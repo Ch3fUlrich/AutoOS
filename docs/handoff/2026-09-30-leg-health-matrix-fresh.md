@@ -25,9 +25,16 @@ Every number below is derived from the JSONL only. No value is hand-typed.
 - **Legs are probed DIRECTLY.** A combo 200 does not name the leg that served it:
   the combo routes through the gateway and the response `model` field names the
   serving leg. The leg rows below are the only direct evidence of leg health.
-- **TRUE UTC.** Each attempt records wall-clock UTC from
-  `datetime.now(timezone.utc)` at send time (millisecond precision, trailing `Z`).
-  This is *not* a log-derived or inferred timestamp: it is the probe's own clock.
+- **TRUE UTC, response-receipt time.** Each attempt records wall-clock UTC from
+  `datetime.now(timezone.utc)` taken immediately **after** `post()` returns —
+  i.e. when the response is received, not at send time (millisecond precision,
+  trailing `Z`). The stamp therefore trails the request by roughly the row's
+  `latency_ms`; it is evaluated inside `run_probe` after the call
+  (`docs/handoff/2026-09-30-leg-health-probe.py:194`). This is *not* a
+  log-derived or inferred timestamp: it is the probe's own clock.
+- **Per-row evidence.** Each row's `JSONL` column gives the 1-based line
+  number(s) of its record(s) in `2026-09-30-leg-health-raw.jsonl`; a retried
+  probe shows both attempts (e.g. `3,4` = attempt 0 then attempt 1).
 - **`200` is split two ways.** A gateway 200 with a non-empty
   `choices[0].message.content` is **`200_content`** (a *usable completion*). A 200
   whose completion content is empty/null is **`200_null`** (the provider answered
@@ -80,53 +87,54 @@ Restricted to the 34 health rows (15 combos + 19 legs):
 
 ## 3. Combos (15) — latest attempt
 
-| # | UTC (TRUE) | Combo | Status | Class | Latency | Serving leg (`model` field) | Command |
-|---|------------|-------|--------|-------|---------|------------------------------|---------|
-| C1 | 2026-09-30T20:10:59.375Z | deepseek-v4.1-flash | 200 | content | 1370ms | `deepseek-flash` | `omni deepseek-v4.1-flash 256` |
-| C2 | 2026-09-30T20:11:20.018Z | gemini-3.8-flash | 200 | content | 17643ms | `gemini-3.8-flash` | `omni gemini-3.8-flash 256` |
-| C3 | 2026-09-30T20:11:26.042Z | opus-4-6 | 401 | — | 11ms | — | `omni opus-4-6 256` |
-| C4 | 2026-09-30T20:11:49.231Z | spark-1.3-contributor | 502 | — | 11341ms | — | `omni spark-1.3-contributor 256` |
-| C5 | 2026-09-30T20:11:52.775Z | t1-orchestrator | 200 | content | 544ms | `qwen3-235b-a22b-instruct-2507` | `omni t1-orchestrator 256` |
-| C6 | 2026-09-30T20:11:57.188Z | t1-orchestrator-free-only | 200 | content | 1412ms | `qwen3-235b-a22b-instruct-2507` | `omni t1-orchestrator-free-only 256` |
-| C7 | 2026-09-30T20:12:07.410Z | t1-orchestrator-paid | 200 | content | 7222ms | `deepseek-flash` | `omni t1-orchestrator-paid 256` |
-| C8 | 2026-09-30T20:12:11.606Z | t2-orchestrator | 200 | content | 1195ms | `deepseek-flash` | `omni t2-orchestrator 256` |
-| C9 | 2026-09-30T20:12:15.536Z | t2-worker | 200 | content | 930ms | `qwen3-235b-a22b-instruct-2507` | `omni t2-worker 256` |
-| C10 | 2026-09-30T20:12:19.650Z | t2-worker-clean | 200 | content | 1114ms | `deepseek-flash` | `omni t2-worker-clean 256` |
-| C11 | 2026-09-30T20:12:23.169Z | t2-worker-free-only | 200 | content | 518ms | `qwen3-235b-a22b-instruct-2507` | `omni t2-worker-free-only 256` |
-| C12 | 2026-09-30T20:12:27.434Z | t3-driver | 200 | content | 1265ms | `mistral-small-3.2-24b-instruct-2506` | `omni t3-driver 256` |
-| C13 | 2026-09-30T20:12:31.452Z | t3-driver-clean | 200 | content | 1018ms | `deepseek-flash` | `omni t3-driver-clean 256` |
-| C14 | 2026-09-30T20:12:35.691Z | t3-driver-free-only | 200 | content | 1239ms | `mistral-small-3.2-24b-instruct-2506` | `omni t3-driver-free-only 256` |
-| C15 | 2026-09-30T20:12:39.801Z | t4-rag | 200 | content | 1110ms | `command-a-03-2025` | `omni t4-rag 256` |
+| # | UTC (TRUE) | Combo | Status | Class | Latency | Serving leg (`model` field) | JSONL | Command |
+|---|------------|-------|--------|-------|---------|------------------------------|-------|---------|
+| C1 | 2026-09-30T20:10:59.375Z | deepseek-v4.1-flash | 200 | content | 1370ms | `deepseek-flash` | 1 | `omni deepseek-v4.1-flash 256` |
+| C2 | 2026-09-30T20:11:20.018Z | gemini-3.8-flash | 200 | content | 17643ms | `gemini-3.8-flash` | 2 | `omni gemini-3.8-flash 256` |
+| C3 | 2026-09-30T20:11:26.042Z | opus-4-6 | 401 | — | 11ms | — | 3,4 | `omni opus-4-6 256` |
+| C4 | 2026-09-30T20:11:49.231Z | spark-1.3-contributor | 502 | — | 11341ms | — | 5,6 | `omni spark-1.3-contributor 256` |
+| C5 | 2026-09-30T20:11:52.775Z | t1-orchestrator | 200 | content | 544ms | `qwen3-235b-a22b-instruct-2507` | 7 | `omni t1-orchestrator 256` |
+| C6 | 2026-09-30T20:11:57.188Z | t1-orchestrator-free-only | 200 | content | 1412ms | `qwen3-235b-a22b-instruct-2507` | 8 | `omni t1-orchestrator-free-only 256` |
+| C7 | 2026-09-30T20:12:07.410Z | t1-orchestrator-paid | 200 | content | 7222ms | `deepseek-flash` | 9 | `omni t1-orchestrator-paid 256` |
+| C8 | 2026-09-30T20:12:11.606Z | t2-orchestrator | 200 | content | 1195ms | `deepseek-flash` | 10 | `omni t2-orchestrator 256` |
+| C9 | 2026-09-30T20:12:15.536Z | t2-worker | 200 | content | 930ms | `qwen3-235b-a22b-instruct-2507` | 11 | `omni t2-worker 256` |
+| C10 | 2026-09-30T20:12:19.650Z | t2-worker-clean | 200 | content | 1114ms | `deepseek-flash` | 12 | `omni t2-worker-clean 256` |
+| C11 | 2026-09-30T20:12:23.169Z | t2-worker-free-only | 200 | content | 518ms | `qwen3-235b-a22b-instruct-2507` | 13 | `omni t2-worker-free-only 256` |
+| C12 | 2026-09-30T20:12:27.434Z | t3-driver | 200 | content | 1265ms | `mistral-small-3.2-24b-instruct-2506` | 14 | `omni t3-driver 256` |
+| C13 | 2026-09-30T20:12:31.452Z | t3-driver-clean | 200 | content | 1018ms | `deepseek-flash` | 15 | `omni t3-driver-clean 256` |
+| C14 | 2026-09-30T20:12:35.691Z | t3-driver-free-only | 200 | content | 1239ms | `mistral-small-3.2-24b-instruct-2506` | 16 | `omni t3-driver-free-only 256` |
+| C15 | 2026-09-30T20:12:39.801Z | t4-rag | 200 | content | 1110ms | `command-a-03-2025` | 17 | `omni t4-rag 256` |
 
 All 15 combos answered except `opus-4-6` (401) and `spark-1.3-contributor` (502).
-13 combos serve content; every combo that answered named a *different* serving
-leg than its own name — that is why the combo rows cannot stand in for leg health.
+13 combos serve content; 12 of them named a *different* serving leg than their own
+name — only `gemini-3.8-flash` was served by a leg of its own name (raw record 2).
+That is why the combo rows cannot stand in for leg health.
 
 ---
 
 ## 4. Legs (19) — latest attempt, probed directly
 
-| # | UTC (TRUE) | Leg (model id sent) | Hand alias | Status | Class | Latency | Command |
-|---|------------|---------------------|------------|--------|-------|---------|---------|
-| L1 | 2026-09-30T20:12:44.729Z | `deepseek/deepseek-flash` | — | 200 | content | 1928ms | `omni deepseek/deepseek-flash 256` |
-| L2 | 2026-09-30T20:13:06.691Z | `gemini/gemini-3.8-flash` | — | 429 | — | 7ms | `omni gemini/gemini-3.8-flash 256` |
-| L3 | 2026-09-30T20:13:12.709Z | `antigravity/claude-opus-4-6-thinking` | — | 401 | — | 7ms | `omni antigravity/claude-opus-4-6-thinking 256` |
-| L4 | 2026-09-30T20:14:00.531Z | `meta-api/muse-spark-1.3-contributor` | — | 502 | — | 15825ms | `omni meta-api/muse-spark-1.3-contributor 256` |
-| L5 | 2026-09-30T20:14:04.062Z | `scw/qwen3-235b-a22b-instruct-2507` | — | 200 | content | 531ms | `omni scw/qwen3-235b-a22b-instruct-2507 256` |
-| L6 | 2026-09-30T20:14:10.094Z | `nebius/zai-org/GLM-5.3-Flash` | — | 401 | — | 6ms | `omni nebius/zai-org/GLM-5.3-Flash 256` |
-| L7 | 2026-09-30T20:14:14.396Z | `scw/mistral-small-3.2-24b-instruct-2506` | — | 200 | content | 1302ms | `omni scw/mistral-small-3.2-24b-instruct-2506 256` |
-| L8 | 2026-09-30T20:14:20.412Z | `antigravity/gemini-3.7-flash-high` | — | 401 | — | 9ms | `omni antigravity/gemini-3.7-flash-high 256` |
-| L9 | 2026-09-30T20:14:26.424Z | `nebius/zai-org/GLM-5.2` | — | 401 | — | 5ms | `omni nebius/zai-org/GLM-5.2 256` |
-| L10 | 2026-09-30T20:14:30.539Z | `free-ai/qwen7b` | — | 200 | content | 1115ms | `omni free-ai/qwen7b 256` |
-| L11 | 2026-09-30T20:14:36.552Z | `antigravity/gemini-3.7-flash-medium` | — | 401 | — | 6ms | `omni antigravity/gemini-3.7-flash-medium 256` |
-| L12 | 2026-09-30T20:14:40.008Z | `mistral/mistral-code-latest` | — | 200 | content | 455ms | `omni mistral/mistral-code-latest 256` |
-| L13 | 2026-09-30T20:14:44.107Z | `cohere/command-a-03-2025` | — | 200 | content | 1099ms | `omni cohere/command-a-03-2025 256` |
-| L14 | 2026-09-30T20:14:49.721Z | `cohere/command-r-plus-08-2024` | — | 200 | content | 2614ms | `omni cohere/command-r-plus-08-2024 256` |
-| L15 | 2026-09-30T20:14:55.812Z | `vertex/gemini-3-flash-preview` | vertex-flash | 200 | content | 3091ms | `omni vertex/gemini-3-flash-preview 256` |
-| L16 | 2026-09-30T20:15:02.195Z | `vertex/gemini-3.1-flash-lite` | vertex-flash-lite | 200 | content | 3383ms | `omni vertex/gemini-3.1-flash-lite 256` |
-| L17 | 2026-09-30T20:15:13.218Z | `vertex/gemini-3.1-pro-preview` | vertex-pro | 200 | content | 8023ms | `omni vertex/gemini-3.1-pro-preview 256` |
-| L18 | 2026-09-30T20:15:50.778Z | `vertex/gemini-3.8-flash` | vertex-3.8-flash | 200 | content | 34560ms | `omni vertex/gemini-3.8-flash 256` |
-| L19 | 2026-09-30T20:16:09.215Z | `gemini/gemini-2.5-flash` | gemini-2.5-flash | 429 | — | 7ms | `omni gemini/gemini-2.5-flash 256` |
+| # | UTC (TRUE) | Leg (model id sent) | Hand alias | Status | Class | Latency | JSONL | Command |
+|---|------------|---------------------|------------|--------|-------|---------|-------|---------|
+| L1 | 2026-09-30T20:12:44.729Z | `deepseek/deepseek-flash` | — | 200 | content | 1928ms | 18 | `omni deepseek/deepseek-flash 256` |
+| L2 | 2026-09-30T20:13:06.691Z | `gemini/gemini-3.8-flash` | — | 429 | — | 7ms | 19,20 | `omni gemini/gemini-3.8-flash 256` |
+| L3 | 2026-09-30T20:13:12.709Z | `antigravity/claude-opus-4-6-thinking` | — | 401 | — | 7ms | 21,22 | `omni antigravity/claude-opus-4-6-thinking 256` |
+| L4 | 2026-09-30T20:14:00.531Z | `meta-api/muse-spark-1.3-contributor` | — | 502 | — | 15825ms | 23,24 | `omni meta-api/muse-spark-1.3-contributor 256` |
+| L5 | 2026-09-30T20:14:04.062Z | `scw/qwen3-235b-a22b-instruct-2507` | — | 200 | content | 531ms | 25 | `omni scw/qwen3-235b-a22b-instruct-2507 256` |
+| L6 | 2026-09-30T20:14:10.094Z | `nebius/zai-org/GLM-5.3-Flash` | — | 401 | — | 6ms | 26,27 | `omni nebius/zai-org/GLM-5.3-Flash 256` |
+| L7 | 2026-09-30T20:14:14.396Z | `scw/mistral-small-3.2-24b-instruct-2506` | — | 200 | content | 1302ms | 28 | `omni scw/mistral-small-3.2-24b-instruct-2506 256` |
+| L8 | 2026-09-30T20:14:20.412Z | `antigravity/gemini-3.7-flash-high` | — | 401 | — | 9ms | 29,30 | `omni antigravity/gemini-3.7-flash-high 256` |
+| L9 | 2026-09-30T20:14:26.424Z | `nebius/zai-org/GLM-5.2` | — | 401 | — | 5ms | 31,32 | `omni nebius/zai-org/GLM-5.2 256` |
+| L10 | 2026-09-30T20:14:30.539Z | `free-ai/qwen7b` | — | 200 | content | 1115ms | 33 | `omni free-ai/qwen7b 256` |
+| L11 | 2026-09-30T20:14:36.552Z | `antigravity/gemini-3.7-flash-medium` | — | 401 | — | 6ms | 34,35 | `omni antigravity/gemini-3.7-flash-medium 256` |
+| L12 | 2026-09-30T20:14:40.008Z | `mistral/mistral-code-latest` | — | 200 | content | 455ms | 36 | `omni mistral/mistral-code-latest 256` |
+| L13 | 2026-09-30T20:14:44.107Z | `cohere/command-a-03-2025` | — | 200 | content | 1099ms | 37 | `omni cohere/command-a-03-2025 256` |
+| L14 | 2026-09-30T20:14:49.721Z | `cohere/command-r-plus-08-2024` | — | 200 | content | 2614ms | 38 | `omni cohere/command-r-plus-08-2024 256` |
+| L15 | 2026-09-30T20:14:55.812Z | `vertex/gemini-3-flash-preview` | vertex-flash | 200 | content | 3091ms | 39 | `omni vertex/gemini-3-flash-preview 256` |
+| L16 | 2026-09-30T20:15:02.195Z | `vertex/gemini-3.1-flash-lite` | vertex-flash-lite | 200 | content | 3383ms | 40 | `omni vertex/gemini-3.1-flash-lite 256` |
+| L17 | 2026-09-30T20:15:13.218Z | `vertex/gemini-3.1-pro-preview` | vertex-pro | 200 | content | 8023ms | 41 | `omni vertex/gemini-3.1-pro-preview 256` |
+| L18 | 2026-09-30T20:15:50.778Z | `vertex/gemini-3.8-flash` | vertex-3.8-flash | 200 | content | 34560ms | 42 | `omni vertex/gemini-3.8-flash 256` |
+| L19 | 2026-09-30T20:16:09.215Z | `gemini/gemini-2.5-flash` | gemini-2.5-flash | 429 | — | 7ms | 43,44 | `omni gemini/gemini-2.5-flash 256` |
 
 **Distinct legs = 19** (14 from `combos.json` + 5 hand entries). The prior version
 counted "20 legs" by treating the 15 combos plus 5 hand aliases as legs; that
@@ -141,10 +149,10 @@ working leg and answered 200.
 
 ## 5. Control probe — reasoning leg, 8 vs 256 tokens
 
-| UTC (TRUE) | Probe | max_tokens | Status | Class | Latency | Command |
-|------------|-------|-----------:|--------|-------|---------|---------|
-| 2026-09-30T20:16:16.698Z | vertex/gemini-3.1-pro-preview | 8 | 200 | **`200_null`** | 4483ms | `omni vertex/gemini-3.1-pro-preview 8` |
-| 2026-09-30T20:16:25.756Z | vertex/gemini-3.1-pro-preview | 256 | 200 | `200_content` | 6058ms | `omni vertex/gemini-3.1-pro-preview 256` |
+| UTC (TRUE) | Probe | max_tokens | Status | Class | Latency | JSONL | Command |
+|------------|-------|-----------:|--------|-------|---------|-------|---------|
+| 2026-09-30T20:16:16.698Z | vertex/gemini-3.1-pro-preview | 8 | 200 | **`200_null`** | 4483ms | 45 | `omni vertex/gemini-3.1-pro-preview 8` |
+| 2026-09-30T20:16:25.756Z | vertex/gemini-3.1-pro-preview | 256 | 200 | `200_content` | 6058ms | 46 | `omni vertex/gemini-3.1-pro-preview 256` |
 
 At `max_tokens=8` the completion content is `""` with `finish_reason: "length"`
 — all 8 tokens went to `reasoning_content`. At 256 the same leg returns usable
@@ -159,18 +167,18 @@ the leg is healthy; 8 tokens is simply too few for a reasoning model.
 Ten probes were retried once (non-200 first attempt). The JSONL records **both**
 attempts, so latency is not "last attempt only":
 
-| Probe | Attempt 0 | Attempt 1 |
-|-------|-----------|-----------|
-| combo:opus-4-6 | 401, 12ms | 401, 11ms |
-| combo:spark-1.3-contributor | 502, 5847ms | 502, 11341ms |
-| leg:gemini/gemini-3.8-flash | 429, 15954ms | 429, 7ms |
-| leg:antigravity/claude-opus-4-6-thinking | 401, 10ms | 401, 7ms |
-| leg:meta-api/muse-spark-1.3-contributor | 502, 25996ms | 502, 15825ms |
-| leg:nebius/zai-org/GLM-5.3-Flash | 401, 25ms | 401, 6ms |
-| leg:antigravity/gemini-3.7-flash-high | 401, 7ms | 401, 9ms |
-| leg:nebius/zai-org/GLM-5.2 | 401, 6ms | 401, 5ms |
-| leg:antigravity/gemini-3.7-flash-medium | 401, 6ms | 401, 6ms |
-| leg:gemini/gemini-2.5-flash | 429, 12429ms | 429, 7ms |
+| Probe | Attempt 0 | Attempt 1 | JSONL |
+|-------|-----------|-----------|-------|
+| combo:opus-4-6 | 401, 12ms | 401, 11ms | 3,4 |
+| combo:spark-1.3-contributor | 502, 5847ms | 502, 11341ms | 5,6 |
+| leg:gemini/gemini-3.8-flash | 429, 15954ms | 429, 7ms | 19,20 |
+| leg:antigravity/claude-opus-4-6-thinking | 401, 10ms | 401, 7ms | 21,22 |
+| leg:meta-api/muse-spark-1.3-contributor | 502, 25996ms | 502, 15825ms | 23,24 |
+| leg:nebius/zai-org/GLM-5.3-Flash | 401, 25ms | 401, 6ms | 26,27 |
+| leg:antigravity/gemini-3.7-flash-high | 401, 7ms | 401, 9ms | 29,30 |
+| leg:nebius/zai-org/GLM-5.2 | 401, 6ms | 401, 5ms | 31,32 |
+| leg:antigravity/gemini-3.7-flash-medium | 401, 6ms | 401, 6ms | 34,35 |
+| leg:gemini/gemini-2.5-flash | 429, 12429ms | 429, 7ms | 43,44 |
 
 Two corrections to the prior version:
 
@@ -271,7 +279,7 @@ leg probes (§4) are the only valid health evidence per leg.
 
 ## 10. test-all (recorded, timestamped)
 
-- **Run:** 2026-09-30T20:16:25.756Z → 2026-09-30T20:16:44.622Z (18865 ms), `exit_code: 1`.
+- **Run:** 2026-09-30T20:16:25.756Z → 2026-09-30T20:16:44.622Z (18865 ms), `exit_code: 1` (JSONL record 47).
 - **32 connections tested:** 23 `valid: true`, 9 `valid: false`.
 - Not-valid reasons: 4 `Connection is inactive` (antigravity, cerebras,
   muse-code, vertex-partner), 1 `Provider test not supported` (arcee-ai), 1
