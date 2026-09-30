@@ -1,7 +1,7 @@
 # Handoff: DeepSeek Thinking-Mode 400 Fix (Lane C)
 
 **Date:** 2026-09-30  
-**Branch:** `L1-backlog/ws_fixes-20260930`  
+**Branch:** `L1-backlog/ws-fixes-20260930`  
 **Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`  
 **Base HEAD:** `d08f7f2` (unchanged — no push/merge/rebase)  
 **Gateway:** OmniRoute v3.8.50 at `http://127.0.0.1:20128`
@@ -80,30 +80,59 @@ routes it through the gateway where the reasoning defense pipeline operates.
 Documents the defense pipeline, `requiresExplicitReasoningReplay` logic, cache
 TTL, and operator mitigations.
 
+### 3. Compiled Chunk + .ts Source Patch (runtime fix)
+
+**Commit:** `3f6fd25`  
+**Files:**
+- `configuration/omniroute/reason-fix-reapply.ps1` — idempotent reapply script
+- `configuration/omniroute/reason-fix-README.md` — patch documentation
+
+**Patched in the npm package** (`C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`):
+
+The running gateway executes compiled JavaScript from
+`dist/.build/next/server/chunks/`, not the `.ts` source. The `toResponses`
+function in 5 chunk files has the bug: when reasoning is a placeholder or
+absent (cache miss), no `reasoning` item is pushed before `function_call`
+items, and DeepSeek 400s.
+
+**Compiled .js chunk patches** (5 files, 2 patterns):
+
+| Pattern | Files | Push | CredRec | Model |
+|---------|-------|------|---------|-------|
+| A | `_08_y1bx._.js`, `_1j_edf1._.js`, `_1luyz1c._.js` | `g` | `A._provider` | `p.model` |
+| B | `_15ose6x._.js`, `_1xkpq2s._.js` | `d` | `p._provider` | `g.model` |
+
+Fix: inject `NON_ANTHROPIC_THINKING_PLACEHOLDER` reasoning item when
+`isInternalReasoningPlaceholder(reasoning) || !reasoning` AND provider is
+DeepSeek/MiMo AND message has `tool_calls`.
+
+**.ts source patches** (2 files, for source-tree consistency):
+- `open-sse/translator/index.ts` — added `deepseek` to `requiresReasoningContentPresence`
+- `open-sse/translator/request/openai-responses/toResponses.ts` — added import,
+  helper, `reasoningIsPlaceholder` var, `else if` placeholder injection branch
+
+**Backups:** All 7 files backed up to `<file>.autoos-backup-<timestamp>`.
+
+**Verification** (isolated gateway, port 20130, separate DATA_DIR, shared
+gateway on 20128 untouched):
+
+```
+deepseek-v4.1-flash      overwrite (cache miss) → 200 PASS  (was 400)
+deepseek-v4.1-flash      preserve (cache hit)   → 200 PASS  (was 200)
+deepseek/deepseek-flash  overwrite (cache miss) → 200 PASS  (was 400)
+deepseek/deepseek-flash  preserve (cache hit)   → 200 PASS  (was 200)
+```
+
+4/4 test cases PASS. 400 error no longer reproduced.
+
 ## What Was NOT Changed (by design)
 
 - `configuration/omniroute/combos.json` — P1-combos territory, not touched
 - `configuration/omniroute/apply.ps1` — resilience hunks excluded
 - `catalog/ai-registry.json` — L1-beta territory
 - `tools/probe-sweep.py` — P1-sweep territory
-- OmniRoute source (`npm node_modules/omniroute`) — source patch would be
-  reverted by `npm update`; config fix preferred per requirements
-
-## What a Source Patch Would Fix (if npm stability is resolved)
-
-The empty injection at `schemaCoercion.ts:485` adds `reasoning_content: ""`.
-DeepSeek rejects this when the original reasoning was non-empty. A source patch
-would either:
-
-1. **Not strip reasoning from the response** — let the client see and pass it
-   back. The `preserveReasoningContent` flag would then preserve it.
-2. **Store the actual reasoning in the empty injection fallback** — when the
-   replay cache misses, use the DB-backed cache as a secondary lookup.
-3. **Add `interleaved_field` to the override key types** — so operators can
-   override it via the management API.
-
-These are upstream gateway fixes, not config changes. File an issue with the
-OmniRoute maintainers if the 400 becomes frequent.
+- OmniRoute compiled chunks (`dist/.build/next/server/chunks/`) — patched
+  in-place (see fix #3 below); reapply script handles `npm update` revert
 
 ## Files in This Change
 
@@ -121,6 +150,8 @@ OmniRoute maintainers if the 400 becomes frequent.
 | `tools/diag-models.py` | Lists models from gateway /v1/models |
 | `tools/diag-models-auth.py` | Lists models from gateway with auth header |
 | `configuration/omniroute/reasoning-defense.md` | Reasoning defense documentation |
+| `configuration/omniroute/reason-fix-reapply.ps1` | Idempotent reapply script for compiled chunk + .ts patches |
+| `configuration/omniroute/reason-fix-README.md` | Patch documentation (compiled chunk approach, backups, verification) |
 | `docs/handoff/2026-09-30-laneC-reasoning-fix.md` | This file |
 
 ## Verification
@@ -131,6 +162,10 @@ OmniRoute maintainers if the 400 becomes frequent.
 
 # Probe (reproduces 400 on cache miss, 200 on cache hit):
 python tools/probe-reasoning-repro.py
+
+# After compiled chunk patch (isolated gateway, port 20130):
+AUTOOS_OMNIROUTE_URL=http://127.0.0.1:20130 python tools/probe-reasoning-repro.py
+# → 4/4 PASS (400→200 on cache miss, 200→200 on cache hit)
 
 # Diagnostic (confirms model_capabilities empty for DeepSeek):
 python tools/diag-db.py
