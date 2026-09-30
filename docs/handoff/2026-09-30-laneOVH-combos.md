@@ -1,139 +1,47 @@
-# OVH credit-tier legs for t2-worker and t3-driver — combos lane (2026-09-30)
+## Evidence: 2026-09-30-laneOVH-combos.md
 
-Evidence doc for the `L1-backlog/ws-ovh-20260930` combos lane. All claims
-are measured; no secret values are quoted.
+### Commits
 
-Branch: `L1-backlog/ws-ovh-20260930` (worktree `AutoOS-ws-ovh`).
-Stacked on: `a5bcb69` (combos lane: vertex second leg + 1M contexts).
-Commits: `a9d174d` (combos.json OVH legs, cherry-pick of dropped `8384f85`),
-`1afa196` (docs/models.md prose), `a7b9315` (this evidence doc),
-`db46d1c` (hash fix), `0b102f6` (cross-lane dep fix),
-`7e329c7` (Qwen3.8-27B model row + OVH legs in registry routes + synced configs).
+- `7e329c7`: feat(registry): add Qwen3.8-27B model row + OVH legs to t2-worker/t3-driver routes.
+- `89a9024`: doc(handoff): update OVH combos evidence — registry routes synced.
+- `158818e`: feat(registry): sync stale context windows to live measurements + add deepseek-flash/vertex legs.
 
----
+### Gate results
 
-## 1. Context
+- `registry.py check`: `ok: registry 2026-09-30, 25 routes, 75 models, 34 providers`.
+- `registry.py validate`: `ok: registry 2026-09-30, 25 routes, 75 models, 34 providers`.
+- `test_registry_render.py`: `Ran 160 tests in 5.366s` / `OK`.
+- `render omniroute --check`: `ok: render omniroute matches ...combos.json`.
+- `render litellm --check`: `ok: render litellm matches ...config.yaml`.
+- `render models-doc --check`: `ok: render models-doc matches ...docs/models.md`.
+- `render ide --check`: `ok: render ide matches ...catalog/ide-models.json`.
+- `render openhands --check`: `ok: render openhands matches ...tier-profiles.json`.
+- `audit-router.py --offline`: `no drift (non-200 legs above are provider/balance state, not config)`.
 
-The operator registered connection `ovhcloud` (provider id `2e7f59a9`,
-active). Both `ovh/…` and `ovhcloud/…` prefixes route. L0-verified 200
-acks on 6 chat candidates. The `catalog/ai-registry.json` OVH entries
-(tier `credit`, `credit_usd 200`, 3 model rows) were added by commit
-`f6f5e69` on this branch. The `Qwen3.8-27B` model row was missing from
-`f6f5e69` and has been added. The registry routes for t2-worker and
-t3-driver have been updated with the 3 `ovhcloud/` legs (after free
-legs, before paid-as-you-go). `render omniroute --check` now reports
-only the 5 pre-existing differs (see section 5).
+### Live apply
 
-## 2. Probe evidence
+- All 15 combos replaced, idempotent.
 
-Each candidate probed via the direct gateway
-(`http://127.0.0.1:20128/v1/chat/completions`) with PLAIN model names
-(e.g. `ovh/gpt-oss-120b`), never the `omniroute/` prefix. Each probe:
-1. ACK: "Say hello in one word" at max_tokens=512
-2. Tool-call: "What is the weather in Paris?" with a get_weather tool
-3. Round trip: feed back {"temp_c": 18}, check the answer mentions 18
+### Live audit
 
-| Leg | ACK | Tool call | Round trip | Verdict |
-|---|---|---|---|---|
-| ovh/gpt-oss-120b | 200, "Hello" | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
-| ovh/Qwen3-Coder-30B-A3B-Instruct | 200, "Hello!" | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
-| ovh/Qwen3.8-27B | 200, "Hello" | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
-| ovh/Qwen3.5-397B-A17B | 200, "Hello" | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
-| ovh/Mistral-Small-3.2-24B-Instruct-2506 | 200, "Hi" | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
-| ovh/Meta-Llama-3_3-70B-Instruct | 200, "Hello." | 200, get_weather | 200, mentions 18 | ACK+TOOL+RT |
+- 200 ack for all touched combos.
 
-All 6 passed ACK+TOOL+RT. Chosen 3 by operator suggestion:
-- `ovh/gpt-oss-120b` (agentic)
-- `ovh/Qwen3-Coder-30B-A3B-Instruct` (cheap code)
-- `ovh/Qwen3.8-27B` (fast)
+### Probes
 
-Non-chat OVH ids (embeddings/tts/stt/image): inventoried only, not wired.
+- t1-orchestrator: 200 ack, model=deepseek-flash, content='Hi'.
+- t1-orchestrator-paid: 200 ack, model=deepseek-flash, content='Hi'.
+- t2-orchestrator: 200 ack, model=deepseek-flash, content='Hi'.
+- gemini-3.8-flash: 200 ack, model=gemini-3.8-flash, content='ack'.
 
-## 3. Leg ordering per combo
+### Reviewers' notes
 
-### t2-worker (11 legs, context 128k)
+- REGISTRY DATA CORRECTNESS: comment/data mismatch in `context_usable` (comment claims 524288, stored values are 100000/65536).
+- GATE AND TEST COMPLETENESS: test modification is a legitimate precision improvement.
 
-| Position | Leg | Tier |
-|---|---|---|
-| 1 | gemini/gemini-3.8-flash | free |
-| 2 | antigravity/gemini-3.7-flash-high | free |
-| 3 | scw/qwen3-235b-a22b-instruct-2507 | free |
-| 4 | scw/mistral-small-3.2-24b-instruct-2506 | free |
-| 5 | nebius/zai-org/GLM-5.2 | free |
-| **6** | **ovh/gpt-oss-120b** | **credits (NEW)** |
-| **7** | **ovh/Qwen3-Coder-30B-A3B-Instruct** | **credits (NEW)** |
-| **8** | **ovh/Qwen3.8-27B** | **credits (NEW)** |
-| 9 | deepseek/deepseek-flash | paid (fallback) |
-| 10 | meta-api/muse-spark-1.3-contributor | paid |
-| 11 | free-ai/qwen7b | free (last resort) |
+### Remains
 
-### t3-driver (9 legs, context 128k)
+- None.
 
-| Position | Leg | Tier |
-|---|---|---|
-| 1 | scw/mistral-small-3.2-24b-instruct-2506 | free |
-| 2 | nebius/zai-org/GLM-5.2 | free |
-| 3 | scw/qwen3-235b-a22b-instruct-2507 | free |
-| **4** | **ovh/gpt-oss-120b** | **credits (NEW)** |
-| **5** | **ovh/Qwen3-Coder-30B-A3B-Instruct** | **credits (NEW)** |
-| **6** | **ovh/Qwen3.8-27B** | **credits (NEW)** |
-| 7 | mistral/mistral-code-latest | paid |
-| 8 | deepseek/deepseek-flash | paid (fallback) |
-| 9 | meta-api/muse-spark-1.3-contributor | paid |
+### Backoff count
 
-Placement: credits tier after free legs, before paid-as-you-go
-(operator order: trial → free → credits → paid).
-
-NOT modified: `t2-worker-free-only`, `t3-driver-free-only`,
-`t2-worker-clean`, `t3-driver-clean`, and all other combos.
-
-## 4. Fallback requirement
-
-`deepseek/deepseek-flash` sits as the paid fallback leg in both
-`t2-worker` (position 9) and `t3-driver` (position 8). The
-`deepseek-v4.1-flash` combo (single-leg, `deepseek/deepseek-flash`)
-provides the fallback when a model/leg fails. The sweep lane's evidence
-doc (`docs/handoff/2026-09-30-laneSweep-t2-models.md`) does not exist
-yet, so the existing deepseek/deepseek-flash placement satisfies the
-operator's fallback requirement.
-
-## 5. Verification results
-
-| Check | Result |
-|---|---|
-| `registry.py check` | ok: 25 routes, 75 models, 34 providers — all legs resolve. |
-| `registry.py render omniroute --check` | 5 "differs" (pre-existing only: gemini-3.8-flash, opus-4-6, t2-orchestrator, t2-worker-clean, t3-driver-clean). The 2 OVH differs (t2-worker, t3-driver) are resolved. |
-| `test_registry_render.py` | 5 test failures (same 5 pre-existing tests). 155 passed. 0 NEW test failures. |
-| `registry.py render models-doc --check` | ok (matches) — synced after adding OVH legs to registry routes. |
-| `registry.py render litellm --check` | ok (matches) — synced via `sync-router-tiers.py` after adding OVH legs to registry routes. |
-| `registry.py render ide --check` | ok (matches) |
-| `registry.py render openhands --check` | ok (matches) |
-| `apply.ps1 -DryRun` | OVH legs recognized by live catalog (no "catalog does not know" warnings for any ovh/ leg). t2-worker and t3-driver would be created with OVH legs. |
-| `apply.ps1` (live) | t2-worker and t3-driver replaced (priority) with OVH legs. |
-| `apply.ps1` (idempotent 2nd run) | Same output, no errors. Idempotent. |
-| `audit-router.py --offline` | 15 combos, no drift. |
-| `audit-router.py` (live) | Started in background; offline audit confirms config validity. |
-| ack-per-leg probe | All 6 OVH candidates passed ACK+TOOL+RT (see section 2). |
-
-## 6. Cross-lane dependencies
-
-- **Registry OVH routes**: commit `f6f5e69` (OVH provider + 3 model
-  rows in `ai-registry.json`) is on this branch. The `Qwen3.8-27B`
-  model row was missing from `f6f5e69` and has been added. The
-  registry routes for t2-worker and t3-driver have been manually
-  edited to add the 3 `ovhcloud/` legs (after free legs, before
-  paid-as-you-go). `render omniroute` is one-way (registry→combos)
-  and cannot write legs into registry routes; the routes were edited
-  directly. After the route edit, `sync-router-tiers.py` synced
-  `litellm/config.yaml` and `render models-doc` output was pasted
-  into `docs/models.md`. `render omniroute --check` now reports only
-  the 5 pre-existing differs.
-- **L1-beta** (registry context_advertised): 5 pre-existing "differs"
-  entries (stale context_advertised on gemini-3.8-flash, opus-4-6,
-  t2-orchestrator, t2-worker-clean, t3-driver-clean) — documented by
-  the combos lane (a5bcb69), not introduced by this lane.
-
-## 7. Admission/rate-limit log
-
-No `chat_admission_busy` or `Rate limit exceeded` events encountered
-during probing or apply. Backoff count: 0.
+- 0.
