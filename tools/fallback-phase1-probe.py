@@ -2,12 +2,14 @@
 """FALLBACK-FLEET phase 1 probe: Claude Code harness on the local OmniRoute gateway.
 
 Spec: docs/plans/2026-09-28-fallback-fleet-spec.md section 3. Non-Claude legs only.
-The gateway key comes from api-keys.yml through autoos-agent's client_key(); it goes
-into the child's environment only - never argv, never printed, redacted from logs.
+The gateway key comes from api-keys.yml's omniroute_server field (D-147; deployments
+that predate that field keep the legacy omniroute key), or the AUTOOS_OMNIROUTE_KEY
+env override; it goes into the child's environment only - never argv, never printed,
+redacted from logs.
 The measured session is narrow: --permission-mode default, an explicit --allowedTools
 list (Read, Edit, Skill), no MCP servers, a scratch worktree, MemoryMax=2G, a wall cap.
 
-    python3 tools/fallback-phase1-probe.py --leg deepseek/deepseek-flash [--wall 300]
+    python3 tools/fallback-phase1-probe.py --leg deepseek/deepseek-flash [--wall 300] [--max-output-tokens 16384]
 
 Leg spelling: use the gateway's wire model id (provider prefix per ai-registry
 providers.<name>.model_prefix) - e.g. deepseek/deepseek-flash,
@@ -15,7 +17,7 @@ scw/qwen3-235b-a22b-instruct-2507. 'scw/' is the scaleway prefix: OS-30 (2026-09
 showed 'scaleway/qwen3-...' returning 400 while FREEKEYS-1 measured the same leg
 200 (tool-call round trip included) as 'scw/...'.
 """
-import argparse, importlib.util, json, os, re, shutil, subprocess, sys, tempfile, time
+import argparse, json, os, re, shutil, subprocess, sys, tempfile, time
 import urllib.error
 import urllib.request
 
@@ -24,11 +26,29 @@ GATEWAY = "http://127.0.0.1:20128"
 ALLOWED_TOOLS = "Read,Edit,Skill"
 
 
-def load_agent():
-    spec = importlib.util.spec_from_file_location("autoos_agent", os.path.join(ROOT, "tools", "autoos-agent.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def probe_key():
+    """D-147: the gateway key lives in api-keys.yml's omniroute_server field;
+    deployments that predate that field keep the legacy omniroute key. The
+    AUTOOS_OMNIROUTE_KEY env override wins (the harness-leg rule: the key enters
+    the child env only). Values are never printed or logged - every output path
+    redacts them."""
+    key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
+    if key:
+        return key
+    path = os.path.join(ROOT, "configuration", "api-keys.yml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    for pattern in (r"^omniroute_server\s*:\s*(.+?)\s*$", r"^omniroute\s*:\s*(.+?)\s*$"):
+        for line in lines:
+            m = re.match(pattern, line)
+            if m:
+                val = m.group(1).strip("\"'")
+                if not val.startswith("REPLACE_WITH_"):
+                    return val
+    return None
 
 
 def post(path, body, key):
@@ -71,7 +91,7 @@ def endpoint_check(leg, key):
     return out
 
 
-def harness_run(leg, key, wall):
+def harness_run(leg, key, wall, max_output_tokens=None):
     work = tempfile.mkdtemp(prefix="fb1-")
     cfg = os.path.join(work, "cfgdir")
     repo = os.path.join(work, "repo")
@@ -98,6 +118,13 @@ def harness_run(leg, key, wall):
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid()
     env["XDG_RUNTIME_DIR"] = runtime_dir
     env["DBUS_SESSION_BUS_ADDRESS"] = os.environ.get("DBUS_SESSION_BUS_ADDRESS") or ("unix:path=" + runtime_dir + "/bus")
+    # OS-30 (2026-09-30): the gateway caps max_completion_tokens per model id
+    # (qwen3-235b = 16384); the harness's own default request exceeded it and the
+    # leg died 400 before any tool call. --max-output-tokens caps the harness's
+    # request through CLAUDE_CODE_MAX_OUTPUT_TOKENS; unset keeps the recorded
+    # deepseek-leg configuration untouched.
+    if max_output_tokens:
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_output_tokens)
     task = ("Read target.txt, change the line to 'status: DONE' with the Edit tool, then invoke the probe-skill "
             "skill and finish with one line: the probe word and the new file content.")
     cmd = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=2G", "timeout", str(wall), "claude", "-p", task,
@@ -127,7 +154,7 @@ def harness_run(leg, key, wall):
     if os.path.exists(marker):
         with open(marker) as f:
             fired = len(f.read().split())
-    res = {"leg": leg, "exit": p.returncode, "wall_s": wall_s, "tool_calls": tools, "models_answering": sorted(models),
+    res = {"leg": leg, "max_output_tokens": max_output_tokens, "exit": p.returncode, "wall_s": wall_s, "tool_calls": tools, "models_answering": sorted(models),
            "file_after": final, "edit_correct": final == "status: DONE", "hook_fired": fired,
            "skill_tool_used": any(t["name"] == "Skill" for t in tools),
            "probe_word_in_result": "PINEAPPLE" in json.dumps((result or {}).get("result", "")),
@@ -142,15 +169,17 @@ def main():
     ap.add_argument("--leg", required=True)
     ap.add_argument("--wall", type=int, default=300)
     ap.add_argument("--endpoint-only", action="store_true")
+    ap.add_argument("--max-output-tokens", type=int, default=None,
+                    help="cap the harness request (CLAUDE_CODE_MAX_OUTPUT_TOKENS), e.g. 16384 where the gateway caps the model id")
     a = ap.parse_args()
     if re.search(r"claude|opus|sonnet|haiku", a.leg, re.I):
         sys.exit("refused: non-Claude legs only (D-102/SBC)")
-    key = load_agent().client_key(ROOT)
+    key = probe_key()
     if not key:
-        sys.exit("no gateway key (api-keys.yml omniroute)")
+        sys.exit("no gateway key (api-keys.yml omniroute_server / omniroute)")
     out = {"endpoint": endpoint_check(a.leg, key)}
     if not a.endpoint_only:
-        out["harness"] = harness_run(a.leg, key, a.wall)
+        out["harness"] = harness_run(a.leg, key, a.wall, a.max_output_tokens)
     print(json.dumps(out, indent=1))
 
 
