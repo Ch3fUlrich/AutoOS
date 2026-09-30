@@ -9043,17 +9043,24 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
 
 CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                      "reviewer=omniroute/muse verdict=PASS")
+# REVGATE2F (operator 2026-09-30): a ready record needs TWO cross-family seats
+# from two different families -- one line is no longer a review, so the ready
+# fixtures below carry a second seat. gem-flash is the fixture's other family
+# (google) and is not the qwen author.
+CROSS_FAMILY_LINE_2 = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                       "reviewer=gem-flash verdict=PASS")
 FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
 
 
 class ReviewStatusTests(unittest.TestCase):
     """REVROUTE (S2) item 5: a lane is not ready because the orchestrator says so.
 
-    A lane record must carry two review entries before it can be called ready --
-    one cross-family review (a reviewer whose model FAMILY differs from the
-    author's, the rule items 1-2 made data) and the Sonnet final check (the
-    operator's unchanged decision). This reads the record, not a person's
-    summary of it, and says which of the two is missing and why.
+    A lane record must carry its reviews before it can be called ready -- at
+    least two cross-family seats from DISTINCT families (each a reviewer whose
+    model FAMILY differs from the author's, the rule items 1-2 made data;
+    REVGATE2F raised the floor) and the Sonnet final check (the operator's
+    unchanged decision). This reads the record, not a person's summary of it,
+    and says which requirement is missing and why.
     """
 
     def setUp(self):
@@ -9092,17 +9099,78 @@ class ReviewStatusTests(unittest.TestCase):
 
     # --- what counts -------------------------------------------------------
 
-    def test_a_record_with_both_entries_is_ready(self):
+    def test_a_record_with_two_family_seats_and_the_final_is_ready(self):
         # Prose around the entries is the norm: a record is a markdown report,
-        # and an entry may sit in a bullet or under a heading.
-        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n"
-                             % (CROSS_FAMILY_LINE, FINAL_LINE))
+        # and an entry may sit in a bullet or under a heading. REVGATE2F: the
+        # ready floor is TWO cross-family seats from distinct families.
+        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n%s\n"
+                             % (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE))
         self.assertTrue(report["ready"], report)
         self.assertTrue(report["cross_family"]["ok"])
         self.assertTrue(report["final"]["ok"])
+        self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
+
+    def test_a_single_cross_family_seat_is_no_longer_a_review(self):
+        # REVGATE2F: the gate used to pass on the FIRST valid cross-family
+        # entry, so one seat plus the final read as reviewed. The floor is two
+        # seats from two different families.
+        report = self.status(CROSS_FAMILY_LINE + "\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("2 cross-family seats required; have 1",
+                      report["cross_family"]["detail"])
+
+    def test_two_seats_from_the_same_family_are_one_review_not_two(self):
+        # The duplicate the floor exists for: two spellings, one family.
+        # muse-contrib is the same meta family as omniroute/muse.
+        report = self.status(CROSS_FAMILY_LINE + "\n"
+                             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=muse-contrib verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("reviewers omniroute/muse and muse-contrib are the same family (meta)",
+                      report["cross_family"]["detail"])
+        self.assertIn("2 cross-family seats required; have 1",
+                      report["cross_family"]["detail"])
+
+    def test_a_declared_family_that_disagrees_with_the_registry_is_refused(self):
+        # The optional family= is a cross-check, not a claim: when present it
+        # must match the registry-derived family, and the mismatch names both.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse family=qwen verdict=PASS\n"
+                             + CROSS_FAMILY_LINE_2 + "\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("declares family=qwen but the registry says meta",
+                      report["cross_family"]["detail"])
+
+    def test_a_declared_family_that_agrees_is_still_a_seat(self):
+        # The registry's own capitalization is the same family (REVFIX S2).
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse family=Meta verdict=PASS\n"
+                             + CROSS_FAMILY_LINE_2 + "\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+
+    def test_more_than_three_seats_is_a_note_never_a_failure(self):
+        # The operator's guidance is 2-3 seats; the gate enforces the floor of
+        # two and prints a non-blocking note past three -- never a refusal.
+        real = self.real_registry()
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=qwen3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=opencode/longcat-2.5-preview-free verdict=PASS\n"
+            + FINAL_LINE, real)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["families"],
+                         ["meta", "google", "qwen", "meituan"])
+        self.assertIn("no cap", report["cross_family"]["detail"])
 
     def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
-        report = self.status(CROSS_FAMILY_LINE)
+        # Both seats present (the REVGATE2F floor), the final missing.
+        report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2)
         self.assertFalse(report["ready"])
         self.assertTrue(report["cross_family"]["ok"])
         self.assertFalse(report["final"]["ok"])
@@ -9123,7 +9191,8 @@ class ReviewStatusTests(unittest.TestCase):
         # substring of either.
         for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
             with self.subTest(reviewer=spelling):
-                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2
+                                     + "\nAutoOS-Review: "
                                      "kind=final reviewer=%s verdict=READY" % spelling)
                 self.assertTrue(report["ready"], report)
 
@@ -9196,18 +9265,23 @@ class ReviewStatusTests(unittest.TestCase):
     def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
         # The record quotes what the client was run with, not a registry id:
         # "omniroute/spark-1.3-contributor" is the operator's reviewer spelling
-        # whose family the registry states.
+        # whose family the registry states. REVGATE2F: the second seat (a
+        # different family than the author's meta) makes the record ready.
         report = self.status("AutoOS-Review: kind=cross-family "
                              "author=omniroute/muse reviewer=gem-flash verdict=PASS\n"
+                             "AutoOS-Review: kind=cross-family "
+                             "author=omniroute/muse reviewer=qwen3.8-flash verdict=PASS\n"
                              + FINAL_LINE)
         self.assertTrue(report["ready"], report)
-        self.assertEqual(report["cross_family"]["family"], "google")
+        self.assertEqual(report["cross_family"]["families"], ["google", "qwen"])
 
     def test_a_bare_family_name_the_registry_knows_is_still_a_family(self):
         # Fail-closed on the unknown must not break the ordinary shorthand:
         # "qwen" is a family the fixture's reviewers declare, so it resolves.
         report = self.status("AutoOS-Review: kind=cross-family author=qwen "
-                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+                             "reviewer=omniroute/muse verdict=PASS\n"
+                             "AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=gem-flash verdict=PASS\n" + FINAL_LINE)
         self.assertTrue(report["ready"], report)
 
     def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
@@ -9232,8 +9306,10 @@ class ReviewStatusTests(unittest.TestCase):
                 report = self.status(
                     "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                     "reviewer=omniroute/muse verdict=%s\n"
+                    "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                    "reviewer=gem-flash verdict=%s\n"
                     "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
-                    % (verdict, verdict))
+                    % (verdict, verdict, verdict))
                 self.assertTrue(report["ready"], report)
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=SHIP\n"
@@ -9248,7 +9324,9 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
                          "anthropic")
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                             "reviewer=claude-haiku-4-5 verdict=ship\n" + FINAL_LINE)
+                             "reviewer=claude-haiku-4-5 verdict=ship\n"
+                             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=ship\n" + FINAL_LINE)
         self.assertTrue(report["ready"], report)
         # An id whose name the list does not carry stays unknown: a reviewer
         # nobody can place is not an independent review (fail closed).
@@ -9274,10 +9352,14 @@ class ReviewStatusTests(unittest.TestCase):
     # --- the command's contract -------------------------------------------
 
     def test_the_command_exits_0_on_a_ready_record(self):
-        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, FINAL_LINE)
+        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
+                                 FINAL_LINE)
         rc, out, _ = self.cmd(path)
         self.assertEqual(rc, 0)
         self.assertIn("ready", out)
+        # REVGATE2F: every counted seat prints as model (family) + verdict.
+        self.assertIn("seat 1: omniroute/muse (meta) verdict=PASS", out)
+        self.assertIn("seat 2: gem-flash (google) verdict=PASS", out)
 
     def test_the_command_exits_1_and_names_the_missing_review(self):
         path = self.write_record("# Lane x", FINAL_LINE)
@@ -9299,9 +9381,11 @@ class ReviewStatusTests(unittest.TestCase):
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "reviewer=opencode/nemotron-3-ultra-free verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
-        self.assertEqual(report["cross_family"]["family"], "meta")
+        self.assertEqual(report["cross_family"]["families"], ["meta", "nvidia"])
         # Haiku is the fallback first pass: it counts as a cross-family reviewer
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
@@ -9312,6 +9396,8 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertTrue(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+            "reviewer=gemini-3.8-flash verdict=ship\n"
             "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
@@ -9326,6 +9412,8 @@ class ReviewStatusTests(unittest.TestCase):
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=Meta "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=qwen3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
         # The self-review that used to pass: Meta's own model, Meta's reviewer.
@@ -9355,9 +9443,12 @@ class ReviewStatusTests(unittest.TestCase):
                 # and complete: family != qwen, and the Sonnet final stands.
                 report = self.agent.review_status(
                     ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                     "reviewer=%s verdict=PASS\n" % spelling) + FINAL_LINE, real)
+                     "reviewer=%s verdict=PASS\n" % spelling)
+                    + "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                      "reviewer=opencode/muse-spark-1.3-contributor-free verdict=PASS\n"
+                    + FINAL_LINE, real)
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
-                self.assertEqual(report["cross_family"]["family"], family)
+                self.assertEqual(report["cross_family"]["families"], [family, "meta"])
 
     # The models an orchestrator session actually runs, spelled as its own client
     # reports them. They are authors, never routes: no provider serves them here,
@@ -9387,9 +9478,11 @@ class ReviewStatusTests(unittest.TestCase):
                 report = self.agent.review_status(
                     ("AutoOS-Review: kind=cross-family author=%s "
                      "reviewer=omniroute/spark-1.3-contributor verdict=ship\n" % author)
+                    + "AutoOS-Review: kind=cross-family author=%s "
+                      "reviewer=gemini-3.8-flash verdict=ship\n" % author
                     + FINAL_LINE, real)
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
-                self.assertEqual(report["cross_family"]["family"], "meta")
+                self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
 
     def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
         # Known is not routable, and this pins the difference: a route leg whose
@@ -9537,7 +9630,7 @@ class ReadyCommandTests(unittest.TestCase):
             rc = self.agent.main(argv)
         return rc, out.getvalue(), err.getvalue()
 
-    READY_RECORD = (CROSS_FAMILY_LINE, FINAL_LINE)
+    READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
     NOT_PUSHED_SHA = "0" * 40
 
     # --- the review gate ----------------------------------------------------
@@ -9589,7 +9682,7 @@ class ReadyCommandTests(unittest.TestCase):
                 repo, sha = self.make_repo()
                 inbox = self.make_inbox("")
                 rc, out, _ = self.ready(
-                    self.write_record(CROSS_FAMILY_LINE,
+                    self.write_record(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
                                       "AutoOS-Review: kind=final reviewer=%s "
                                       "verdict=READY" % spelling),
                     repo, sha, inbox)
@@ -9660,7 +9753,8 @@ class ReadyCommandTests(unittest.TestCase):
             r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) ready %s %s reviews: "
             r"(.+) \| (.+)$" % (re.escape(self.BRANCH), sha), lines[1])
         self.assertIsNotNone(match, lines[1])
-        self.assertEqual(match.group(2), "qwen3.8-flash reviewed by omniroute/muse (meta)")
+        self.assertEqual(match.group(2), "2 cross-family seats: "
+                                          "omniroute/muse (meta), gem-flash (google)")
         self.assertEqual(match.group(3), "sonnet verdict READY")
         self.assertIn(lines[1], out)
 

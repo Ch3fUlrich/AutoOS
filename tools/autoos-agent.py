@@ -2673,8 +2673,10 @@ def review_run_refusal(review: dict | None):
 # the gate looks for one machine-readable line per review and ignores the prose
 # around it. `review-status` prints the same hint it parses, and `run` prints a
 # paste-ready one, so the format is never something you have to go looking for.
+# REVGATE2F (operator 2026-09-30): one line is one SEAT, and a ready lane needs
+# two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
-REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "verdict")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
@@ -2691,7 +2693,8 @@ FINAL_REVIEWER = "sonnet"
 # the client, so it counts too; anything else does not.
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
-                     "reviewer=<model> verdict=<ready|pass|ship|lgtm|...>")
+                     "reviewer=<model> [family=<family>] "
+                     "verdict=<ready|pass|ship|lgtm|...>")
 
 
 def _family_of_one_spelling(name, registry):
@@ -2764,37 +2767,82 @@ def _review_entry_verdict(entry):
     return False, "verdict %s" % (verdict or "missing")
 
 
+def _cross_family_seat(entry, registry):
+    """``(seat, reason)`` for one kind=cross-family entry.
+
+    A *seat* is one entry that counts: a reviewer the registry places, an author
+    the registry places, two different families, a declared ``family=`` that
+    agrees with the registry, and a READY verdict. Anything else is a reason the
+    entry does not count, said out loud -- an unplaced name is never evidence of
+    independence (REVFIX S2), and a non-READY verdict is a finding, not a seat.
+    """
+    reviewer = entry["reviewer"]
+    family = reviewer_family(reviewer, registry)
+    if family is None:
+        return None, ("%s is not a known reviewer (policy.reviewers or models)"
+                      % reviewer)
+    author, why = resolver.author_family(entry.get("author") or "", registry)
+    if author is None:
+        # REVFIX S2: an author the registry cannot place is NOT treated as a
+        # family of its own. "Who wrote this" unanswered is not evidence that
+        # the reviewer is someone else, so the check fails and says so.
+        return None, "author: %s" % why
+    if author == family:
+        return None, "%s is the same family as the author (%s)" % (reviewer, family)
+    declared = (entry.get("family") or "").strip()
+    if declared and resolver.family_key(declared) != family:
+        # The optional family= is a cross-check, not a claim (REVGATE2F): when a
+        # record prints one it must be the family the registry derives, or the
+        # seat is refused and the mismatch names both sides.
+        return None, ("%s declares family=%s but the registry says %s"
+                      % (reviewer, declared, family))
+    ok, reason = _review_entry_verdict(entry)
+    if not ok:
+        return None, "%s %s" % (reviewer, reason)
+    return {"reviewer": reviewer, "family": family,
+            "verdict": (entry.get("verdict") or "").strip()}, None
+
+
 def _cross_family_review(entries, registry):
-    """The record's independent review: a reviewer from a DIFFERENT family."""
+    """The record's independent review: >=2 READY seats from DISTINCT families.
+
+    REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
+    entry, so one seat plus the final read as reviewed -- and two spellings of
+    one family read as two seats. The floor is two counted seats whose families
+    differ and are not the author's, each READY. There is no cap: past three
+    seats the operator's 2-3 guidance is printed as a non-blocking note, never a
+    refusal. Missing and duplicated seats are both named in the detail, because
+    "try again" without names sends someone to book a review that already
+    happened.
+    """
     wanted = [e for e in entries if e.get("kind") == "cross-family"]
     if not wanted:
-        return {"ok": False, "family": None,
+        return {"ok": False, "families": [], "seats": [],
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
-    reasons = []
+    reasons, seats = [], []
     for entry in wanted:
-        reviewer = entry["reviewer"]
-        family = reviewer_family(reviewer, registry)
-        if family is None:
-            reasons.append("%s is not a known reviewer (policy.reviewers or models)"
-                           % reviewer)
+        seat, reason = _cross_family_seat(entry, registry)
+        if reason is not None:
+            reasons.append(reason)
             continue
-        author, why = resolver.author_family(entry.get("author") or "", registry)
-        if author is None:
-            # REVFIX S2: an author the registry cannot place is NOT treated as a
-            # family of its own. "Who wrote this" unanswered is not evidence that
-            # the reviewer is someone else, so the check fails and says so.
-            reasons.append("author: %s" % why)
+        same = [s for s in seats if s["family"] == seat["family"]]
+        if same:
+            reasons.append("reviewers %s and %s are the same family (%s)"
+                           % (same[0]["reviewer"], seat["reviewer"], seat["family"]))
             continue
-        if author == resolver.family_key(family):
-            reasons.append("%s is the same family as the author (%s)" % (reviewer, family))
-            continue
-        ok, reason = _review_entry_verdict(entry)
-        if not ok:
-            reasons.append("%s %s" % (reviewer, reason))
-            continue
-        return {"ok": True, "family": family,
-                "detail": "%s reviewed by %s (%s)" % (entry.get("author"), reviewer, family)}
-    return {"ok": False, "family": None, "detail": "; ".join(reasons)}
+        seats.append(seat)
+    if len(seats) < 2:
+        reasons.append("2 cross-family seats required; have %d" % len(seats))
+    if reasons:
+        return {"ok": False, "families": [s["family"] for s in seats],
+                "seats": seats, "detail": "; ".join(reasons)}
+    detail = "%d cross-family seats: %s" % (
+        len(seats), ", ".join("%s (%s)" % (s["reviewer"], s["family"]) for s in seats))
+    if len(seats) > 3:
+        detail += ("; note: %d seats, beyond the operator's 2-3 guidance -- no cap"
+                   % len(seats))
+    return {"ok": True, "families": [s["family"] for s in seats],
+            "seats": seats, "detail": detail}
 
 
 def _final_review(entries):
@@ -2825,7 +2873,9 @@ def review_status(text, registry):
     the other half -- proof it RAN and said something, in the file that gets
     merged. A same-family reviewer, an unknown reviewer spelling and a verdict
     that says FIX-FIRST all fail, and each says which, because "missing" would
-    send someone to book a review that already happened and did not pass.
+    send someone to book a review that already happened and did not pass. The
+    floor is two seats from distinct families (REVGATE2F): one entry is no
+    longer a review, and two spellings of one family are one seat.
     """
     entries, malformed = [], []
     for line in (text or "").splitlines():
@@ -2873,6 +2923,12 @@ def print_review_report(label, report):
     for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
         item = report[key]
         print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+        # REVGATE2F: every counted seat prints as model (family) + verdict, so
+        # "which reviews" is answerable from the output without re-reading the
+        # record line by line.
+        for number, seat in enumerate(item.get("seats") or [], 1):
+            print("  seat %d: %s (%s) verdict=%s"
+                  % (number, seat["reviewer"], seat["family"], seat["verdict"]))
     for line in report["malformed"]:
         print("  note: entry without a kind= or reviewer= ignored: %s" % line)
     if not report["entries"]:
@@ -7778,9 +7834,13 @@ def cmd_run(args, cfg: dict) -> int:
             route["review_plan"]["author_family"]))
         # Item 5: the line that has to end up in the lane record for the lane to
         # read as reviewed. Filling in the verdict is the reviewer's job at the
-        # end of the run, not the spawner's guess at the start of it.
+        # end of the run, not the spawner's guess at the start of it. REVGATE2F:
+        # one line is one seat; a ready lane needs two, from two different
+        # families, so the note below names the floor for the second seat.
         print("record-line: AutoOS-Review: kind=cross-family author=%s reviewer=%s "
               "verdict=<fill in>" % ((route.get("card") or {}).get("author"), reviewer["model"]))
+        print("note: a ready lane needs TWO record lines above, from two different "
+              "families; family=<family> is optional and cross-checked")
         for line in resolver.reviewer_explain_lines(route["review_plan"]):
             print(line)
     if route.get("reviewer_note"):
