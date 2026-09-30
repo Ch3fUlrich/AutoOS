@@ -1,122 +1,112 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Apply (or re-apply) the AutoOS max_tokens output-clamp patch to a local OmniRoute
-  gateway bundle.
+  Apply (or re-apply) the AutoOS max_tokens output-clamp patch to a local OmniRoute install.
 
 .DESCRIPTION
-  Vendor file is outside the repo, so this is the durable reapply artifact for
-  configuration/omniroute/patches/0001-clamp-max-tokens.patch. It edits
-  dist/open-sse/mcp-server/server.js by exact string replacement (byte-stable: the file
-  is LF, no BOM):
+  The live HTTP gateway is the Next.js standalone build (dist/server-ws.mjs ->
+  dist/.build/next/**), NOT dist/open-sse/mcp-server/server.js (that file is the MCP
+  stdio bundle, used only by bin/mcp-server.mjs). Both carry a copy of the same
+  open-sse source, so the patch is applied to BOTH:
 
-    1. Un-gate resolveReasoningBufferedMaxTokens so the per-model output cap
-       (capability override max_output_tokens / registry maxOutputTokens) clamps ANY
-       model, not only reasoning models.
-    2. Call that clamp at the head of executeModelUnit so the single-model unit path
-       clamps its per-target body before dispatch.
+    1. dist/open-sse/mcp-server/server.js (canonical, un-minified compiled form):
+       - un-gate resolveReasoningBufferedMaxTokens (drop the supportsThinking check),
+       - clamp the per-target body in executeModelUnit.
+    2. every dist/.build/next/**/*.js that carries the gateway's minified clamp
+       (exactly 4 chunk copies today): remove the same supportsThinking gate with a
+       name-agnostic regex.
 
-  A model with no explicit cap is untouched (the helper returns null), so this is a
-  per-model change, not a global default. Idempotent: the marker line makes a second
-  run a no-op. The vendor file is backed up first to server.js.autoos-backup-<ts>.
+  Effect: a per-model output cap (capability override max_output_tokens / registry
+  maxOutputTokens) now clamps max_tokens for any model, not only reasoning models. A
+  model with no explicit cap is untouched (the helper still returns null), so this is a
+  per-model change, not a global default.
 
-  The gateway must be restarted after this for the patched bundle to load
-  (omniroute serve / the workstation start-stack). See the evidence doc.
+  Idempotent (the gate regex no longer matches after the first run). Every changed file
+  is backed up to <file>.autoos-backup-<timestamp>. The running gateway keeps the old
+  bytes in memory: RESTART it to load the patch (see the evidence doc).
 
-.PARAMETER ServerJs
-  Path to the bundle. Defaults to the npm-global install.
+.PARAMETER OmniRouteRoot
+  Install root. Defaults to the npm-global install.
 
 .PARAMETER DryRun
   Report what would change, write nothing.
 #>
 [CmdletBinding()]
 param(
-    [string]$ServerJs = (Join-Path $env:APPDATA 'npm\node_modules\omniroute\dist\open-sse\mcp-server\server.js'),
+    [string]$OmniRouteRoot = (Join-Path $env:APPDATA 'npm\node_modules\omniroute'),
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$Marker = 'AutoOS clamp: never forward max_tokens above'
+$McpBundle = Join-Path $OmniRouteRoot 'dist\open-sse\mcp-server\server.js'
+$NextRoot  = Join-Path $OmniRouteRoot 'dist\.build\next'
+$Marker    = 'AutoOS clamp: never forward max_tokens above'
+$stamp     = Get-Date -Format 'yyyyMMdd-HHmmss'
+$utf8      = New-Object System.Text.UTF8Encoding($false)
 
-if (-not (Test-Path $ServerJs)) {
-    Write-Host "  ! bundle not found: $ServerJs"
-    exit 1
+function Backup-And-Write {
+    param([string]$Path, [string]$Text)
+    if ($DryRun) { Write-Host "  - would write $Path"; return }
+    Copy-Item -LiteralPath $Path -Destination "$Path.autoos-backup-$stamp" -Force
+    [IO.File]::WriteAllText($Path, $Text, $utf8)
+    Write-Host "  + patched $Path (backup .autoos-backup-$stamp)"
 }
 
-$text = [IO.File]::ReadAllText($ServerJs)
-
-if ($text.Contains($Marker)) {
-    Write-Host "  = already patched (marker present): $ServerJs"
-    exit 0
-}
-
-$oldGate = @'
-  const capabilities = getResolvedModelCapabilities(modelStr);
-  if (capabilities.supportsThinking !== true) return null;
-  const maxOutputTokens = toPositiveInteger(getExplicitModelOutputCap(modelStr));
-'@ -replace "`r`n", "`n"
-
-$newGate = @'
-  const maxOutputTokens = toPositiveInteger(getExplicitModelOutputCap(modelStr));
-'@ -replace "`r`n", "`n"
-
-$oldUnit = @'
-  if (args.isModelAvailable) {
-    const available = await args.isModelAvailable(args.unit.modelStr, args.unit);
-    if (!available) return errorResponse(503, `Model ${args.unit.modelStr} is unavailable`);
-  }
-  return args.handleSingleModel(args.body, args.unit.modelStr, {
-'@ -replace "`r`n", "`n"
-
-$newUnit = @'
-  if (args.isModelAvailable) {
-    const available = await args.isModelAvailable(args.unit.modelStr, args.unit);
-    if (!available) return errorResponse(503, `Model ${args.unit.modelStr} is unavailable`);
-  }
-  {
-    // AutoOS clamp: never forward max_tokens above the model's explicit output cap
-    // (capability override max_output_tokens / registry maxOutputTokens). Per-model:
-    // a model with no cap still clamps to nothing.
-    const clampedMaxTokens = resolveReasoningBufferedMaxTokens(args.unit.modelStr, args.body && args.body.max_tokens);
-    if (clampedMaxTokens !== null && args.body && typeof args.body === "object" && clampedMaxTokens !== args.body.max_tokens) {
-      args.body = { ...args.body, max_tokens: clampedMaxTokens };
+# --- 1. MCP bundle (canonical compiled form) --------------------------------
+if (Test-Path $McpBundle) {
+    $text = [IO.File]::ReadAllText($McpBundle)
+    if ($text.Contains($Marker)) {
+        Write-Host "  = mcp bundle already patched"
+    } else {
+        $oldGate = "  const capabilities = getResolvedModelCapabilities(modelStr);`n  if (capabilities.supportsThinking !== true) return null;`n  const maxOutputTokens = toPositiveInteger(getExplicitModelOutputCap(modelStr));"
+        $newGate = "  const maxOutputTokens = toPositiveInteger(getExplicitModelOutputCap(modelStr));"
+        $oldUnit = "  if (args.isModelAvailable) {`n    const available = await args.isModelAvailable(args.unit.modelStr, args.unit);`n    if (!available) return errorResponse(503, ``Model `${args.unit.modelStr} is unavailable``);`n  }`n  return args.handleSingleModel(args.body, args.unit.modelStr, {"
+        $newUnit = "  if (args.isModelAvailable) {`n    const available = await args.isModelAvailable(args.unit.modelStr, args.unit);`n    if (!available) return errorResponse(503, ``Model `${args.unit.modelStr} is unavailable``);`n  }`n  {`n    // AutoOS clamp: never forward max_tokens above the model's explicit output cap`n    const clampedMaxTokens = resolveReasoningBufferedMaxTokens(args.unit.modelStr, args.body && args.body.max_tokens);`n    if (clampedMaxTokens !== null && args.body && typeof args.body === `"object`" && clampedMaxTokens !== args.body.max_tokens) {`n      args.body = { ...args.body, max_tokens: clampedMaxTokens };`n    }`n  }`n  return args.handleSingleModel(args.body, args.unit.modelStr, {"
+        if (-not $text.Contains($oldGate) -or -not $text.Contains($oldUnit)) {
+            Write-Host "  ! mcp bundle anchors not found - skipping"
+        } else {
+            Backup-And-Write -Path $McpBundle -Text ($text.Replace($oldGate, $newGate).Replace($oldUnit, $newUnit))
+        }
     }
-  }
-  return args.handleSingleModel(args.body, args.unit.modelStr, {
-'@ -replace "`r`n", "`n"
-
-if (-not $text.Contains($oldGate)) {
-    Write-Host "  ! un-gate anchor not found - bundle differs; refusing to patch"
-    exit 1
-}
-if (-not $text.Contains($oldUnit)) {
-    Write-Host "  ! executeModelUnit anchor not found - bundle differs; refusing to patch"
-    exit 1
-}
-
-if ($DryRun) {
-    Write-Host "  - would un-gate resolveReasoningBufferedMaxTokens (1 site)"
-    Write-Host "  - would add the clamp call to executeModelUnit (1 site)"
-    Write-Host "  - would back up $ServerJs"
-    exit 0
-}
-
-$backup = "$ServerJs.autoos-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-Copy-Item -LiteralPath $ServerJs -Destination $backup -Force
-Write-Host "  + backup: $backup"
-
-$patched = $text.Replace($oldGate, $newGate).Replace($oldUnit, $newUnit)
-[IO.File]::WriteAllText($ServerJs, $patched, (New-Object System.Text.UTF8Encoding($false)))
-
-# Verify.
-$check = [IO.File]::ReadAllText($ServerJs)
-if ($check.Contains($Marker) -and -not $check.Contains('capabilities.supportsThinking !== true) return null;')) {
-    Write-Host "  + patched OK: $ServerJs"
-    Write-Host '  ! restart the gateway so the patched bundle loads'
 } else {
-    Write-Host "  ! verification failed - restoring backup"
-    Copy-Item -LiteralPath $backup -Destination $ServerJs -Force
+    Write-Host "  ! mcp bundle not found: $McpBundle"
+}
+
+# --- 2. Gateway Next build (what the live gateway loads) --------------------
+# Remove the supportsThinking gate from the clamp, name-agnostic.
+$gatePattern = 'let ([A-Za-z0-9_$]+)=\(0,[A-Za-z0-9_$]+\.getResolvedModelCapabilities\)\([A-Za-z0-9_$]+\);if\(!0!==\1\.supportsThinking\)return null;'
+$gatewayFiles = Get-ChildItem $NextRoot -Recurse -Filter *.js -File -ErrorAction SilentlyContinue |
+    Select-String -Pattern $gatePattern -List
+$gatewayFiles = @($gatewayFiles)
+
+if ($gatewayFiles.Count -eq 0) {
+    Write-Host "  = gateway already patched (no clamp gate found under .build/next)"
+} else {
+    foreach ($hit in $gatewayFiles) {
+        $path = $hit.Path
+        $text = [IO.File]::ReadAllText($path)
+        $new = [regex]::Replace($text, $gatePattern, '')
+        if ($new -eq $text) { continue }
+        Backup-And-Write -Path $path -Text $new
+    }
+}
+
+# --- 3. Verify --------------------------------------------------------------
+$ok = $true
+if (Test-Path $McpBundle) {
+    $m = [IO.File]::ReadAllText($McpBundle)
+    if (-not $m.Contains($Marker)) { Write-Host "  ! verify: mcp marker missing"; $ok = $false }
+}
+$left = Get-ChildItem $NextRoot -Recurse -Filter *.js -File -ErrorAction SilentlyContinue |
+    Select-String -Pattern $gatePattern -List
+if ($left) { Write-Host "  ! verify: $($left.Count) gateway file(s) still carry the gate"; $ok = $false }
+
+if ($ok) {
+    Write-Host '  + patched OK'
+    Write-Host '  ! RESTART the gateway to load the patched bundle (the running process keeps the old bytes in memory)'
+} else {
+    Write-Host '  ! verification failed - restore from the .autoos-backup-* files'
     exit 1
 }
