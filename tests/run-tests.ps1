@@ -9776,6 +9776,32 @@ Test-Case 'canvas verdict keeps the current docker path' {
     Assert-True ($ps1 -match 'docker\.openhands\.dev/openhands/openhands:latest') 'docker path must stay intact'
 }
 
+Test-Case 'omniroute launchers pin the .cmd shim, fail loudly without it, and default chat admission without clobbering' {
+    # A bare Start-Process -FilePath 'omniroute' resolves to the npm .ps1 shim
+    # (ExternalScript), which Start-Process cannot launch as a Win32 app: the
+    # gateway silently never starts. Both gateway launchers must pin the .cmd
+    # shim - resolved via PATH with an %APPDATA%\npm fallback, never a hardcoded
+    # user path - and fail loudly when it is missing, and must apply the chat
+    # admission default only when the operator has not already set one.
+    foreach ($rel in @('configuration\omniroute\apply.ps1', 'configuration\start-stack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        # (a) resolves the .cmd shim, not the bare ExternalScript name.
+        Assert-True ($src -notmatch "Start-Process\s+-FilePath\s+'omniroute'") "$rel still starts the bare 'omniroute' name"
+        Assert-True ($src -match 'Get-Command omniroute\.cmd') "$rel does not resolve omniroute.cmd via PATH"
+        Assert-True ($src -match 'if \(-not \$omnirouteCmd\) \{ \$omnirouteCmd = Join-Path \$env:APPDATA') "$rel lacks the %APPDATA%\npm fallback"
+        Assert-True ($src -match 'Start-Process -FilePath \$omnirouteCmd') "$rel does not start the resolved .cmd shim"
+        Assert-True ($src -notmatch 'C:\\Users\\[A-Za-z]') "$rel carries a hardcoded user path"
+        # (b) a missing shim is a loud failure, not a silent wait for a gateway
+        # that never starts.
+        Assert-True ($src -match 'if \(-not \(Test-Path -LiteralPath \$omnirouteCmd\)\) \{') "$rel does not check that the shim exists"
+        Assert-True ($src -match '(?s)Test-Path -LiteralPath \$omnirouteCmd.{0,200}?exit 1') "$rel does not exit when the shim is missing"
+        # (c) the chat admission default is respect-set and appears exactly once
+        # (idempotent - a second run cannot add a duplicate assignment).
+        Assert-True ($src -match 'if \(-not \$env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT\) \{') "$rel does not respect a user-set admission limit"
+        Assert-Equal @([regex]::Matches($src, "OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'")).Count 1 "$rel must set the admission default exactly once"
+    }
+}
+
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''

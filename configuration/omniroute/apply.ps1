@@ -85,8 +85,29 @@ if (-not (Test-Gateway)) {
     if ($DryRun) {
         Write-Host 'Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128).'
     } else {
+        # Raise the chat admission heavy-in-flight limit from the default of 1.
+        # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+        # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+        # for parallel agents (swarm, multi-lane) without over-allocating heap.
+        # Respect a user-set value - do not clobber.
+        if (-not $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT) {
+            $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'
+        }
         Write-Host 'Starting OmniRoute (background)...'
-        Start-Process -FilePath 'omniroute' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
+        # A bare 'omniroute' resolves to the npm .ps1 shim (ExternalScript), which
+        # Start-Process cannot launch as a Win32 app - pin the .cmd shim instead.
+        # Resolved via PATH with a %APPDATA%\npm fallback (never a hardcoded user
+        # path): a missing shim is a loud failure, not a silent wait for a
+        # gateway that never starts.
+        $omnirouteCmd = $null
+        $omnirouteCmdInfo = Get-Command omniroute.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($omnirouteCmdInfo) { $omnirouteCmd = $omnirouteCmdInfo.Source }
+        if (-not $omnirouteCmd) { $omnirouteCmd = Join-Path $env:APPDATA 'npm\omniroute.cmd' }
+        if (-not (Test-Path -LiteralPath $omnirouteCmd)) {
+            Write-Host "Could not find omniroute.cmd (the npm shim). Run: .\setup.ps1 -Only omniroute -Yes"
+            exit 1
+        }
+        Start-Process -FilePath $omnirouteCmd -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
         $tries = 0
         while ((-not (Test-Gateway)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
         if (-not (Test-Gateway)) { Write-Host 'Gateway did not start - run: omniroute doctor'; exit 1 }
