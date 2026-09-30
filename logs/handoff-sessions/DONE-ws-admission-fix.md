@@ -33,6 +33,9 @@ Base sha: `6ec0605a188586778acac6829a9263181129e949` (`origin/main` tip at workt
   — same pre-existing `KeysMissing`; start-stack pre=0/post=0; run-tests pre=17/post=17).
 - Behavioral: admission guard `preset=4 -> 4`, `unset -> 8`, `second run -> 8`;
   missing-shim child run → loud message + `MISS-EXIT=1`.
+- Full `pwsh tests/run-tests.ps1`: `passed 1748 failed 5 skipped 13` (EXIT=1). All 5
+  failures are **pre-existing on the base** — reproduced identically on a detached
+  `origin/main` worktree — and touch no file this lane changed.
 
 ## Review (item 5) — reviewer → fixer → re-review
 

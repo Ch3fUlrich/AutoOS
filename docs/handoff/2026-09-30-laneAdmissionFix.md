@@ -151,6 +151,30 @@ Could not find omniroute.cmd (the npm shim). Run: .\setup.ps1 -Only omniroute -Y
 MISS-EXIT=1
 ```
 
+### 7. Full Windows suite (`pwsh -NoProfile -File tests/run-tests.ps1`)
+
+```
+  passed 1748   failed 5   skipped 13
+SUITE_EXIT=1
+```
+
+The 5 failures are **pre-existing on the base** and unrelated to this change — none
+touches a file this lane modified. Re-running the same failing names on a detached
+`origin/main` (pre-fix) worktree reproduces all five:
+
+```
+  passed 65   failed 5   skipped 1
+  - registry: no generated file drifts
+  - autoos-agent spawner unit tests: card routing, clients, depth
+  - agent harness: the generator's unit tests pass
+  - combos.json is valid, named and provider/model shaped
+  - apply scripts refresh the catalog between registering and reading /v1/models
+```
+
+The last two are drift/ordering assertions over `configuration/omniroute/` files
+(`combos.json`, `apply.sh`) that this lane did not touch — the failure text blames
+`configuration/omniroute/apply.sh`, which is unchanged here.
+
 ## Out of scope (observed, NOT changed — reported for L0)
 
 - `configuration/autostart/Start-AutoOSStack.ps1:47` carries the SAME bare
