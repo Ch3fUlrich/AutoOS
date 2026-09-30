@@ -78,63 +78,105 @@ support), 10/15 failed.
 | 504 | 1 | nebius/zai-org/GLM-5.3-Flash | Timeout (125 s) |
 | tool-fail | 1 | free-ai/qwen7b | Ack OK but no tool-call support |
 
-## 4. Combo routing tests (measured 2026-09-30T14:46–14:51Z)
+## 4. Combo routing tests (clean re-run measured 2026-09-30T14:53–14:58Z)
 
-11 combos tested (re-run via `--combos-only`). Gateway was **unstable** during
-the sweep — the two long-running combos (t1-orchestrator 124 s, t1-orchestrator-
-free-only 117 s) appear to have overwhelmed the gateway, causing transport
-errors (URLError, ConnectionResetError) for subsequent combos. `t3-driver-
-free-only` was not tested (script crashed, exit 255).
+A first run at 14:46–14:51Z was discarded — the gateway was unstable (3/10 ok,
+7 transport errors: URLError ~2 s, ConnectionResetError). The two long-running
+combos (t1-orchestrator 124 s, t1-orchestrator-free-only 117 s) appear to have
+exhausted the gateway's connection pool, causing cascading transport errors for
+subsequent combos. The script also crashed before testing t3-driver-free-only.
 
-| Combo | Result | Latency ms | Model served | Error |
-|---|---|---|---|---|
-| `deepseek-v4.1-flash` | **ok** | 812 | `deepseek-flash` | — |
-| `t1-orchestrator` | FAIL | 124 031 | (none) | HTTP 502 — all 5 legs failed |
-| `t1-orchestrator-free-only` | FAIL | 116 796 | (none) | transport: ConnectionResetError (gateway overwhelmed) |
-| `t1-orchestrator-paid` | FAIL | 2 047 | (none) | transport: URLError (gateway unreachable) |
-| `t2-orchestrator` | FAIL | 2 047 | (none) | transport: URLError |
-| `t2-worker` | FAIL | 2 045 | (none) | transport: URLError |
-| `t2-worker-clean` | **ok** | 13 391 | `deepseek-flash` | — (slow: gateway under load) |
-| `t2-worker-free-only` | **ok** | 1 937 | `qwen7b` | — (GLM-5.2 down → fell through to qwen7b; qwen7b has no tool support — ok for ack, unusable for agentic work) |
-| `t3-driver` | FAIL | 17 842 | (none) | transport: ConnectionResetError |
-| `t3-driver-clean` | FAIL | 2 047 | (none) | transport: URLError |
-| `t3-driver-free-only` | — | — | — | **not tested** (script crashed) |
+A clean re-run at 14:53–14:58Z confirmed those failures were gateway-overwhelm
+artifacts, not real leg failures: the same combos that returned URLError/
+ConnectionResetError now succeed cleanly (t2-worker, t2-worker-clean, t3-driver,
+t3-driver-clean all ok).
 
-**3/10 tested combos ok** (deepseek-v4.1-flash, t2-worker-clean, t2-worker-free-only).
-7/10 failed — 1× HTTP 502 (t1-orchestrator), 2× ConnectionResetError (t1-orchestrator-
-free-only, t3-driver), 4× URLError (t1-orchestrator-paid, t2-orchestrator, t2-worker,
-t3-driver-clean).
+| # | Combo | Result | Latency ms | Model served | Error |
+|---|---|---|---|---|---|
+| 1 | `deepseek-v4.1-flash` | **ok** | 1 123 | `deepseek-flash` | — |
+| 2 | `t1-orchestrator` | FAIL | 124 728 | (none) | HTTP 502 — all 5 legs failed |
+| 3 | `t1-orchestrator-free-only` | FAIL | 122 510 | (none) | HTTP 502 — all 4 legs failed |
+| 4 | `t1-orchestrator-paid` | FAIL | 1 497 | (none) | HTTP 502 — sole leg (muse-spark) failed |
+| 5 | `t2-orchestrator` | FAIL | 22 | (none) | HTTP 401 — sole leg (agy/opus) no credentials |
+| 6 | `t2-worker` | **ok** | 1 251 | `gpt-oss-120b` ⚠ | — (see stale-combo finding below) |
+| 7 | `t2-worker-clean` | **ok** | 864 | `deepseek-flash` | — |
+| 8 | `t2-worker-free-only` | **ok** | 1 091 | `qwen7b` | — (GLM-5.2 down → fell through to qwen7b) |
+| 9 | `t3-driver` | **ok** | 1 382 | `gpt-oss-120b` ⚠ | — (see stale-combo finding below) |
+| 10 | `t3-driver-clean` | **ok** | 1 161 | `deepseek-flash` | — |
+| 11 | `t3-driver-free-only` | **HUNG** | >7 200 000 | (none) | GLM-5.3-Flash 504 leg hung (no socket timeout); killed by PID after >2 h |
 
-### Gateway instability note
+**6/11 combos ok**, 4 FAIL (1× 502 paid, 2× 502 orchestrator, 1× 401), 1 HUNG.
 
-The sweep ran 11 combos sequentially. The first two (deepseek-v4.1-flash at
-0.8 s and t1-orchestrator at 124 s) completed normally. The third
-(t1-orchestrator-free-only) ran 117 s and ended with ConnectionResetError —
-the gateway connection was reset mid-request. The next three combos
-(t1-orchestrator-paid, t2-orchestrator, t2-worker) failed with URLError at
-~2 s (gateway unreachable). The gateway partially recovered (t2-worker-clean
-ok at 13.4 s, t2-worker-free-only ok at 1.9 s), then failed again (t3-driver
-ConnectionResetError at 17.8 s, t3-driver-clean URLError at 2 s). The script
-crashed before testing t3-driver-free-only.
+### Prior-run vs re-run comparison
 
-The combo loop in `probe-sweep.py` has no exception guard, which is why
-t3-driver-free-only was lost instead of recorded. The gateway instability
-correlates with long-running upstream leg timeouts (GLM-5.3-Flash 504 at
-125 s, gemini 429 at 96 s) exhausting the gateway's connection pool.
+| Combo | Prior (14:46Z) | Re-run (14:53Z) | Verdict |
+|---|---|---|---|
+| t2-orchestrator | URLError 2 s | 401 22 ms | 401 confirmed (was masked by gateway overwhelm) |
+| t2-worker | URLError 2 s | ok 1 251 ms | transport error was artifact |
+| t3-driver | ConnectionReset 18 s | ok 1 382 ms | transport error was artifact |
+| t3-driver-clean | URLError 2 s | ok 1 161 ms | transport error was artifact |
 
-### Key finding: t2-worker-free-only served qwen7b
+The prior run's 7 transport-error combos reduced to 0 in the re-run. The
+remaining 4 FAILs are real (HTTP 502/401 from upstream legs), not gateway
+artifacts.
+
+### Key finding 1: stale combos — gateway served gpt-oss-120b
+
+`t2-worker` (combo #6) and `t3-driver` (combo #9) both served `gpt-oss-120b`
+in the re-run. However, `groq/openai/gpt-oss-120b` is **not a leg** in the
+repo's `combos.json` for either combo:
+
+- Repo `t2-worker` legs: gemini-3.8-flash → agy-gemini-high → scw-qwen3 →
+  scw-mistral-small → nebius-GLM-5.2 → **deepseek-flash** → muse-spark → qwen7b
+  (8 legs, no gpt-oss-120b)
+- Repo `t3-driver` legs: scw-mistral-small → nebius-GLM-5.2 → scw-qwen3 →
+  mistral-code-latest → **deepseek-flash** → muse-spark
+  (6 legs, no gpt-oss-120b)
+
+This means the **live gateway has older combo definitions** than the repo's
+`combos.json`. The repo's combos were updated by commit `d08f7f2` (this lane's
+base) but those changes were **never re-applied to the live gateway**. The
+live gateway still has the pre-`d08f7f2` combo legs (matching the §A table in
+`docs/models-proposed.md`), which include `groq/openai/gpt-oss-120b` as a leg
+in t2-worker and t3-driver. Since all legs before gpt-oss-120b fail (401/429/
+502), the gateway correctly falls through to the working gpt-oss-120b leg —
+but this is the **stale** combo, not the one in the repo.
+
+**Implication:** The repo's `combos.json` and the live gateway are out of sync.
+Any analysis of combo behavior must account for the gateway's actual (stale)
+leg definitions, not the repo's. This is a known issue — see
+`docs/models-proposed.md` §A for the gateway's actual combo legs and the
+gateway findings doc for the full stale-combo trace.
+
+### Key finding 2: t2-worker-free-only served qwen7b
 
 `t2-worker-free-only` returned `qwen7b` (leg 6 of 6), not `GLM-5.2` (leg 5).
 This means GLM-5.2 was temporarily down during the combo test, and the
 gateway correctly fell through to the next working leg (qwen7b). This is
 **direct evidence of the priority-chain fallback working as designed** —
-when a leg fails, the gateway tries the next one in order.
+when a leg fails, the gateway tries the next one in order. qwen7b has no
+tool-call support (measured in §3), so this combo is ok for ack but
+unusable for agentic work.
+
+### Key finding 3: t3-driver-free-only hung
+
+`t3-driver-free-only` started at ~14:58Z. Its first leg (`scw-mistral-small`)
+fails (401), second leg (`nebius/zai-org/GLM-5.3-Flash`) times out at 504
+(125 s, per §3). The probe-sweep.py script has no HTTP socket timeout on
+the combo request, so the 504 leg's hang propagated — the process stayed
+alive for >2 h (until 16:59Z) without writing a result record. The process
+was killed by PID (129200) to unblock the lane. No JSONL record was written
+for this combo.
+
+This is a **probe-sweep.py bug**: the combo HTTP request needs a timeout
+(60 s is reasonable — no working combo took >1.4 s). The leg probe path
+already has timeouts; the combo path does not.
 
 ### Deepseek-v4.1-flash consistency
 
-`deepseek-v4.1-flash` (sole leg: `deepseek/deepseek-flash`) was tested 3
-times across both runs, all ok: 922 ms, 812 ms, 1079 ms. This is the most
-reliable combo in the sweep.
+`deepseek-v4.1-flash` (sole leg: `deepseek/deepseek-flash`) was tested 4
+times across all runs, all ok: 922 ms, 812 ms, 1 079 ms, 1 123 ms. This is
+the most reliable combo in the sweep.
 
 ## 5. Deepseek V4.1 Flash fallback analysis
 
@@ -159,34 +201,42 @@ Context window: 1 048 576 (1M). Ack: 1 047 ms. Tool-call: 2 843 ms.
 | `t1-orchestrator` | gemini-3.8-flash → scw-qwen3 → nebius-GLM-5.3-Flash → scw-mistral-small → muse-spark | All 5 legs currently fail → 502 |
 | `t1-orchestrator-free-only` | gemini-3.8-flash → scw-qwen3 → nebius-GLM-5.3-Flash → scw-mistral-small | All 4 legs currently fail |
 | `t1-orchestrator-paid` | muse-spark | 502 |
-| `t2-orchestrator` | antigravity/claude-opus-4-6-thinking | 401 (inferred — other agy legs returned 401; this leg was not probed; combo test returned URLError, see §4) |
+| `t2-orchestrator` | antigravity/claude-opus-4-6-thinking | 401 (measured in re-run, 22 ms; confirmed the prior inference — see §4) |
 | `t2-worker-free-only` | gemini-3.8-flash → agy-gemini-medium → scw-qwen3 → scw-mistral-small → nebius-GLM-5.2 → qwen7b | GLM-5.2 (leg 5) works; free-only by design |
 | `t3-driver-free-only` | scw-mistral-small → nebius-GLM-5.3-Flash → scw-qwen3 → qwen7b | GLM-5.3-Flash 504 + qwen7b ack-only; fragile |
 
-### Fallback behavior per combo (structural analysis from leg-sweep results; combo probes for t2-worker and t3-driver failed with transport errors)
+### Fallback behavior per combo (structural analysis from repo combos.json leg order; measured combo results in §4 reflect the live gateway's stale legs — see §4 stale-combo finding)
+
+> **Stale-combo caveat:** The structural analysis below is based on the repo's
+> `combos.json` leg order. The **measured** combo results in §4 reflect the live
+> gateway's actual (stale) legs, which differ from the repo — e.g. t2-worker and
+> t3-driver served `gpt-oss-120b` (not a repo leg) because the live gateway still
+> has the pre-`d08f7f2` combo definitions. The proposal below targets the repo's
+> `combos.json` (what should be applied), not the live gateway's current state.
 
 **`t2-worker`** (deepseek = leg 6): Legs 1–4 all fail (429/401). **Leg 5 (`nebius/zai-org/GLM-5.2`)
 succeeds** (297 ms) → gateway stops here. Deepseek (leg 6) **never fires** unless GLM-5.2
 also goes down. This is correct priority ordering: free legs first, paid deepseek as
-fallback. **No reordering needed.**
+fallback. **No reordering needed.** (Measured: the live gateway served `gpt-oss-120b`
+instead — stale combo, see §4.)
 
 **`t3-driver`** (deepseek = leg 5): Leg 1 (scw-mistral-small) fails (401). **Leg 2
 (`nebius/zai-org/GLM-5.2`) succeeds** (297 ms) → gateway stops. Deepseek (leg 5) never
 fires unless GLM-5.2, scw-qwen3, AND mistral-code-latest all fail simultaneously. **No
-reordering needed.**
+reordering needed.** (Measured: the live gateway served `gpt-oss-120b` instead — stale
+combo, see §4.)
 
 **`t1-orchestrator`** (NO deepseek): All 5 legs fail → **combo returns 502** (measured
-124 031 ms in the combo sweep; 124 593 ms in the first run). **Proposal: append
+124 728 ms in the re-run; 124 031 ms in the prior run). **Proposal: append
 `deepseek/deepseek-flash` as a final fallback leg** so the orchestrator tier
 degrades to a working model instead of returning 502.
 
-**`t1-orchestrator-paid`** (NO deepseek): Sole leg (muse-spark) returns 502. **Proposal:
-append `deepseek/deepseek-flash` as a fallback leg.**
+**`t1-orchestrator-paid`** (NO deepseek): Sole leg (muse-spark) returns 502 (measured
+1 497 ms). **Proposal: append `deepseek/deepseek-flash` as a fallback leg.**
 
-**`t2-orchestrator`** (NO deepseek): Sole leg (agy/claude-opus-4-6-thinking) inferred 401
-(other agy legs returned 401; this leg was not probed directly). The combo test itself
-returned URLError (gateway unreachable, §4), not 401. **Proposal: append
-`deepseek/deepseek-flash` as a fallback leg.**
+**`t2-orchestrator`** (NO deepseek): Sole leg (agy/claude-opus-4-6-thinking) returns
+401 — measured directly in the re-run (22 ms, §4), confirming the prior inference
+from other agy legs. **Proposal: append `deepseek/deepseek-flash` as a fallback leg.**
 
 **Free-only combos** (`t1-orchestrator-free-only`, `t2-worker-free-only`,
 `t3-driver-free-only`): By design, no paid deepseek leg. These combos can fail entirely
@@ -199,7 +249,7 @@ their character from "zero spend" to "free-first with paid overflow."
 |---|---|---|---|
 | `t1-orchestrator` | …→ muse-spark (502) | …→ muse-spark → **deepseek/deepseek-flash** | Prevents 502 when all free + paid legs fail |
 | `t1-orchestrator-paid` | muse-spark (502) | muse-spark → **deepseek/deepseek-flash** | Same — single failing leg needs a fallback |
-| `t2-orchestrator` | agy/opus-4-6-thinking (401, inferred) | agy/opus-4-6-thinking → **deepseek/deepseek-flash** | Prevents 401 when agy credentials are absent |
+| `t2-orchestrator` | agy/opus-4-6-thinking (401, measured) | agy/opus-4-6-thinking → **deepseek/deepseek-flash** | Prevents 401 when agy credentials are absent |
 | `t2-worker` | (unchanged) | deepseek already leg 6 of 8 | Correct — no change |
 | `t3-driver` | (unchanged) | deepseek already leg 5 of 6 | Correct — no change |
 | `-clean` twins | (unchanged) | deepseek is sole leg | Working as intended |
@@ -236,7 +286,8 @@ config overlay: temporary QWEN_HOME (removed after exit)
 |---|---|---|---|---|---|---|
 | 1 | 14:33:56Z | gemini/gemini-3.8-flash (ack) | 429 | 79 | yes | still 429 (failed) |
 
-**Total admission backoffs:** 1 (recorded; no lane death)
+**Total admission backoffs:** 1 (from the leg sweep at 14:33Z; the combo re-run
+at 14:53–14:58Z had 0 backoffs — no 429/503/`chat_admission_busy` encountered).
 
 ## 8. Files changed
 
@@ -246,4 +297,4 @@ config overlay: temporary QWEN_HOME (removed after exit)
 | `docs/handoff/2026-09-30-laneSweep-t2-models.md` | NEW — this evidence doc |
 | `docs/models-proposed.md` | §E updated with 2026-09-30 sweep leg results |
 | `logs/handoff-sessions/DONE-ws-sweep.md` | NEW — DONE note |
-| `logs/probe-sweep-20260930.jsonl` | git-ignored — 28 records (15 legs + 13 combos) |
+| `logs/probe-sweep-20260930.jsonl` | git-ignored — 38 records (15 legs + 23 combo records across two runs) |
