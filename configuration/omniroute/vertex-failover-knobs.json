@@ -1,22 +1,61 @@
 {
+  "$comment": "Keyed to the gateway's actual config surface in omniroute/src/shared/utils/circuitBreaker.ts",
   "perLegTimeout": {
     "value": 30,
-    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 42"
+    "comment": "Seconds before a per-leg request is considered failed (default: undefined)"
   },
   "idleTimeout": {
-    "value": 60,
-    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 45"
+    "value": 120,
+    "comment": "Seconds of inactivity before a connection is closed (default: undefined)"
   },
-  "breakerFailureThreshold": {
-    "value": 5,
-    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 48"
-  },
-  "breakerResetWindow": {
-    "value": 60,
-    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 51"
+  "breaker": {
+    "failureThreshold": {
+      "value": 5,
+      "comment": "Number of failures before the circuit opens (default: 5)"
+    },
+    "resetTimeout": {
+      "value": 30000,
+      "comment": "Milliseconds to wait before attempting to reset the circuit (default: 30000)"
+    },
+    "halfOpenRequests": {
+      "value": 1,
+      "comment": "Number of requests allowed in half-open state (default: 1)"
+    },
+    "degradationThreshold": {
+      "value": 3,
+      "comment": "Failure count at which state becomes DEGRADED (default: 60% of failureThreshold)"
+    },
+    "maxBackoffMultiplier": {
+      "value": 16,
+      "comment": "Max backoff multiplier for resetTimeout (default: 16)"
+    },
+    "backoffEscalationCount": {
+      "value": 3,
+      "comment": "Number of open→half_open→open cycles before escalating backoff (default: 3)"
+    },
+    "cooldownByKind": {
+      "rate_limit": {
+        "value": 60000,
+        "comment": "Milliseconds to wait before resetting after a rate limit failure"
+      },
+      "quota_exhausted": {
+        "value": 60000,
+        "comment": "Milliseconds to wait before resetting after a quota exhausted failure"
+      }
+    },
+    "kindThresholds": {
+      "rate_limit": {
+        "threshold": 3,
+        "comment": "Number of rate limit failures before the circuit opens (default: 5)"
+      },
+      "quota_exhausted": {
+        "threshold": 3,
+        "comment": "Number of quota exhausted failures before the circuit opens (default: 5)"
+      }
+    }
   },
   "cooldownAwareSkip": {
     "value": true,
-    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 54"
+    "comment": "Whether to skip requests during cooldown periods (default: false)"
   }
 }

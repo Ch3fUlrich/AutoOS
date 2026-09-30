@@ -75,7 +75,7 @@ The following failover resilience knobs were implemented based on sweep evidence
 3. **Idle timeout**: Set to 120s for Vertex/Gemini routes.
 4. **Breaker tuning**: Adjusted to trigger after 3 consecutive failures with a reset time of 5m.
 
-Config-first implementation. See `configuration/omniroute/vertex-failover-knobs.json` for the proposed combos.json additions.
+Config-first implementation. See `configuration/omniroute/vertex-failover-knobs.json` for the actual failover resilience knobs.
 
 ## DONE Note
 
