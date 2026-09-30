@@ -759,6 +759,13 @@ if it "prepush: the gate refuses a push whose tests were never run (unit tests)"
     out="$(python3 tests/test_prepush.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tests/test_no_cao.py: the no-CAO gate (operator removal lane 2026-09-29) — no CAO
+# path, skill section or example-config block may ship; the file shipped unwired,
+# so the gate existed but nothing ran it until tests/test_suite_wiring.py refused it.
+if it "no-cao: no CAO path, section, or config ships (unit tests)"; then
+    out="$(python3 tests/test_no_cao.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
