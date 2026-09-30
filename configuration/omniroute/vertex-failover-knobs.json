@@ -1,0 +1,22 @@
+{
+  "perLegTimeout": {
+    "value": 30,
+    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 42"
+  },
+  "idleTimeout": {
+    "value": 60,
+    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 45"
+  },
+  "breakerFailureThreshold": {
+    "value": 5,
+    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 48"
+  },
+  "breakerResetWindow": {
+    "value": 60,
+    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 51"
+  },
+  "cooldownAwareSkip": {
+    "value": true,
+    "comment": "Keyed to the gateway's actual config surface, file: C:\\Users\\mauls\\AppData\\Roaming\\npm\\node_modules\\omniroute\\config\\defaults.js, line: 54"
+  }
+}
