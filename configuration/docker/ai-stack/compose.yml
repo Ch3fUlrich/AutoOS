@@ -120,6 +120,13 @@ services:
     image: autoos/opencode:2.0.19-autoos1
     container_name: autoos-opencode
     restart: unless-stopped
+    # init:true runs tini as PID 1, which reaps orphaned processes. Without it
+    # the container accumulated ~2600 unreaped git/timeout zombies (D-171);
+    # once pids.current hit the ceiling, pthread_create failed, Bun aborted in
+    # WTF::Thread::create and PID 1 died -> every in-flight run was cut. The
+    # operator raised the live ceiling with `docker update --pids-limit 4096`;
+    # these two lines make a recreate keep both the reaper and the ceiling.
+    init: true
     user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"
     read_only: true
     tmpfs:
@@ -151,8 +158,10 @@ services:
       - "${AUTOOS_STACK_BIND:-0.0.0.0}:4096:4096"
     # mem_limit removed 2026-09-29 (operator): the 1536m cap was OOM-killing
     # PID 1 (opencode serve) repeatedly and every restart cut every in-flight
-    # run across the fleet. pids_limit stays as the cheap runaway guard.
-    pids_limit: 1024
+    # run across the fleet. pids_limit mirrors the live `docker update`
+    # (operator 2026-09-30) so a recreate does not revert to 1024; init:true
+    # above is the actual cure, the higher ceiling only buys headroom.
+    pids_limit: 4096
     healthcheck:
       # The UI answers 200 without the password; /api/* is what is guarded.
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:4096/"]
