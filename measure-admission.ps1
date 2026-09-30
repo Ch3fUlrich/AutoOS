@@ -14,7 +14,7 @@ $Gateway = 'http://127.0.0.1:20128'
 $Key = $env:AUTOOS_OMNIROUTE_KEY
 if ([string]::IsNullOrWhiteSpace($Key)) {
   # Try reading from api-keys.yml
-  $keysFile = 'C:\Users\mauls\Documents\Code\AutoOS\configuration\api-keys.yml'
+  $keysFile = 'C:\Users\<user>\Documents\Code\AutoOS\configuration\api-keys.yml'
   if (Test-Path $keysFile) {
     foreach ($line in (Get-Content $keysFile -Encoding utf8)) {
       if ($line -cmatch '^omniroute\s*:\s*(.+)$') {

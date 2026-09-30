@@ -1,7 +1,7 @@
 # Lane F2 — chat_admission_busy fix (ws-omniroute-20260930)
 
 Branch: `L1-backlog/ws-gw-admission-20260930`. Gateway source (unmodified):
-`C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`.
+`C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`.
 Gateway: `http://127.0.0.1:20128`. No secrets below (key/lane names only).
 
 ## 1. KNOBS (gateway source, path:line + literal values)
@@ -42,7 +42,7 @@ stage is the binding one.
 | after2-3 | same, `-Label after2-3` @ 2026-09-30T15:39:25 | **3×200, 0 rejected** (each ~13 s, fully overlapping) |
 | after3-4 | same, `-Label after3-4` @ 2026-09-30T15:41:36 | **4/4 admitted past the gate, 0 `chat_admission_busy`**; all 4 then failed upstream with 401 `invalid_api_key` (expired provider grants — see §5) |
 
-Log correlation (`C:\Users\mauls\.omniroute\logs\application\app.log`):
+Log correlation (`C:\Users\<user>\.omniroute\logs\application\app.log`):
 shed-line count 407 → 411 across the before-runs (exactly my 4 rejections;
 `13:31:00Z` ×1, `13:31:08Z` ×3, incl. `waiting=2/queuedBytes=524288` park
 evidence). Last 2 sheds `13:34:58Z` (operator lane on unfixed restart).
@@ -78,7 +78,7 @@ shell AND keep the registry value for durability. Verbatim commands:
 
 ```powershell
 Stop-Process -Id 58296
-$env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT='4'; Start-Process -FilePath 'C:\Users\mauls\AppData\Roaming\npm\omniroute.cmd' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden -WorkingDirectory $env:USERPROFILE
+$env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT='4'; Start-Process -FilePath 'C:\Users\<user>\AppData\Roaming\npm\omniroute.cmd' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden -WorkingDirectory $env:USERPROFILE
 ```
 
 (An intermediate `ProcessStartInfo` + `cmd.exe /c` spawn attempt at
