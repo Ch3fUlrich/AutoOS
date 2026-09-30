@@ -76,6 +76,13 @@ if ! gateway_ok && [[ $IN_DOCKER -eq 1 ]]; then
     gateway_ok || { echo "Gateway did not answer. Run: $AI_STACK status"; exit 1; }
 elif ! gateway_ok; then
     command -v omniroute >/dev/null || { echo "omniroute is not installed. Run: ./setup.sh --only omniroute --yes"; exit 1; }
+    # Raise the chat admission heavy-in-flight limit from the default of 1.
+    # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+    # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+    # for parallel agents (swarm, multi-lane) without over-allocating heap.
+    # Respect a user-set value — do not clobber.
+    : "${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:=8}"
+    export OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT
     echo "Starting OmniRoute in the background..."
     nohup omniroute --no-open --port 20128 >/tmp/omniroute.log 2>&1 &
     for _ in $(seq 1 24); do gateway_ok && break; sleep 5; done

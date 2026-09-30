@@ -85,6 +85,14 @@ if (-not (Test-Gateway)) {
     if ($DryRun) {
         Write-Host 'Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128).'
     } else {
+        # Raise the chat admission heavy-in-flight limit from the default of 1.
+        # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+        # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+        # for parallel agents (swarm, multi-lane) without over-allocating heap.
+        # Respect a user-set value — do not clobber.
+        if (-not $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT) {
+            $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'
+        }
         Write-Host 'Starting OmniRoute (background)...'
         Start-Process -FilePath 'omniroute' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
         $tries = 0
