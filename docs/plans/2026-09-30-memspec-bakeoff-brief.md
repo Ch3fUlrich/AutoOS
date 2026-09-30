@@ -2,7 +2,7 @@
 
 **Author:** writer:nemotron-3.5-lightning-free  
 **Created:** 2026-09-30  
-**Lane:** L1-backlog/memspec-p2 (branch `L1-backlog/memspec-p2`, tip `851829e8e84f846b106573e9cbf49fe2450c7cb2`)  
+**Lane:** /home/s/code/AutoOS-lanes/L1-backlog-memspec-p2 (branch L1-backlog/memspec-p2; base 851829e)  
 **Status:** Skeleton up — build-only mode; engine phase gated on P1 host gate / pids dip / L1-main word  
 
 ## Scope
