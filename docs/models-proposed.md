@@ -223,7 +223,7 @@ with an ack test (16-token chat) and a tool-call test (single tool-call round,
 | `morph/morph-glm52-744b` | FAIL | FAIL | 15 | 0 | — | HTTP 401 |
 
 **4/15 fully working** (GLM-5.2, deepseek-flash, mistral-code-latest, gpt-oss-120b).
-1/15 ack-only (qwen7b — no tool support). 10/15 failed (5× 401, 1× 402, 1×
+1/15 ack-only (qwen7b — no tool support). 10/15 failed (6× 401, 1× 402, 1×
 429, 1× 502, 1× 504, 1× tool-fail).
 
 **Deepseek V4.1 Flash fallback:** `deepseek/deepseek-flash` is leg 6/8 in

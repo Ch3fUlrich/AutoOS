@@ -81,9 +81,10 @@ support), 10/15 failed.
 ## 4. Combo routing tests (clean re-run measured 2026-09-30T14:53–14:58Z)
 
 A first run at 14:46–14:51Z was discarded — the gateway was unstable (3/10 ok,
-7 transport errors: URLError ~2 s, ConnectionResetError). The two long-running
-combos (t1-orchestrator 124 s, t1-orchestrator-free-only 117 s) appear to have
-exhausted the gateway's connection pool, causing cascading transport errors for
+7 failures: 6 transport errors (URLError ~2 s, ConnectionResetError) + 1 HTTP
+502). The two long-running combos (t1-orchestrator 502 at 124 s,
+t1-orchestrator-free-only ConnectionReset at 117 s) appear to have exhausted
+the gateway's connection pool, causing cascading transport errors for
 subsequent combos. The script also crashed before testing t3-driver-free-only.
 
 A clean re-run at 14:53–14:58Z confirmed those failures were gateway-overwhelm
@@ -173,8 +174,10 @@ proxy (§A disagrees with combos.json on `t1-orchestrator` leg count: 2 vs 5).
 
 `t2-worker-free-only` returned `qwen7b` (leg 6 of 6 in the repo's definition),
 not `GLM-5.2` (leg 5). This means GLM-5.2 was temporarily down during the combo
-test, and the gateway correctly fell through to the next working leg (qwen7b).
-This is **direct evidence of the priority-chain fallback working as designed**.
+test (**inferred** from the repo leg order + served model; the live gateway's
+legs may differ — see stale-combo finding above), and the gateway correctly
+fell through to the next working leg (qwen7b). This is **direct evidence of
+the priority-chain fallback working as designed**.
 
 qwen7b has no tool-call support (measured in §3, "expected exactly one
 tool_call, got 0"), so this combo is ok for ack but **unusable for agentic
@@ -190,15 +193,20 @@ conclusive.
 
 `t3-driver-free-only` started at ~14:58Z. Its first leg (`scw-mistral-small`)
 fails (401), second leg (`nebius/zai-org/GLM-5.3-Flash`) times out at 504
-(125 s, per §3). The probe-sweep.py script has no HTTP socket timeout on
-the combo request, so the 504 leg's hang propagated — the process stayed
-alive for >2 h (until 16:59Z) without writing a result record. The process
-was killed by PID (129200) to unblock the lane. No JSONL record was written
-for this combo.
+(125 s, per §3). The combo HTTP request has a per-read timeout of 180 s
+(via `make_post(timeout=180)` → `urllib.request.urlopen(req, timeout=180)`,
+shared by both the leg and combo paths). However, this is a **per-read**
+timeout, not a total wall-clock deadline: a gateway trickling bytes (one
+byte every <180 s) resets the timer indefinitely. With no total deadline
+and no per-combo exception guard in the combo loop, the 504 leg's hang
+propagated — the process stayed alive for >2 h (until 16:59Z) without
+writing a result record. The process was killed by PID (129200) to
+unblock the lane. No JSONL record was written for this combo.
 
-This is a **probe-sweep.py bug**: the combo HTTP request needs a timeout
-(60 s is reasonable — no working combo took >1.4 s). The leg probe path
-already has timeouts; the combo path does not.
+This is a **probe-sweep.py bug**: the combo loop needs (a) a total
+wall-clock deadline around each combo call (monotonic deadline or
+thread + `join(timeout)`), and (b) a per-combo `try/except` so one
+hung combo cannot block the rest of the sweep.
 
 ### Deepseek-v4.1-flash consistency
 
@@ -329,16 +337,20 @@ at 14:53–14:58Z had 0 backoffs — no 429/503/`chat_admission_busy` encountere
 | `logs/handoff-sessions/DONE-ws-sweep.md` | NEW — DONE note |
 | `logs/probe-sweep-20260930.jsonl` | git-ignored — 38 records (15 legs + 23 combo records across two runs) |
 
-## 9. Cross-family review (measured 2026-09-30T17:00Z)
+## 9. Cross-family review (original 3 at 2026-09-30T17:00Z; supplementary 2 at ~17:30Z)
 
-Three t3-reviewer subagents reviewed this evidence doc, each on a different
-model family. Read-only scope; no edits by reviewers.
+Five t3-reviewer subagents reviewed this evidence doc across two rounds, each on
+a different model family. Read-only scope; no edits by reviewers. The original
+round (3 reviewers) is rows 1–3; the supplementary round (2 reviewers, launched
+after session resume to strengthen the Gemini and Qwen family verdicts) is rows 4–5.
 
 | # | Reviewer model | Family | Verdict | Session |
 |---|---|---|---|---|
 | 1 | `omniroute/deepseek-v4.1-flash` | DeepSeek | APPROVED-WITH-NOTES | ses_f0d2ae02affeHgMyKYPZkhPEZN |
 | 2 | `omniroute/gemini-2.5-flash` | Gemini | REJECTED (invalid — see below) | ses_f0d2ae028ffe3mZGupoOz0T0wq |
 | 3 | `omniroute/t2-worker-free-only` | Qwen/GLM | APPROVED-WITH-NOTES | ses_f0d2ae025ffeWqTg2tICWUTPBr |
+| 4 | `omniroute/vertex-flash` | Gemini (Vertex AI) | APPROVED | ses_f0d2e9f88ffeEeOjv2nt9Xgb3K |
+| 5 | `openrouter/qwen/qwen3.8-27b:free` | Qwen (OpenRouter) | NEEDS-CHANGES → fixes applied | ses_f0d2b893dffeluwL9LOTR4hrNZ |
 
 **Writer:** t2-worker (this session, `L1-backlog/ws-sweep-20260930`).
 
@@ -385,12 +397,40 @@ Fixes applied before this commit:
    t1-orchestrator leg count (2 vs 5). The measured 502 at 125 s matches the
    5-leg layout, not §A's 2-leg layout. **Noted in §4 Key finding 1.**
 
+### Supplementary review fixes (round 2, reviewers 4–5)
+
+The supplementary Qwen reviewer (qwen3.8-27b:free) found 5 major + 5 minor
+issues. Three majors were false positives (M1: DONE note already shows re-run
+data; M2: commit table already complete; M5: no stale "inferred" label exists).
+Two majors and three minors were valid and fixed:
+
+6. **Transport-error count corrected.** §4 said "7 transport errors" but
+   there were 6 transport + 1 HTTP 502 = 7 total failures. **Fixed in §4.**
+
+7. **probe-sweep.py defect re-diagnosed.** §4 Key finding 3 claimed "no HTTP
+   socket timeout on the combo request" and "the combo path does not [have
+   timeouts]." Both false: both paths use `make_post(timeout=180)` →
+   `urlopen(timeout=180)`. The real defect is no total wall-clock deadline
+   (per-read timeout resets on trickled bytes) + no per-combo exception
+   guard. **Fixed in §4 Key finding 3 and outstanding items #2.**
+
+8. **GLM-5.2-down inference labeled.** §4 Key finding 2 stated "GLM-5.2 was
+   temporarily down" as fact; it is inferred from repo leg order + served
+   model. **Fixed: labeled "(inferred)" with stale-combo caveat.**
+
+9. **models-proposed.md §E 401 count fixed.** Said "5× 401" but table lists
+   6. **Fixed to "6× 401".**
+
+10. **First-run 117 s clarified.** §4 said "t1-orchestrator-free-only 117 s"
+    as a long-running combo; it was a ConnectionReset at 117 s, not a slow
+    completed request. **Fixed in §4.**
+
 ### Outstanding items (not blocking DONE — noted for operator follow-up)
 
 | # | Item | Source | Priority |
 |---|---|---|---|
 | 1 | Run `omniroute combo list --json` or `tools/audit-router.py` for live gateway ground truth | DeepSeek §2c, Qwen §B1 | high — resolves all stale-combo inferences |
-| 2 | probe-sweep.py combo-timeout bug (no socket timeout on combo path; t3-driver-free-only hung >2 h) | Qwen §B3 | medium — add 60 s timeout to combo HTTP request |
+| 2 | probe-sweep.py combo-loop bug (no total wall-clock deadline + no per-combo exception guard; t3-driver-free-only hung >2 h) | Qwen §B3 | medium — add monotonic deadline around each combo call + try/except per combo |
 | 3 | t1-orchestrator-free-only is fully dead (all 4 free legs fail) with no §5 mitigation | Qwen §B4 | medium — needs a free fallback leg, distinct from the paid deepseek proposal |
 | 4 | Antigravity provider-credential regression (all agy legs 401) not escalated as a finding | DeepSeek §5 | medium — affects opus-4-6 combo + every agy leg |
 | 5 | qwen7b tool-fail deserves a second probe with a different tool-call shape | Qwen §B2 | low — the self-referential counter-evidence is strong |

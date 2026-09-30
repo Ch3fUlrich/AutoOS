@@ -3,13 +3,13 @@
 **Lane:** L1-backlog/ws-sweep-20260930  
 **Branch:** `L1-backlog/ws-sweep-20260930` (worktree: `AutoOS-ws-sweep`)  
 **Base:** `d08f7f2` (main, 2026-09-30)  
-**Tip:** `adb515f` (9 commits including this DONE note)  
+**Tip:** `5f0402c` (10 commits including this DONE note)  
 **Date:** 2026-09-30T17:10Z  
 **Writer:** t2-worker (this session)  
 
 ---
 
-## 1. Commits (8)
+## 1. Commits (9)
 
 | # | Hash | Message |
 |---|---|---|
@@ -21,6 +21,7 @@
 | 6 | `3b160d9` | docs(handoff): apply DeepSeek reviewer fixes — inferred vs measured, remove key length, fix t2-orchestrator URLError |
 | 7 | `ec30338` | evidence: replace unstable combo results with clean re-run (6/11 ok) |
 | 8 | `73c1192` | evidence: fix stale-combo attribution + add cross-family review (§9) |
+| 9 | `bc42e42` | docs(handoff): supplementary cross-family review fixes — transport-error count, probe-sweep.py timeout diagnosis, GLM-5.2 inference label, 401 count, 5 reviewers |
 
 All commits are on the branch only — **not pushed, not merged to main**.
 
@@ -175,20 +176,29 @@ Standalone qwen CLI returns 401 (connects to Alibaba Cloud default, not gateway)
 
 ## 7. Cross-family review verdicts
 
-Three t3-reviewer subagents reviewed the evidence doc, each on a different model family.
+Five t3-reviewer subagents reviewed the evidence doc across two rounds (3 original
++ 2 supplementary), each on a different model family.
 
 | # | Reviewer model | Family | Verdict | Session |
 |---|---|---|---|---|
 | 1 | `omniroute/deepseek-v4.1-flash` | DeepSeek | APPROVED-WITH-NOTES | ses_f0d2ae02affeHgMyKYPZkhPEZN |
 | 2 | `omniroute/gemini-2.5-flash` | Gemini | REJECTED (invalid — reviewed wrong file) | ses_f0d2ae028ffe3mZGupoOz0T0wq |
 | 3 | `omniroute/t2-worker-free-only` | Qwen/GLM | APPROVED-WITH-NOTES | ses_f0d2ae025ffeWqTg2tICWUTPBr |
+| 4 | `omniroute/vertex-flash` | Gemini (Vertex AI) | APPROVED | ses_f0d2e9f88ffeEeOjv2nt9Xgb3K |
+| 5 | `openrouter/qwen/qwen3.8-27b:free` | Qwen (OpenRouter) | NEEDS-CHANGES → fixes applied | ses_f0d2b893dffeluwL9LOTR4hrNZ |
 
-Both valid reviewers independently identified the stale-combo attribution as
-wrong (gpt-oss-120b removed in c126e5f/979b8c3, not d08f7f2). Fixes applied in
-commit `73c1192` before this DONE note. See evidence doc §9 for full detail.
+**Valid verdicts:** 4 APPROVED / APPROVED-WITH-NOTES (1, 3, 4, 5→fixed), 1 invalid
+(2 — reviewed wrong file). The supplementary Qwen reviewer (#5) found valid issues:
+transport-error miscount, probe-sweep.py timeout misdiagnosis, unlabeled inference,
+models-proposed.md 401 off-by-one. All fixed. See evidence doc §9 for full detail.
 
-Gemini reviewer's rejection is invalid: it read `omniroute-gateway-findings.md`
-instead of `laneSweep-t2-models.md` — a model-follows-wrong-path artifact.
+Both original valid reviewers independently identified the stale-combo attribution
+as wrong (gpt-oss-120b removed in c126e5f/979b8c3, not d08f7f2). Fixes applied in
+commit `73c1192`. Supplementary fixes applied in the final commit.
+
+Gemini reviewer #2's rejection is invalid: it read `omniroute-gateway-findings.md`
+instead of `laneSweep-t2-models.md` — a model-follows-wrong-path artifact. The
+supplementary Gemini reviewer (#4, vertex-flash) provided a valid APPROVED.
 
 ---
 
@@ -199,7 +209,7 @@ instead of `laneSweep-t2-models.md` — a model-follows-wrong-path artifact.
 | 1 | Apply the deepseek fallback proposal to `combos.json` (§4 above) | L1-alpha (OVH lane) | high |
 | 2 | Run `omniroute combo list --json` or `tools/audit-router.py` for live gateway ground truth | operator | high — resolves all stale-combo inferences |
 | 3 | Re-apply current `combos.json` to the live gateway (stale by ~6 days) | operator | high |
-| 4 | Fix probe-sweep.py combo-timeout bug (add 60 s socket timeout to combo HTTP request) | P1-sweep or operator | medium |
+| 4 | Fix probe-sweep.py combo-loop bug (add total wall-clock deadline + per-combo try/except; combo path already has 180 s per-read timeout) | P1-sweep or operator | medium |
 | 5 | t1-orchestrator-free-only is fully dead (all 4 free legs fail) — needs a free fallback leg | L1-alpha | medium |
 | 6 | Antigravity provider-credential regression (all agy legs 401) — affects opus-4-6 + every agy leg | operator | medium |
 | 7 | qwen7b tool-fail deserves a second probe with a different tool-call shape | P1-sweep | low |
