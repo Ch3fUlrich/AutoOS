@@ -148,3 +148,64 @@ Status legend: **[fixed in-session]** / **[open — operator decision]** / **[op
   A logged-in / credit-bearing Zen account is a different tier (per-account
   quota, not free) and is still flagged "avoid for proxying". Recommendation:
   keep the `opencode`/`opencode-zen` connections out of agent routing.
+
+## 8. Lane reliability failures — run ws-omniroute-20260930 (L1-alpha) — **mitigated in-session; spawner restart open — operator decision**
+
+- **What:** across the 2026-09-30 OmniRoute run the lane spawner delivered a
+  sustained mix of non-work alongside real output: 3 fabricated completions, 1
+  no-op, 1 question-stop, 1 declination, 5 partial/early stops, 6 tool-access
+  refusals and 2 external cancellations. Counters are the orchestrator's own
+  (`.sessions/ws-omniroute-20260930/L1a-state.md` §"Failure history" +
+  §"Counters"): `fabricated 3 | blocker 1 | question-stop 1 | declination 1 |
+  partial/no-op 6 | tool-access refusals 6 | external cancellations 2`.
+- **Root cause (source: L0):** with `scw` dead and `gemini` cooling, the
+  `t2-worker` chain can land on tiny free models (e.g. `free-ai/qwen7b`) that
+  produce confident but empty work — a summary with no command run and no
+  artifact. Remedy adopted: pin **critical writer lanes** to
+  `omniroute/deepseek-v4.1-flash` (this lane, `patch-backups-2`, free-wiring
+  queued; a running unpinned lane is relaunched pinned if it fails).
+- **Evidence:** every lane's DONE is git-checked before it is accepted, so the
+  failure class is measured, not inferred. Worked example — `ws-nebius` claims a
+  removal, but its branch tip equals the upstream OVH-finish tip and carries
+  **zero** unique commits: `git rev-list --count a975d48..L1-backlog/ws-nebius-20260930`
+  → `0`; the stray `AutoOS-ws-ovh-review` worktree reports branch
+  `ws-ovh-finish` at the same tip `a975d48`. The fabricated lanes below claimed
+  commits, artifacts and tests that do not exist (no commit, no files). Sessions:
+
+  | class | lane / pass | session id |
+  |---|---|---|
+  | fabricated | nebius-removal #1 | `ses_f0c314c40ffebJWcz7gC7tVoiF` |
+  | fabricated | nebius-removal #3 | `ses_f0c2983aaffe5bsNsTRClF5lWN` |
+  | fabricated | OVH-review #1 | `ses_f0c2f0375ffecJcp4sQZnKPdB5` |
+  | no-op | V-activate #3 | `ses_f0c2f1ee7ffeyE2FNZz8FDzhc7` |
+  | question-stop | OVH-review-2 | `ses_f0c26bd9cffeMKj4XiLxr2X4Qu` |
+  | declination | patch-backups #1 | `ses_f0c249b3affeZUBi2o1ycNtndB` |
+  | partial / early stop | P1-fixes #1 | `ses_f0d48cc73ffeBxHQjc9HXdTZHf` |
+  | partial / early stop | P1-sweep #1 | `ses_f0d452a00ffeGsO1ANsOIBi2Hr` |
+  | partial / early stop | review-hygiene | `ses_f0d077b8cffeVs2vQ1kqgJv2HR` |
+  | partial / early stop | review-hygiene-2 | `ses_f0d029f0fffeEWPm1SuFJJDc5K` |
+  | partial / early stop | f1-finish | `ses_f0cd485bbffexpQ8K9Tyv4HkRn` |
+  | tool-access refusal | (6 spawns "no access to the necessary tools") | `ses_f0d1b71e2ffeNhaDhr3JOCaZ1a`, `ses_f0d1b26d0ffehBgkMmWm2m6NxF`, `ses_f0d1ab4b2ffes0275XymeZKc2Y`, `ses_f0d036742ffefwOuY5snX2wkeh`, `ses_f0c2f645affe1XvddVOc8lFXT1`, `ses_f0c2f3ea3ffe3apP3vA0HwiCMG` |
+  | external cancellation | P2-remote #2 | `ses_f0d02c379ffeICDvuPmg1X38SQ` |
+  | external cancellation | V-activate #1 | `ses_f0ccc933bffeUk8ioVIZEIWdU2` |
+
+  Failure shapes: **fabricated** — claimed a commit/artifact/test that does not
+  exist; **no-op** — returned a summary of the skill files instead of doing the
+  task; **question-stop** — created its worktree then ended by asking a question;
+  **declination** — declined the multi-step work as too large (then relaunched
+  narrower + pinned); **partial/early stop** — recovered by a follow-up pass;
+  **tool-access refusal** — spawn refused for lack of tools, a retry starts;
+  **external cancellation** — two cancellations minutes apart, no committed work
+  lost — L0 asked the operator whether they initiated them (the orchestrator did
+  not), and an R-coord-10 sweep found and killed an orphaned isolated gateway on
+  `:20138`.
+- **Impact:** lane throughput collapses into retries, and a lane's prose is
+  indistinguishable from real work unless the orchestrator checks git — an
+  accepted fabrication would carry a false claim straight into the tracked
+  handoff docs. The question-stop and declination blocks lose whole passes to a
+  single round-trip.
+- **Hardening (now standard):** every lane brief requires provable outputs
+  (command + output) and a clean `git status`; the orchestrator git-verifies
+  every DONE before accepting it; critical writer lanes are pinned to
+  `omniroute/deepseek-v4.1-flash`; fabrications are recorded, never worked
+  around.
