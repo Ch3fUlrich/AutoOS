@@ -5,7 +5,8 @@ are measured; no secret values are quoted.
 
 Branch: `L1-backlog/ws-ovh-20260930` (worktree `AutoOS-ws-ovh`).
 Stacked on: `a5bcb69` (combos lane: vertex second leg + 1M contexts).
-Commits: `8384f85` (combos.json OVH legs), `1afa196` (docs/models.md prose).
+Commits: `a9d174d` (combos.json OVH legs, cherry-pick of dropped `8384f85`),
+`1afa196` (docs/models.md prose), `a7b9315` (this evidence doc).
 
 ---
 
