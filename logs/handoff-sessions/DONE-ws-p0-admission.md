@@ -2,9 +2,11 @@
 
 Verdict: **DONE**. Fix independently re-verified, knob persisted in launchers,
 start-stack shim fixed (parse + dry-run verified), F2 review attempted and reconciled.
-Redaction milestone (this commit): hardcoded username path in this lane's own
+Redaction milestone: hardcoded username path in this lane's own
 evidence doc redacted; verified clean; cross-family review attempted; cross-branch
-defect list compiled read-only.
+defect list compiled read-only. Follow-up (admission reviewer B, FAIL — this commit):
+leaked token-like session ids and the inherited workstation user-home path redacted;
+see “Reviewer-B redaction follow-up” below.
 
 ## Commits (branch `L1-backlog/ws-p0-admission-fix-20260930`, no push/merge/rebase)
 
@@ -45,7 +47,7 @@ defect list compiled read-only.
 ## F2 review (item 4): writer lane-F2 / reviewer NONE / verdict NONE
 
 - Fresh `t3-reviewer` leaf failed at spawn (all routes 401 expired grants — verbatim in
-  evidence doc §5, ses_f0d6625d7ffeRY0y2yCJTF1H0W); no healthy route → reconciled by
+  evidence doc §5, session id `<session-id>`); no healthy route → reconciled by
   independent behavioral re-verification + self-review. No defect found in `c41de4a`.
 
 ## Admission protocol
@@ -66,8 +68,10 @@ defect list compiled read-only.
   meaning preserved, only the username token redacted). No other content changed.
 - Scope: only files introduced by this branch's commit. The inherited
   `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19` (added by `d08f7f2` on
-  `main`, NOT by this branch's `d88ed3b`) also carries a real-user path; per the brief's
-  step 5 it is READ-ONLY (reported in the cross-branch list below), not modified here.
+  `main`, NOT by this branch's `d88ed3b`) also carries a real-user path; under the
+  earlier brief's step 5 it was READ-ONLY (reported in the cross-branch list below). It
+  was redacted in the reviewer-B follow-up commit below, which the operator authorised
+  before merge.
 - `docs/handoff/2026-09-30-laneP0-admission-before.md`, the four scripts
   (`apply.ps1`, `apply.sh`, `start-stack.ps1`, `start-stack.sh`) and this DONE note were
   checked: no real username and no Windows user-home path form present.
@@ -108,12 +112,12 @@ Full-tree result on this branch (all tracked files):
 ## Reviewer verdicts (mission item 4)
 
 - Writer: this lane (t2-worker, omniroute/t2-worker).
-- Reviewer 1: `t3-reviewer` (ses_f0d04fbe9ffeu9lzNXAcLrEnQV) — **PASS**.
+- Reviewer 1: `t3-reviewer` (session id `<session-id>`) — **PASS**.
   Confirmed (a) admission doc line 4 uses the `%APPDATA%\npm\node_modules\omniroute` env-var
   form with no real username; (b) scoped grep (real-username token + Windows user-home
   backslash form) across all 7 introduced files: 0 matches (exit 1); (c) forward-slash
   form: 0 matches.
-- Reviewer 2: `t3-reviewer` (ses_f0d04b65affeu4dAzoNcc3zpLu) — **PASS**.
+- Reviewer 2: `t3-reviewer` (session id `<session-id>`) — **PASS**.
   Independently re-verified: line 4 content quoted verbatim; both greps (backslash and
   forward-slash forms) returned no output, exit 1; no real username in any introduced file.
 - Both reviewers noted the inherited `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`
@@ -121,6 +125,33 @@ Full-tree result on this branch (all tracked files):
 - Cross-family note: two independent `t3-reviewer` subagent sessions (fresh context, distinct
   session IDs) both returned PASS. The orchestrator cannot select the reviewer model family
   (model param is operator-controlled); both ran independently and converged on PASS.
+
+## Reviewer-B redaction follow-up (2026-09-30, this commit)
+
+Admission reviewer B returned FAIL: hard-rule violation — token-like session ids and a
+real username/user-home path still present on the branch. Measured state (a prior pass
+had already redacted the evidence doc's line 4, so reviewer B's line-4 claim was stale):
+
+    $ git grep -n -I -F -e <the-redacted-username> -e <win-home-prefix> -e <ses-prefix> -- docs logs
+    docs/handoff/2026-09-30-laneP0-admission.md:13    (one <ses-prefix> token)
+    docs/handoff/2026-09-30-laneP0-admission.md:105   (one <ses-prefix> token)
+    docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19  (two <win-home-prefix> username paths)
+    logs/handoff-sessions/DONE-ws-p0-admission.md:48   (one <ses-prefix> token)
+    logs/handoff-sessions/DONE-ws-p0-admission.md:111  (one <ses-prefix> token)
+    logs/handoff-sessions/DONE-ws-p0-admission.md:116  (one <ses-prefix> token)
+
+Redactions: session ids → `<session-id>`; the username path → `C:/Users/<user>`. Findings,
+verdicts and the cross-branch list are unchanged; placeholders preserve meaning and
+traceability.
+
+After (verbatim):
+
+    $ git grep -n -I -F -e <the-redacted-username> -e <win-home-prefix> -e <ses-prefix> -- docs logs
+    (no output; exit 1 — 0 matches)
+
+A repo-wide real-username check (username token + both slash forms) also returns 0
+(exit 1). Cross-family review of this redaction was run post-commit; verdict in the
+lane's final message.
 
 ## Cross-branch defect list (mission item 5 — READ-ONLY; no other branch touched)
 

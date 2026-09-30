@@ -10,7 +10,7 @@ Default t2-worker combo is all-legs 401 today:
 `vertex/gemini-3.8-flash: auth — [401] ... Expected OAuth 2 access token ...;
 gemini/gemini-3.8-flash: auth — [401] ...;
 antigravity/gemini-3.7-flash-high / scw/qwen3-235b / nebius GLM:
-All connection(s) authentication expired (+2 more)`, ses_f0d6d1814ffetB5CgjQYXrMU56 2026-09-30.
+All connection(s) authentication expired (+2 more)` (session id `<session-id>`) 2026-09-30.
 This lane runs on the direct model; shell probes hit the gateway over HTTP regardless.
 Provider legs flap: this lane's own probes got 4×200 once, 4×401 one minute later (§3).
 
@@ -102,7 +102,7 @@ This lane adds spawner-side defaults (idempotent, respect-a-set-value, never clo
   All 1 connection(s) authentication expired (HTTP 401);
   meta-api/muse-spark-1.3-contributor: auth — [openai-compatible-chat-conn:d9427825]
   All 2 connection(s) authentication expired (HTTP 401)`
-  (sessionID ses_f0d6625d7ffeRY0y2yCJTF1H0W). No healthy route exists;
+  (sessionID `<session-id>`). No healthy route exists;
   retry would hit the same expired grants → not retried, per token discipline.
 - Reconciliation: no reviewer verdict obtainable (writer F2 / reviewer NONE / verdict NONE).
   Substituted independent behavioral re-verification (§2: verify1 4×200 @7.5 s overlap
