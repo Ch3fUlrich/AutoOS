@@ -6,7 +6,9 @@ are measured; no secret values are quoted.
 Branch: `L1-backlog/ws-ovh-20260930` (worktree `AutoOS-ws-ovh`).
 Stacked on: `a5bcb69` (combos lane: vertex second leg + 1M contexts).
 Commits: `a9d174d` (combos.json OVH legs, cherry-pick of dropped `8384f85`),
-`1afa196` (docs/models.md prose), `a7b9315` (this evidence doc).
+`1afa196` (docs/models.md prose), `a7b9315` (this evidence doc),
+`db46d1c` (hash fix), `0b102f6` (cross-lane dep fix),
+`7e329c7` (Qwen3.8-27B model row + OVH legs in registry routes + synced configs).
 
 ---
 
@@ -16,10 +18,11 @@ The operator registered connection `ovhcloud` (provider id `2e7f59a9`,
 active). Both `ovh/…` and `ovhcloud/…` prefixes route. L0-verified 200
 acks on 6 chat candidates. The `catalog/ai-registry.json` OVH entries
 (tier `credit`, `credit_usd 200`, 3 model rows) were added by commit
-`f6f5e69` on this branch. The registry routes for t2-worker and
-t3-driver still need a `render` (without `--check`) to incorporate
-the OVH legs — until then `render omniroute --check` reports 2 new
-"differs" (see section 5).
+`f6f5e69` on this branch. The `Qwen3.8-27B` model row was missing from
+`f6f5e69` and has been added. The registry routes for t2-worker and
+t3-driver have been updated with the 3 `ovhcloud/` legs (after free
+legs, before paid-as-you-go). `render omniroute --check` now reports
+only the 5 pre-existing differs (see section 5).
 
 ## 2. Probe evidence
 
@@ -98,10 +101,11 @@ operator's fallback requirement.
 
 | Check | Result |
 |---|---|
-| `registry.py render omniroute --check` | 7 "differs": 5 pre-existing (gemini-3.8-flash, opus-4-6, t2-orchestrator, t2-worker-clean, t3-driver-clean) + 2 new (t2-worker, t3-driver) — all are cross-lane dependencies on L1-beta's registry (context_advertised stale + missing OVH routes). Will resolve after L0-side ws-ovh lane's `ai-registry.json` commit is merged. |
-| `test_registry_render.py` | 5 test failures (same 5 tests as before, now showing 7 "differs" entries instead of 5). 155 passed. No NEW test failures added. |
-| `registry.py render models-doc --check` | ok (matches) |
-| `registry.py render litellm --check` | ok (matches) |
+| `registry.py check` | ok: 25 routes, 75 models, 34 providers — all legs resolve. |
+| `registry.py render omniroute --check` | 5 "differs" (pre-existing only: gemini-3.8-flash, opus-4-6, t2-orchestrator, t2-worker-clean, t3-driver-clean). The 2 OVH differs (t2-worker, t3-driver) are resolved. |
+| `test_registry_render.py` | 5 test failures (same 5 pre-existing tests). 155 passed. 0 NEW test failures. |
+| `registry.py render models-doc --check` | ok (matches) — synced after adding OVH legs to registry routes. |
+| `registry.py render litellm --check` | ok (matches) — synced via `sync-router-tiers.py` after adding OVH legs to registry routes. |
 | `registry.py render ide --check` | ok (matches) |
 | `registry.py render openhands --check` | ok (matches) |
 | `apply.ps1 -DryRun` | OVH legs recognized by live catalog (no "catalog does not know" warnings for any ovh/ leg). t2-worker and t3-driver would be created with OVH legs. |
@@ -114,13 +118,16 @@ operator's fallback requirement.
 ## 6. Cross-lane dependencies
 
 - **Registry OVH routes**: commit `f6f5e69` (OVH provider + 3 model
-  rows in `ai-registry.json`) is on this branch. The registry routes
-  for t2-worker and t3-driver still list the pre-OVH legs, so
-  `render omniroute --check` reports 2 new "differs". Running
-  `python tools/registry.py render omniroute` (without `--check`) will
-  write the OVH legs into the registry routes and resolve the differs.
-  Until then, `apply` validates against the live `/v1/models` catalog
-  (OVH legs are known to the gateway).
+  rows in `ai-registry.json`) is on this branch. The `Qwen3.8-27B`
+  model row was missing from `f6f5e69` and has been added. The
+  registry routes for t2-worker and t3-driver have been manually
+  edited to add the 3 `ovhcloud/` legs (after free legs, before
+  paid-as-you-go). `render omniroute` is one-way (registry→combos)
+  and cannot write legs into registry routes; the routes were edited
+  directly. After the route edit, `sync-router-tiers.py` synced
+  `litellm/config.yaml` and `render models-doc` output was pasted
+  into `docs/models.md`. `render omniroute --check` now reports only
+  the 5 pre-existing differs.
 - **L1-beta** (registry context_advertised): 5 pre-existing "differs"
   entries (stale context_advertised on gemini-3.8-flash, opus-4-6,
   t2-orchestrator, t2-worker-clean, t3-driver-clean) — documented by
