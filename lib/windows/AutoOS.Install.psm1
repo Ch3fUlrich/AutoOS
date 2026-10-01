@@ -173,7 +173,7 @@ function Find-AutoOSKey {
 function Write-AutoOSNoticeOnce {
     # A notice prints once per session, like the Python resolver, even when two callers resolve.
     param([string]$Message)
-    if (-not $script:AutoOSNoticed) { $script:AutoOSNoticed = @{} }
+    if (-not (Get-Variable -Name AutoOSNoticed -Scope Script -ErrorAction SilentlyContinue)) { $script:AutoOSNoticed = @{} }
     if ($script:AutoOSNoticed.ContainsKey($Message)) { return }
     $script:AutoOSNoticed[$Message] = $true
     Write-AutoOSLine $Message
