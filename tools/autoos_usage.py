@@ -366,6 +366,14 @@ def spend_guard(registry, provider, spend_usd):
     sees 0 spend here, which is why the grant's own balance is what FREEKEYS-2
     must check as well.
     """
+    if isinstance(spend_usd, bool) or not isinstance(spend_usd, (int, float)) \
+            or not math.isfinite(spend_usd):
+        # T1-CREDIT-FIX-7 R4: a non-finite figure (nan/inf -- a poisoned
+        # ledger, never a measurement) is `unknown`, not `ok`: nan compared
+        # False against every line and used to read as a healthy grant.
+        return "unknown", ("%s spend %r is not a measurement - spend "
+                           "unmeasured, leg kept (fail open)"
+                           % (provider, spend_usd))
     cap = monthly_cap_usd(registry, provider)
     warn = spend_warn_usd(registry, provider)
     margin = credit_hard_stop_margin_usd(registry, provider)
@@ -499,6 +507,20 @@ def credit_guards_unreadable(registry, failure):
     return out
 
 
+def _unmeasured_guard(registry, provider, note):
+    """One `unknown` guard that never raises: best-effort cap reads only."""
+    cap = warn = 0.0
+    try:
+        cap = monthly_cap_usd(registry, provider)
+        warn = spend_warn_usd(registry, provider)
+    except Exception:
+        pass  # a grant with no readable cap cannot be judged, only kept openly
+    return {"provider": provider, "state": "unknown",
+            "spend_usd": 0.0, "spend_unknown": True,
+            "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+            "note": note}
+
+
 def credit_guards(registry, rows, since=None, failure=None, today=None):
     """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
 
@@ -572,11 +594,29 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                         "the combo falls through)"
                         % (provider, failure or "no call-log rows")}
             continue
-        spend = paid_spend(rows, prices, registry, since, provider=provider)
-        state, note = spend_guard(registry, provider, spend["spend_usd"])
+        try:
+            spend = paid_spend(rows, prices, registry, since, provider=provider)
+            state, note = spend_guard(registry, provider, spend["spend_usd"])
+        except ValueError:
+            # Config errors (a grant that cannot state its cap) still raise:
+            # the usage report exits 3 on them (pinned by T1-CREDIT-FIX-2
+            # C3) and the plan falls back to `unknown` for the map. Only
+            # UNFORESEEN per-provider bugs degrade to a single-grant
+            # `unknown` below.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad grant, not the map
+            # T1-CREDIT-FIX-7 R4: a provider whose own figure cannot be built
+            # (a cap it cannot state, a pricing bug) degrades to `unknown`
+            # for THAT grant only -- fail open, named -- instead of raising
+            # and turning every grant into `guard error` downstream.
+            out[provider] = _unmeasured_guard(
+                registry, provider,
+                "credit guard unreadable (%s) - spend unmeasured, leg kept "
+                "(fail open)" % type(exc).__name__)
+            continue
         out[provider] = {"provider": provider, "state": state,
                          "spend_usd": spend["spend_usd"],
-                         "spend_unknown": False,
+                         "spend_unknown": state == "unknown",
                          "cap_usd": monthly_cap_usd(registry, provider),
                          "warn_usd": spend_warn_usd(registry, provider),
                          "models_unpriced": spend["models_unpriced"],
@@ -650,6 +690,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
     window_source["providers"].setdefault(provider, {})
     spend = 0.0
     calls = tokens_in = tokens_out = 0
+    unreadable = 0
     unpriced = set()
     for r in rows:
         if not is_spend_row(r, provider, registry):
@@ -658,8 +699,13 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         if ts is not None and ts < since:
             continue
         tokens = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
-        tin = _as_int(tokens.get("in"))
-        tout = _as_int(tokens.get("out"))
+        # T1-CREDIT-FIX-7 R4: a row with present-but-unmeasurable token
+        # fields degrades only itself -- skipped and counted, never billed
+        # as $0 and never aborting the whole guard map.
+        tin, tout, readable = _readable_tokens(tokens)
+        if not readable:
+            unreadable += 1
+            continue
         calls += 1
         tokens_in += tin
         tokens_out += tout
@@ -697,6 +743,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         "balance_usd": balance,
         "balance_threshold_usd": BALANCE_FLOOR_USD,
         "models_unpriced": len(unpriced),
+        "rows_unreadable": unreadable,
         "price_source": price_source,
         "complete": bool(complete),
         "warnings": warnings,
@@ -839,10 +886,59 @@ def _group_key(dim, row):
 
 
 def _as_int(value):
-    try:
+    """int(value), 0 when it is not a readable count -- never raises.
+
+    T1-CREDIT-FIX-7 R4: `int()` raises OverflowError on +/-inf (and huge
+    floats), which used to escape `paid_spend`, abort `credit_guards`, and
+    degrade EVERY grant to `guard error`. Non-finite floats and absurd
+    magnitudes (beyond 2**62 tokens -- at $1e-06/token that is $4.6M, not a
+    measurement) are not counts, so they read as 0 here; `paid_spend`
+    additionally skips such a row outright via `_readable_tokens`."""
+    if isinstance(value, bool):
         return int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, float) and not math.isfinite(value):
         return 0
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if abs(n) > 2 ** 62:
+        return 0
+    return n
+
+
+def _readable_tokens(tokens):
+    """(tin, tout, readable): token ints plus whether the row is billable.
+
+    A row whose `in`/`out` fields are present but unmeasurable (non-finite,
+    overflowing, or absurdly huge -- the shapes `_as_int` maps to 0) is not
+    a $0 row: `paid_spend` skips it and counts it as unreadable instead of
+    billing a drained grant as untouched money. Missing/None/unparseable
+    fields keep the old read-as-0 behaviour and stay counted."""
+    if not isinstance(tokens, dict):
+        return 0, 0, True
+    tin = tokens.get("in")
+    tout = tokens.get("out")
+    if not _token_field_readable(tin) or not _token_field_readable(tout):
+        return 0, 0, False
+    return _as_int(tin), _as_int(tout), True
+
+
+def _token_field_readable(value):
+    """False only for a present-but-unmeasurable token field."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return True  # unparseable keeps the old read-as-0 behaviour
+    except OverflowError:
+        return False
+    return abs(n) <= 2 ** 62
 
 
 def _new_group(key, priced=False):
