@@ -52,6 +52,15 @@ merge), so applying it would reverse main. Full decisions: evidence §3.
 - **No gateway restart, no live apply.**
 - No other lane's files touched.
 
+## 3b. Flags for L0 (see evidence §6)
+
+- **F3:** the rebase surface is two files, not one — `combos.json` (conflicts) and
+  `tests/test_autoos_spawner.py` (disjoint hunks, auto-merges, no pin content).
+- **F4 (rebase target):** the local `main` checkout is **not** `origin/main` — it
+  is `08bd972f` = common base `d08f7f23` + one docs commit, **84 commits behind**
+  `origin/main e58274a8`, and its `combos.json` lacks the `24a98228` 1M pins.
+  Rebase onto **`origin/main`**, not the stale local `main`.
+
 ## 4. Reviews
 
 Two `t3-reviewer` leaves, **free model families only** (operator: NOT

@@ -229,6 +229,19 @@ committed `configuration/omniroute/combos.json`.
   `combos.json` conflicts" holds for main's `24a98228`; for the broader
   `origin/main` comparison the conflict surface is this one extra
   non-overlapping file. Recorded so the operator is not surprised.
+- **F4 (rebase target):** the local `main` checkout is **not** `origin/main`.
+  Verified: `git rev-parse main` → `08bd972fc9babad936c7b962039c682794de245e`;
+  common base of `main` and `origin/main` = `d08f7f23`; `main` = that base + one
+  docs commit (`08bd972f docs: OVH pass review lane and DONE log`), i.e. **84
+  commits behind** `origin/main` on this line (`git rev-list --count
+  main..origin/main` → `84`). `main`'s committed `combos.json` accordingly lacks
+  the `24a98228` 1M pins (`gemini-3.8-flash` 128k, `opus-4-6` 200k,
+  `t1-orchestrator`/`t1-orchestrator-free-only` 128k, `t2-orchestrator` 200k),
+  whereas `origin/main e58274a8` carries 1M. This lane was specified against
+  `origin/main e58274a8`; the operator should rebase onto **`origin/main`**, not
+  the stale local `main`. (The pre-existing `M` files in the main checkout —
+  `SKILL.md`, `catalog/ai-registry.json`, `combos.json`, timestamps 2026-09-30 —
+  are the operator's own uncommitted work, untouched by this session.)
 
 ---
 
