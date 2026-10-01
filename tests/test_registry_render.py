@@ -1931,5 +1931,85 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
         self.assertIn("OVHCLOUD_API_KEY", joined)
 
 
+class CombosDeclaredAuthSkipTests(unittest.TestCase):
+    """T1-CLEAN-4 rework F2/F3/F4: tools/sync-router-tiers.py's --combos path
+    applies the same declared-auth drop as the registry path, and the drop,
+    its naming, and its per-call state were all untested."""
+
+    def setUp(self):
+        self.sync = registry._load_sync_router_tiers()
+        self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        self.sync.PROVIDER_PREFIX, self.sync.API_BASE, self.sync.ENV_KEY = (
+            self.sync.provider_maps_from_dict(self.reg["providers"]))
+
+    def _combos(self, tmp, combos):
+        path = Path(tmp) / "combos.json"
+        path.write_text(json.dumps({"combos": combos}), encoding="utf-8")
+        return str(path)
+
+    def test_a_declared_auth_combo_leg_is_dropped_and_named(self):
+        # F2: combos_refs' `no_key` clause had no test - deleting it survived.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            refs = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(refs["t1-orchestrator"], ["ovhcloud/gpt-oss-120b"])
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["t1-orchestrator"],
+                             ["vertex/gemini-3.8-flash"])
+            block = self.sync.render_block("t1-orchestrator",
+                                           refs["t1-orchestrator"])
+            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash",
+                          "\n".join(block), block)
+
+    def test_each_call_owns_the_skip_state_it_leaves_behind(self):
+        # F3: SKIPPED_BY_TIER is module state that was only ever .update()d and
+        # assigned per tier, never cleared - a second call in one process left
+        # the first call's skips sitting there for render_block() to pick up.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            self.sync.combos_refs(path, registry=self.reg)
+            second = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+                "ovhcloud/gpt-oss-120b"]}])
+            combos = self.sync.combos_refs(second, registry=self.reg)
+            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t1-orchestrator"})
+            block = "\n".join(self.sync.render_block(
+                "t2-worker", combos.get("t2-worker", [])))
+            self.assertNotIn("litellm-skip", block)
+
+    def test_the_registry_call_clears_a_prior_combos_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            self.sync.combos_refs(path, registry=self.reg)
+            self.sync.registry_refs(str(REGISTRY_PATH), tiers=("t4-rag",))
+            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t4-rag"})
+
+    def test_a_combo_dropped_whole_still_gets_its_skip_named(self):
+        # F4: the default tier set derived from the POST-filter list, so a combo
+        # whose every leg is a declared-auth skip got no block and its
+        # "# litellm-skip:" line rendered nowhere - the drop went invisible.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "vertex-gemini-3.8-flash",
+                                       "models": ["vertex/gemini-3.8-flash"]}])
+            combos = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(combos, {})
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["vertex-gemini-3.8-flash"],
+                             ["vertex/gemini-3.8-flash"])
+            self.assertIn("vertex-gemini-3.8-flash: vertex/gemini-3.8-flash",
+                          self.sync.unmanaged_skip_notices(combos))
+
+    def test_a_combo_dropped_only_by_gateway_only_stays_unnamed(self):
+        # the notice is for the declared-auth drop only: an all-GATEWAY_ONLY
+        # combo was never a LiteLLM leg at all (the opus-4-6 case combos_refs
+        # documents), and naming it would be a different rule with one home.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "opus-4-6",
+                                       "models": ["cc/opus-4-6"]}])
+            combos = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(combos, {})
+            self.assertEqual(self.sync.unmanaged_skip_notices(combos), [])
+
+
 if __name__ == "__main__":
     unittest.main()

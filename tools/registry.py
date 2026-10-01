@@ -1384,6 +1384,16 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     if missing_blocks:
         raise ValueError("config.yaml has no managed block for: %s" % ", ".join(missing_blocks))
 
+    # K6/F3 (T1-CLEAN-4 rework, 2026-10-01): render_block() reads the skip names
+    # out of the sync tool's module state, so this call owns that table for the
+    # whole render — set from the tiers it actually emits, cleared of everything
+    # else, so a second call in one process cannot inherit the first one's
+    # `# litellm-skip:` lines into an unrelated block.
+    sync.SKIPPED_BY_TIER.clear()
+    sync.SKIPPED_BY_TIER.update(
+        {tier: sync.skipped_refs(routes[tier], registry)
+         for tier in refs_by_tier})
+
     rendered = {}
     for tier in refs_by_tier:
         start, end = blocks[tier]
@@ -1395,7 +1405,6 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
         # registry to find out why the leg is missing. sync.render_block() owns
         # the line (via SKIPPED_BY_TIER), so this tool's render and
         # tools/sync-router-tiers.py's own rewrite cannot drift apart.
-        sync.SKIPPED_BY_TIER[tier] = sync.skipped_refs(routes[tier], registry)
         try:
             block_lines = sync.render_block(tier, refs_by_tier[tier], indent, extras)
         except sync.ConfigError as exc:

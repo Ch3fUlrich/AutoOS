@@ -386,12 +386,22 @@ def combos_refs(combos_path, tiers=None, registry=None):
     default does: every combo name whose gateway-only-filtered model list is
     non-empty, so the explicit --combos override onto the old file's own
     shape covers exactly the routes the registry would (a combo that is only
-    gateway-only legs, e.g. opus-4-6, gets no managed block either way).
+    gateway-only legs, e.g. opus-4-6, gets no managed block either way). A
+    combo emptied only by the declared-auth drop keeps no block either —
+    rewrite() refuses one config.yaml does not have — so its dropped legs are
+    named by unmanaged_skip_notices() instead (F4, T1-CLEAN-4 rework).
     """
     try:
         data = json.loads(Path(combos_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read {combos_path}: {exc}") from exc
+    # F3 (T1-CLEAN-4 rework, 2026-10-01): SKIPPED_BY_TIER is module state that
+    # render_block() reads, so each entry point OWNS it for the whole call -
+    # cleared here, not merely .update()d over. Without that, a second call in
+    # one process (a --combos run then a registry render, --combos then the
+    # default, or two tests) left the first call's skip lines to be emitted
+    # into an unrelated tier's block.
+    SKIPPED_BY_TIER.clear()
     by_name = {}
     for combo in data.get("combos", []):
         name = combo.get("name")
@@ -403,6 +413,9 @@ def combos_refs(combos_path, tiers=None, registry=None):
             by_name[name] = [
                 m for m in refs
                 if m.split("/", 1)[0] not in GATEWAY_ONLY
+                # K6, pinned by rework F2: a provider that declares an auth
+                # LiteLLM cannot express (litellm_auth) has no renderable leg -
+                # this drop and the naming below are one rule with one home.
                 and m.split("/", 1)[0] not in no_key
             ]
             SKIPPED_BY_TIER[name] = [
@@ -415,6 +428,24 @@ def combos_refs(combos_path, tiers=None, registry=None):
     if missing:
         raise ConfigError(f"{combos_path} has no combo(s): {', '.join(missing)}")
     return {t: by_name[t] for t in tiers}
+
+
+def unmanaged_skip_notices(combos):
+    """``<tier>: <leg>`` notices for the declared-auth legs this call dropped
+    from a combo that gets no managed block (F4, T1-CLEAN-4 rework, 2026-10-01).
+
+    combos_refs() derives its default tier set from the POST-filter list, so a
+    combo whose every leg carries `litellm_auth` ends with no block - and
+    rewrite() refuses to invent one config.yaml does not have, so the
+    `# litellm-skip:` line has nowhere to render. The drop is still real, so it
+    is still named: main() prints these lines beside its OK/Synced summary.
+    Reads the skip state the current call left behind (F3 makes that exactly
+    this call's), and only the declared-auth kind - an all-GATEWAY_ONLY combo
+    was never a LiteLLM leg at all."""
+    return [f"{tier}: {leg}"
+            for tier, legs in sorted(SKIPPED_BY_TIER.items())
+            if tier not in combos
+            for leg in legs]
 
 
 def registry_refs(registry_path, tiers=None):
@@ -443,6 +474,8 @@ def registry_refs(registry_path, tiers=None):
     # skipped-leg names are recorded here as module state - otherwise the writer
     # would emit the block without them and `render litellm --check` would read
     # the hand-named omission as drift.
+    # F3 (rework): the call owns the whole table, not just its own tiers.
+    SKIPPED_BY_TIER.clear()
     SKIPPED_BY_TIER.update({t: skipped_refs(routes[t], doc) for t in tiers})
     return {t: litellm_servable_refs(routes[t], doc) for t in tiers}
 
@@ -644,6 +677,13 @@ def main(argv=None):
     except (OSError, ConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    if not args.quiet:
+        # F4 (T1-CLEAN-4 rework): a combo emptied by the declared-auth drop has
+        # no managed block to carry its `# litellm-skip:` line, so the drop is
+        # named here rather than rendering nowhere.
+        for notice in unmanaged_skip_notices(combos):
+            print(f"litellm-skip (no managed block for it): {notice}")
 
     if args.check:
         if changed:
