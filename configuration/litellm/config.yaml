@@ -359,6 +359,26 @@ model_list:
       additional_drop_params: ["strict"]
   # AUTOOS-MANAGED-END t4-rag
 
+  # AUTOOS-MANAGED-START t4-researcher
+  - model_name: t4-researcher
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: nebius/zai-org/GLM-5.3-Flash
+      api_key: os.environ/NEBIUS_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
+  # AUTOOS-MANAGED-END t4-researcher
+
   # ── t1-orchestrator: orchestrator-1M, meta_api first then free gemini fallback ─────────
   # AUTOOS-MANAGED-START t1-orchestrator
   - model_name: t1-orchestrator

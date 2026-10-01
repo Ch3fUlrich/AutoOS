@@ -4642,6 +4642,38 @@
         }
       }
     },
+    "t4-researcher": {
+      "class": "free",
+      "id": "t4-researcher",
+      "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors t3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context.",
+      "legs": [
+        "gemini/gemini-3.8-flash",
+        "scaleway/qwen3-235b-a22b-instruct-2507",
+        "free_ai/qwen7b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "litellm": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "output": 8192
+        },
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "output": 8192
+        }
+      }
+    },
     "ovh-gpt-oss-120b": {
       "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/gpt-oss-120b (live ovh/gpt-oss-120b 400000; registry shared model adv 131072, renders 128k; shared row price 0 = unpriced grant, unproven - renders but resolver refuses until priced, same stance as deepinfra credit tails). Class credit. opencode/zed only.",
       "class": "credit",

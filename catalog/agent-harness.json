@@ -201,6 +201,23 @@
         "serena",
         "graphify"
       ]
+    },
+    "leaf-researcher": {
+      "description": "Read-only researcher: wide-context exploration and fact-finding under the leaf contract. Never edits, spawns or commits.",
+      "spawn": false,
+      "leaf": true,
+      "opencode": {
+        "mode": "subagent",
+        "model": "deepseek/deepseek-flash"
+      },
+      "openhands": {
+        "profile": "researcher",
+        "llm_profile_ref": "deepseek-flash"
+      },
+      "mcp": [
+        "serena",
+        "graphify"
+      ]
     }
   }
 }

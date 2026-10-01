@@ -1311,6 +1311,7 @@ IDE_MODEL_ORDER = (
     "spark-1.3-contributor",
     "opus-4-6",
     "t4-rag",
+    "t4-researcher",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
     # FREEWIRE 2026-09-30: pinned single-provider free combos for the

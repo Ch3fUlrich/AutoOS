@@ -79,6 +79,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t3-driver-paid` | cheap | 131,072 | (none) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
 | `vertex-gemini-3.8-flash` | credit | 1M | vertex `gemini-3.8-flash` |
+| `t4-researcher` | free | 128k | gemini `gemini-3.8-flash` → scaleway `qwen3-235b-a22b-instruct-2507` → free_ai `qwen7b` |
 <!-- AUTOOS-MANAGED-END models-doc -->
 
 **t2-worker is not context-capped at 128k.** 128k is a display convention inherited

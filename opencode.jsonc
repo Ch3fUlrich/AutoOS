@@ -263,6 +263,161 @@
         { "action": "external_directory", "resource": "*manage.key*", "effect": "deny" },
         { "action": "external_directory", "resource": "*.claude.json*", "effect": "deny" }
       ]
+    },
+    "t4-researcher": {
+      "description": "Read-only researcher: wide-context exploration and fact-finding. Reads and runs checks only; never edits, commits or spawns. May not launch subagents.",
+      "mode": "subagent",
+      "model": "omniroute/t4-researcher",
+      "permissions": [
+        // KEYDENY3b: the spawn gate has two spellings in v2.0.16 — the canonical
+        // action `subagent` and the legacy tool name `task` (its rename map is
+        // {bash: shell, task: subagent, apply_patch: patch}). `subagent` is the
+        // fence; the `task` rule is insurance for a build that still matches the
+        // alias, and is not proof — see the `bash` note below, an alias rule can
+        // match nothing. A leaf that could spawn would hand the work to a child
+        // carrying none of the fences below, key file included.
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "task", "resource": "*", "effect": "deny" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "write", "resource": "*", "effect": "deny" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        // v2 calls the shell action `shell`; a `bash` rule matches nothing.
+        // The denies below are catalog/agent-harness.json fences
+        // (bash_deny_all + bash_deny_leaf), asserted by both suites.
+        { "action": "shell", "resource": "*", "effect": "allow" },
+        { "action": "shell", "resource": "git merge*", "effect": "deny" },
+        { "action": "shell", "resource": "git rebase*", "effect": "deny" },
+        { "action": "shell", "resource": "git reset --hard*", "effect": "deny" },
+        { "action": "shell", "resource": "git branch -D*", "effect": "deny" },
+        { "action": "shell", "resource": "git clean*", "effect": "deny" },
+        { "action": "shell", "resource": "git worktree remove*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *merge*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *rebase*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *reset --hard*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *branch -D*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *clean*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *worktree remove*", "effect": "deny" },
+        { "action": "shell", "resource": "gh *", "effect": "deny" },
+        { "action": "shell", "resource": "rm -rf /*", "effect": "deny" },
+        { "action": "shell", "resource": "rm -rf ~*", "effect": "deny" },
+        { "action": "shell", "resource": "sudo *", "effect": "deny" },
+        { "action": "shell", "resource": "docker compose *", "effect": "deny" },
+        { "action": "shell", "resource": "docker rm*", "effect": "deny" },
+        { "action": "shell", "resource": "*auth.json*", "effect": "deny" },
+        { "action": "shell", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "shell", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "shell", "resource": "*client.key*", "effect": "deny" },
+        { "action": "shell", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "shell", "resource": "*.env*", "effect": "deny" },
+        { "action": "shell", "resource": "env", "effect": "deny" },
+        { "action": "shell", "resource": "env *", "effect": "deny" },
+        { "action": "shell", "resource": "printenv*", "effect": "deny" },
+        { "action": "shell", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "shell", "resource": "*.config/opencode*", "effect": "deny" },
+        { "action": "shell", "resource": "*.local/share/opencode*", "effect": "deny" },
+        { "action": "shell", "resource": "set", "effect": "deny" },
+        { "action": "shell", "resource": "cat /proc/*", "effect": "deny" },
+        { "action": "shell", "resource": "git push*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *push*", "effect": "deny" },
+        { "action": "shell", "resource": "git commit*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *commit*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *tag*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *update-ref*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *stash*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *checkout*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *switch*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *restore*", "effect": "deny" },
+        // MCP write tools bypass the edit/write deny: serena is deny-by-default
+        // with a read-only allow list; memory-graph and browser-code writes off.
+        // KEYDENY3: an MCP rule can only name the tool (v2.0.16 asserts every
+        // MCP call as {action:"<server>_<tool>", resources:["*"]}), so nothing
+        // on that list can be fenced by path — the allow list therefore excludes
+        // every serena tool that can return file bytes: read_file and
+        // search_for_pattern directly, find_symbol / find_declaration /
+        // find_implementations / find_referencing_symbols through their
+        // include_body parameter (serena 1.7.0, tools/symbol_tools.py). What is
+        // left returns names or diagnostics, and the leaf still has the
+        // path-fenced read tool. catalog/agent-harness.json holds the list.
+        { "action": "serena_*", "resource": "*", "effect": "deny" },
+        { "action": "serena_activate_project", "resource": "*", "effect": "allow" },
+        { "action": "serena_initial_instructions", "resource": "*", "effect": "allow" },
+        { "action": "serena_check_onboarding_performed", "resource": "*", "effect": "allow" },
+        { "action": "serena_get_symbols_overview", "resource": "*", "effect": "allow" },
+        { "action": "serena_get_diagnostics_for_file", "resource": "*", "effect": "allow" },
+        { "action": "serena_list_dir", "resource": "*", "effect": "allow" },
+        { "action": "serena_find_file", "resource": "*", "effect": "allow" },
+        { "action": "omnigraph_mutate", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_load", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_create", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_merge", "resource": "*", "effect": "deny" },
+        { "action": "omnigraph_branches_delete", "resource": "*", "effect": "deny" },
+        { "action": "playwright_browser_run_code_unsafe", "resource": "*", "effect": "deny" },
+        // KEYDENY3b: an MCP rule can only name the tool (resources is ["*"]), so
+        // a server whose tools read by URL or path goes whole, not tool by tool.
+        // browser_navigate takes a file:// path — run_code_unsafe was never the
+        // only door. context7 fetches remote docs by id/topic for the same reason.
+        { "action": "playwright_*", "resource": "*", "effect": "deny" },
+        { "action": "context7_*", "resource": "*", "effect": "deny" },
+        // A leaf never spawns: the spawner's MCP tools (autoos-agent_spawn and
+        // friends, registered for every agent) are off here too.
+        { "action": "autoos-agent_*", "resource": "*", "effect": "deny" },
+        // The read_deny_all fences (catalog/agent-harness.json) as `read`,
+        // `grep`, `glob` and `external_directory` denies: `read: * allow` above
+        // left the real key files — configuration/api-keys.yml and the gateway
+        // client.key/manage.key — readable by a leaf, and KEYDENY3 closes the
+        // two other doors to the same bytes. opencode v2.0.16 asserts a
+        // different resource per action, so one deny list means three different
+        // matching semantics: `grep`/`glob` are matched against the *search
+        // pattern* the leaf passed (it stops a search naming a key file, not a
+        // search that happens to hit one), and the searched path is checked only
+        // by `external_directory` — which is why a path-scoped deny goes there.
+        // Last match wins, so the allows come after, and
+        // each one is an exact path suffix: a `shell` allow is matched against
+        // the whole command line, so any allow there licenses a real key file
+        // paired on the same line (KEYDENY2). There is no shell allow for a key
+        // example — a leaf reads the template with the read tool, `cat` stays
+        // denied.
+        { "action": "read", "resource": "*.env", "effect": "deny" },
+        { "action": "read", "resource": "*.env.*", "effect": "deny" },
+        { "action": "read", "resource": "*auth.json", "effect": "deny" },
+        { "action": "read", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "read", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "read", "resource": "*client.key*", "effect": "deny" },
+        { "action": "read", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "read", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "read", "resource": "*.env.example", "effect": "allow" },
+        { "action": "read", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "grep", "resource": "*.env", "effect": "deny" },
+        { "action": "grep", "resource": "*.env.*", "effect": "deny" },
+        { "action": "grep", "resource": "*auth.json", "effect": "deny" },
+        { "action": "grep", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "grep", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "grep", "resource": "*client.key*", "effect": "deny" },
+        { "action": "grep", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "grep", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "grep", "resource": "*.env.example", "effect": "allow" },
+        { "action": "grep", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "glob", "resource": "*.env", "effect": "deny" },
+        { "action": "glob", "resource": "*.env.*", "effect": "deny" },
+        { "action": "glob", "resource": "*auth.json", "effect": "deny" },
+        { "action": "glob", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "glob", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "glob", "resource": "*client.key*", "effect": "deny" },
+        { "action": "glob", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "glob", "resource": "*.claude.json*", "effect": "deny" },
+        { "action": "glob", "resource": "*.env.example", "effect": "allow" },
+        { "action": "glob", "resource": "*configuration/api-keys.example.yml", "effect": "allow" },
+        { "action": "external_directory", "resource": "*.env", "effect": "deny" },
+        { "action": "external_directory", "resource": "*.env.*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*auth.json", "effect": "deny" },
+        { "action": "external_directory", "resource": "*api_keys*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*api-keys*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*client.key*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*manage.key*", "effect": "deny" },
+        { "action": "external_directory", "resource": "*.claude.json*", "effect": "deny" }
+      ]
     }
   },
   "providers": {
@@ -426,6 +581,16 @@
           "modelID": "t4-rag",
           "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
           "limit": { "context": 131072, "output": 16384 }
+        },
+        "t4-researcher": {
+          "modelID": "t4-researcher",
+          "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "limit": { "context": 128000, "output": 8192 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "gemini-3.8-flash": {
           "modelID": "gemini-3.8-flash",
@@ -616,6 +781,16 @@
           "modelID": "t4-rag",
           "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
           "limit": { "context": 131072, "output": 16384 }
+        },
+        "t4-researcher": {
+          "modelID": "t4-researcher",
+          "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "limit": { "context": 128000, "output": 8192 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         }
         // AUTOOS-MANAGED-END litellm
       }

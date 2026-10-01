@@ -278,6 +278,27 @@
       }
     },
     {
+      "id": "t4-researcher",
+      "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+      "context": 128000,
+      "output": 8192,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ],
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
       "id": "gemini-3.8-flash",
       "name": "gemini-3.8-flash -- gemini free -> vertex credit (1M)",
       "context": 1048576,
