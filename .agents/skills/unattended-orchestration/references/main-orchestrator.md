@@ -84,18 +84,25 @@ R-orch-14. Put both ids in every L2 brief.
 - Before relying on an unmeasured route, run it once on a tiny task, record the exact command
   and result in the DONE note, then scale.
 
-**Seat-model evidence (D-260).** A review seat run keyless on the opencode path
-(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word: the
-fence may serve a different model than the one requested (measured 2026-10-01: a seat pinned to
-`opencode/mimo-v2.6-flash-free` served `opencode/nemotron-3-ultra-free` on all 7 turns).
-Before accepting a free-seat verdict, run
-`python3 tools/seat-model-evidence.py <sandbox-dir> --expect opencode/<model>` — it reads the
-per-turn provider-response model id from the seat's `<sandbox>.opencode-data/opencode/opencode.db`
-(`session_message` → assistant `data.model`) and writes a sha256-stamped JSON file
-(`<sandbox>.seat-evidence.json`). Exit 0 = every assistant turn was served by the expected model;
-exit 2 = at least one turn was not — reject or re-run the seat; exit 3 = no turn data, the
-verdict is unverifiable. The check is deterministic and reads `credential`/`account`/`kv` never;
-cite the evidence file's sha256 in the DONE note.
+**Seat-model evidence (D-260 / D-261).** A review seat run keyless on the opencode path
+(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. A gate
+review proved opencode stores **no provider-response model** in its session db: the per-turn
+`data.model` it writes is the model the CLI was *started* with — **request-side** evidence only. So
+a keyless seat is checked three ways (D-261) and all three must equal `--expect`: (a) the run
+record's requested free model, (b) the opencode CLI `--model` from the sandbox's `opencode.log`,
+(c) the per-turn db model on *every* assistant row of the seat's session. Measured 2026-10-01: a
+seat whose record requested `opencode/mimo-v2.6-flash-free` carried `opencode/nemotron-3-ultra-free`
+on its CLI and all 7 turns — not the provider substituting a model, but **autoos-agent's own
+cross-family fence** re-launching opencode with `--model nemotron`; the three-way surfaces exactly
+that divergence. Before accepting a free-seat verdict, run
+`python3 tools/seat-model-evidence.py <sandbox-dir> --expect opencode/<model> --run-id <id>` — it
+writes a sha256-stamped JSON file (`<sandbox>.seat-evidence.json`) of kind `request-side` that lists
+each source. For a paid/gateway seat, `--gateway` reads OmniRoute call logs (kind `response-side`) —
+genuine provider-response evidence. Exit 0 = every source present and matching (turns ≥ 1); exit 2 =
+any source diverges, or an assistant row is missing its model/providerID/id (a gap — never skipped);
+exit 3 = the db is unreadable or the session has no assistant rows, unverifiable. The check is
+deterministic, opens the db read-only with the WAL included, and reads `credential`/`account`/`kv`
+never; cite the evidence file's sha256 in the DONE note.
 
 **The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
 carries them:
