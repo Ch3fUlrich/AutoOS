@@ -243,6 +243,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -868,8 +869,12 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
         archive = subprocess.run(["git", "-C", root, "archive", "HEAD", "--",
                                   *allowed],
                                  capture_output=True, check=True)
-        subprocess.run(["tar", "-x", "-C", path], input=archive.stdout,
-                       check=True)
+        # Unpack with the stdlib, not a `tar` child: a tar child would inherit
+        # the caller's whole env past the FF1b audit, and the bytes are our own
+        # `git archive` output — tracked paths only, never absolute — so a
+        # plain extract of this self-generated stream is the whole job.
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
+            tf.extractall(path)
     subprocess.run(["git", "-C", path, "add", "-A"], check=True)
     subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
                     "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",

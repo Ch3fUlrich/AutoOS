@@ -10810,8 +10810,13 @@ class IsolateSourceTests(unittest.TestCase):
         dest = os.path.join(self.tmp, "sandbox")
         base = self.cli.isolate_clone(self.cli.isolate_source(worktree), dest,
                                       "agent/keydeny3g")
-        self.assertEqual(base, self.git("-C", worktree, "rev-parse", "HEAD"))
-        self.assertNotEqual(base, self.git("-C", main, "rev-parse", "HEAD"))
+        # T2-ISOLATE-SECRETS: the sandbox base is its own one-commit history,
+        # but its content is the worktree's HEAD — and the worktree sha rides
+        # in autoos.sandboxSource.
+        self.assertEqual(self.git("-C", dest, "config", "autoos.sandboxSource"),
+                         self.git("-C", worktree, "rev-parse", "HEAD"))
+        self.assertEqual(
+            1, int(self.git("-C", dest, "rev-list", "--all", "--count")))
         # the side branch's file is there, so the sandbox really started on X
         self.assertTrue(os.path.isfile(os.path.join(dest, "side.txt")))
 
@@ -12005,9 +12010,12 @@ class SandboxPushFenceTests(unittest.TestCase):
         self.assertEqual(0, rc, out + err)
         sb = calls["cwds"][0]
         self.assertIn("/sandboxes/", sb)
-        self.assertEqual(self.agent.ISOLATE_PUSH_DISABLED,
-                         self.git("remote", "get-url", "--push", "origin",
-                                  cwd=sb).stdout.strip())
+        # T2-ISOLATE-SECRETS: the archive sandbox carries no remotes and the
+        # accident-guard hook, so a push fails for want of a destination.
+        self.assertEqual("",
+                         self.git("remote", cwd=sb).stdout.strip())
+        self.assertTrue(os.access(os.path.join(sb, ".git", "hooks",
+                                               "pre-push"), os.X_OK))
         self.assertNotEqual(0, self.git("push", "origin", "HEAD", cwd=sb).returncode)
 
 
