@@ -701,3 +701,23 @@ needs **≥2 counted cross-family seats** (writer's family excluded).
   ws-patchbackups, ws-patchlive, ws-providers. Earlier takes: reviewgate-2fam (`d0f70f1`),
   redclear (`f93aee3`).
 - **Not yet taken:** see the merge checklist Refresh (e) for the per-branch list.
+---
+
+## 17. Main-leak escalation (2026-10-01) — Hard Rule 1 violation in `origin/main`, fix branch open
+
+The tier-order take `bd0ad278` (`origin/main` `11757db4`) carried the residual username
+flagged in §15 into the **public** main branch:
+
+- `docs/handoff/2026-09-30-laneFreeWire.md:4`
+- `docs/handoff/2026-10-01-laneConnRotate.md:3,25,30`
+- `docs/handoff/2026-10-01-laneTierOrder.md:4`
+- `tools/combo-contract.py:176` — hardcoded `api-keys.yml` path (a **code** leak)
+
+**Fix branch:** `L1-backlog/ws-mainleak-20261001` @ `72a98835` — docs → `<user>`;
+`tools/combo-contract.py` fallback derived from `pathlib.Path.home()` (no username
+literal). Verified: 0 hits on the branch; `py_compile` OK; `combo-contract.py` gate
+**PASS** (23 combos, LIVE catalog). Free-family review **APPROVED**
+(`opencode/space-bunny-free`, `ses_f08e96ea0ffesTX0tMopnSZk3D`).
+
+**Operator action required:** take the branch. The username also remains in `origin/main`
+**history** — a history rewrite is operator-only (agents must not rewrite).
