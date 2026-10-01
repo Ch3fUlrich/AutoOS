@@ -4,6 +4,26 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- T2-ISOLATE-SECRETS-4 (2026-10-01, lane `t2-isolate-secrets-4`, cross-family FAIL round on the `-3` tip):
+  **R6** `_isolate_materialise` refuses a *final* component that is already a symlink or any
+  non-regular file before opening it, and lets the first entry win a path two entries claim — the
+  old code vetted ancestors only and leaned on `O_NOFOLLOW`, which is `0` where the attribute does
+  not exist (Windows), so `[(120000,"evil"),(100644,"evil")]` or a planted `evil -> outside` wrote
+  straight through the link. **R7** `os.makedirs`/`os.unlink` are guarded: a tracked name that
+  collides with what an earlier entry created (`a/x` then a symlink `a` → `IsADirectoryError`, `p`
+  then `p/q` → `FileExistsError`) is one skipped entry with one stderr line, not an aborted clone.
+  **R8** the refusal reasons are constants (`could not create the link` / `could not open for
+  writing`) instead of `"link: %s" % exc`, which echoed an OSError's text — potentially the refused
+  bytes — to the terminal and the log; `_isolate_link_inside` now explicitly refuses an empty,
+  backslash-only or NUL-containing target (a NUL reached `os.symlink` and raised `ValueError`, no
+  OSError, killing the whole run). **R9** the canary scan gained `_escaping_links`: `_bytes_hits`
+  walks without `followlinks`, so an escaping *directory* symlink inside a sandbox passed assertion
+  (1) while leaving the host readable through it; the scan now fails on any symlink, file or
+  directory, whose realpath leaves the sandbox, with a hand-built negative control. **R10** the
+  remaining `git clone --local` wording in `lib/agent_harness.py` and the unattended-orchestration
+  skill now says what the sandbox is: a fresh repo holding one base commit of the allowed committed
+  files. 10 new tests in `T2IsolateSecretsS5PathSafetyTests` / `S5CanaryTests` (49 across the lane,
+  from 39).
 - T2-ISOLATE-SECRETS-3 (2026-10-01, lane `t2-isolate-secrets-3`, cross-family FAIL round):
   **R1** `_isolate_materialise` no longer trusts a tracked *name* — a new
   `_isolate_safe_path` refuses `..`, empty / `.` components, a leading `/`, a NUL,

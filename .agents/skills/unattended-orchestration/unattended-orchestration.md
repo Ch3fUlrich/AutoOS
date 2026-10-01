@@ -92,8 +92,9 @@ resolved writer with its `source` for every client; `--model` now pins an own-ac
 client too, and its family feeds the fence like a gateway leg's.
 
 `--isolate` is not optional for a spawned tier: tiers 2 and 3 are refused in
-place (exit 2), and the MCP `spawn` tool forces the clone for them. The clone is
-`git clone --local` of the caller's checkout, so it holds committed files only —
+place (exit 2), and the MCP `spawn` tool forces the clone for them. The sandbox
+is a fresh repo holding one base commit of the allowed committed files (see the
+ISOLATION STATEMENT in `isolate_clone`, `tools/autoos-agent.py`) —
 the one control that keeps a worker's whole-tree grep out of the git-ignored
 `configuration/api-keys.yml` and `.env*` sitting in your working tree. Only a
 read-only tier-1 run (`role=orchestrate`, your own session) stays in place: a
@@ -179,8 +180,10 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   surface is the whole point. `enabled: false` is not an
   opencode 2.x field: it is dropped without a warning and the server starts
   anyway. Measured peak process-tree RSS of one run: 1406 MB → 678 MB.
-- **`--isolate`** runs the agent in a private `git clone --local` on its own
-  branch. For opencode it also gets its own data dir and a deny on every path
+- **`--isolate`** runs the agent in a private sandbox on its own branch: a fresh
+  repo holding one base commit of the allowed committed files (ISOLATION
+  STATEMENT in `isolate_clone`, `tools/autoos-agent.py`). For opencode it also
+  gets its own data dir and a deny on every path
   outside the clone. **Not a git worktree:** opencode resolves a worktree to
   the main checkout, and a worker's writes from inside one landed in the main
   repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
