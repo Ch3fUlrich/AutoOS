@@ -19,7 +19,7 @@
       "reasoning": true
     },
     {
-      "cache_read_price": 6e-09,
+      "cache_read_price": 3e-08,
       "context": 1048576,
       "direct": {
         "base_url": "https://api.deepseek.com",

@@ -614,6 +614,11 @@
           "description": "spec 5.3/5.4, per bucket.",
           "additionalProperties": { "$ref": "#/$defs/token_count" }
         },
+        "paid_local_cap_usd": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "T1-CREDIT-FIX-10 M2 (D-240, operator 2026-10-01): the USD cap an UNMEASURED paid leg is held to -- tighter than the provider's own monthly cap while spend cannot be measured. Absent reads as 20 (tools/autoos_usage.py PAID_LOCAL_CAP_DEFAULT_USD); registry.py check rejects a present-but-non-positive value."
+        },
         "brief_tokens": {
           "type": "object",
           "description": "spec 5.3/8.2, per bucket.",

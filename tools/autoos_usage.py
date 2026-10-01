@@ -94,6 +94,7 @@ import json
 import math
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -105,6 +106,24 @@ DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
 MAX_PAGES = 20
 TIMEOUT_S = 15
+# T1-CREDIT-FIX-10 M1 (D-250): the gateway container the read-only CLI helper
+# runs in. The helper (`/app/bin/cli/api.mjs`' apiFetch) authenticates with its
+# own machine-derived loopback token inside the container, so this transport
+# never sees a key at all.
+HELPER_CONTAINER = "autoos-omniroute"
+HELPER_API_MODULE = "/app/bin/cli/api.mjs"
+# T1-CREDIT-FIX-10 M2 (D-240): the local USD cap an UNMEASURED paid leg is
+# held to. Tighter than the provider's own monthly cap: while spend cannot be
+# measured, the last-resort leg is refused at this line instead of the full
+# cap. Overridable per registry (`policy.paid_local_cap_usd`).
+PAID_LOCAL_CAP_DEFAULT_USD = 20.0
+# T1-CREDIT-FIX-10 M4 (D-253): the prepaid balance floor and snapshot
+# freshness for the provider-balance paid meter. A fresh snapshot below the
+# floor refuses the leg; a snapshot older than the window is history, not a
+# meter, and the exhausted check skips it.
+BALANCE_EXHAUSTED_USD = 3.0
+BALANCE_FRESH_S = 3 * 3600
+BALANCE_LEDGER_REL = os.path.join("routing", "provider-balances.jsonl")
 DIMENSIONS = ("provider", "combo", "lane", "model", "run")
 UNTAGGED_LANE = "(untagged)"
 NO_RUN_LABEL = "(no run id)"
@@ -862,6 +881,39 @@ def is_spend_row(row, provider=SPEND_PROVIDER, registry=None):
     return False
 
 
+def cache_read_price_for(model, registry):
+    """USD per token for a row's `cacheRead` tokens, or None.
+
+    T1-CREDIT-FIX-10 M4 (D-253): reads the model-level `price_cache_read`
+    (10 % of `price_in` on the priced paid models) with the same resolution
+    as `price_for` -- the exact model id first, then the tail after the last
+    `/` (a `deepseek/...` gateway spelling resolves to the bare registry
+    row). Anything absent, non-numeric or non-positive reads as unpriced
+    (None): the row's whole input then bills at `price_in`, the old
+    behaviour exactly.
+    """
+    if not model or not isinstance(registry, dict):
+        return None
+    models = registry.get("models")
+    if not isinstance(models, dict):
+        return None
+    entry = models.get(model)
+    if entry is None and "/" in model:
+        entry = models.get(model.rsplit("/", 1)[1])
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("price_cache_read")
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
+
+
 def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=None,
                price_source=None, complete=True):
     """The DSGUARD block: what this month's paid calls cost, and what to warn about.
@@ -908,7 +960,21 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
             continue
         # No parseable timestamp means an in-flight row: bill it at full price.
         factor = resolver.price_factor(provider, window_source, ts) if ts else 1.0
-        spend += (tin * pair[0] + tout * pair[1]) * factor
+        # T1-CREDIT-FIX-10 M4 (D-253): a row's `cacheRead` tokens bill at the
+        # model's `price_cache_read`, the REST of the input at `price_in`.
+        # The cached count is clamped into [0, in] -- a row that claims more
+        # cached tokens than input tokens bills the input as fully cached,
+        # never negative.
+        cached = 0
+        if isinstance(tokens, dict):
+            cached = _as_int(tokens.get("cacheRead"))
+            cached = min(max(cached, 0), tin)
+        cache_price = cache_read_price_for(r.get("model"), registry)
+        if cache_price is not None and cached:
+            spend += ((tin - cached) * pair[0] + cached * cache_price
+                      + tout * pair[1]) * factor
+        else:
+            spend += (tin * pair[0] + tout * pair[1]) * factor
 
     spend = round(spend, 6)
     warnings = []
@@ -939,6 +1005,406 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         "complete": bool(complete),
         "warnings": warnings,
     }
+
+
+def paid_local_cap_usd(registry):
+    """USD cap an UNMEASURED paid leg is held to (T1-CREDIT-FIX-10 M2, D-240).
+
+    `policy.paid_local_cap_usd`, default `PAID_LOCAL_CAP_DEFAULT_USD` when
+    absent. Total: a malformed value reads as the default (loudly flagged by
+    `registry.py check`), never a crash on the routing path.
+    """
+    policy = (registry or {}).get("policy")
+    raw = policy.get("paid_local_cap_usd", PAID_LOCAL_CAP_DEFAULT_USD) \
+        if isinstance(policy, dict) else PAID_LOCAL_CAP_DEFAULT_USD
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) \
+            or not math.isfinite(raw) or raw <= 0:
+        return float(PAID_LOCAL_CAP_DEFAULT_USD)
+    return float(raw)
+
+
+def local_paid_estimate(rows, registry, since, provider=SPEND_PROVIDER):
+    """Best-effort month spend over LOCAL rows (T1-CREDIT-FIX-10 M2, D-240).
+
+    The single home for the D-240 estimate: the same rows the usage report
+    reads (the gateway call log IS the ledger -- there is no second local
+    store), priced by the same `paid_spend` (registry list price via
+    `leg_price`/`provider_prices`, 10 % cache billing included), over
+    whatever rows are at hand -- even a truncated page. A run record without
+    token counts adds $0 and is counted in `unpriced_runs`. Never raises on
+    row shapes (it reuses the total readers); returns
+    `{"provider", "spend_usd", "unpriced_runs"}`.
+    """
+    prices = prices_from_registry(registry)
+    spend = paid_spend(rows or [], prices, registry, since, provider=provider)
+    unpriced = 0
+    for r in (rows or []):
+        if not is_spend_row(r, provider, registry):
+            continue
+        ts = row_timestamp(r)
+        if ts is not None and ts < since:
+            continue
+        tokens = r.get("tokens") if isinstance(r, dict) else None
+        if not isinstance(tokens, dict) \
+                or (tokens.get("in") is None and tokens.get("out") is None):
+            unpriced += 1
+    return {"provider": provider, "spend_usd": spend["spend_usd"],
+            "unpriced_runs": unpriced}
+
+
+def apply_paid_local_cap(registry, guards, rows, since):
+    """Hold UNMEASURED paid guards to the local cap (T1-CREDIT-FIX-10 M2).
+
+    For every `tier == paid` guard in state `unknown` (measured spend is
+    unavailable -- gateway down, truncated fetch, unreadable rows): the
+    local estimate over `rows` decides. At or above `paid_local_cap_usd`
+    the leg is REFUSED with the D-240 reason (the state flips to `refuse`,
+    so the resolver's paid block refuses it); below, the leg is kept with
+    the exact D-240 kept line appended to the existing note (which keeps
+    naming the underlying cause: fetch truncation, unreadable rows, or the
+    D-212 last resort). Measured states (`ok`/`warn`/`refuse`/`manual`) and
+    `guard error` are untouched -- measured spend governs, and an unforeseen
+    bug keeps its own state. Returns `guards` (mutated in place).
+    """
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        if guard.get("state") != "unknown" or not guard.get("spend_unknown"):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        try:
+            monthly_cap_usd(registry, pid)
+        except Exception:
+            continue  # a paid row with no readable cap is not guarded at all
+        local_cap = paid_local_cap_usd(registry)
+        est = local_paid_estimate(rows, registry, since, pid)
+        amount = est["spend_usd"]
+        # The D-240 line stays terminal in the note (and the whole note when
+        # there is nothing else to say), so the kept/refused line reads
+        # exactly as specified; an unpriced-runs count, when nonzero, precedes
+        # it rather than trailing it.
+        unpriced = "" if not est["unpriced_runs"] else \
+            "; unpriced runs: %d" % est["unpriced_runs"]
+        if amount >= local_cap:
+            guard["state"] = "refuse"
+            guard["spend_unknown"] = False
+            guard["spend_usd"] = amount
+            guard["note"] = ("%spaid spend unmeasured - local estimate $%.2f "
+                             ">= $%g cap (D-240)"
+                             % (("unpriced runs: %d; " % est["unpriced_runs"]
+                                 if est["unpriced_runs"] else ""),
+                                amount, local_cap))
+        else:
+            guard["spend_usd"] = amount
+            guard["note"] = ("%s%s; paid spend unmeasured - leg kept, local "
+                             "estimate $%.2f of $%g (D-240)"
+                             % (guard.get("note") or "spend unmeasured",
+                                unpriced, amount, local_cap))
+    return guards
+
+
+def balance_ledger_path(env=None):
+    """Path of the provider-balance ledger: one JSON line per reading.
+
+    T1-CREDIT-FIX-10 M4 (D-253): the ledger lives in the spawner state dir --
+    the same contract as `autoos_clients.state_dir` (`AUTOOS_STATE_DIR`, else
+    the repository's git-ignored `logs/`), under `routing/` beside the track
+    record. Never under the repo tree elsewhere (AGENTS.md rule 1 keeps
+    machine readings out of tracked files; `logs/` is git-ignored).
+    """
+    env = os.environ if env is None else env
+    base = (env or {}).get("AUTOOS_STATE_DIR")
+    if not base:
+        base = str(ROOT / "logs")
+    return os.path.join(base, BALANCE_LEDGER_REL)
+
+
+def _match_balance_provider(plan, registry):
+    """Registry provider id for a balance `plan` name, or None.
+
+    The gateway names the display plan (`DeepSeek`); the registry names the
+    id (`deepseek`). The match is exact case-insensitive over the id and the
+    provider's own spellings (`omniroute_id`, `model_prefix`) -- the same
+    namespaces `is_spend_row` bills under -- so `Vertex AI` never reads as
+    `vertex_ai` and an unknown plan matches nothing instead of someone's
+    money.
+    """
+    if not isinstance(plan, str) or not plan.strip():
+        return None
+    want = plan.strip().lower()
+    providers = (registry or {}).get("providers") or {}
+    for pid, entry in providers.items():
+        names = {str(pid).lower()}
+        if isinstance(entry, dict):
+            for key in ("omniroute_id", "model_prefix"):
+                val = entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    names.add(val.strip().lower())
+        if want in names:
+            return pid
+    return None
+
+
+def parse_provider_limits(payload, registry=None):
+    """Credit-balance readings from a provider-limits payload.
+
+    T1-CREDIT-FIX-10 M4 (D-253): reads ``caches.<id>.quotas.credits_usd``
+    (`{remaining, toppedUpBalance, grantedBalance, currency}`) with the
+    provider from `plan` and the snapshot time from `fetchedAt`. Entries
+    without a `credits_usd` quota (model quotas, spend meters, null plans)
+    carry no prepaid balance and yield no reading. Never raises: a
+    mis-shaped entry is skipped, and an unreadable payload reads as no
+    readings. Returns a list of
+    `{"cache", "provider", "remaining", "currency", "fetched_at"}`.
+    """
+    out = []
+    try:
+        caches = (payload or {}).get("caches") or {}
+    except Exception:
+        return out
+    if not isinstance(caches, dict):
+        return out
+    for cid, entry in caches.items():
+        if not isinstance(entry, dict):
+            continue
+        pid = _match_balance_provider(entry.get("plan"), registry)
+        if pid is None:
+            continue
+        try:
+            quotas = entry.get("quotas") or {}
+            credits = quotas.get("credits_usd") or {}
+        except Exception:
+            continue
+        if not isinstance(credits, dict):
+            continue
+        remaining = credits.get("remaining")
+        if isinstance(remaining, bool) \
+                or not isinstance(remaining, (int, float)) \
+                or not math.isfinite(remaining):
+            continue
+        fetched_at = entry.get("fetchedAt")
+        out.append({"cache": cid, "provider": pid,
+                    "remaining": float(remaining),
+                    "currency": credits.get("currency")
+                    if isinstance(credits.get("currency"), str) else None,
+                    "fetched_at": fetched_at
+                    if isinstance(fetched_at, str) else None})
+    return out
+
+
+def load_balance_readings(path):
+    """Every well-formed balance reading; a missing file is empty, malformed
+    lines are skipped (the track record's `load` contract, one home per
+    shape -- this one carries provider/remaining/fetched_at). A line keyed
+    `fetchedAt` (the gateway's spelling) normalises to `fetched_at` on load,
+    so hand-written seeds and recorded lines dedupe against each other."""
+    readings = []
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        return readings
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or not isinstance(
+                    obj.get("provider"), str):
+                continue
+            stamped = obj.get("fetched_at")
+            if not isinstance(stamped, str):
+                stamped = obj.get("fetchedAt")
+            if not isinstance(stamped, str):
+                continue
+            obj = dict(obj)
+            obj["fetched_at"] = stamped
+            readings.append(obj)
+    return readings
+
+
+def record_balance_readings(path, readings):
+    """Append every new reading; dedupe on (provider, fetched_at).
+
+    Returns the number of lines added. Total on malformed input, loud on an
+    unwritable file (OSError propagates: a meter that cannot record must not
+    silently govern).
+    """
+    seen = {(r.get("provider"), r.get("fetched_at"))
+            for r in load_balance_readings(path)}
+    fresh = [r for r in (readings or [])
+             if isinstance(r, dict)
+             and (r.get("provider"), r.get("fetched_at")) not in seen]
+    if not fresh:
+        return 0
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        for r in fresh:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+            seen.add((r.get("provider"), r.get("fetched_at")))
+    return len(fresh)
+
+
+def _reading_ts(reading):
+    """Aware UTC datetime of a reading's `fetched_at`; None when unparseable."""
+    if not isinstance(reading, dict):
+        return None
+    return row_timestamp({"timestamp": reading.get("fetched_at")})
+
+
+def balance_month_spend(readings, provider, since):
+    """(spend, topups) for one provider over readings at/after `since`.
+
+    T1-CREDIT-FIX-10 M4 (D-253): the month's measured spend is the sum of
+    DECREASES between consecutive in-month readings (oldest first); an
+    increase is a top-up -- excluded from spend and reported separately, so a
+    refill never reads as negative spend. Unparseable timestamps are skipped,
+    never interpolated.
+    """
+    mine = [(ts, float(r.get("remaining") or 0.0))
+            for r in (readings or [])
+            for ts in [_reading_ts(r)]
+            if isinstance(r, dict) and r.get("provider") == provider
+            and ts is not None and ts >= since]
+    mine.sort(key=lambda pair: pair[0])
+    spend = topups = 0.0
+    for (_, prev), (_, cur) in zip(mine, mine[1:]):
+        delta = prev - cur
+        if delta >= 0:
+            spend += delta
+        else:
+            topups -= delta
+    return round(spend, 6), round(topups, 6)
+
+
+def balance_paid_guard(registry, provider, readings, since, now=None):
+    """The paid guard from the provider-balance series, or None.
+
+    T1-CREDIT-FIX-10 M4 (D-253): with two or more in-month readings the
+    scheduled balance IS the paid meter -- `balance_month_spend` judged by
+    `spend_guard` against the provider's own cap, so the $20 alert and the
+    $25 refuse are the registry's numbers, not second ones. A fresh snapshot
+    (within `BALANCE_FRESH_S`) below `BALANCE_EXHAUSTED_USD` refuses with
+    the exhausted reason regardless of the month figure, so routing falls
+    back per the leg order. A top-up in-month is logged, not billed. Fewer
+    than two readings is not a spend meter (None -- the caller falls back to
+    the call ledger, then D-240), but a fresh snapshot below the floor still
+    refuses on its own.
+    The note always names `measured via provider balance`. None on a
+    provider that cannot state its cap either (ValueError is a config error
+    the caller already handles, not a figure).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    mine = [r for r in (readings or [])
+            if isinstance(r, dict) and r.get("provider") == provider
+            and _reading_ts(r) is not None and _reading_ts(r) >= since]
+    if not mine:
+        return None
+    try:
+        cap = monthly_cap_usd(registry, provider)
+        warn = spend_warn_usd(registry, provider)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    latest = max(mine, key=_reading_ts)
+    latest_ts = _reading_ts(latest)
+    latest_remaining = latest.get("remaining")
+    fresh = latest_ts is not None and \
+        (now - latest_ts).total_seconds() <= BALANCE_FRESH_S
+    # The exhausted check runs on ANY fresh snapshot -- even the first
+    # sighting: a prepaid balance of $2.50 refuses the leg whether or not a
+    # month series exists yet. A stale snapshot is history, not a meter, and
+    # never refuses on its own.
+    if fresh and isinstance(latest_remaining, (int, float)) \
+            and not isinstance(latest_remaining, bool) \
+            and float(latest_remaining) < BALANCE_EXHAUSTED_USD:
+        spend, topups = balance_month_spend(readings, provider, since) \
+            if len(mine) >= 2 else (0.0, 0.0)
+        guard = {"provider": provider, "state": "refuse",
+                 "spend_usd": spend, "spend_unknown": False,
+                 "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                 "note": ("paid %s balance exhausted ($%.2f left) - spend "
+                          "refused [measured via provider balance]"
+                          % (provider, float(latest_remaining)))}
+        if topups > 0:
+            guard["note"] += "; top-up +$%.2f" % topups
+        return guard
+    if len(mine) < 2:
+        return None
+    spend, topups = balance_month_spend(readings, provider, since)
+    try:
+        state, note = spend_guard(registry, provider, spend)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    latest = max(mine, key=_reading_ts)
+    bal_line = ("provider balance $%.2f remaining (fetched %s)"
+                % (float(latest.get("remaining") or 0.0),
+                   latest.get("fetched_at")))
+    note = "%s; %s [measured via provider balance]" % (note, bal_line)
+    if topups > 0:
+        note += "; top-up +$%.2f" % topups
+    guard = {"provider": provider, "state": state, "spend_usd": spend,
+             "spend_unknown": False, "cap_usd": cap, "warn_usd": warn,
+             "models_unpriced": 0, "note": note}
+    return guard
+
+
+def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
+                           env, since, now=None):
+    """Overlay the provider-balance paid meter on a guard map.
+
+    T1-CREDIT-FIX-10 M4 (D-253): one read-only `GET /api/usage/provider-limits`
+    through the helper transport; every new reading is recorded in the
+    git-ignored state-dir ledger (dedupe on provider+fetchedAt), and each
+    `tier == paid` guard with an in-month balance series is replaced by
+    `balance_paid_guard` (decreases billed, top-ups logged, fresh exhausted
+    snapshots refused). A paid guard with no series keeps its ledger figure,
+    named `measured via call ledger`; an unmeasured (D-240) one is untouched.
+    Total on expected read/parse failures (helper `UsageError`, transport
+    `OSError`, bad JSON `ValueError`): no balance series, ledger governs.
+    Returns `guards` (mutated in place).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        status, body = helper_fetch_fn(
+            gateway.rstrip("/") + "/api/usage/provider-limits", None, TIMEOUT_S)
+    except (UsageError, OSError, ValueError):
+        return guards
+    if status != 200:
+        return guards
+    try:
+        payload = json.loads(
+            body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
+    except (ValueError, UnicodeDecodeError):
+        return guards
+    if not isinstance(payload, dict):
+        return guards
+    readings = parse_provider_limits(payload, registry)
+    if readings:
+        try:
+            record_balance_readings(balance_ledger_path(env), readings)
+        except OSError:
+            pass
+    ledger = load_balance_readings(balance_ledger_path(env))
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        balanced = balance_paid_guard(registry, pid, ledger, since, now)
+        if balanced is not None:
+            guards[pid] = balanced
+        elif guard.get("state") in ("ok", "warn", "refuse") \
+                and "(D-240)" not in (guard.get("note") or "") \
+                and "measured via call ledger" not in (guard.get("note") or ""):
+            guard["note"] = "%s [measured via call ledger]" % guard.get("note")
+    return guards
 
 
 def parse_since(text, now):
@@ -1009,6 +1475,76 @@ def urllib_fetch(url, headers, timeout):
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:  # an HTTP status is a response, not a transport failure
         return e.code, e.read()
+
+
+def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
+                 _run=None):
+    """(status, body bytes) via the gateway's own CLI helper, read-only.
+
+    T1-CREDIT-FIX-10 M1 (D-250): the second fetch transport, next to
+    `urllib_fetch`. It runs ``docker exec -w /app <container> node
+    --input-type=module -e <fixed script>`` where the fixed script GETs the
+    URL's own path+query through ``apiFetch`` (which authenticates inside
+    the container) and prints ``<status>\\n<body>``. The return shape is the
+    same (status, body bytes) page `fetch_window` consumes, so either
+    transport feeds the same paging loop.
+
+    Only ``/api/usage/`` paths are fetched, only with method GET (the method
+    is hardcoded in the script, never taken from the caller). `headers` is
+    accepted so this is a drop-in for the HTTP fetch signature, and IGNORED:
+    the helper handles auth inside the container, so no caller key is ever
+    read, printed or passed -- the subprocess gets no `env` override and the
+    script carries the path only. Failures raise `UsageError` naming the
+    failure TYPE only (a message could carry a gateway URL or a home path);
+    `FileNotFoundError` (no docker binary) reads as the helper being
+    unavailable, which the caller treats as "fall back", not "measured $0".
+
+    `_run` is the injectable subprocess runner (tests fake it; production
+    passes none and gets `subprocess.run`). Tests never touch the real
+    container through this function.
+    """
+    del headers  # accepted for signature parity only; never read or passed
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except Exception as exc:  # noqa: BLE001 - total: malformed URL, type only
+        raise UsageError("gateway helper cannot parse the request URL (%s)"
+                         % type(exc).__name__)
+    path_query = parts.path + (("?" + parts.query) if parts.query else "")
+    if not parts.path.startswith("/api/usage/"):
+        raise UsageError("gateway helper refuses a non-usage path (%s)"
+                         % type(ValueError).__name__)
+    script = ("import { apiFetch } from %s;\n"
+              "const r = await apiFetch(%s, { method: 'GET' });\n"
+              "const t = await r.text();\n"
+              "process.stdout.write(String(r.status) + '\\n' + t);\n"
+              % (json.dumps(HELPER_API_MODULE), json.dumps(path_query)))
+    argv = ["docker", "exec", "-w", "/app", container,
+            "node", "--input-type=module", "-e", script]
+    run = _run or subprocess.run
+    try:
+        proc = run(argv, capture_output=True,
+                   timeout=timeout or TIMEOUT_S)
+    except FileNotFoundError:
+        raise UsageError("gateway helper unavailable (FileNotFoundError)")
+    except OSError as exc:
+        raise UsageError("gateway helper unavailable (%s)"
+                         % type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - timeout shapes vary; type only
+        raise UsageError("gateway helper failed (%s)" % type(exc).__name__)
+    if getattr(proc, "returncode", 1) != 0:
+        raise UsageError("gateway helper failed (CalledProcessError)")
+    out = getattr(proc, "stdout", b"") or b""
+    if isinstance(out, str):
+        out = out.encode("utf-8", "replace")
+    head, sep, body = out.partition(b"\n")
+    try:
+        status = int(head.decode("ascii").strip())
+    except (ValueError, UnicodeDecodeError):
+        status = -1
+    if not sep or status < 0:
+        raise UsageError("gateway helper returned an unreadable page "
+                         "(ValueError)")
+    return status, body
 
 
 def fetch_window(fetch, gateway, key, cutoff):

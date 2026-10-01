@@ -4606,7 +4606,11 @@ def _paid_guards_measured(registry: dict, rows, since, complete=True) -> dict:
                     "warn_usd": usage_mod.spend_warn_usd(registry, pid),
                     "models_unpriced": spend["models_unpriced"],
                     "note": note}
-    return out
+    # T1-CREDIT-FIX-10 M2 (D-240): an `unknown` paid guard is not the end of
+    # the story -- the local estimate over these same rows either refuses the
+    # leg at the local cap or keeps it with the D-240 line. Measured states
+    # are untouched: measured spend governs.
+    return usage_mod.apply_paid_local_cap(registry, out, rows, since)
 
 
 def _credit_guard_error(registry: dict, type_name: str) -> dict:
@@ -4658,7 +4662,7 @@ def _credit_guard_error(registry: dict, type_name: str) -> dict:
 
 
 def plan_credit_guards(registry: dict, now=None, fetch=None,
-                       env: dict | None = None) -> dict:
+                       env: dict | None = None, helper=None) -> dict:
     """The `{provider: guard}` map `autoos_resolver.usable_legs` refuses a credit
     leg with (brief FREEKEYS-2 item 2): this month's spend per `credit` provider
     against its own `monthly_cap_usd`, read from the gateway's call log.
@@ -4692,6 +4696,29 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
 
     `fetch`/`env`/`now` are injectable so a test can drive this without a
     gateway, a key or the clock; the callers pass none of them.
+
+    T1-CREDIT-FIX-10 M1 (D-250): the rows come from the first transport that
+    answers. The manage-key HTTP fetch wins when the key file is non-empty
+    and answers 200; else the gateway's read-only CLI helper transport
+    (`autoos_usage.helper_fetch`, docker exec into the gateway container --
+    no key involved) is tried when docker and the container exist; else the
+    guards fall back to unknown with the D-240 local estimate. The helper is
+    the default stack's second transport: an explicitly injected `fetch`
+    that fails reads as that transport being down (old tests drive exactly
+    this), so the helper is attempted only when `helper` is injected or
+    `fetch` is the default. `helper` is injectable for the same reason
+    `fetch` is (a test must never touch the real container); production
+    passes neither. Every measured guard note names its rows source
+    (`measured via manage key` / `measured via gateway helper`); an
+    unmeasured paid guard carries the D-240 line (`local estimate (D-240)`).
+
+    T1-CREDIT-FIX-10 M4 (D-253): when the helper is in play, the scheduled
+    provider balances (`GET /api/usage/provider-limits` through the same
+    helper transport) become the paid meter -- a provider with an in-month
+    balance series is judged on decreases, recorded reading by reading in
+    the git-ignored state-dir ledger. No series: the call ledger governs
+    (`measured via call ledger`), and an unmeasured paid guard keeps the
+    D-240 line. Balance reads never fail the plan.
     """
     cache_key = id(registry)
     cached = CREDIT_GUARD_CACHE.get(cache_key)
@@ -4708,23 +4735,64 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     fetch_cut = usage_mod.fetch_cutoff(registry, now)
     gateway = (env.get("AUTOOS_OMNIROUTE_URL")
                or usage_mod.DEFAULT_GATEWAY).rstrip("/")
+    use_helper = helper is not None or fetch is None
     fetch = fetch or usage_mod.urllib_fetch
-    try:
-        key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
-        rows, _pages, truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
+    helper_fetch_fn = helper or usage_mod.helper_fetch
+
+    def _measured(rows, truncated):
         guards = usage_mod.credit_guards(registry, rows, cutoff, today=now,
                                          complete=not truncated)
         guards.update(_paid_guards_measured(registry, rows, cutoff,
                                             complete=not truncated))
+        return guards
+
+    def _tag_source(guards, source):
+        # Every measured guard note names the rows source that produced it.
+        # A D-240 line is terminal in its note (the kept/refused line reads
+        # exactly), so the tag skips notes that already carry one.
+        for guard in (guards or {}).values():
+            if not isinstance(guard, dict) or not guard.get("note"):
+                continue
+            if "(D-240)" in guard["note"]:
+                continue
+            guard["note"] = "%s [%s]" % (guard["note"], source)
+        return guards
+
+    rows_source = None
+    try:
+        key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
+        rows, _pages, truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
+        rows_source = "measured via manage key"
+        guards = _tag_source(_measured(rows, truncated), rows_source)
     except (usage_mod.UsageError, OSError, ValueError) as exc:
         # Every failure mode the read predicts (gateway refusal/unreachable,
         # missing key, unreadable ledger, a grant that cannot state its cap):
         # `unknown` (fail open for credit, kept for paid as last resort per
-        # D-212; a local paid cap follows in CREDIT-10 per D-240), never a
+        # D-212, held to the D-240 local cap), never a
         # traceback.
         # ValueError already covers JSON decode errors: fetch_window rewraps
         # bad pages as UsageError, and JSONDecodeError subclasses ValueError.
-        guards = _credit_guards_unreadable(registry, usage_mod.spend_failure_note(exc))
+        first_failure = exc
+        if use_helper:
+            # T1-CREDIT-FIX-10 M1 (D-250): the manage-key read did not answer
+            # 200 -- try the read-only helper transport before giving up on a
+            # measurement. The helper takes no key (it authenticates inside
+            # the container), so `key` is never passed, printed or read here.
+            def _helper_transport(url, headers, timeout):
+                return helper_fetch_fn(url, None, timeout)
+            try:
+                rows, _pages, truncated = usage_mod.fetch_window(
+                    _helper_transport, gateway, "", fetch_cut)
+                rows_source = "measured via gateway helper"
+                guards = _tag_source(_measured(rows, truncated), rows_source)
+            except (usage_mod.UsageError, OSError, ValueError) as exc2:
+                guards = _credit_guards_unreadable(
+                    registry, usage_mod.spend_failure_note(exc2))
+                usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+        else:
+            guards = _credit_guards_unreadable(
+                registry, usage_mod.spend_failure_note(first_failure))
+            usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
         # surface as its own `guard error` state -- kept for credit, kept for
@@ -4733,6 +4801,15 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         # never silently `unknown` (which would read as a gateway outage) or
         # `ok`.
         guards = _credit_guard_error(registry, type(exc).__name__)
+    if use_helper and rows_source is not None:
+        # T1-CREDIT-FIX-10 M4 (D-253): the scheduled provider balances are
+        # the paid meter ... (see `usage_mod.overlay_balance_guards`). This
+        # never fails the plan -- a balance read is a meter, not a gate.
+        try:
+            guards = usage_mod.overlay_balance_guards(
+                registry, guards, gateway, helper_fetch_fn, env, cutoff, now)
+        except Exception:  # noqa: BLE001 - the meter must never break the map
+            pass
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 

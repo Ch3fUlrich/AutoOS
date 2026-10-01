@@ -3192,6 +3192,26 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
+def _check_paid_local_cap(registry) -> list:
+    """policy.paid_local_cap_usd, when present, is a number > 0.
+
+    T1-CREDIT-FIX-10 M2 (D-240): the USD cap an UNMEASURED paid leg is held
+    to (default 20 when absent -- absence is fine, not a problem). A present
+    but non-positive/non-numeric value is flagged loudly; the runtime reads
+    the default rather than billing against a made-up number.
+    """
+    problems = []
+    policy = _section(registry, "policy")
+    if "paid_local_cap_usd" not in policy:
+        return problems
+    value = policy["paid_local_cap_usd"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not value > 0:
+        problems.append("policy.paid_local_cap_usd must be a number > 0, "
+                        "got %r" % (value,))
+    return problems
+
+
 def check_registry(registry, today=None) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -3207,6 +3227,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_provider_prices(registry))
+    problems.extend(_check_paid_local_cap(registry))
     problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))

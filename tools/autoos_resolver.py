@@ -1232,9 +1232,15 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 pass
             elif guard.get("state") == "refuse":
                 # Measured spend >= cap: refuse the leg (real budget protection)
-                reasons.append("paid spend %s $%.2f/$%.2f"
-                               % (provider_id, float(guard.get("spend_usd") or 0.0),
-                                  float(guard.get("cap_usd") or 0.0)))
+                # T1-CREDIT-FIX-10 M2 (D-240): an UNMEASURED spend held to the
+                # local cap refuses with its own reason -- the note names the
+                # estimate, the cap and D-240, so it is the reason verbatim.
+                if "(D-240)" in (guard.get("note") or ""):
+                    reasons.append(guard["note"])
+                else:
+                    reasons.append("paid spend %s $%.2f/$%.2f"
+                                   % (provider_id, float(guard.get("spend_usd") or 0.0),
+                                      float(guard.get("cap_usd") or 0.0)))
             elif guard.get("state") == "warn" and credit_warns is not None:
                 line = "paid spend warn %s $%.2f/$%.2f" % (
                     provider_id, float(guard.get("spend_usd") or 0.0),
@@ -1246,8 +1252,13 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 # Unmeasurable spend: leg kept (last resort), add visible warning
                 # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not say
                 # 'kept'.
+                # T1-CREDIT-FIX-10 M2 (D-240): a kept line that already names
+                # the local estimate is emitted verbatim; anything else keeps
+                # the D-212 line exactly as before.
                 if credit_warns is not None:
-                    line = "paid spend unmeasured %s - leg kept (last resort, D-212)" % provider_id
+                    note = guard.get("note") or ""
+                    line = note if "(D-240)" in note else \
+                        "paid spend unmeasured %s - leg kept (last resort, D-212)" % provider_id
                     pending_extra.append(line)
             # spend_unknown / unknown / guard error -> leg KEPT (last resort)
             # No reason added means the leg passes through to legs.append()
