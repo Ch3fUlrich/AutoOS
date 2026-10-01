@@ -41,6 +41,40 @@ checkout) and the first also switched its branch; both were halted, their WIP pr
 was finished by L1-alpha directly with no subagent — the branch is checked out only in this
 worktree, which is the fence that closes the failure mode.
 
+## Review
+
+Free family: `opencode/space-bunny-free`, session `ses_f07d474c1ffeGG7VK3v6dsRmz3`, nonce
+`RENDERFIX-NONCE-6Xn2Pq9W` quoted in all three rounds → **APPROVED** on `5c8b38df`.
+
+Three rounds, and the two "fix-first" verdicts were both earned:
+
+- **Round 1** — caught that I had introduced a **tautology** (`assertIn` on the list the fixture had
+  just built) while the doc claimed no tautology existed, and that the free-ai row had **dropped
+  positional coverage**. Both fixed; its controls proved the two synthetic re-opens are
+  intent-preservation (a `zen` leg prepended the same way *does* reach the LiteLLM block; the
+  antigravity one does not, so `GATEWAY_ONLY` is the cause).
+- **Round 2** — caught that my *correction* introduced a **new false claim** ("no assertion was
+  removed" + a stale count). Fixed with counts measured one way (267 base → 276 tip) instead of a
+  figure that moved as I edited.
+- **Round 3** — verified the claim true and self-consistent, and went further than asked: across all
+  **145 test methods** exactly three carry fewer assertions than base — the three renamed ones — and
+  **each successor gained assertions**; no surviving test lost one. It re-derived the positional pins
+  from the live render and confirmed the contract gate was strengthened, never weakened.
+
+It also resolved the 52-vs-53 five-file alarm **against this branch**: the two full failure lists
+differ in exactly one test,
+`tests/test_autoos_spawner.py::McpStdioTests::test_initialize_tools_list_and_a_dry_run_spawn`, and it
+reproduced **both** counts at this very tip — a real-subprocess (Popen + blocking `readline`) flake
+in a file this branch does not touch.
+
+## Scope
+
+`git diff --name-status 75af3236..HEAD`: `M CHANGELOG.md`, `A docs/handoff/2026-10-01-laneRenderFix.md`,
+`A logs/handoff-sessions/DONE-ws-renderfix.md`, `M tests/run-tests.ps1`, `M tests/test_registry_render.py`.
+No `catalog/`, `configuration/`, `tools/` or `.gitignore` change; no live apply; the operator's `main`
+checkout was only ever read from.
+
+
 ### CHANGELOG bullet
 
 - `test(render): update the 15 stale `tests/test_registry_render.py` expectations to the
