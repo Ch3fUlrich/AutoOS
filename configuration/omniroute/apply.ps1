@@ -527,6 +527,14 @@ if ($DryRun) {
     }
 }
 
+# TORDER 2026-10-01: combo-contract gate (fail-closed, also under -DryRun).
+# Every combo must satisfy tools/combo-contract.py (contexts, trial->free->
+# credits->paid with paid last/deepseek last/no-free-after-paid, openrouter
+# :free-only, resolve+live, t1 >=600k 1M, t2/t3 128k) before anything is created.
+$contractScript = Join-Path $Root 'tools\combo-contract.py'
+& python $contractScript
+if ($LASTEXITCODE -ne 0) { Write-Host 'combo-contract failed - refusing to create combos'; exit 1 }
+
 # --- (Re)create combos --- ---
 Write-Host 'Combos:'
 $comboDoc = Get-Content $CombosFile -Raw -Encoding utf8 | ConvertFrom-Json

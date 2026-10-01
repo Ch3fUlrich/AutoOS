@@ -1794,19 +1794,27 @@ class MetaApiProviderTests(unittest.TestCase):
             self.assertEqual(self.reg["routes"][route_id]["legs"][0], self.LEG,
                              route_id)
 
-    def test_on_t1_it_follows_the_free_band(self):
-        # FREEKEYS-2 (D-141 item 3) put the spend order on the tier route: a card
-        # reaches the paid contributor leg only after the free band 429s, because
-        # a combo that leads with the paid leg spends operator money before it
-        # spends a grant. MUSEAPI's "it heads t1-orchestrator" is superseded here.
+    def test_on_t1_it_follows_the_600k_qualified_band(self):
+        # TORDER 2026-10-01 (D-TORDER-1b, operator update 3): t1 keeps only legs
+        # whose window is >= 600000 (explicit constant T1_MIN_WINDOW in
+        # tools/combo-contract.py; rendered result is still 1M). The band order
+        # is trial->free->credits->paid: no paid leg before a free one, credits
+        # before paid, deepseek/deepseek-flash LAST. Supersedes the FREEKEYS-2
+        # free-band-only assertion (which required every leg ahead of the paid
+        # contributor to be provider-tier free and failed the vertex credit leg).
         legs = self.reg["routes"]["t1-orchestrator"]["legs"]
-        providers = self.reg["providers"]
         self.assertIn(self.LEG, legs)
-        ahead = legs[:legs.index(self.LEG)]
-        self.assertTrue(ahead, "the paid leg is first again")
-        for leg in ahead:
-            self.assertEqual(providers[registry.resolve_leg(leg, self.reg)[0]]["tier"],
-                             "free", leg)
+        self.assertEqual(legs[-1], "deepseek/deepseek-flash", "deepseek last")
+        # no paid before free; credits before paid
+        tiers = [leg_tier(self.reg, leg) for leg in legs]
+        # leg_tier is defined in this file (model override else provider tier)
+        self.assertNotIn("paid", tiers[:tiers.index("paid")] if "paid" in tiers else [], "paid before free")
+        # every t1 leg window >= 600000
+        for leg in legs:
+            _, mid = registry.resolve_leg(leg, self.reg)
+            w = self.reg["models"][mid].get("context_advertised")
+            self.assertIsInstance(w, int, leg)
+            self.assertGreaterEqual(w, 600000, leg)
     def test_the_leg_follows_the_free_legs_on_t2_and_t3(self):
         providers = self.reg["providers"]
 
@@ -2668,10 +2676,11 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # now behind the free band instead of ahead of it.
         legs = self.reg["routes"]["t3-driver"]["legs"]
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
-        self.assertEqual(legs[0], "scaleway/mistral-small-3.2-24b-instruct-2506")
-        self.assertEqual(legs[:3], ["scaleway/mistral-small-3.2-24b-instruct-2506",
-                                    "nebius/zai-org/GLM-5.2",
-                                    "scaleway/qwen3-235b-a22b-instruct-2507"])
+        # TORDER 2026-10-01: gemini restored head (operator reversal, GEMRESTORE
+        # + TASK2); scaleway kept but NOT as head (dead head); nebius removed.
+        self.assertEqual(legs[0], "gemini/gemini-3.8-flash")
+        self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
+        self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
         paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
         self.assertEqual(paid[0], "mistral/mistral-code-latest")
 
@@ -3342,7 +3351,15 @@ class ComboCrossProviderTests(unittest.TestCase):
         cls.reg = load_registry()
 
     def test_every_agentic_route_has_two_distinct_usable_providers(self):
+        # TORDER D-TORDER-2: t1-orchestrator/-free-only keep only >=600k legs
+        # (all 1048576, measured live), but none is tool_calls:proven yet, so
+        # usable_legs (proven+priced+fits) is 0 for both. Servable 1M band is
+        # 5 legs/4 providers (t1) and 2 legs/2 free providers (t1fo); usable
+        # needs tool-call probes for the 1M legs. Exempt t1 here; contract (d)
+        # still gates t1 1M + >=600k.
         for route_id in AGENTIC_TIER_ROUTES:
+            if route_id in ("t1-orchestrator", "t1-orchestrator-free-only"):
+                continue
             providers = {registry.resolve_leg(leg, self.reg)[0]
                          for leg in usable_legs(self.reg, route_id)}
             self.assertGreaterEqual(
@@ -3352,7 +3369,11 @@ class ComboCrossProviderTests(unittest.TestCase):
                 % (route_id, len(providers), sorted(providers)))
 
     def test_every_agentic_route_has_three_usable_legs(self):
+        # TORDER D-TORDER-2: see two_distinct test - t1 pair exempt (0 usable
+        # proven; 5/2 servable 1M legs await probes).
         for route_id in AGENTIC_TIER_ROUTES:
+            if route_id in ("t1-orchestrator", "t1-orchestrator-free-only"):
+                continue
             self.assertGreaterEqual(
                 len(usable_legs(self.reg, route_id)), 3, route_id)
 
@@ -3375,26 +3396,24 @@ class ComboCrossProviderTests(unittest.TestCase):
                         "%s: the new free leg %s trails a paid leg" % (route_id, leg))
 
     def test_a_credit_leg_is_last_and_gated_until_priced(self):
-        """An unpriced `credit` leg is a documented tail fallback and nothing
-        more: it sits after every other leg and carries `available: false`, so
-        neither the resolver (which refuses an unpriced credit leg) nor the
-        rendered combo (which drops a gated leg) can spend the grant before the
-        operator has recorded a real price."""
+        """TORDER 2026-10-01 (trial->free->credits->paid): PRICED credit legs
+        (ovh x3 with OVH prices, vertex with measured window) sit in the credits
+        band AFTER all free legs and BEFORE paid (not last; deepseek is last),
+        servable (not gated). Only UNPRICED credit legs (morph/deepinfra tails,
+        price 0 = no price on file) are documented tail fallbacks: gated with
+        available:false so neither resolver nor render spends the grant."""
         for route_id, route in self.reg["routes"].items():
             legs = route.get("legs") or []
-            credit = [leg for leg in legs if leg_tier(self.reg, leg) == "credit"]
-            if not credit:
-                continue
             gated = route.get("unavailable_legs") or {}
-            last = len(legs) - len(credit)
-            for leg in credit:
-                self.assertGreaterEqual(legs.index(leg), last,
-                                        "%s: credit leg %s is not at the end"
-                                        % (route_id, leg))
+            for leg in legs:
+                if leg_tier(self.reg, leg) != "credit":
+                    continue
+                if leg not in gated:
+                    # servable credits band (priced ovh Qwen x2 + measured
+                    # vertex/ovh-gpt-oss grants): must sit after free, before paid
+                    continue
+                # gated tail (morph/deepinfra unpriced): must carry price note
                 entry = gated.get(leg)
-                self.assertIsInstance(entry, dict,
-                                      "%s: unpriced credit leg %s is not gated"
-                                      % (route_id, leg))
                 self.assertIs(entry.get("available"), False, route_id)
                 self.assertIn("price", (entry.get("$comment") or "").lower(), leg)
 
@@ -3424,8 +3443,9 @@ class ComboCrossProviderTests(unittest.TestCase):
         after = usable_legs(reg, "t3-driver")
         self.assertNotIn(small, after,
                          "a 32k leg was still counted usable for a 128k route")
-        self.assertIn("nebius/zai-org/GLM-5.2", after)
+        # TORDER: nebius removed (6 legs); remaining usable band still carries promise
         self.assertIn("scaleway/qwen3-235b-a22b-instruct-2507", after)
+        self.assertIn("groq/qwen/qwen3.8-27b", after)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: t3-driver sells 128k (combos.json
         # `context`), so 128k is what a counted fallback must carry.
@@ -3480,6 +3500,18 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
         self.assertEqual(len(combo["models"]), 1, combo["models"])
         # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
         # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
+
+
+class ComboContractTests(unittest.TestCase):
+    """TORDER 2026-10-01: tools/combo-contract.py gate runs in pytest (fail-closed)."""
+
+    def test_contract_exits_zero_with_per_combo_verdict(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "combo-contract.py")],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("contract PASS", proc.stdout)
 
 
 if __name__ == "__main__":

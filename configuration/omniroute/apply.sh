@@ -1006,6 +1006,12 @@ else
     done
 fi
 
+# TORDER 2026-10-01: combo-contract gate (fail-closed, also under --dry-run).
+if ! python3 "$ROOT/tools/combo-contract.py"; then
+  echo "combo-contract failed - refusing to create combos" >&2
+  exit 1
+fi
+
 # ─── (Re)create combos ──────────────────────────────────────────────────────
 # The gateway's model catalog, read once. The omniroute *client* key authorises
 # /v1/models, and it goes to omni_rest — which writes a 0600 curl --config file

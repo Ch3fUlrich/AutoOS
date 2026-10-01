@@ -310,6 +310,7 @@ Test-Case 'registry: no generated file drifts' {
     # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
     # only semantically (regenerate: python3 tools/registry.py render ide
     # --out catalog/ide-models.json).
+    # TORDER 2026-10-01: combo-contract gate (fail-closed) runs here too.
     if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
@@ -317,6 +318,8 @@ Test-Case 'registry: no generated file drifts' {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
             Assert-True ($rc -eq 0) "render $t drift: $out"
         }
+        $out = & python3 (Join-Path $Root 'tools\combo-contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE

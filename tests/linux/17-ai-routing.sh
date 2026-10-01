@@ -2596,3 +2596,7 @@ if it "no committed secrets in router files"; then    # Report file:line only - 
     if [[ -z "$hits" ]]; then pass; else fail "credential-shaped value at: $hits"; fi
 fi
 
+if it "combo-contract gate passes (TORDER fail-closed)"; then
+    out="$(python3 tools/combo-contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
