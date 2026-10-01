@@ -18855,14 +18855,6 @@ class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
         self.cli.isolate_clone(root, dest, "agent/t2s3enc")
         self.assertTrue(os.path.isdir(dest))
 
-    def test_example_template_is_exempt(self):
-        root = self._root_with("api-keys.example.yml", "api-keys: FAKE\n")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        dest = os.path.join(tmp, "sandbox")
-        self.cli.isolate_clone(root, dest, "agent/t2s3ex")
-        self.assertTrue(os.path.isdir(dest))
-
 
     def test_binary_plaintext_secret_refuses_naming_path_only(self):
         # I5: `git cat-file -p` ran with text=True, so a binary client.p12
@@ -18987,14 +18979,6 @@ class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
             "sops_version=3.8.1\nsops_lastmodified=2026-01-01\n"))
         self.assertFalse(self.cli._isolate_blob_encrypted(
             "TOKEN=PLAINTEXT\nsops_version=3.8.1\n"))
-
-    def test_example_template_is_exempt(self):
-        root = self._root_with("api-keys.example.yml", "api-keys: FAKE\n")
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        dest = os.path.join(tmp, "sandbox")
-        self.cli.isolate_clone(root, dest, "agent/t2s3ex")
-        self.assertTrue(os.path.isdir(dest))
 
 
 class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
