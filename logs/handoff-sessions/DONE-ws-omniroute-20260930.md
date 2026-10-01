@@ -71,6 +71,21 @@ Post-restart probes, all PASS: `probe-clamp` (over-cap qwen3-235b → 200, no ca
 - **No per-leg timeout knob exists** in the gateway; the crawl was fixed by removing dead
   legs and letting the 30-min park skip them.
 
+## Review
+
+Docs-only closeout commit reviewed by a **free family**: `opencode/longcat-2.5-preview-free`,
+session `ses_f091c6fe0ffensOsHHC3YUlF0C`, nonce `CLOSEOUT-NONCE-7Yq3Zm8K` quoted back →
+**APPROVED**. It independently reproduced: main's
+`render omniroute --check` exit 0, `combo-contract.py` `23 PASS (LIVE 4161 models)`,
+`registry.py check` (36/80/53), `run-tests.ps1 -Filter combos.json` `236/0/0`, the
+25-commit count and the `bd0ad278 → 11757db4` take, `providers.google_ai_studio`
+`available: True`, the ignored-and-moved artifacts, `test_credential_files_ignored.py`
+3/3, and **0** secret-pattern matches across the three docs. It found no internal
+contradictions and listed only point-in-time live measurements and historical session ids
+as unreproducible (each corroborated in-repo). First reviewer
+(`openrouter/nvidia/nemotron-3-super-120b-a12b:free`) died on a provider error with no
+verdict — recorded, not counted as a pass.
+
 ## Open items (not owned by this track)
 
 1. `free-ai/google/gemini-3.8-flash` is `premium_requires_purchase`, not free — recorded as
