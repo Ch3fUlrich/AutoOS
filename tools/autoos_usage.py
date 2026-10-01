@@ -806,16 +806,23 @@ def is_spend_row(row, provider=SPEND_PROVIDER, registry=None):
     """True when the gateway billed this row to the watched provider.
 
     Matches the registry id, its `omniroute_id`/`model_prefix`, and rows
-    whose model is namespaced `<any of those>/...` -- a `vertex/...` model
-    billed under either spelling is vertex_ai's money either way. A bare
-    model under another provider (`gemini-3.8-flash` via AI-Studio) and a
+    with no provider of their own whose model is namespaced `<any of those>/...`
+    -- a `vertex/...` model billed under either spelling is vertex_ai's money
+    either way. A row whose provider field names a DIFFERENT (non-empty,
+    non-matching) provider never counts via its model namespace
+    (T1-CREDIT-FIX-8 C2: an `openrouter` row for `deepseek/...` is OpenRouter's
+    money -- billing it to DeepSeek held the paid leg on spend elsewhere). A
+    bare model under another provider (`gemini-3.8-flash` via AI-Studio) and a
     lookalike namespace (`vertexish/...`) match nothing: the comparison is
-    exact per namespace, never a substring."""
+    exact per namespace, never a substring, case-insensitive on both sides."""
     if not isinstance(row, dict):
         return False
     spellings = _provider_spellings(provider, registry)
-    if str(row.get("provider") or "").strip().lower() in spellings:
+    prov = str(row.get("provider") or "").strip().lower()
+    if prov in spellings:
         return True
+    if prov:
+        return False
     model = row.get("model")
     if isinstance(model, str) and "/" in model:
         if model.split("/", 1)[0].strip().lower() in spellings:
