@@ -67,11 +67,13 @@ its renders. Full reasoning + the exact read path: evidence §0 and §8.
 
 ## 5. Reviews
 
-Two `t3-reviewer` leaves, two families (one free), read-only, nonce-gated on
-`INVARFIX-NONCE-2Vb9Xq4M`. Verdicts recorded in the follow-up commit to the
-evidence file.
+Two `t3-reviewer` leaves, two families (**including one free route**), read-only,
+nonce-gated on `INVARFIX-NONCE-2Vb9Xq4M` — **both APPROVED**:
 
 | # | Reviewer route (family) | Verdict | Session |
 |---|---|---|---|
-| 1 | `omniroute/t3-driver-clean` (DeepSeek, paid) | _pending_ | — |
-| 2 | free route | _pending_ | — |
+| 1 | `omniroute/t3-driver-clean` (DeepSeek, paid) | APPROVED | `ses_f09ee7d34ffepTEcGMX1JZpPEd` |
+| 2 | `omniroute/t3-driver-free-only` (free route) | APPROVED | `ses_f09ea7c41ffe1MumXWU2gvLX66` |
+
+Full detail (what each read + the two pre-verdict free-route attempts) in the
+evidence §10.

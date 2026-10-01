@@ -300,14 +300,44 @@ Diff: `4 files changed, 24 insertions(+), 3 deletions(-)` for the code/render se
 
 ## 10. Reviews
 
-Two `t3-reviewer` subagents, two different families **including one free model**
-(operator mandate), read-only, nonce-gated on `INVARFIX-NONCE-2Vb9Xq4M`. Verdicts
-recorded in the follow-up commit to this file.
+Two `t3-reviewer` subagents, two different families **including one free route**
+(operator mandate), read-only, nonce-gated on `INVARFIX-NONCE-2Vb9Xq4M`; both
+quoted the nonce back from THIS file and neither edited anything.
 
 | # | Reviewer route (family) | Verdict | Session |
 |---|---|---|---|
-| 1 | `omniroute/t3-driver-clean` (DeepSeek, paid) | _pending_ | — |
-| 2 | free route | _pending_ | — |
+| 1 | `omniroute/t3-driver-clean` (DeepSeek, paid) | APPROVED | `ses_f09ee7d34ffepTEcGMX1JZpPEd` |
+| 2 | `omniroute/t3-driver-free-only` (free route) | APPROVED | `ses_f09ea7c41ffe1MumXWU2gvLX66` |
+
+What each read and verified:
+
+- **#1 (DeepSeek):** `git show --stat` (exactly the six expected files);
+  the invariant test → `ok`; `registry.py check` → the `ok:` line (exit 0);
+  `audit-router.py --offline` → `no drift`; `git show HEAD -- catalog/ai-registry.json`
+  → exactly one leg added (`groq/qwen/qwen3.8-27b`), zero `nebius/*` deletions;
+  `render litellm --check` + `render models-doc --check` → `ok`; independently
+  recomputed the six counts after stripping `nebius/*` → `t1-orchestrator`
+  `2 ['groq','scaleway']`, the rest `4/5/4/5/4`; judged §8 honest and the change
+  minimal. Verdict APPROVED.
+- **#2 (free route):** the same commands, the same six-file stat, the same
+  one-leg diff, the same `ok`/`no drift`, and the same recomputed counts
+  (`t1-orchestrator usable_legs=3 distinct_providers=2 ['groq','scaleway']`).
+  Quoted the nonce twice. Verdict APPROVED.
+
+**Two free-route attempts before #2 succeeded, recorded verbatim:**
+
+- `omniroute/or-qwen3.8-27b-free` was **not a registered model** →
+  `Model "omniroute/or-qwen3.8-27b-free" is not available` (no session created).
+  The free route was then taken from the registered set
+  (`omniroute/t1-orchestrator-free-only`, `omniroute/t3-driver-free-only`).
+- A first free leaf on `omniroute/t1-orchestrator-free-only`
+  (session `ses_f09ed735bffe76Hvbcs24F7uOz`) quoted the nonce and verified every
+  step correctly, but its final line read
+  `VERDICT: The registry edit in section 8 is honest and minimal.` instead of the
+  exact token. It is corroboration, not the recorded verdict; #2 re-ran the same
+  checks on `omniroute/t3-driver-free-only` and emitted `VERDICT: APPROVED`
+  cleanly. No `chat_admission_busy` and no `Rate limit exceeded` were seen during
+  any review; no backoff was needed.
 
 ## 11. Explicitly NOT done here
 
