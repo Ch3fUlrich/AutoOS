@@ -1895,6 +1895,11 @@
         "minutes": 8,
         "source": "default"
       },
+      "credit": {
+        "minutes": 5,
+        "source": "default",
+        "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+      },
       "free": {
         "minutes": 5,
         "source": "default"
@@ -2232,6 +2237,38 @@
           "alpha": 1,
           "beta": 5,
           "source": "2026-09-25"
+        }
+      },
+      "credit": {
+        "S0": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S1": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
         }
       },
       "free": {

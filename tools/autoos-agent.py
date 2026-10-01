@@ -4550,9 +4550,9 @@ def _paid_guards_unreadable(registry: dict, why: str) -> dict:
     """`{provider id: guard}` for paid rows when spend cannot be measured.
 
     Total: never raises. Every entry reads `unknown` with `spend_unknown`
-    True -- and unlike a credit grant the resolver HOLDS the leg on these
-    (fail closed: a post-paid overage bills real money, while a spent prepaid
-    grant rejects at the provider and falls through)."""
+    True -- D-212: paid legs are STANDING LAST-RESORT legs, so they are KEPT
+    with a visible note 'paid spend unmeasured <provider> - leg kept (last
+    resort, D-212)'. They are REFUSED only when MEASURED spend >= monthly_cap_usd."""
     out = {}
     for pid in _paid_guard_ids(registry):
         cap = warn = 0.0
@@ -4564,8 +4564,8 @@ def _paid_guards_unreadable(registry: dict, why: str) -> dict:
         out[pid] = {"provider": pid, "state": "unknown",
                     "spend_usd": 0.0, "spend_unknown": True,
                     "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
-                    "note": "paid spend unknown %s: %s - leg held (fail closed)"
-                            % (pid, why or "no call-log rows")}
+                    "note": "paid spend unmeasured %s - leg kept (last resort, D-212)"
+                            % pid}
     return out
 
 

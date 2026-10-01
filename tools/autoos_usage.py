@@ -91,6 +91,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -324,8 +325,15 @@ def manual_credit_spend(registry, provider):
     as_of = entry.get("credit_spent_as_of")
     if figure is None and as_of is None:
         return None, None
+    # Reject non-finite values (NaN, Infinity, -Infinity)
     if (isinstance(figure, bool) or not isinstance(figure, (int, float))
-            or figure < 0 or not isinstance(as_of, str) or not as_of.strip()):
+            or figure < 0 or not math.isfinite(figure)
+            or not isinstance(as_of, str) or not as_of.strip()):
+        return None, None
+    # Validate YYYY-MM-DD format
+    try:
+        datetime.datetime.strptime(as_of.strip(), "%Y-%m-%d")
+    except ValueError:
         return None, None
     return float(figure), as_of.strip()
 
@@ -974,9 +982,9 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     try:
         key = read_manage_key(path)
     except OSError:
-        print("autoos-usage: manage key file missing or empty: %s - create a manage-scoped "
-              "key in the OmniRoute dashboard and save it there (mode 600) - spend unmeasured"
-              % path, file=sys.stderr)
+        print("autoos-usage: manage key file missing or empty - create a manage-scoped "
+              "key in the OmniRoute dashboard and save it there (mode 600) - spend unmeasured",
+              file=sys.stderr)
         return 3
 
     gateway = (env.get("AUTOOS_OMNIROUTE_URL") or DEFAULT_GATEWAY).rstrip("/")
@@ -986,7 +994,8 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                                               min(cutoff, spend_cutoff)
                                               if spend_on else cutoff)
     except UsageError as e:
-        print("autoos-usage: %s" % e, file=sys.stderr)
+        # Print only the exception type name, not the message which may contain URLs
+        print("autoos-usage: spend unmeasured (%s)" % type(e).__name__, file=sys.stderr)
         text = str(e)
         # The distinct manage-key line (T1-CREDIT-FIX): a 403 is the observed
         # failure -- a short/revoked/wrong-scoped key the gateway refuses --
@@ -996,9 +1005,6 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                   file=sys.stderr)
         elif "HTTP 401" in text:
             print("autoos-usage: manage key rejected (401) - spend unmeasured",
-                  file=sys.stderr)
-        else:
-            print("autoos-usage: spend unmeasured (%s)" % type(e).__name__,
                   file=sys.stderr)
         return 3
 

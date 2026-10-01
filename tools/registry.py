@@ -176,6 +176,7 @@ import fnmatch
 import importlib.util
 import ipaddress
 import json
+import math
 import re
 import sys
 from datetime import datetime, timezone
@@ -2936,12 +2937,19 @@ def _check_credit_guards(registry) -> list:
                             % (provider_id, figure, as_of))
             continue
         if isinstance(figure, bool) or not isinstance(figure, (int, float)) \
-                or figure < 0:
-            problems.append("providers.%s: credit_spent_usd must be a number >= 0, "
+                or figure < 0 or not math.isfinite(figure):
+            problems.append("providers.%s: credit_spent_usd must be a finite number >= 0, "
                             "got %r" % (provider_id, figure))
         if not isinstance(as_of, str) or not as_of.strip():
             problems.append("providers.%s: credit_spent_as_of must be a non-empty "
                             "date (YYYY-MM-DD), got %r" % (provider_id, as_of))
+        else:
+            # Validate YYYY-MM-DD format
+            try:
+                datetime.strptime(as_of.strip(), "%Y-%m-%d")
+            except ValueError:
+                problems.append("providers.%s: credit_spent_as_of must be a valid "
+                                "date YYYY-MM-DD, got %r" % (provider_id, as_of))
     # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
     # label every reader branches on, so a row that keeps `credit_usd` and calls
     # itself `free` silently un-limits the money, drops out of the leg filter's

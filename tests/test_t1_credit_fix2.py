@@ -159,9 +159,13 @@ class C3UsageReportMissingCap(unittest.TestCase):
         self.assertNotIn("Traceback", err.getvalue())
 
 
-class C4PaidStaysFailClosed(unittest.TestCase):
-    """A tier==paid provider with a cap holds the leg when spend is
-    unmeasurable (post-paid overage bills real money); tier==credit keeps."""
+class C4PaidLastResort(unittest.TestCase):
+    """D-212: paid legs (deepseek) are STANDING LAST-RESORT legs.
+    
+    A paid leg with unmeasurable spend is KEPT with a visible note
+    'paid spend unmeasured <provider> - leg kept (last resort, D-212)'.
+    It is REFUSED only when MEASURED spend >= its monthly_cap_usd.
+    """
 
     def setUp(self):
         agent.CREDIT_GUARD_CACHE.clear()
@@ -170,16 +174,57 @@ class C4PaidStaysFailClosed(unittest.TestCase):
         with open(os.path.join(self.keydir, "manage.key"), "w") as fh:
             fh.write("x")
 
-    def test_paid_with_unmeasurable_spend_holds_the_leg(self):
+    def test_paid_with_unmeasurable_spend_keeps_the_leg(self):
+        """Paid leg with unmeasurable spend is kept (last resort), not held."""
         def down(url, headers, timeout):
             raise OSError("connection refused")
         guards = agent.plan_credit_guards(
             _reg_paid(), now=NOW, fetch=down, env=_env_key(self.keydir))
-        kept, skipped, _warns = _legs_for(_reg_paid(), "r-paid", guards)
+        # The guard state should be "unknown" with a note about unmeasured spend
+        self.assertEqual(guards["deepseek"]["state"], "unknown")
+        self.assertIn("paid spend unmeasured deepseek", guards["deepseek"]["note"])
+        self.assertIn("leg kept (last resort, D-212)", guards["deepseek"]["note"])
+        kept, skipped, warns = _legs_for(_reg_paid(), "r-paid", guards)
+        self.assertIn(("deepseek", "ds-model"), kept)
+        self.assertNotIn("deepseek/ds-model", skipped)
+        self.assertTrue(any("paid spend unmeasured deepseek" in w and "leg kept" in w
+                            for w in warns), warns)
+
+    def test_paid_with_measured_spend_above_cap_refuses_the_leg(self):
+        """Paid leg with measured spend >= monthly_cap_usd is refused."""
+        # Create a registry with paid provider and measured spend above cap
+        reg = _reg_paid(cap=25.0)
+        # 30M in + 30M out at 1e-06/token = $60, above $25 cap
+        rows = [{"timestamp": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "deepseek", "model": "ds-model",
+                 "tokens": {"in": 30_000_000, "out": 30_000_000}}]
+        def ok_fetch(url, headers, timeout):
+            return 200, json.dumps(rows).encode()
+        guards = agent.plan_credit_guards(
+            reg, now=NOW, fetch=ok_fetch, env=_env_key(self.keydir))
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        kept, skipped, _warns = _legs_for(reg, "r-paid", guards)
         self.assertNotIn(("deepseek", "ds-model"), kept)
         self.assertIn("deepseek/ds-model", skipped)
 
+    def test_paid_with_measured_spend_below_cap_keeps_the_leg(self):
+        """Paid leg with measured spend < monthly_cap_usd is kept."""
+        reg = _reg_paid(cap=25.0)
+        # 5M in + 5M out at 1e-06/token = $10, below $25 cap
+        rows = [{"timestamp": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "deepseek", "model": "ds-model",
+                 "tokens": {"in": 5_000_000, "out": 5_000_000}}]
+        def ok_fetch(url, headers, timeout):
+            return 200, json.dumps(rows).encode()
+        guards = agent.plan_credit_guards(
+            reg, now=NOW, fetch=ok_fetch, env=_env_key(self.keydir))
+        self.assertEqual(guards["deepseek"]["state"], "ok")
+        kept, skipped, _warns = _legs_for(reg, "r-paid", guards)
+        self.assertIn(("deepseek", "ds-model"), kept)
+        self.assertNotIn("deepseek/ds-model", skipped)
+
     def test_credit_with_unmeasurable_spend_keeps_the_leg(self):
+        """Credit tier still fails open (unchanged behavior)."""
         def down(url, headers, timeout):
             raise OSError("connection refused")
         guards = agent.plan_credit_guards(
@@ -197,6 +242,301 @@ class C5MissingGuardIsNamed(unittest.TestCase):
         self.assertNotIn("ovhcloud/ovh-priced", skipped)
         self.assertTrue(any("no guard for ovhcloud" in w for w in warns),
                        warns)
+
+
+class C6ClassFilterLatentBug(unittest.TestCase):
+    """T1-CREDIT-FIX-3: the class filter must not drop routes whose class is
+    present in one map when the other map is empty."""
+
+    def test_only_latency_seed_nonempty_credit_class_survives(self):
+        """When only latency_seed has entries, a 'credit' class route should survive."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": 200.0,
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {
+                "r-credit": {"id": "r-credit", "class": "credit",
+                            "legs": ["ovhcloud/ovh-priced"]},
+            },
+            "policy": {"leg_rules": [],
+                       "latency_seed": {"credit": {"minutes": 5, "source": "default"}},
+                       "seed_priors": {}},  # empty!
+        }
+        guards = usage.credit_guards(reg, [], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc))
+        survivors, removed = r.filter_routes(
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards)
+        self.assertIn("r-credit", survivors, "credit class should survive when only latency_seed has entries")
+        self.assertNotIn("r-credit", removed)
+
+    def test_only_seed_priors_nonempty_credit_class_survives(self):
+        """When only seed_priors has entries, a 'credit' class route should survive."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": 200.0,
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {
+                "r-credit": {"id": "r-credit", "class": "credit",
+                            "legs": ["ovhcloud/ovh-priced"]},
+            },
+            "policy": {"leg_rules": [],
+                       "latency_seed": {},  # empty!
+                       "seed_priors": {"credit": {"S0": {"alpha": 2, "beta": 1, "source": "default"}}}},
+        }
+        guards = usage.credit_guards(reg, [], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc))
+        survivors, removed = r.filter_routes(
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards)
+        self.assertIn("r-credit", survivors, "credit class should survive when only seed_priors has entries")
+        self.assertNotIn("r-credit", removed)
+
+    def test_both_maps_nonempty_credit_class_survives(self):
+        """When both maps have credit entries, the route should survive."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": 200.0,
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {
+                "r-credit": {"id": "r-credit", "class": "credit",
+                            "legs": ["ovhcloud/ovh-priced"]},
+            },
+            "policy": {"leg_rules": [],
+                       "latency_seed": {"credit": {"minutes": 5, "source": "default"}},
+                       "seed_priors": {"credit": {"S0": {"alpha": 2, "beta": 1, "source": "default"}}}},
+        }
+        guards = usage.credit_guards(reg, [], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc))
+        survivors, removed = r.filter_routes(
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards)
+        self.assertIn("r-credit", survivors, "credit class should survive when both maps have entries")
+        self.assertNotIn("r-credit", removed)
+
+    def test_missing_class_in_both_maps_is_removed(self):
+        """When both maps have entries but the class is missing from both, route is removed."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": 200.0,
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {
+                "r-unknown": {"id": "r-unknown", "class": "unknown-class",
+                             "legs": ["ovhcloud/ovh-priced"]},
+            },
+            "policy": {"leg_rules": [],
+                       "latency_seed": {"credit": {"minutes": 5, "source": "default"}},
+                       "seed_priors": {"credit": {"S0": {"alpha": 2, "beta": 1, "source": "default"}}}},
+        }
+        guards = usage.credit_guards(reg, [], datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc))
+        survivors, removed = r.filter_routes(
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards)
+        self.assertNotIn("r-unknown", survivors)
+        self.assertIn("r-unknown", removed)
+        self.assertTrue(any("scoring priors" in reason for reason in removed["r-unknown"]))
+
+
+class C7NaNAndDateValidation(unittest.TestCase):
+    """T1-CREDIT-FIX-3: reject non-finite values and validate date format."""
+
+    def test_manual_credit_spend_rejects_nan(self):
+        """NaN credit_spent_usd is rejected (returns None, None)."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "credit_spent_usd": float("nan"),
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud")
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_manual_credit_spend_rejects_inf(self):
+        """Infinity credit_spent_usd is rejected."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "credit_spent_usd": float("inf"),
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud")
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_manual_credit_spend_rejects_neg_inf(self):
+        """-Infinity credit_spent_usd is rejected."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "credit_spent_usd": float("-inf"),
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud")
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_manual_credit_spend_rejects_negative(self):
+        """Negative credit_spent_usd is rejected."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "credit_spent_usd": -1.0,
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud")
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_manual_credit_spend_rejects_invalid_date(self):
+        """Invalid date format is rejected."""
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "credit_spent_usd": 50.0,
+                             "credit_spent_as_of": "tomorrow"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud")
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_registry_validation_rejects_nan(self):
+        """Registry validation flags NaN credit_spent_usd."""
+        import registry as registry_mod
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "credit_spent_usd": float("nan"),
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        problems = list(registry_mod._check_credit_guards(reg))
+        self.assertTrue(any("credit_spent_usd must be a finite number" in p for p in problems), problems)
+
+    def test_registry_validation_rejects_inf(self):
+        """Registry validation flags Infinity credit_spent_usd."""
+        import registry as registry_mod
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "credit_spent_usd": float("inf"),
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        problems = list(registry_mod._check_credit_guards(reg))
+        self.assertTrue(any("credit_spent_usd must be a finite number" in p for p in problems), problems)
+
+    def test_registry_validation_rejects_invalid_date(self):
+        """Registry validation flags invalid date format."""
+        import registry as registry_mod
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "credit_spent_usd": 50.0,
+                             "credit_spent_as_of": "tomorrow"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        problems = list(registry_mod._check_credit_guards(reg))
+        self.assertTrue(any("credit_spent_as_of must be a valid date" in p for p in problems), problems)
+
+    def test_registry_validation_accepts_valid_date(self):
+        """Registry validation accepts valid YYYY-MM-DD date."""
+        import registry as registry_mod
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "credit_spent_usd": 50.0,
+                             "credit_spent_as_of": "2026-09-15"},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {},
+        }
+        problems = list(registry_mod._check_credit_guards(reg))
+        self.assertFalse(any("credit_spent_as_of" in p for p in problems), problems)
 
 
 if __name__ == "__main__":

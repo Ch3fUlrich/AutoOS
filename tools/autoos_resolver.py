@@ -1142,20 +1142,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                     credit_warns.append(line)
         elif registry["providers"][provider_id].get("tier") == "paid" and \
                 _paid_cap_usd(registry, provider_id) is not None:
-            # T1-CREDIT-FIX-2: a post-paid per-token row that declares a
-            # monthly cap is fail CLOSED when spend is unmeasurable -- an
-            # overage bills real money, while a spent prepaid grant rejects at
-            # the provider and falls through. No guard entry at all means the
-            # plan never asked (guards=None/{} in unit callers): kept, exactly
-            # as before -- only a guard that SAYS unmeasured holds the leg.
+            # T1-CREDIT-FIX-3 (D-212): paid legs are STANDING LAST-RESORT legs.
+            # A paid leg with unmeasurable spend is KEPT with a visible note
+            # 'paid spend unmeasured <provider> - leg kept (last resort, D-212)'.
+            # It is REFUSED only when MEASURED spend >= its monthly_cap_usd
+            # (guard state == "refuse").
             guard = (credit_guards or {}).get(provider_id) or {}
             if not guard:
                 pass
-            elif guard.get("spend_unknown") or guard.get("state") in (
-                    "unknown", "guard error"):
-                reasons.append("paid spend unmeasured %s - leg held "
-                               "(fail closed)" % provider_id)
             elif guard.get("state") == "refuse":
+                # Measured spend >= cap: refuse the leg (real budget protection)
                 reasons.append("paid spend %s $%.2f/$%.2f"
                                % (provider_id, float(guard.get("spend_usd") or 0.0),
                                   float(guard.get("cap_usd") or 0.0)))
@@ -1165,6 +1161,15 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                     float(guard.get("cap_usd") or 0.0))
                 if line not in credit_warns:
                     credit_warns.append(line)
+            elif guard.get("spend_unknown") or guard.get("state") in (
+                    "unknown", "guard error"):
+                # Unmeasurable spend: leg kept (last resort), add visible warning
+                if credit_warns is not None:
+                    line = "paid spend unmeasured %s - leg kept (last resort, D-212)" % provider_id
+                    if line not in credit_warns:
+                        credit_warns.append(line)
+            # spend_unknown / unknown / guard error -> leg KEPT (last resort)
+            # No reason added means the leg passes through to legs.append()
 
         if agentic and not proven and _rate_limited(leg, overlay):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
@@ -1281,15 +1286,17 @@ def filter_routes(card, features, client_state, registry, overlay,
         # checked when the policy maps exist at all: a registry with no policy
         # section is a unit-test synthetic exercising the leg filters, not a
         # data gap, and scoring never ran on it either way.
+        # T1-CREDIT-FIX-3: if only one map is non-empty, only check that map.
         policy = registry.get("policy") or {}
         seeds = policy.get("latency_seed") or {}
         priors = policy.get("seed_priors") or {}
         route_class = route.get("class")
         if route_class and (seeds or priors):
-            missing = [key for key, mapping in
-                       (("policy.latency_seed", seeds),
-                        ("policy.seed_priors", priors))
-                       if route_class not in mapping]
+            missing = []
+            if seeds and route_class not in seeds:
+                missing.append("policy.latency_seed")
+            if priors and route_class not in priors:
+                missing.append("policy.seed_priors")
             if missing:
                 reasons.append("no scoring priors for class %r (%s) - add the "
                                "class entries before this route can plan"

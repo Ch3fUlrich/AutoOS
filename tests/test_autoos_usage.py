@@ -371,7 +371,7 @@ class CliTests(UsageCliTests):
 
         rc, out, err = self.run_cli(["--since", "1h"], broken)
         self.assertEqual(rc, 3)
-        self.assertIn("IncompleteRead", err)
+        self.assertIn("UsageError", err)
         self.assertNotIn(FIXTURE_KEY, out + err)
 
     def test_gateway_unreachable_exit3(self):
@@ -380,7 +380,9 @@ class CliTests(UsageCliTests):
 
         rc, out, err = self.run_cli(["--since", "1h"], down)
         self.assertEqual(rc, 3)
-        self.assertIn("gw.invalid:20128", err)
+        # Error should contain exception type name but not the URL
+        self.assertIn("UsageError", err)
+        self.assertNotIn("gw.invalid", err)
         self.assertNotIn(FIXTURE_KEY, out + err)
 
     def test_missing_key_file_exit3(self):
@@ -388,7 +390,8 @@ class CliTests(UsageCliTests):
         fetch = FakeFetch({0: (200, [])})
         rc, out, err = self.run_cli(["--since", "1h"], fetch)
         self.assertEqual(rc, 3)
-        self.assertIn("manage.key", err)
+        self.assertIn("manage key file missing or empty", err)
+        self.assertNotIn("manage.key", err)
         self.assertEqual(fetch.calls, [])  # never contacted the gateway
 
     def test_sends_bearer_header_and_paging_params(self):
