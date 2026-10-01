@@ -562,5 +562,44 @@ class Freeze3WaiverLineTests(FixMainWaiverTests):
         self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
 
+class Freeze4ScopedCiTests(MainCiStatusParserTests):
+    """T0-FREEZE-4 H2: main_ci_status scopes the gh read to push CI."""
+
+    def test_argv_scopes_to_ci_workflow_push_events(self):
+        (_c, _r, err), seen = self.parse(
+            json.dumps([{"databaseId": 1, "conclusion": "success",
+                         "headSha": "abc"}]))
+        self.assertIsNone(err)
+        self.assertEqual(seen["argv"],
+                         ["gh", "run", "list", "--branch", "main",
+                          "--status", "completed", "--limit", "1",
+                          "--workflow", "ci.yml", "--event", "push",
+                          "--json", "databaseId,conclusion,headSha"])
+
+
+class Freeze4WaiverLaneCharsTests(Freeze3WaiverLineTests):
+    """T0-FREEZE-4 H3: the waiver lane is safe for the durable line."""
+
+    BRANCH = 'lane/a"b'
+
+    def test_quote_in_waiver_lane_is_refused(self):
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: '%s@%s' % (self.BRANCH, s))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertEqual(inbox, "")
+
+
+class Freeze4WaiverGateNameTests(FixMainWaiverTests):
+    """T0-FREEZE-4 H4: an undeclared waiver names its own gate."""
+
+    def test_bare_flag_names_waiver_not_declared_gate(self):
+        rc, out, err, inbox, _sha = self.run_ready_env(None)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
+        self.assertEqual(inbox, "")
+
+
 if __name__ == "__main__":
     unittest.main()

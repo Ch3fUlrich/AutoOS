@@ -599,6 +599,13 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# T0-FREEZE (plan v3): the sixth `ready` gate -- main CI red freezes normal
+# lanes, --fixes-main + AUTOOS_FIXES_MAIN waives it. Same fakes-and-real-CLI
+# shape as the spawner gate tests above; fixtures are temp repos, no CI read.
+if it "ready main-CI freeze gate: red main blocks, fixes-main waives (unit tests)"; then
+    out="$(python3 tests/test_ready_main_freeze.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # gwloopback (2026-09-30): how tools/autoos-agent.py picks the gateway - the
 # AUTOOS_OMNIROUTE_URL override (tried alone, never rescued), the docker DNS
 # name with loopback as fallback, the I/O-free import, and gateway_up() as the
