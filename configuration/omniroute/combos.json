@@ -257,8 +257,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash",
-        "free-ai/google/gemini-3.8-flash"
+        "gemini/gemini-3.8-flash"
       ]
     },
     {

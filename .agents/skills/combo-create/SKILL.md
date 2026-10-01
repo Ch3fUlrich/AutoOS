@@ -18,8 +18,12 @@ reference it; they do not restate it.
   `gemini/gemini-3.8-flash` (free head), `free_ai/google/gemini-3.8-flash`
   (second free 1M), `vertex/gemini-3.8-flash` (credit),
   `meta_api/muse-spark-1.3-contributor` (paid),
-  `deepseek/deepseek-flash` (paid LAST). Free-only twin: two distinct FREE 1M
-  providers (gemini + free_ai). Verify each leg in live `/v1/models` before
+  `deepseek/deepseek-flash` (paid LAST). Free-only twin: L0 D-TORDER-2 ACCEPT —
+  **deliberately single-provider** (`gemini` only; no verified genuinely-free
+  live 1M tool-calling second exists); real load on `t1-orchestrator` vertex
+  credits. A single-provider tier is allowed ONLY as a documented,
+  gate-exempted constraint (registry note + `SINGLE_PROVIDER_EXEMPTIONS` +
+  test asserting the note). Verify each leg in live `/v1/models` before
   adding; if impossible without inventing, keep what exists and report
   D-TORDER-2 with measured windows.
 - **t2/t3 order = trial -> free -> credits -> paid, DEEPSEEK LAST, 128k clamp.**

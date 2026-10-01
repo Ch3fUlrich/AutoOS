@@ -24,6 +24,12 @@ For every omniroute combo, asserts:
       every t1 leg window >= T1_MIN_WINDOW (600000, operator update 3);
       t2/t3 (t2-worker, -free-only, t3-driver, -free-only) render the 128k
       clamp (lowest implementer window, do not raise) with sub-1M legs allowed.
+  (e) two distinct servable providers per agentic combo, except the named
+      SINGLE_PROVIDER_EXEMPTIONS below (same style as
+      tests/test_registry.py CLEAN_ROUTE_EXEMPTIONS): t1-orchestrator-free-only
+      is deliberately single-provider (L0 D-TORDER-2 ACCEPT) and passes only
+      via that exemption + its registry constraint note; a future
+      single-provider route without such a note still fails.
 
 Exit 0 with per-combo verdicts when all fail-closed assertions pass;
 exit 1 naming the failing combo/assertion otherwise.
@@ -46,6 +52,36 @@ T1_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
              "t1-orchestrator-paid", "t1-orchestrator-clean")
 T2T3_ROUTES = ("t2-worker", "t2-worker-free-only",
                "t3-driver", "t3-driver-free-only")
+AGENTIC_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
+                  "t2-worker", "t2-worker-free-only",
+                  "t3-driver", "t3-driver-free-only")
+
+# The one documented, deliberate single-provider exception (L0 D-TORDER-2
+# ACCEPT 2026-10-01, same style as CLEAN_ROUTE_EXEMPTIONS): no verified
+# genuinely-free live 1M tool-calling second provider exists, so
+# t1-orchestrator-free-only stays single-provider on gemini only and
+# t1-orchestrator carries the real load on vertex credits. Passes only via
+# this entry PLUS its routes.t1-orchestrator-free-only.$comment constraint
+# note (deliberately single-provider, free-ai premium_requires_purchase,
+# openrouter :free <=262k, huggingface unusable, vertex credits); a future
+# single-provider route without such a note still fails rule (e).
+SINGLE_PROVIDER_EXEMPTIONS = {
+    "t1-orchestrator-free-only": (
+        "L0 D-TORDER-2 ACCEPT: deliberately single-provider "
+        "(gemini/gemini-3.8-flash only); no verified genuinely-free live 1M "
+        "tool-calling second provider (free-ai premium_requires_purchase; "
+        "openrouter :free <=262k sub-1M; huggingface unusable); real load on "
+        "t1-orchestrator vertex credits."
+    ),
+}
+
+# Phrases the registry constraint note must contain (rule (e) fails if missing).
+REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES = (
+    "deliberately single-provider",
+    "premium_requires_purchase",
+    "huggingface",
+    "vertex",
+)
 
 CONTEXT_LADDER = [("1M", 1000000), ("512k", 512000), ("256k", 256000),
                   ("200k", 200000), ("128k", 128000), ("64k", 64000),
@@ -263,7 +299,29 @@ def main():
             if combo_label != "128k":
                 failures.append("%s: (d) t2/t3 must render 128k clamp, got %r" % (name, combo_label))
                 per.append("d-t2t3-context")
-        verdicts.append("%s: %s [%s]" % (name, "FAIL " + ",".join(per) if per and any(not p.startswith("c-live-missing") for p in per) else "PASS", live_note))
+        # (e) two distinct servable providers, except named exemption
+        if name in AGENTIC_ROUTES:
+            provs = set()
+            for leg in legs:
+                try:
+                    pid, _ = resolve_leg(registry_ref(leg, registry), registry)
+                    provs.add(pid)
+                except ValueError:
+                    pass  # rule (c) already reports unresolvable
+            if len(provs) < 2:
+                if name in SINGLE_PROVIDER_EXEMPTIONS:
+                    note = ((routes.get(name) or {}).get("$comment") or "")
+                    missing = [ph for ph in REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES if ph not in note]
+                    if missing:
+                        failures.append("%s: (e) exemption note missing phrases %s" % (name, missing))
+                        per.append("e-note-missing")
+                    else:
+                        per.append("e-exempted-single-provider")
+                else:
+                    failures.append("%s: (e) single servable provider %s without exemption" % (name, sorted(provs)))
+                    per.append("e-single-provider")
+        fail_tags = [x for x in per if not (x.startswith("c-live-missing") or x == "e-exempted-single-provider")]
+        verdicts.append("%s: %s [%s]" % (name, "FAIL " + ",".join(per) if fail_tags else ("PASS" + (",e-exempted" if "e-exempted-single-provider" in per else "")), live_note))
     # declared paid openrouter must be gated
     for rid, route in routes.items():
         for leg in (route.get("legs") or []):

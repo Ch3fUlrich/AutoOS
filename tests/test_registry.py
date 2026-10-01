@@ -3355,15 +3355,16 @@ class ComboCrossProviderTests(unittest.TestCase):
         cls.reg = load_registry()
 
     def test_every_agentic_route_has_two_distinct_usable_providers(self):
-        # TORDER D-TORDER-2: t1-orchestrator/-free-only keep only >=600k legs
-        # (all 1048576, measured live), but none is tool_calls:proven yet, so
-        # usable_legs (proven+priced+fits) is 0 for both. Servable 1M band is
-        # 5 legs/4 providers (t1) and 2 legs/2 free providers (t1fo); usable
-        # needs tool-call probes for the 1M legs. Exempt t1 here; contract (d)
-        # still gates t1 1M + >=600k.
+        # TORDER D-TORDER-2: t1-orchestrator keeps only >=600k legs (all
+        # 1048576 live) but none is tool_calls:proven yet, so usable_legs is 0.
+        # Exempt t1-orchestrator here; contract (d) still gates 1M + >=600k.
+        # t1-orchestrator-free-only is L0 ACCEPT single-provider (see
+        # test_t1_free_only_single_provider_exemption below), not skipped here.
         for route_id in AGENTIC_TIER_ROUTES:
-            if route_id in ("t1-orchestrator", "t1-orchestrator-free-only"):
+            if route_id in ("t1-orchestrator",):
                 continue
+            if route_id == "t1-orchestrator-free-only":
+                continue  # asserted in exemption test, not silently passed
             providers = {registry.resolve_leg(leg, self.reg)[0]
                          for leg in usable_legs(self.reg, route_id)}
             self.assertGreaterEqual(
@@ -3371,6 +3372,29 @@ class ComboCrossProviderTests(unittest.TestCase):
                 "%s has %d usable free/priced provider(s) (%s): a card routed "
                 "here has no cross-provider fallback"
                 % (route_id, len(providers), sorted(providers)))
+
+    def test_t1_free_only_single_provider_exemption(self):
+        # L0 D-TORDER-2 ACCEPT: t1-orchestrator-free-only is deliberately
+        # single-provider (gemini only). Passes ONLY via named exemption +
+        # registry constraint note; a missing note fails (so a future
+        # single-provider route without one still fails). Same style as
+        # CLEAN_ROUTE_EXEMPTIONS.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "combo_contract", str(ROOT / "tools" / "combo-contract.py"))
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        self.assertIn("t1-orchestrator-free-only", cc.SINGLE_PROVIDER_EXEMPTIONS)
+        route = self.reg["routes"]["t1-orchestrator-free-only"]
+        # single servable provider
+        provs = {registry.resolve_leg(leg, self.reg)[0]
+                 for leg in registry.gateway_legs(route, self.reg)}
+        self.assertEqual(provs, {"google_ai_studio"})
+        # exemption note present with required phrases (fails if missing)
+        note = route.get("$comment") or ""
+        for phrase in cc.REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES:
+            self.assertIn(phrase, note, "constraint note missing %r" % phrase)
+        self.assertIn("deliberately single-provider", note)
 
     def test_every_agentic_route_has_three_usable_legs(self):
         # TORDER D-TORDER-2: see two_distinct test - t1 pair exempt (0 usable
