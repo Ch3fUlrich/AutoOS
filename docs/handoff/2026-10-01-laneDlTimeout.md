@@ -2,7 +2,7 @@
 
 - **Date:** 2026-10-01
 - **Branch:** `L1-backlog/ws-dl-timeout-20260930`
-- **Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-dltimeout`
+- **Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-dltimeout`
 - **Base:** `96e5a53` (suite-fixture teardown-fix tip)
 - **Commits:** `c408e186` (fix), `ed1ed397` (tests), `e87648df` (review
   follow-up), `2964c8ea` (this doc + the DONE note)
