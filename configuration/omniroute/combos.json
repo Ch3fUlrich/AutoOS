@@ -293,8 +293,11 @@
     {
       "name": "t2-orchestrator",
       "strategy": "priority",
-      "context": "1M",
+      "context": "128k",
       "models": [
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ]
     },
@@ -315,7 +318,6 @@
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
         "ovh/gpt-oss-120b",
-        "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
         "meta-api/muse-spark-1.3-contributor",
@@ -325,8 +327,11 @@
     {
       "name": "t2-worker-clean",
       "strategy": "priority",
-      "context": "1M",
+      "context": "128k",
       "models": [
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ]
     },
@@ -365,7 +370,6 @@
         "scw/mistral-small-3.2-24b-instruct-2506",
         "scw/qwen3-235b-a22b-instruct-2507",
         "ovh/gpt-oss-120b",
-        "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
         "mistral/mistral-code-latest",
@@ -376,8 +380,11 @@
     {
       "name": "t3-driver-clean",
       "strategy": "priority",
-      "context": "1M",
+      "context": "128k",
       "models": [
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ]
     },

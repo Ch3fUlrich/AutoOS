@@ -97,10 +97,6 @@ model_list:
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
-      api_key: os.environ/OVHCLOUD_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: ovhcloud/Qwen3.8-27B
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t2-worker
@@ -120,6 +116,18 @@ model_list:
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
   # AUTOOS-MANAGED-START t2-worker-clean
+  - model_name: t2-worker-clean
+    litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker-clean
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker-clean
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   - model_name: t2-worker-clean
     litellm_params:
       model: deepseek/deepseek-flash
@@ -248,10 +256,6 @@ model_list:
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
-      api_key: os.environ/OVHCLOUD_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: ovhcloud/Qwen3.8-27B
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t3-driver
@@ -275,6 +279,18 @@ model_list:
 
   # ── t3-driver-clean: gateway-only legs stripped ────────────────────────────
   # AUTOOS-MANAGED-START t3-driver-clean
+  - model_name: t3-driver-clean
+    litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver-clean
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver-clean
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   - model_name: t3-driver-clean
     litellm_params:
       model: deepseek/deepseek-flash
@@ -432,6 +448,18 @@ model_list:
   # AUTOOS-MANAGED-END t1-orchestrator-paid
 
   # AUTOOS-MANAGED-START t2-orchestrator
+  - model_name: t2-orchestrator
+    litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-orchestrator
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-orchestrator
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   - model_name: t2-orchestrator
     litellm_params:
       model: deepseek/deepseek-flash

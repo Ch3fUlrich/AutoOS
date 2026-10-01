@@ -4211,15 +4211,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t2 orchestrator-1M — small-scope orchestration",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t2 orchestrator-128k — small-scope orchestration",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 32768,
             "reasoning": true
           },
-          "output": 32768
+          "output": 32768,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15)."
@@ -4340,15 +4341,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t2 smart-reasoning-1M — no training (sensitive data)",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t2 smart-reasoning-128k — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 32768,
             "reasoning": false
           },
-          "output": 32768
+          "output": 32768,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "unavailable_legs": {
@@ -4553,15 +4555,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t3 cheap-driver-1M — no training (sensitive data)",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t3 cheap-driver-128k — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 16384,
             "reasoning": false
           },
-          "output": 16384
+          "output": 16384,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "unavailable_legs": {
