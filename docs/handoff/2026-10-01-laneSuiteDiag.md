@@ -2,10 +2,10 @@
 
 **Type:** read-only diagnosis + proposal. No test file was edited, nothing pushed/merged.
 **Author:** `suite-diag` (reader tier).
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-suite-diag`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-suite-diag`
 **Branch:** `L1-backlog/ws-suite-diag-20260930`, base `origin/main` @ `e58274a8030625c19b739032d37aa82d2ec24a73`
 **Shell:** `pwsh` 7.5.8 (`C:\Program Files\PowerShell\7\pwsh.exe`), Windows PowerShell 5.1 present.
-**Claim of provenance:** every claim below is a command plus its exact output. Temp scripts live under `%TEMP%\opencode\`.
+**Claim of provenance:** every claim below is a command plus its exact output. Temp scripts live under `%TEMP%\opencode\`. A Windows username appearing in captured output is redacted to `<user>` (AGENTS.md §7); nothing else in a quoted block is altered.
 
 ---
 
@@ -156,9 +156,9 @@ the suite process shows a single child `pwsh.exe` (the `Start-Job` host)
 alive from t≈3.4 s to t≈120.7 s:
 
 ```
-t=    3,4s pid=71700 pwsh.exe "C:\Program Files\PowerShell\7\pwsh.exe" -s -NoLogo -NoProfile -wd C:\Users\mauls\Documents\Code\AutoOS
+t=    3,4s pid=71700 pwsh.exe "C:\Program Files\PowerShell\7\pwsh.exe" -s -NoLogo -NoProfile -wd C:\Users\<user>\Documents\Code\AutoOS
 t=  ...
-t=  120,7s pid=71700 pwsh.exe "C:\Program Files\PowerShell\7\pwsh.exe" -s -NoLogo -NoProfile -wd C:\Users\mauls\Documents\Code\AutoOS
+t=  120,7s pid=71700 pwsh.exe "C:\Program Files\PowerShell\7\pwsh.exe" -s -NoLogo -NoProfile -wd C:\Users\<user>\Documents\Code\AutoOS
 --- suite tail ---
   passed 1   failed 0   skipped 0
 ```
@@ -283,7 +283,7 @@ The cases that **start the loopback fixture** (each pays ~120 s in teardown,
 | 3 | `tests/run-tests.ps1:3298` (via `New-AutoOSUsbFetchMirror`, caller `:3580`) | `usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the canonical source ... (fetch mirror)` | `:3591` |
 | 4 | `tests/run-tests.ps1:3298` (caller `:3608`) | `usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not match the manifest ... (fetch mirror)` | `:3616` |
 | 5 | `tests/run-tests.ps1:3510` | `usb custom: executing custom-url downloads and verifies ...` (this task) | `:3524` |
-| 6-13 | `tests/run-tests.ps1:8986` (via `Start-AutoOSPruneGateway`; callers `:9002, :9021, :9040, :9060, :9084, :9133, :9145, :9188`) | the 8 `apply prune:` cases | `:8992, :9012, :9031, :9047, :9075, :9098, :9141, :9150, :9215` |
+| 6-13 | `tests/run-tests.ps1:8986` (via `Start-AutoOSPruneGateway`; callers `:9002, :9021, :9040, :9060, :9084, :9133, :9145, :9188`) | the 8 `apply prune:` cases | per-case teardown stops at `:9012, :9031, :9047, :9075, :9098, :9141, :9150, :9215`; `:8992` is the in-gateway health-check failure-path stop inside `Start-AutoOSPruneGateway`, not a per-case teardown |
 
 **13 server starts → ~26 min of teardown.** A `-Filter` that avoids the prune
 group and the two `(http)` cases is cheap; a `-Filter usb` still includes rows
@@ -363,7 +363,44 @@ the full-suite pass quotable again. (b) only if (a) cannot land this cycle;
 
 ## 6. Reviewer (different family, nonce-gated)
 
-*Pending — filled in after the review of the committed artefact.*
+**Reviewer:** `t3-reviewer` subagent on **LongCat 2.5 Preview Free**
+(`opencode/longcat-2.5-preview-free`) — a free hosted model, distinct family from
+the writer (t3).
+**Session:** `ses_f0a3a512bffeGAGmH2hAxPtptA`
+**Artefact reviewed:** commit `038d93eec44f40781c8114658e55ec46c373f14a`
+**Follow-up commit:** one commit on top of `038d93e` — applies Note 1 below,
+records this review, and redacts the Windows username to `<user>` (AGENTS.md §7).
+None of the verified anchors (line numbers, curl flags, case count, scope) change.
+**Nonce:** `REVIEW-NONCE=51f8129441f3d135` — returned verbatim in the report (gate
+passed).
+**Verdict: APPROVED-WITH-NOTES.**
+
+The reviewer independently ran `git show --stat 038d93e`, read
+`tests/run-tests.ps1` and `lib/windows/AutoOS.Download.psm1`, and confirmed,
+anchor by anchor:
+
+* The commit touches only `docs/handoff/` + `logs/handoff-sessions/`; **no test
+  or lib file was edited** (scope compliant).
+* `AcceptTcpClient()` blocks at `tests/run-tests.ps1:2405`; the job loop has no
+  cooperative exit.
+* `Stop-AutoOSTestHttpServer` is `:2449-2452`; `Remove-Job ... -Force` is `:2451`.
+* `AutoOS.Download.psm1:244` is verbatim `curl.exe -fsSL --retry 3 --retry-delay 2`,
+  with no `--max-time`/`--connect-timeout`; the IWR fallback `:263` has no
+  `-TimeoutSec`.
+* The fixture is loopback-only, no external-internet case.
+* The **13 server-starting cases** count is exactly right
+  (5 direct sites, 2 mirror callers, 8 prune callers).
+
+**Note 1 (non-blocking, applied in the follow-up):** the §4 table's Stop column listed
+`:8992` alongside the 8 per-case prune teardown stops; `:8992` is actually the
+in-gateway `/api/health` failure-path stop inside `Start-AutoOSPruneGateway`, not
+a per-case teardown. The table now says so. The count (13 cases → ~26 min) is
+unaffected.
+
+**Note 2 (non-blocking, acknowledged):** the reviewer verified the *code
+structure* that produces the stall but did not re-run the 120 s probes (a bounded
+static review was the agreed scope), so the 120.02 s figure rests on the writer's
+quoted probe output in §2.6 / §2.9.
 
 ---
 

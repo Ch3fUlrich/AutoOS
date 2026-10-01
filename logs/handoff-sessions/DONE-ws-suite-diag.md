@@ -3,9 +3,9 @@
 **Date:** 2026-10-01
 **Lane:** L1-backlog (reader/diagnosis tier)
 **Base:** `origin/main` @ `e58274a8030625c19b739032d37aa82d2ec24a73`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-suite-diag`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-suite-diag`
 **Branch:** `L1-backlog/ws-suite-diag-20260930`
-**Commit:** _(filled at commit time)_
+**Commit:** `038d93ee` (initial), plus a follow-up (review record + username redaction)
 
 ---
 
@@ -53,6 +53,14 @@ shorter timeout reads as a park. The suite does terminate with a normal summary.
 
 ## Review record
 
-- **Writer:** suite-diag (reader tier)
-- **Cross-family reviewer:** _pending — filled after nonce-gated review_
-- **Verdict:** _pending_
+- **Writer:** suite-diag (reader tier, t3)
+- **Cross-family reviewer:** `t3-reviewer` on LongCat 2.5 Preview Free
+  (`opencode/longcat-2.5-preview-free`), session `ses_f0a3a512bffeGAGmH2hAxPtptA`
+- **Nonce:** `REVIEW-NONCE=51f8129441f3d135` returned verbatim (gate passed)
+- **Verdict:** APPROVED-WITH-NOTES
+  - Commit scope clean (no test/lib edit); all cited anchors verified.
+  - 13-server-case count verified exact.
+  - Note 1: §4 Stop column conflated the in-gateway failure-path stop `:8992`
+    with the 8 per-case teardown stops — fixed in the follow-up commit.
+  - Note 2: probe timing not re-run by reviewer (bounded static review); the
+    120.02 s figure rests on the writer's quoted probe output.
