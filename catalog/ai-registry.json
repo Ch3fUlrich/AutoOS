@@ -414,11 +414,11 @@
       "tool_calls": "unproven"
     },
     "gemini-3.8-flash": {
-      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it.",
+      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded).",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
-        "tokens": 65536
+        "tokens": 1048576
       },
       "effort_ladder": [
         "low",
@@ -427,7 +427,7 @@
       ],
       "family": "google",
       "id": "gemini-3.8-flash",
-      "output_max": 32768,
+      "output_max": 65536,
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
@@ -466,11 +466,11 @@
       "tool_calls": "proven"
     },
     "google/gemini-3.8-flash": {
-      "$comment": "openrouter's paid twin of the native gemini-3.8-flash free head (docs/models.md: the bare 'openrouter/gemini-3.8-flash' spelling 400s - only this google-scoped spelling ships). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
-      "context_advertised": 131072,
+      "$comment": "openrouter's paid twin of the native gemini-3.8-flash free head (docs/models.md: the bare 'openrouter/gemini-3.8-flash' spelling 400s - only this google-scoped spelling ships). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). TORDER 2026-10-01: context_advertised 131072->1048576 per live /v1/models (openrouter/google/gemini-3.8-flash context_length 1048576, max_output 65536); output_max 32768->65536 same source; context_usable 65536->524288 (50% default, matching google/gemini-3.7-flash siblings at 500000/1000000).",
+      "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
-        "tokens": 65536
+        "tokens": 524288
       },
       "effort_ladder": [
         "low",
@@ -479,7 +479,7 @@
       ],
       "family": "google",
       "id": "google/gemini-3.8-flash",
-      "output_max": 32768,
+      "output_max": 65536,
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
@@ -2909,7 +2909,7 @@
       "trains_on_prompts": true
     },
     "google_ai_studio": {
-      "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one. FREEWIRE 2026-09-30 (measured): the gateway log for 2026-09-30 held 8088 'gemini' cooling-down lines (8218 for all providers = 98.4%), 7187 of them lastErrorCode=429 with 7136 'Model gemini-3.8-flash rate_limited', and a live probe at 2026-09-30T21:13Z returned a 429 'model_cooldown' (reset_seconds 51). Every gemini/* leg was removed from every route (the gemini-3.8-flash combo now heads on vertex/gemini-3.8-flash). This provider is marked unavailable so the dead gemini/* door cannot be re-opened by a stray leg; the google_ai_studio API key stays unwired. Re-probe after the until.",
+      "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one. FREEWIRE 2026-09-30 (measured): the gateway log for 2026-09-30 held 8088 'gemini' cooling-down lines (8218 for all providers = 98.4%), 7187 of them lastErrorCode=429 with 7136 'Model gemini-3.8-flash rate_limited', and a live probe at 2026-09-30T21:13Z returned a 429 'model_cooldown' (reset_seconds 51). Every gemini/* leg was removed from every route (the gemini-3.8-flash combo now heads on vertex/gemini-3.8-flash). This provider is marked unavailable so the dead gemini/* door cannot be re-opened by a stray leg; the google_ai_studio API key stays unwired. Re-probe after the until. TORDER 2026-10-01: gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park) (gateway restarted 08:07Z with rotation 3x429/120s->300s per-leg cooldown, 30min park, CHAT_MAX_HEAVY=8 - ACTIVE).",
       "api_base": null,
       "id": "google_ai_studio",
       "litellm_env": "GEMINI_API_KEY",
@@ -2918,8 +2918,7 @@
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": true,
-      "available": false,
-      "unavailable_until": "2026-10-07T00:00:00Z"
+      "available": true
     },
     "groq": {
       "api_base": null,
@@ -3416,8 +3415,9 @@
     "gemini-3.8-flash": {
       "class": "cheap",
       "id": "gemini-3.8-flash",
-      "$comment": "FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash free head was REMOVED from every route (2026-09-30 measured 8088 gemini cooling-down lines / 7187 of them lastErrorCode=429, and a live 429 model_cooldown; providers.google_ai_studio is now unavailable). This pinned per-model group is repointed to vertex/gemini-3.8-flash, the 1M credit door that free-probe proved with a tool call at 2026-09-30T21:13Z. The OpenRouter mirror and the DeepInfra gemini-3.5-flash tail stay gated (credits/price), so the combo renders vertex alone.",
+      "$comment": "FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash free head was REMOVED from every route (2026-09-30 measured 8088 gemini cooling-down lines / 7187 of them lastErrorCode=429, and a live 429 model_cooldown; providers.google_ai_studio is now unavailable). This pinned per-model group is repointed to vertex/gemini-3.8-flash, the 1M credit door that free-probe proved with a tool call at 2026-09-30T21:13Z. The OpenRouter mirror and the DeepInfra gemini-3.5-flash tail stay gated (credits/price), so the combo renders vertex alone. TORDER 2026-10-01: legs restored to [gemini free head, vertex credit, openrouter paid (gated), deepinfra tail (gated)]; surfaces context 1048576/1M renders 1M; output 32768->65536 per live max_output.",
       "legs": [
+        "gemini/gemini-3.8-flash",
         "vertex/gemini-3.8-flash",
         "openrouter/google/gemini-3.8-flash",
         "deepinfra/google/gemini-3.5-flash"
@@ -3432,13 +3432,13 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "gemini-3.8-flash — vertex 3.8 Flash (1M credit)",
+          "display_name": "gemini-3.8-flash -- gemini free -> vertex credit (1M)",
           "openhands_profile": {
             "max_input_tokens": 1048576,
-            "max_output_tokens": 32768,
+            "max_output_tokens": 65536,
             "reasoning": false
           },
-          "output": 32768
+          "output": 65536
         }
       },
       "unavailable_legs": {
