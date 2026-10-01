@@ -4382,8 +4382,75 @@ class PaidLastResortTests(unittest.TestCase):
         model = shipped["models"][model_id]
         tier = model.get("tier",
                          shipped["providers"][provider_id].get("tier"))
-        self.assertNotEqual(tier, "paid")
+        self.assertIn(tier, ("free", "trial", "credit"))
 
+    def unknown_tier_fixture(self):
+        providers = {"myst-p": {"id": "myst-p",
+                                 "trains_on_prompts": False},
+                     "sub-p": {"id": "sub-p", "tier": "subscription",
+                               "trains_on_prompts": False}}
+        models = {}
+        for model_id, family in (("myst-model", "mystfam"),
+                                 ("sub-model", "subfam")):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": 1e-5, "price_out": 2e-5, "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        return self.fixture(legs=("myst-p/myst-model", "sub-p/sub-model",
+                                  "free-p/free-model"),
+                            extra_models=models, extra_providers=providers)
+
+    def test_implement_unknown_and_subscription_tiers_first_healthy_free_wins(self):
+        # T0-PAID-3 P1: a leg whose tier is missing (None) or unrecognised
+        # ("subscription" here) is NON-free -- held back like paid while a
+        # free leg is usable, never chosen ahead of it.
+        plan = self.run_plan(self.unknown_tier_fixture(),
+                             self.card("implement"))
+        self.assertEqual(plan["leg"], "free-p/free-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("myst-p/myst-model", blob)
+        self.assertIn("sub-p/sub-model", blob)
+        self.assertIn("subscription", blob)
+
+    def test_implement_all_free_down_unknown_tier_allowed_with_last_resort(self):
+        # T0-PAID-3 P1: with every free leg down the non-free legs stay --
+        # last resort, with a last_resort line naming the skipped free leg.
+        reg = self.unknown_tier_fixture()
+        reg["routes"]["r-mix"]["unavailable_legs"] = {
+            "free-p/free-model": {"available": False}}
+        plan = self.run_plan(reg, self.card("implement"))
+        self.assertEqual(plan["leg"], "myst-p/myst-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("last_resort", blob)
+        self.assertIn("free-p/free-model", blob)
+
+    def test_shipped_registry_subscription_leg_held_back_while_free_healthy(self):
+        # T0-PAID-3 P1 on shipped data: the cc subscription leg (tier
+        # "subscription") is held back while a free leg is healthy. The copy
+        # re-opens the two orthogonal gates -- the operator-wide cc outage and
+        # the Claude budget -- so the tier rule is what decides.
+        import copy
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            shipped = copy.deepcopy(json.load(fh))
+        self.assertEqual(r.leg_tier("cc/claude-opus-4-6", shipped),
+                         "subscription")
+        shipped["providers"]["cc"]["available"] = True
+        shipped["policy"]["claude_budget"]["mode"] = "normal"
+        shipped["policy"]["claude_budget"]["weekly_share_left"] = 0.9
+        route = {"id": "r-sub", "class": "cheap",
+                 "legs": ["cc/claude-opus-4-6", "groq/openai/gpt-oss-120b"]}
+        overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                            for leg in route["legs"]}}
+        legs, skipped, _notes = r.usable_legs(
+            route, self.card("implement"), self.feats(), self.state(),
+            shipped, overlay, "opencode", self.now())
+        self.assertTrue(legs)
+        self.assertEqual(legs[0], ("groq", "openai/gpt-oss-120b"))
+        self.assertIn("cc/claude-opus-4-6", skipped)
+        blob = " ".join(sum(skipped.values(), []))
+        self.assertIn("subscription", blob)
 
 if __name__ == "__main__":
     unittest.main()

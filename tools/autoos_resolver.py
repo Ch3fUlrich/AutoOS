@@ -889,18 +889,27 @@ def leg_tier(leg, registry):
 
 
 def _hold_back_paid_legs(legs, leg_names, skipped, registry):
-    """Drop usable paid legs while a free/trial/credit leg is usable (R4a).
+    """Drop usable non-free legs while a free/trial/credit leg is usable (R4a).
 
     `legs`/`leg_names` are parallel (the resolved tuple and the route string
     as written); `skipped` is usable_legs' own map, extended in place. A held
-    back paid leg lands in `skipped` with a "paid held back" reason naming it,
-    so the plan's "falls through" count and explain keep naming what was
-    passed over. When no freeish leg is usable the paid legs stay -- last
+    back leg lands in `skipped` with a held-back reason naming it and its
+    tier, so the plan's "falls through" count and explain keep naming what was
+    passed over. When no freeish leg is usable the non-free legs stay -- last
     resort, recorded by plan()'s `last_resort` lines instead. Credit/trial
     fail-open behaviour is untouched: an *unusable* credit leg (unpriced,
     exhausted, cooling) is already in `skipped`, so it never blocks a paid
-    leg; only a *usable* one does. A leg whose tier is unknown (neither paid
-    nor freeish) neither blocks nor is blocked.
+    leg; only a *usable* one does.
+
+    Fail closed on tier (T0-PAID-3 P1): only the known free-ish tiers
+    (`_FREEISH_TIERS`) count as free or as healthy blockers. A leg whose tier
+    is missing (None) or unrecognised -- "subscription" (the Claude Code /
+    antigravity seats, gated elsewhere by the budget and leg rules) included --
+    is NON-free: held back exactly like paid while a free-ish leg is usable,
+    never counted as healthy, allowed with a last_resort line when every
+    free-ish leg is down. The registry's own effective-tier reader fails
+    closed the same way (tests/test_registry.py), so the resolver must not
+    read an unknown tier as free.
     """
     tiers = [leg_tier(name, registry) for name in leg_names]
     if not any(tier in _FREEISH_TIERS for tier in tiers):
@@ -909,11 +918,16 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
                         if tier in _FREEISH_TIERS)
     kept = []
     for entry, name, tier in zip(legs, leg_names, tiers):
-        if tier == _PAID_TIER:
+        if tier in _FREEISH_TIERS:
+            kept.append(entry)
+        elif tier == _PAID_TIER:
             skipped[name] = ["paid held back: %s is last resort while %s "
                              "is healthy" % (name, healthy)]
         else:
-            kept.append(entry)
+            skipped[name] = ["non-free held back: %s (tier %s) is last "
+                             "resort while %s is healthy"
+                             % (name, "unknown" if tier is None else tier,
+                                healthy)]
     return kept, skipped
 
 
@@ -1136,9 +1150,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             if notes:
                 re_probe_notes[leg] = notes
 
-    # R4a: paid legs are last resort within the route -- never selected while
-    # a free/trial/credit leg of the same route is usable, wherever the paid
-    # leg is listed. This also covers reviewer *routes* (_select_reviewers
+    # R4a: non-free legs are last resort within the route -- never selected
+    # while a free/trial/credit leg of the same route is usable, wherever the
+    # non-free leg is listed (T0-PAID-3 P1: only _FREEISH_TIERS count as free;
+    # a missing or unrecognised tier is held back like paid). This also covers reviewer *routes* (_select_reviewers
     # scores through here) for implement and review cards alike. The
     # operator-ordered policy.reviewers walk (reviewer_for) is out of scope:
     # its entries name no route, so "same route class" cannot apply.
@@ -2294,24 +2309,36 @@ def _escalation(chosen, scores, registry, card=None, env=None):
 
 
 def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
-    """Explain lines for R4a (D-212): held-back paid legs, or the last resort.
+    """Explain lines for R4a (D-212): held-back non-free legs, or the last resort.
 
-    - Every skipped leg held back as paid-last-resort names itself, so the
-      plan says which paid leg it passed over and why.
-    - When the chosen leg itself is paid, every skipped NON-paid leg gets one
-      `last_resort` line carrying its existing skip reasons -- the record of
-      which free legs were down and why the paid leg was allowed.
+    - Every skipped leg held back as paid/non-free-last-resort names itself
+      (and, for a non-paid tier, the tier), so the plan says which leg it
+      passed over and why.
+    - When the chosen leg itself is NON-free (paid, subscription, missing or
+      otherwise unrecognised -- anything outside _FREEISH_TIERS), every
+      skipped free-ish leg gets one `last_resort` line carrying its existing
+      skip reasons -- the record of which free legs were down and why the
+      non-free leg was allowed.
     """
     lines = []
     for leg, reasons in skipped_legs.items():
         if any(reason.startswith("paid held back") for reason in reasons):
             lines.append("paid held back: %s held as last resort while a "
                          "free/trial/credit leg is healthy" % leg)
+        elif any(reason.startswith("non-free held back")
+                 for reason in reasons):
+            try:
+                tier = leg_tier(leg, registry)
+            except ValueError:
+                tier = None
+            lines.append("non-free held back: %s (tier %s) held as last "
+                         "resort while a free/trial/credit leg is healthy"
+                         % (leg, "unknown" if tier is None else tier))
     try:
         chosen_tier = leg_tier(chosen_leg, registry)
     except ValueError:
         chosen_tier = None
-    if chosen_tier == _PAID_TIER:
+    if chosen_tier not in _FREEISH_TIERS:
         for leg, reasons in skipped_legs.items():
             try:
                 tier = leg_tier(leg, registry)
