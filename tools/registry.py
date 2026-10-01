@@ -530,6 +530,26 @@ def _check_unique_ids(registry) -> list:
     return problems
 
 
+def _check_model_key_case(registry) -> list:
+    """Rule 1b (L3 hygiene, 2026-10-01): no two models.<key> entries may differ
+    only in letter case.
+
+    Two keys a human reads as the same model drift: a price or a trains_on_prompts
+    flag is fixed on one and silently missed on the other. The canonical spelling
+    is the one the provider's own API uses (for OVH, ``Qwen3.8-27B``); a
+    provider that spells the same model differently is a SEPARATE entry only when
+    the spelling differs beyond case (groq's ``openai/gpt-oss-120b`` vs the bare
+    ``gpt-oss-120b`` both exist), never by case alone."""
+    by_fold = {}
+    for key in _section(registry, "models"):
+        by_fold.setdefault(key.lower(), []).append(key)
+    problems = []
+    for folded, keys in sorted(by_fold.items()):
+        if len(keys) > 1:
+            problems.append("model keys differ only in case: %s" % ", ".join(sorted(keys)))
+    return problems
+
+
 # ===========================================================================
 # rule 3 - privacy-sensitive routes
 # ===========================================================================
@@ -549,8 +569,11 @@ def private_safe(provider_id, model_id, registry) -> tuple:
 
     Safe only when ALL of:
       - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
-        ``providers.<id>.tier`` -- is exactly ``"paid"`` or ``"subscription"``.
-        A free pool is never private-safe, even one whose own
+        ``providers.<id>.tier`` -- is ``"paid"``, ``"subscription"`` or
+        (L1-CLEAN, 2026-10-01) ``"credit"``. A credit leg is admitted because
+        its provider now proves no-training with a cited ``privacy`` block and
+        the resolver's own spend guard prices/caps it; a free pool is still
+        never private-safe, even one whose own
         ``trains_on_prompts`` is ``false`` (the found bug: groq/cerebras/
         sambanova free legs, and mistral's own ``mistral-code-latest`` free
         pool, all carry ``trains_on_prompts: false`` at the provider level and
@@ -586,8 +609,8 @@ def private_safe(provider_id, model_id, registry) -> tuple:
         return False, "unknown model %r" % (model_id,)
 
     effective_tier = model["tier"] if "tier" in model else provider.get("tier")
-    if effective_tier not in ("paid", "subscription"):
-        return False, "effective tier %r is not paid or subscription" % (effective_tier,)
+    if effective_tier not in ("paid", "subscription", "credit"):
+        return False, "effective tier %r is not paid, subscription or credit" % (effective_tier,)
     if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
         return False, "trains on prompts"
     if "trains_on_prompts" in model and model["trains_on_prompts"] is not False:
@@ -657,6 +680,59 @@ def privacy_exemption_lines(registry) -> list:
         if route_id in routes:
             lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
     return lines
+
+
+def _check_privacy_evidence(registry) -> list:
+    """Rule 3b (L1-CLEAN, 2026-10-01): a providers.<id>.privacy block must be
+    complete and consistent with the provider's own trains_on_prompts flag.
+
+    A provider asking to be trusted on a privacy=sensitive route cannot just
+    assert `false` - the block must cite its authority: non-empty evidence,
+    each row an https url, a non-empty quote and an ISO accessed date, and
+    privacy.trains_on_prompts must equal the provider-level flag exactly. An
+    inconsistent or unevidenced block is the defect (the registry's version of
+    "never guess false to make a row look clean", spec 3.1)."""
+    problems = []
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or "privacy" not in provider:
+            continue
+        block = provider.get("privacy")
+        if not isinstance(block, dict):
+            problems.append("privacy evidence: providers.%s.privacy is not an object"
+                            % provider_id)
+            continue
+        if block.get("trains_on_prompts") is not provider.get("trains_on_prompts"):
+            problems.append(
+                "privacy evidence: providers.%s.privacy.trains_on_prompts %r "
+                "disagrees with the provider flag %r"
+                % (provider_id, block.get("trains_on_prompts"),
+                   provider.get("trains_on_prompts")))
+        if block.get("trains_on_prompts") is not False:
+            continue  # only a no-training claim needs evidence
+        evidence = block.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            problems.append("privacy evidence: providers.%s.privacy has no evidence"
+                            % provider_id)
+            continue
+        for i, row in enumerate(evidence):
+            if not isinstance(row, dict):
+                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                                "is not an object" % (provider_id, i))
+                continue
+            url = row.get("url")
+            if not isinstance(url, str) or not url.startswith("https://"):
+                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                                "url is not https" % (provider_id, i))
+            quote = row.get("quote")
+            if not isinstance(quote, str) or not quote.strip():
+                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                                "quote is empty" % (provider_id, i))
+            accessed = row.get("accessed")
+            if not isinstance(accessed, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$",
+                                                             accessed):
+                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                                "accessed is not YYYY-MM-DD" % (provider_id, i))
+    return problems
 
 
 # ===========================================================================
@@ -3017,7 +3093,9 @@ def check_registry(registry) -> list:
     problems = []
     problems.extend(_check_legs(registry))
     problems.extend(_check_unique_ids(registry))
+    problems.extend(_check_model_key_case(registry))
     problems.extend(_check_privacy(registry))
+    problems.extend(_check_privacy_evidence(registry))
     problems.extend(_check_private_hosts(registry))
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))

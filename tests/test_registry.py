@@ -3602,5 +3602,130 @@ class ComboContractTests(unittest.TestCase):
         self.assertIn("contract PASS", proc.stdout)
 
 
+class CleanTierEvidenceTests(unittest.TestCase):
+    """L1-CLEAN (2026-10-01): the trial-credit providers a privacy=sensitive
+    route may now use must PROVE no-training with cited evidence. A bare
+    trains_on_prompts: false with no evidence is the defect this guards."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_ovhcloud_declares_no_training(self):
+        self.assertIs(self.reg["providers"]["ovhcloud"]["trains_on_prompts"], False)
+
+    def test_both_trial_providers_carry_cited_privacy_evidence(self):
+        expected = {
+            "ovhcloud": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+            "vertex_ai": ("https://docs.cloud.google.com/vertex-ai/generative-ai/"
+                          "docs/vertex-ai-zero-data-retention"),
+        }
+        for pid, url in expected.items():
+            block = self.reg["providers"][pid]["privacy"]
+            self.assertIs(block["trains_on_prompts"], False, pid)
+            urls = [e["url"] for e in block["evidence"]]
+            self.assertIn(url, urls, pid)
+            for e in block["evidence"]:
+                self.assertTrue(e["url"].startswith("https://"), pid)
+                self.assertTrue(e["quote"].strip(), pid)
+                self.assertRegex(e["accessed"], r"^\d{4}-\d{2}-\d{2}$", pid)
+
+    def test_google_ai_studio_still_trains_on_prompts(self):
+        # The free AI-Studio provider trains; it must never gain a no-training
+        # privacy block (its paid twin is reached through openrouter instead).
+        self.assertIs(self.reg["providers"]["google_ai_studio"]["trains_on_prompts"], True)
+
+    def test_a_privacy_block_without_evidence_is_rejected(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"] = []
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "ovhcloud" in p for p in problems),
+            problems)
+
+    def test_a_privacy_block_must_agree_with_the_provider_flag(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["trains_on_prompts"] = None
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy" in p and "ovhcloud" in p for p in problems), problems)
+
+    def test_an_evidence_row_needs_a_quote(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["quote"] = "  "
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "vertex_ai" in p for p in problems),
+            problems)
+
+
+class CleanTierRouteTests(unittest.TestCase):
+    """L2-CLEAN (2026-10-01): privacy=sensitive routes lead with the trial
+    credits (ovh + vertex), span >= 2 families, and end on paid deepseek."""
+
+    TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
+                  "vertex/gemini-3.8-flash")
+    SENSITIVE = ("t2-worker-clean", "t3-driver-clean", "t2-orchestrator")
+    TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _leg(self, leg):
+        pid, mid = registry.resolve_leg(leg, self.reg)
+        self.assertIs(self.reg["providers"][pid].get("trains_on_prompts"), False, leg)
+        return pid, mid
+
+    def test_every_clean_route_leg_trains_nothing(self):
+        for rid in ("t2-worker-clean", "t3-driver-clean"):
+            for leg in self.reg["routes"][rid]["legs"]:
+                self._leg(leg)
+
+    def test_sensitive_routes_lead_with_the_trial_credits(self):
+        for rid in self.SENSITIVE:
+            self.assertEqual(self.reg["routes"][rid]["legs"][:3],
+                             list(self.TRIAL_LEGS), rid)
+
+    def test_sensitive_routes_end_with_paid_deepseek(self):
+        for rid in self.SENSITIVE:
+            self.assertEqual(self.reg["routes"][rid]["legs"][-1],
+                             "deepseek/deepseek-flash", rid)
+
+    def test_clean_trial_legs_span_at_least_two_families(self):
+        families = {self.reg["models"][self._leg(leg)[1]]["family"]
+                    for leg in self.TRIAL_LEGS}
+        self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
+
+    def test_no_banned_provider_serves_a_sensitive_route(self):
+        banned = ("google_ai_studio/", "openrouter/", "opencode-zen/", "gemini/")
+        for rid in self.SENSITIVE:
+            for leg in self.reg["routes"][rid]["legs"]:
+                self.assertFalse(leg.startswith(banned), (rid, leg))
+
+    def test_stale_ovh_coder_legs_are_marked_unavailable(self):
+        stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        for rid in ("t2-worker", "t3-driver"):
+            route = self.reg["routes"][rid]
+            self.assertIn(stale, route["legs"], rid)
+            entry = route["unavailable_legs"][stale]
+            self.assertIs(entry["available"], False, rid)
+            self.assertIn("not in OVH AI Endpoints catalog 2026-10-01",
+                          entry["$comment"], rid)
+
+
+class ModelKeyCaseHygieneTests(unittest.TestCase):
+    """L3 (2026-10-01): two model keys that differ only in letter case are a
+    registry hygiene bug - the same model read twice, drifting."""
+
+    def test_no_model_keys_differ_only_in_case(self):
+        reg = load_registry()
+        seen = {}
+        for key in reg["models"]:
+            seen.setdefault(key.lower(), []).append(key)
+        dupes = {k: v for k, v in seen.items() if len(v) > 1}
+        self.assertEqual(dupes, {})
+
+
 if __name__ == "__main__":
     unittest.main()

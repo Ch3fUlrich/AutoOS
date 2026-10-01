@@ -107,6 +107,38 @@
         "source": { "type": "string" }
       }
     },
+    "provider_privacy": {
+      "type": "object",
+      "description": "Additive field, not in spec 3.1 (L1-CLEAN, 2026-10-01): the cited no-training evidence behind providers.<id>.trains_on_prompts: false. A provider the registry wants to admit to a privacy=sensitive route must not merely assert `false` — it must name the vendor URLs and quote the sentence that says so, plus the caveats an operator must know (abuse-monitoring retention, batch endpoints that do store, regions). tools/registry.py's _check_privacy_evidence() requires the block whenever it is present, requires non-empty evidence with an https url and a non-empty quote per row and an ISO accessed date, and requires privacy.trains_on_prompts to agree with the provider-level flag. A provider that trains (google_ai_studio) or whose terms are unread (trains_on_prompts null) carries no privacy block.",
+      "required": ["trains_on_prompts", "evidence", "caveats"],
+      "additionalProperties": false,
+      "properties": {
+        "trains_on_prompts": {
+          "type": "boolean",
+          "description": "Must equal the provider-level flag; false means the cited evidence below applies."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "description": "One or more cited authority rows; each is an https url plus a verbatim quote and the date it was accessed.",
+          "items": {
+            "type": "object",
+            "required": ["url", "quote", "accessed"],
+            "additionalProperties": false,
+            "properties": {
+              "url": { "type": "string", "pattern": "^https://" },
+              "quote": { "type": "string", "minLength": 1 },
+              "accessed": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+            }
+          }
+        },
+        "caveats": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "What the evidence does NOT cover (unverified retention, endpoints that store data, excluded tiers)."
+        }
+      }
+    },
     "provider": {
       "type": "object",
       "required": ["id", "omniroute_id", "litellm_env", "litellm_prefix", "trains_on_prompts", "tier"],
@@ -154,7 +186,7 @@
         },
         "trains_on_prompts": {
           "type": ["boolean", "null"],
-          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices. `null` (brief FREEKEYS-1, D-132) means UNVERIFIED - the vendor's terms were never read - and is not the same as `false`: tools/registry.py's private_safe() passes only on exactly false, so an unverified provider is kept out of every -clean route by the same fail-closed rule a missing key already was. Never guess `false` to make a row look clean."
+          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices. `null` (brief FREEKEYS-1, D-132) means UNVERIFIED - the vendor's terms were never read - and is not the same as `false`: tools/registry.py's private_safe() passes only on exactly false, so an unverified provider is kept out of every -clean route by the same fail-closed rule a missing key already was. Never guess `false` to make a row look clean. L1-CLEAN 2026-10-01: a `false` a privacy=sensitive route now relies on must be backed by the cited `privacy` block."
         },
         "credit_usd": {
           "type": ["number", "null"],
@@ -162,7 +194,7 @@
         },
         "tier": {
           "enum": ["free", "paid", "subscription", "credit"],
-          "description": "`credit` (brief FREEKEYS-1, D-132/D-141) is a metered API the operator funded with a one-off vendor grant rather than a standing plan: the spend is real, so it is not `free` (a free tier is never private-safe and is what the probes may spend), and it is not `paid` either, because the money is a finite balance the guard must track — see `credit_usd` and `monthly_cap_usd`. tools/registry.py's private_safe() rejects any tier that is not exactly paid or subscription, and tools/probe_common.py probes only tier free, so a credit leg is never probed by the standing probes and never reaches a -clean route; the FREEKEYS-1 grant probe (logs/freekeys1_probe.py, an uncommitted work file) is the deliberate, capped exception."
+          "description": "`credit` (brief FREEKEYS-1, D-132/D-141) is a metered API the operator funded with a one-off vendor grant rather than a standing plan: the spend is real, so it is not `free` (a free tier is never private-safe and is what the probes may spend), and it is not `paid` either, because the money is a finite balance the guard must track — see `credit_usd` and `monthly_cap_usd`. tools/registry.py's private_safe() admits `paid`, `subscription` and (L1-CLEAN, 2026-10-01) `credit` when the provider proves no-training with a cited `privacy` block, and rejects any tier that is not one of those (a `free` tier stays unsafe). tools/probe_common.py probes only tier free, so a credit leg is never probed by the standing probes."
         },
         "windows": { "type": "array", "items": { "$ref": "#/$defs/window" } },
         "limits": {
@@ -170,6 +202,7 @@
           "description": "Additive field, not in spec 3.1 (brief R4, 2026-09-27): per-model free-tier rate caps as data, keyed by the provider's own model spelling (the part of a leg after its '<provider>/' prefix). The resolver reads only `tpm` today (a request-size filter: need_tokens * 1.3 > tpm skips the leg); rpm/rpd/tpd are data only for now (no clock, no counters). Each value carries a source tag (D20). registry.py check rule 10 validates every key resolves via resolve_leg and every value is a non-negative int.",
           "additionalProperties": { "$ref": "#/$defs/provider_limits" }
         },
+        "privacy": { "$ref": "#/$defs/provider_privacy" },
         "$comment": { "$ref": "#/$defs/comment" }
       }
     },
