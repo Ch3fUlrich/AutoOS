@@ -6,12 +6,18 @@ R3: pins that gateway_legs does NO credit gating (D-220 follow-up T1-COMBO3).
 R4: nan/inf/huge spend is unknown / total, one bad row never kills the map.
 R5: SPEND UNKNOWN loud line only for legs that survive reasons.
 """
+import contextlib
 import datetime
+import importlib.util
+import io
 import json
 import math
 import os
 import sys
+import tempfile
 import unittest
+import unittest.mock
+import urllib.parse
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -239,12 +245,22 @@ class R5LoudLineOnlyForSurvivors(unittest.TestCase):
             reg, {}, credit_guards=guards, credit_warns=warns)
         skipped_ids = [s[0] if isinstance(s, (list, tuple)) else s
                        for s in skipped]
-        vertex_skipped = any(str(x).split("/")[0] in ("vertex", "vertex_ai")
-                             for x in skipped_ids)
-        if vertex_skipped:
-            self.assertFalse(any("SPEND UNKNOWN" in w and "vertex" in w
-                                 for w in warns),
-                             "skipped leg must not say 'kept': %r" % (warns,))
+        vertex_skipped = [str(x) for x in skipped_ids
+                          if str(x).split("/")[0] in ("vertex", "vertex_ai")]
+        self.assertTrue(vertex_skipped,
+                        "precondition: implement card must skip a vertex leg, "
+                        "skipped=%r kept=%r" % (skipped, kept))
+        self.assertTrue(
+            any("tool_calls" in reason
+                for leg in skipped for reason in skipped[leg]
+                if str(leg).split("/")[0] in ("vertex", "vertex_ai")),
+            "precondition: vertex leg skipped for tool_calls, got %r"
+            % (skipped,))
+        self.assertFalse(any("leg kept" in w and "vertex" in w for w in warns),
+                         "skipped leg must not say 'kept': %r" % (warns,))
+        self.assertFalse(any("SPEND UNKNOWN" in w and "vertex" in w
+                             for w in warns),
+                         "skipped leg must not say 'kept': %r" % (warns,))
 
     def test_kept_leg_emits_loud_line(self):
         reg, rid, route = self._vertex_route()
@@ -256,10 +272,285 @@ class R5LoudLineOnlyForSurvivors(unittest.TestCase):
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
             reg, {}, credit_guards=guards, credit_warns=warns)
         kept_ids = [k if isinstance(k, str) else k[0] for k in kept]
-        if any(str(x).split("/")[0] in ("vertex", "vertex_ai")
-               for x in kept_ids):
-            self.assertTrue(any("SPEND UNKNOWN" in w for w in warns),
-                            "kept unknown-spend leg must warn LOUDLY")
+        vertex_kept = [str(x) for x in kept_ids
+                       if str(x).split("/")[0] in ("vertex", "vertex_ai")]
+        self.assertTrue(vertex_kept,
+                        "precondition: review card must keep a vertex leg, "
+                        "kept=%r skipped=%r" % (kept, skipped))
+        self.assertTrue(any("SPEND UNKNOWN" in w for w in warns),
+                        "kept unknown-spend leg must warn LOUDLY")
+
+
+# --- T1-CREDIT-FIX-8 -----------------------------------------------------
+# C1: the grant window must actually be fetched. C2: a row billed under a
+# different provider never bills the watched grant. C3: unreadable rows make
+# the grant unknown, never silent $0. C4: the quiet unknown line, like the
+# loud one, is only for survivors. C5: mutants that must die.
+
+_AGENT_MOD = None
+
+
+def _agent_mod():
+    global _AGENT_MOD
+    if _AGENT_MOD is None:
+        path = _ROOT / "tools" / "autoos-agent.py"
+        spec = importlib.util.spec_from_file_location(
+            "autoos_agent_fix8", str(path))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _AGENT_MOD = mod
+    return _AGENT_MOD
+
+
+def _small_tokens():
+    # 20M in + 6M out at the vertex list price = $30 + $45 = $75.
+    return {"in": 20_000_000, "out": 6_000_000}
+
+
+def _c1_rows():
+    def row(rid, ts):
+        return {"id": rid, "provider": "vertex",
+                "model": "vertex/gemini-3.8-flash",
+                "tokens": dict(_small_tokens()),
+                "timestamp": ts, "status": 200}
+    return [row("oct-a", "2026-10-20T10:00:00Z"),
+            row("oct-b", "2026-10-05T10:00:00Z"),
+            row("sep-20", "2026-09-20T10:00:00Z"),
+            row("sep-05", "2026-09-05T10:00:00Z")]
+
+
+def _c1_reg():
+    reg = _reg()
+    reg["providers"]["vertex_ai"]["credit_started"] = "2026-09-01"
+    return reg
+
+
+def _paged_fetch(rows):
+    def fetch(url, headers, timeout):
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        limit = int(qs.get("limit", ["500"])[0])
+        offset = int(qs.get("offset", ["0"])[0])
+        return 200, json.dumps(rows[offset:offset + limit]).encode("utf-8")
+    return fetch
+
+
+def _keyed_env(tmpdir):
+    with open(os.path.join(tmpdir, "manage.key"), "w",
+              encoding="utf-8") as fh:
+        fh.write("test-manage-key")
+    return {"AUTOOS_AI_STACK_CONFIG": tmpdir}
+
+
+class C1FetchCutoffAndPaging(unittest.TestCase):
+    def test_fetch_cutoff_is_earliest_grant_start(self):
+        self.assertEqual(
+            usage.fetch_cutoff(_c1_reg(), NOW),
+            datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc))
+
+    def test_fetch_cutoff_without_starts_is_month_start(self):
+        self.assertEqual(usage.fetch_cutoff(_reg(), NOW), SINCE_MONTH)
+
+    def test_paged_plan_guards_count_september(self):
+        agent = _agent_mod()
+        agent.CREDIT_GUARD_CACHE.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _keyed_env(tmp)
+            with unittest.mock.patch.object(usage, "PAGE_LIMIT", 1):
+                guards = agent.plan_credit_guards(
+                    _c1_reg(), now=NOW, fetch=_paged_fetch(_c1_rows()),
+                    env=env)
+        self.assertEqual(guards["vertex_ai"]["spend_usd"], 300.0)
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse")
+
+    def test_paged_usage_cli_counts_september(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg_path = os.path.join(tmp, "registry.json")
+            with open(reg_path, "w", encoding="utf-8") as fh:
+                json.dump(_c1_reg(), fh)
+            env = _keyed_env(tmp)
+            buf = io.StringIO()
+            with unittest.mock.patch.object(usage, "PAGE_LIMIT", 1):
+                with contextlib.redirect_stdout(buf):
+                    rc = usage.main(
+                        ["--since", "2026-10-01T00:00:00Z", "--json",
+                         "--cost", "--registry", reg_path,
+                         "--spend-since", "2026-10-01T00:00:00Z"],
+                        fetch=_paged_fetch(_c1_rows()), env=env, now=NOW)
+        self.assertEqual(rc, 0)
+        guard = json.loads(buf.getvalue())["credit_guards"]["vertex_ai"]
+        self.assertEqual(guard["spend_usd"], 300.0)
+        self.assertEqual(guard["state"], "refuse")
+
+
+class C2SpendRowProviderGate(unittest.TestCase):
+    def _ds(self):
+        return {"providers": {
+            "deepseek": {"id": "deepseek", "tier": "paid",
+                         "omniroute_id": "deepseek",
+                         "model_prefix": "deepseek"}}}
+
+    def test_openrouter_deepseek_model_does_not_bill_deepseek(self):
+        self.assertFalse(usage.is_spend_row(
+            {"provider": "openrouter", "model": "deepseek/deepseek-v3-flash"},
+            "deepseek", self._ds()))
+
+    def test_zen_deepseek_model_does_not_bill_deepseek(self):
+        self.assertFalse(usage.is_spend_row(
+            {"provider": "opencode-zen",
+             "model": "deepseek/deepseek-v3-flash"},
+            "deepseek", self._ds()))
+
+    def test_empty_provider_with_namespaced_model_counts(self):
+        self.assertTrue(usage.is_spend_row(
+            {"provider": "", "model": "deepseek/deepseek-v3-flash"},
+            "deepseek", self._ds()))
+
+    def test_missing_provider_with_namespaced_model_counts(self):
+        self.assertTrue(usage.is_spend_row(
+            {"model": "deepseek/deepseek-v3-flash"},
+            "deepseek", self._ds()))
+
+    def test_provider_match_is_case_insensitive(self):
+        reg = {"providers": {"vertex_ai": {"id": "vertex_ai",
+                                           "omniroute_id": "vertex"}}}
+        self.assertTrue(usage.is_spend_row(
+            {"provider": "VERTEX", "model": "vertex/gemini-3.8-flash"},
+            "vertex_ai", reg))
+
+    def test_namespace_match_is_exact_not_substring(self):
+        reg = {"providers": {"vertex_ai": {"id": "vertex_ai",
+                                           "omniroute_id": "vertex"}}}
+        self.assertFalse(usage.is_spend_row(
+            {"provider": "vertex_ai2", "model": "other/x"},
+            "vertex_ai", reg))
+        self.assertFalse(usage.is_spend_row(
+            {"provider": "", "model": "vertex2/x"}, "vertex_ai", reg))
+        self.assertFalse(usage.is_spend_row(
+            {"provider": "vertexish", "model": "vertexish/x"},
+            "vertex_ai", reg))
+
+
+class C3UnreadableRowsUnknown(unittest.TestCase):
+    def _bad_row(self, value, rid):
+        return {"id": rid, "provider": "vertex_ai",
+                "model": "vertex/gemini-3.8-flash",
+                "tokens": {"in": value, "out": 0},
+                "timestamp": "2026-10-05T10:00:00Z", "status": 200}
+
+    def test_each_unreadable_kind_is_unknown(self):
+        for label, value in [("inf", float("inf")),
+                             ("neg-inf", float("-inf")),
+                             ("nan", float("nan")),
+                             ("1e30", 1e30),
+                             ("10**400", 10 ** 400),
+                             ("negative", -50)]:
+            with self.subTest(kind=label):
+                guards = usage.credit_guards(
+                    _reg(), [self._bad_row(value, "bad-%s" % label)],
+                    SINCE_MONTH, today=NOW.date())
+                guard = guards["vertex_ai"]
+                self.assertEqual(guard["state"], "unknown",
+                                 "%s must read unknown, got %r"
+                                 % (label, guard))
+                self.assertTrue(guard["spend_unknown"])
+                self.assertIn("1 unreadable", guard["note"])
+
+    def test_negative_counts_never_subtract(self):
+        spend = usage.paid_spend(
+            [self._bad_row(-50, "bad-neg")], _prices(_reg()), _reg(),
+            SINCE_MONTH, provider="vertex_ai")
+        self.assertEqual(spend["rows_unreadable"], 1)
+        self.assertEqual(spend["spend_usd"], 0.0)
+
+    def test_measured_refuse_beats_unknown(self):
+        # $120 + $180 = $300 of readable spend: over the $230 hard stop even
+        # with an unreadable row beside it.
+        big = {"in": 80_000_000, "out": 24_000_000}
+        rows = [_row("vertex_ai", "vertex/gemini-3.8-flash",
+                     tokens=dict(big)),
+                self._bad_row(float("inf"), "bad-inf")]
+        guards = usage.credit_guards(_reg(), rows, SINCE_MONTH,
+                                     today=NOW.date())
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse")
+        self.assertEqual(guards["vertex_ai"]["spend_usd"], 300.0)
+
+
+class C4UnknownWarnOnlyForSurvivors(unittest.TestCase):
+    def _shipped_vertex(self):
+        with open(_ROOT / "catalog" / "ai-registry.json",
+                  encoding="utf-8") as fh:
+            reg = json.load(fh)
+        for rid, route in (reg.get("routes") or {}).items():
+            legs = route.get("legs") or []
+            if any(leg.split("/")[0] in ("vertex", "vertex_ai")
+                   for leg in legs):
+                return reg, rid, route
+        self.fail("shipped registry must carry a vertex leg")
+
+    def _guards(self, reg):
+        return usage.credit_guards(reg, None, None, failure="test: no ledger",
+                                   today=NOW.date())
+
+    def test_implement_skipped_leg_names_no_kept_line(self):
+        reg, rid, route = self._shipped_vertex()
+        warns = []
+        kept, skipped, _notes = r.usable_legs(
+            route, {"kind": "implement", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=self._guards(reg), credit_warns=warns)
+        vertex_skipped = [leg for leg in skipped
+                          if str(leg).split("/")[0] in ("vertex", "vertex_ai")]
+        self.assertTrue(vertex_skipped,
+                        "precondition: implement must skip a vertex leg, "
+                        "skipped=%r kept=%r" % (skipped, kept))
+        self.assertTrue(
+            any("tool_calls" in reason
+                for leg in vertex_skipped for reason in skipped[leg]),
+            "precondition: vertex leg skipped for tool_calls, got %r"
+            % (skipped,))
+        self.assertFalse(any("leg kept" in w and "vertex" in w for w in warns),
+                         "skipped leg must not say 'kept': %r" % (warns,))
+
+    def test_review_kept_leg_names_kept_line(self):
+        reg, rid, route = self._shipped_vertex()
+        warns = []
+        kept, skipped, _notes = r.usable_legs(
+            route, {"kind": "review", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=self._guards(reg), credit_warns=warns)
+        kept_ids = [k if isinstance(k, str) else k[0] for k in kept]
+        vertex_kept = [str(x) for x in kept_ids
+                       if str(x).split("/")[0] in ("vertex", "vertex_ai")]
+        self.assertTrue(vertex_kept,
+                        "precondition: review must keep a vertex leg, "
+                        "kept=%r skipped=%r" % (kept, skipped))
+        self.assertTrue(any("leg kept" in w and "vertex" in w for w in warns),
+                        "kept unknown-spend leg must name it: %r" % (warns,))
+
+
+class C5MutantKillers(unittest.TestCase):
+    def _future_reg(self):
+        return {"providers": {
+            "p": {"id": "p", "tier": "credit", "credit_usd": 10.0,
+                  "monthly_cap_usd": 10.0, "monthly_warn_fraction": 0.8,
+                  "credit_started": "2026-10-02"}}}
+
+    def test_future_credit_started_rejected_with_injected_today(self):
+        problems = regmod.check_registry(
+            self._future_reg(), today=datetime.date(2026, 10, 1))
+        self.assertTrue(any("credit_started" in p and "future" in p
+                            for p in problems),
+                        "future credit_started must be rejected, got %r"
+                        % (problems,))
+
+    def test_past_credit_started_accepted_with_injected_today(self):
+        problems = regmod.check_registry(
+            self._future_reg(), today=datetime.date(2026, 10, 3))
+        self.assertFalse(any("credit_started" in p and "future" in p
+                             for p in problems),
+                         "past credit_started must pass, got %r" % (problems,))
 
 
 if __name__ == "__main__":
