@@ -1218,14 +1218,15 @@ class LegRulesTests(unittest.TestCase):
             if (before or {}).get("id") != (after or {}).get("id") or \
                     (before or {}).get("allow") != (after or {}).get("allow"):
                 changed[leg] = ((before or {}).get("id"), (after or {}).get("id"))
-        # FREEWIRE 2026-09-30: ONE expected change, and it is not a deny escape.
-        # The sweep synthesises provider-spelling x model-id pairs, so the new
-        # allow-groq-qwen3.8-27b (pattern groq/qwen/qwen3.8-27b, matched
-        # case-insensitively) also covers the UNRELATED huggingface model row
-        # 'Qwen/Qwen3.8-27B' spelled under the groq prefix - a combination no
-        # route carries and no real leg uses. It is an allow-vs-deny flip on a
-        # non-served spelling, never a deny a real leg escapes by re-casing.
-        expected = {"groq/Qwen/Qwen3.8-27B": ("deny-groq", "allow-groq-qwen3.8-27b")}
+        # T1-CLEAN-3 2026-10-01: the duplicate row is merged, so the sweep no
+        # longer synthesises that spelling and the fold changes NO committed
+        # verdict: the dict stays empty. (Before the merge the one entry below
+        # documented the duplicate's side effect: the new allow-groq-qwen3.8-27b
+        # also covered the unrelated huggingface model row 'Qwen/Qwen3.8-27B'
+        # spelled under the groq prefix - a combination no route carries. That
+        # row is now merged into the canonical 'qwen/qwen3.8-27b', so the
+        # synthetic leg is gone, not re-verdict.)
+        expected = {}
         self.assertEqual(changed, expected,
                          "unexpected leg verdict changes: %s"
                          % sorted(set(changed.items()) - set(expected.items())))

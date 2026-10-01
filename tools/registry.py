@@ -400,6 +400,12 @@ def resolve_leg(leg, registry) -> tuple:
 
     The prefix may be a providers key or any provider's omniroute_id; the rest
     must be a models key. Anything else raises ValueError naming the leg.
+
+    Model matching is exact first, then the unique case-fold match: model keys
+    are unique under folding (rule 1b), but a leg carries its provider's own
+    wire casing (T1-CLEAN-3: ``huggingface/Qwen/Qwen3.8-27B`` names the
+    canonical key ``qwen/qwen3.8-27b``). An ambiguous or absent fold still
+    raises. (autoos_resolver.ci_key is the runtime-side precedent.)
     """
     if not isinstance(leg, str):
         raise ValueError("leg %r is not a provider/model string" % (leg,))
@@ -416,7 +422,11 @@ def resolve_leg(leg, registry) -> tuple:
                 break
     if provider_id is None:
         raise ValueError("leg %r: no provider matches prefix %r" % (leg, prefix))
-    if model_id not in _section(registry, "models"):
+    models = _section(registry, "models")
+    if model_id not in models:
+        folded = [k for k in models if k.lower() == model_id.lower()]
+        if len(folded) == 1:
+            return provider_id, folded[0]
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return provider_id, model_id
 
