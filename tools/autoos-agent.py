@@ -1121,6 +1121,16 @@ def _isolate_refuse_path(path: str, why: str) -> None:
                      % (repr(path), why))
 
 
+# Refusal reasons are CONSTANTS: the line is echoed to the operator's terminal
+# and to any log that reads it, so it must never carry a byte of the offending
+# entry (R8 — an OSError for a NUL-containing target quotes that target back).
+_REFUSE_FINAL_LINK = "a link or non-file already sits at this path"
+_REFUSE_DUPLICATE = "an earlier entry already wrote this path"
+_REFUSE_DISK_STATE = "the destination already holds something else here"
+_REFUSE_LINK = "could not create the link"
+_REFUSE_OPEN = "could not open for writing"
+
+
 def _isolate_materialise(root: str, entries: list, dest: str) -> None:
     """Write the allowed HEAD entries into `dest`, verbatim from the object DB.
 
@@ -1150,6 +1160,7 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
     every path the filter allowed, while the alternative is bytes outside it.
     """
     blobs = _isolate_batch_blobs(root, entries)
+    written: set = set()
     for mode, sha, path in entries:
         data = blobs.get(sha)
         if data is None:
@@ -1165,29 +1176,54 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
             _isolate_refuse_path(path, "an ancestor is a symlink or outside")
             continue
         full = os.path.join(dest, path.replace("/", os.sep))
+        # R6: refuse a FINAL component that is already a link (or anything but
+        # a regular file) before opening it, and refuse a path two entries
+        # claim (the first one wins). `_isolate_clear_below` vets ancestors
+        # only, so `evil -> ../outside` passes every earlier check; O_NOFOLLOW
+        # below is the second layer and is 0 where the attribute does not exist
+        # (Windows), which is exactly the platform that writes through.
+        if path in written:
+            _isolate_refuse_path(path, _REFUSE_DUPLICATE)
+            continue
+        if mode != "120000" and (
+                os.path.islink(full)
+                or (os.path.lexists(full) and not os.path.isfile(full))):
+            _isolate_refuse_path(path, _REFUSE_FINAL_LINK)
+            continue
         parent = os.path.dirname(full)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        try:
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if mode == "120000":
+                if os.path.lexists(full):
+                    os.unlink(full)
+        except OSError:
+            # R7: a tracked name that collides with what an earlier entry put
+            # on disk (`a/x` then a symlink `a`, or a file `p` then `p/q`) is
+            # one skipped entry, not an aborted clone.
+            _isolate_refuse_path(path, _REFUSE_DISK_STATE)
+            continue
         if mode == "120000":
-            if os.path.lexists(full):
-                os.unlink(full)
             # Never follow the link: create it, pointing where HEAD says.
             try:
                 os.symlink(target, full)
-            except OSError as exc:
-                _isolate_refuse_path(path, "link: %s" % exc)
+            except OSError:
+                _isolate_refuse_path(path, _REFUSE_LINK)
+                continue
+            written.add(path)
             continue
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         # O_NOFOLLOW so a final-component link is refused, not written through.
         flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
             fd = os.open(full, flags, 0o600)
-        except OSError as exc:
-            _isolate_refuse_path(path, "open: %s" % exc)
+        except OSError:
+            _isolate_refuse_path(path, _REFUSE_OPEN)
             continue
         with io.open(fd, "wb", closefd=True) as fh:
             fh.write(data)
         os.chmod(full, 0o755 if mode == "100755" else 0o644)
+        written.add(path)
 
 
 def is_autoos_source(source: str) -> bool:

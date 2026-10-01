@@ -19304,6 +19304,74 @@ class T2IsolateSecretsS5PathSafetyTests(unittest.TestCase):
         self.assertEqual(_t2_tree(self.cli, dest), ["keep.txt"])
 
 
+    def test_r6_preplanted_final_component_link_is_never_written_through(self):
+        """R6: a file entry whose NAME is already a link on disk is refused.
+
+        `_isolate_clear_below` only vets the ANCESTORS, so `evil -> sibling`
+        (a link the materialiser never created, planted by whoever owns the
+        destination) is not caught by it, and the final open is the only thing
+        standing between the entry and a write into `sibling`.
+        """
+        blob = self._blob("evil\n")
+
+        def plant(dest, sibling):
+            with io.open(os.path.join(sibling, "target"), "w",
+                         encoding="utf-8") as fh:
+                fh.write("original\n")
+            os.symlink(os.path.join(sibling, "target"),
+                       os.path.join(dest, "evil"))
+
+        dest, sibling, err = self._mat([("100644", blob, "evil")],
+                                       setup=plant)
+        self.assertTrue(os.path.islink(os.path.join(dest, "evil")))
+        with io.open(os.path.join(sibling, "target"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "original\n")
+        self.assertIn("evil", err)
+
+    def test_r6_symlink_then_file_on_one_path_never_writes_through(self):
+        """R6: two entries on one path (120000 then 100644) — first one wins.
+
+        `evil -> ok.txt` is an IN-TREE target, so every ancestor check passes
+        and O_NOFOLLOW is the only guard; on a platform without that flag
+        (`getattr(os, "O_NOFOLLOW", 0)` is 0 there) the second entry writes
+        straight through the link it just made. Patched away here so the test
+        proves the explicit refusal, not the flag.
+        """
+        ok, evil = self._blob("ok\n"), self._blob("evil\n")
+        with mock.patch.object(os, "O_NOFOLLOW", 0, create=True):
+            dest, _sibling, err = self._mat([
+                ("100644", ok, "ok.txt"),
+                ("120000", self._blob("ok.txt"), "evil"),
+                ("100644", evil, "evil")])
+        with io.open(os.path.join(dest, "ok.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "ok\n")
+        self.assertTrue(os.path.islink(os.path.join(dest, "evil")))
+        self.assertIn("evil", err)
+
+    def test_r6_refusal_survives_a_platform_without_o_nofollow(self):
+        """R6: the check is in the Python, not in the open() flags.
+
+        Windows has no `os.O_NOFOLLOW`, so the flag layer is compiled to 0
+        there; simulated here by patching the constant away.
+        """
+        blob = self._blob("evil\n")
+
+        def plant(dest, sibling):
+            with io.open(os.path.join(sibling, "target"), "w",
+                         encoding="utf-8") as fh:
+                fh.write("original\n")
+            os.symlink(os.path.join(sibling, "target"),
+                       os.path.join(dest, "evil"))
+
+        with mock.patch.object(os, "O_NOFOLLOW", 0, create=True):
+            dest, sibling, err = self._mat([("100644", blob, "evil")],
+                                           setup=plant)
+        self.assertTrue(os.path.islink(os.path.join(dest, "evil")))
+        with io.open(os.path.join(sibling, "target"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "original\n")
+        self.assertIn("evil", err)
+
+
 class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
     """R2 acceptance: an --isolate worker cannot read the source's UNTRACKED key.
 
