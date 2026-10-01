@@ -2909,6 +2909,20 @@ def _check_credit_guards(registry) -> list:
             problems.append("providers.%s: tier credit needs a monthly_warn_fraction in "
                             "(0, 1) (0.8 = warn at 80%% of the grant), got %r"
                             % (provider_id, fraction))
+        # T1-CREDIT-FIX-5 M3: the optional reserve below the grant. It must be a
+        # non-negative number strictly below credit_usd -- a margin that reaches
+        # the grant would refuse every leg, and one at or above it makes the
+        # hard stop the whole point of the guard disappear.
+        margin = provider.get("credit_hard_stop_margin_usd")
+        if margin is not None:
+            if isinstance(margin, bool) or not isinstance(margin, (int, float)) \
+                    or not math.isfinite(margin) or margin < 0:
+                problems.append("providers.%s: credit_hard_stop_margin_usd must be a "
+                                "finite number >= 0, got %r" % (provider_id, margin))
+            elif not isinstance(credit, bool) and isinstance(credit, (int, float)) \
+                    and margin >= credit:
+                problems.append("providers.%s: credit_hard_stop_margin_usd %r must be "
+                                "less than credit_usd %r" % (provider_id, margin, credit))
     # A warn fraction without a cap is a number nothing reads.
     for provider_id, provider in sorted(_section(registry, "providers").items()):
         if isinstance(provider, dict) and "monthly_warn_fraction" in provider \

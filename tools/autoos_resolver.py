@@ -1111,8 +1111,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                             % provider_id)
                     if line not in credit_warns:
                         credit_warns.append(line)
-            elif guard.get("state") == "guard error" or (
-                    guard.get("state") == "unknown" or guard.get("spend_unknown")):
+            elif guard.get("state") == "refuse":
+                # T1-CREDIT-FIX-5 M5b: `refuse` is checked BEFORE the unknown
+                # branch -- a guard that is both drained and `spend_unknown`
+                # must be refused, or the fail-open branch resurrects a grant
+                # the measured figure already drained.
+                reasons.append("credit exhausted %s $%.2f/$%.2f"
+                               % (provider_id, float(guard.get("spend_usd") or 0.0),
+                                  float(guard.get("cap_usd") or 0.0)))
+            elif guard.get("state") in ("unknown", "guard error") or \
+                    guard.get("spend_unknown"):
                 if credit_warns is not None:
                     # The guard note already names the provider and the cause;
                     # it is the explain line verbatim (one line per grant per
@@ -1128,16 +1136,37 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                                 % provider_id)
                     if line not in credit_warns:
                         credit_warns.append(line)
-            elif guard.get("state") == "refuse":
-                reasons.append("credit exhausted %s $%.2f/$%.2f"
-                               % (provider_id, float(guard.get("spend_usd") or 0.0),
-                                  float(guard.get("cap_usd") or 0.0)))
+                    # T1-CREDIT-FIX-5 M2 (D-220): while a credit leg is kept on
+                    # unknown spend the plan says so LOUDLY -- even when the leg
+                    # is otherwise unremarkable -- so an operator never mistakes
+                    # a fail-open grant for a measured, healthy one.
+                    loud = ("SPEND UNKNOWN: %s credit leg kept (grant $%.2f, "
+                            "fail-open per D-220) - measured spend unavailable"
+                            % (provider_id, float(guard.get("cap_usd") or 0.0)))
+                    if loud not in credit_warns:
+                        credit_warns.append(loud)
             elif guard.get("state") == "warn" and credit_warns is not None:
                 line = "credit warn %s $%.2f/$%.2f" % (
                     provider_id, float(guard.get("spend_usd") or 0.0),
                     float(guard.get("cap_usd") or 0.0))
                 # One line per grant per plan, however many of its legs a route
                 # carries and however many routes were filtered to get here.
+                if line not in credit_warns:
+                    credit_warns.append(line)
+            elif guard.get("state") == "manual" and credit_warns is not None:
+                # T1-CREDIT-FIX-5 M1: a dated manual reading is not measured
+                # spend. The leg is kept, but the plan names the figure so it
+                # can never be read as a live number.
+                line = ("credit manual %s: %s" % (provider_id,
+                                                  guard.get("note") or "manual figure"))
+                if line not in credit_warns:
+                    credit_warns.append(line)
+            elif guard.get("state") != "ok" and credit_warns is not None:
+                # M5b: an unrecognised (or None) guard state is never silent --
+                # it is a data bug, named, while the leg stays fail-open.
+                line = ("credit guard %s: unrecognised state %r - spend "
+                        "unmeasured, leg kept (fail open)"
+                        % (provider_id, guard.get("state")))
                 if line not in credit_warns:
                     credit_warns.append(line)
         elif registry["providers"][provider_id].get("tier") == "paid" and \

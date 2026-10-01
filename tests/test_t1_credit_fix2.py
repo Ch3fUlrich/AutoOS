@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -90,6 +91,7 @@ class C1UnexpectedBugIsAGuardError(unittest.TestCase):
         agent.CREDIT_GUARD_CACHE.clear()
         self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
         self.keydir = tempfile.mkdtemp(prefix="t1c2-")
+        self.addCleanup(shutil.rmtree, self.keydir, True)
         with open(os.path.join(self.keydir, "manage.key"), "w") as fh:
             fh.write("x")
 
@@ -117,6 +119,14 @@ class C1UnexpectedBugIsAGuardError(unittest.TestCase):
         self.assertIn(("ovhcloud", "ovh-priced"), kept)
         self.assertNotIn("ovhcloud/ovh-priced", skipped)
         self.assertTrue(any("guard error" in w for w in warns), warns)
+
+    def test_paid_guard_error_note_says_leg_kept_not_held(self):
+        """M5a: the resolver keeps a paid leg on an unforeseen read bug (D-212
+        last resort), so the note must say 'kept', never 'held'."""
+        out = agent._credit_guard_error(_reg_paid(), "TypeError")
+        note = out["deepseek"]["note"]
+        self.assertIn("leg kept", note)
+        self.assertNotIn("leg held", note)
 
 
 class C2FallbackNeverRaises(unittest.TestCase):
@@ -171,6 +181,7 @@ class C4PaidLastResort(unittest.TestCase):
         agent.CREDIT_GUARD_CACHE.clear()
         self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
         self.keydir = tempfile.mkdtemp(prefix="t1c2-paid-")
+        self.addCleanup(shutil.rmtree, self.keydir, True)
         with open(os.path.join(self.keydir, "manage.key"), "w") as fh:
             fh.write("x")
 
@@ -559,6 +570,200 @@ class C7NaNAndDateValidation(unittest.TestCase):
         }
         problems = list(registry_mod._check_credit_guards(reg))
         self.assertFalse(any("credit_spent_as_of" in p for p in problems), problems)
+
+
+class C8ManualSpendExpiry(unittest.TestCase):
+    """T1-CREDIT-FIX-5 M1: a manual figure is a dated reading, not a measurement.
+
+    It expires after 7 days, a figure dated in the future is not a reading at
+    all (one day of tolerance for timezone skew), and a still-valid figure is
+    state `manual` -- never plain `ok`, so nothing downstream reads it as
+    measured spend. The clock is injected (`today=`); no test sleeps.
+    """
+
+    TODAY = datetime.date(2026, 10, 1)
+
+    def _reg(self, figure, as_of):
+        return {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": 200.0,
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False,
+                             "credit_spent_usd": figure,
+                             "credit_spent_as_of": as_of},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {"r-trial": {"id": "r-trial",
+                                   "legs": ["ovhcloud/ovh-priced"]}},
+            "policy": {"leg_rules": []},
+        }
+
+    def test_a_figure_older_than_seven_days_reads_unknown(self):
+        reg = self._reg(50.0, "2026-09-23")  # age 8
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud",
+                                                 today=self.TODAY)
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+        guards = usage.credit_guards(reg, None, failure="403 - spend unmeasured",
+                                     today=self.TODAY)
+        self.assertEqual(guards["ovhcloud"]["state"], "unknown")
+        self.assertTrue(guards["ovhcloud"]["spend_unknown"])
+
+    def test_seven_days_old_is_still_valid(self):
+        reg = self._reg(50.0, "2026-09-24")  # age 7
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud",
+                                                 today=self.TODAY)
+        self.assertEqual(figure, 50.0)
+        self.assertEqual(as_of, "2026-09-24")
+
+    def test_a_figure_beyond_tomorrow_reads_unknown(self):
+        reg = self._reg(50.0, "2026-10-03")  # +2 days
+        figure, as_of = usage.manual_credit_spend(reg, "ovhcloud",
+                                                 today=self.TODAY)
+        self.assertIsNone(figure)
+        self.assertIsNone(as_of)
+
+    def test_tomorrow_is_within_tolerance(self):
+        reg = self._reg(50.0, "2026-10-02")  # +1 day
+        figure, _as_of = usage.manual_credit_spend(reg, "ovhcloud",
+                                                  today=self.TODAY)
+        self.assertEqual(figure, 50.0)
+
+    def test_a_valid_figure_is_state_manual_never_ok(self):
+        guards = usage.credit_guards(self._reg(50.0, "2026-09-30"), None,
+                                     failure="403 - spend unmeasured",
+                                     today=self.TODAY)
+        guard = guards["ovhcloud"]
+        self.assertEqual(guard["state"], "manual")
+        self.assertFalse(guard["spend_unknown"])
+        self.assertEqual(guard["note"],
+                         "manual figure $50.00 as of 2026-09-30 (age 1 d)")
+
+    def test_a_valid_figure_at_the_grant_still_refuses(self):
+        guards = usage.credit_guards(self._reg(200.0, "2026-09-30"), None,
+                                     failure="403", today=self.TODAY)
+        self.assertEqual(guards["ovhcloud"]["state"], "refuse")
+
+
+class C9HardStopMargin(unittest.TestCase):
+    """T1-CREDIT-FIX-5 M3: measured spend refuses the leg at
+    `credit_usd - credit_hard_stop_margin_usd` (default $20), not at 100 %.
+
+    The warn line stays below the hard stop; margin 0 is the old refuse-at-cap;
+    the registry check rejects a margin that is not `0 <= margin < credit_usd`.
+    Unknown spend is untouched (still fail-open, M1/M2).
+    """
+
+    def _reg(self, cap=250.0, margin=None):
+        provider = {"id": "vertex_ai", "tier": "credit",
+                    "model_prefix": "vertex-ai", "credit_usd": cap,
+                    "monthly_cap_usd": cap, "monthly_warn_fraction": 0.8,
+                    "trains_on_prompts": False}
+        if margin is not None:
+            provider["credit_hard_stop_margin_usd"] = margin
+        return {
+            "providers": {"vertex_ai": provider},
+            "models": {"flash": {"id": "flash", "tool_calls": "proven",
+                                 "context_usable": {"tokens": 100000,
+                                                    "source": "default"},
+                                 "price_in": 1e-06, "price_out": 1e-06}},
+            "routes": {},
+            "policy": {},
+        }
+
+    def _rows(self, tokens_in, tokens_out):
+        return [{"timestamp": "2026-09-20T00:00:00Z", "provider": "vertex_ai",
+                 "model": "flash",
+                 "tokens": {"in": tokens_in, "out": tokens_out}}]
+
+    SINCE = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+
+    def test_measured_spend_at_the_margin_is_refused(self):
+        # 115M in + 115M out at 1e-06 = $230 = $250 grant - $20 margin.
+        guards = usage.credit_guards(self._reg(),
+                                     self._rows(115_000_000, 115_000_000),
+                                     self.SINCE)
+        self.assertEqual(guards["vertex_ai"]["spend_usd"], 230.0)
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse")
+
+    def test_just_below_the_margin_is_not_refused(self):
+        # $200 of the $250 grant: above the 80 % warn line, below the $230 stop.
+        guards = usage.credit_guards(self._reg(),
+                                     self._rows(100_000_000, 100_000_000),
+                                     self.SINCE)
+        self.assertEqual(guards["vertex_ai"]["state"], "warn")
+
+    def test_margin_zero_is_the_old_refuse_at_the_full_grant(self):
+        # $200 of $250 with margin 0 stays a warn; $250 refuses.
+        guards = usage.credit_guards(self._reg(margin=0),
+                                     self._rows(100_000_000, 100_000_000),
+                                     self.SINCE)
+        self.assertEqual(guards["vertex_ai"]["state"], "warn")
+        guards = usage.credit_guards(self._reg(margin=0),
+                                     self._rows(125_000_000, 125_000_000),
+                                     self.SINCE)
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse")
+
+    def test_an_unmeasured_spend_is_not_refused_by_the_margin(self):
+        guards = usage.credit_guards(self._reg(), None, failure="403")
+        self.assertEqual(guards["vertex_ai"]["state"], "unknown")
+
+    def test_validation_rejects_a_margin_at_or_above_the_grant(self):
+        import registry as registry_mod
+        problems = [p for p in registry_mod._check_credit_guards(
+            self._reg(margin=250.0)) if "credit_hard_stop_margin_usd" in p]
+        self.assertTrue(problems, problems)
+
+    def test_validation_rejects_a_negative_margin(self):
+        import registry as registry_mod
+        problems = [p for p in registry_mod._check_credit_guards(
+            self._reg(margin=-1.0)) if "credit_hard_stop_margin_usd" in p]
+        self.assertTrue(problems, problems)
+
+    def test_validation_accepts_a_margin_below_the_grant(self):
+        import registry as registry_mod
+        self.assertEqual(registry_mod._check_credit_guards(self._reg(margin=20.0)),
+                         [])
+
+
+class C10GuardStateOrdering(unittest.TestCase):
+    """T1-CREDIT-FIX-5 M5b: `refuse` wins over `spend_unknown`, and a guard
+    state nobody recognises is never silent -- both fail the way the money
+    demands, not the way the branch happens to be ordered."""
+
+    def test_refuse_with_spend_unknown_is_refused(self):
+        guards = {"ovhcloud": {"provider": "ovhcloud", "state": "refuse",
+                              "spend_usd": 200.0, "spend_unknown": True,
+                              "cap_usd": 200.0, "warn_usd": 160.0,
+                              "models_unpriced": 0, "note": "drained"}}
+        kept, skipped, _warns = _legs_for(_reg_credit(), "r-trial", guards)
+        self.assertNotIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertIn("ovhcloud/ovh-priced", skipped)
+
+    def test_an_unrecognised_state_is_a_warn_not_silence(self):
+        guards = {"ovhcloud": {"provider": "ovhcloud", "state": "banana",
+                              "spend_usd": 0.0, "spend_unknown": False,
+                              "cap_usd": 200.0, "warn_usd": 160.0,
+                              "models_unpriced": 0, "note": "odd"}}
+        kept, _skipped, warns = _legs_for(_reg_credit(), "r-trial", guards)
+        self.assertIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertTrue(any("unrecognised state" in w for w in warns), warns)
+
+    def test_a_none_state_is_a_warn_not_silence(self):
+        guards = {"ovhcloud": {"provider": "ovhcloud", "state": None,
+                              "spend_usd": 0.0, "spend_unknown": False,
+                              "cap_usd": 200.0, "warn_usd": 160.0,
+                              "models_unpriced": 0, "note": "missing"}}
+        kept, _skipped, warns = _legs_for(_reg_credit(), "r-trial", guards)
+        self.assertIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertTrue(any("unrecognised state" in w for w in warns), warns)
 
 
 if __name__ == "__main__":

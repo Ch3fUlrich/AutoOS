@@ -4595,11 +4595,12 @@ def _credit_guard_error(registry: dict, type_name: str) -> dict:
     """`{provider id: guard}` for an UNFORESEEN read bug (T1-CREDIT-FIX-2).
 
     Distinct from `unknown`: `unknown` means "the gateway gave no figure"
-    (fail open for credit, held for paid), while `guard error` means "our own
-    code raised something the contract does not predict" -- kept for credit,
-    held for paid, and always named in the plan so the bug is visible instead
-    of silent. `type_name` is the exception TYPE NAME only: a message can
-    carry a gateway URL, a home path or key material (AGENTS.md rule 1).
+    (fail open for credit, kept for paid per D-212), while `guard error` means
+    "our own code raised something the contract does not predict" -- kept for
+    credit, kept for paid (D-212 last resort), and always named in the plan so
+    the bug is visible instead of silent. `type_name` is the exception TYPE
+    NAME only: a message can carry a gateway URL, a home path or key material
+    (AGENTS.md rule 1).
     Total: never raises."""
     out = {}
     try:
@@ -4630,7 +4631,7 @@ def _credit_guard_error(registry: dict, type_name: str) -> dict:
                     "spend_usd": 0.0, "spend_unknown": True,
                     "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
                     "note": "paid guard error %s (%s) - spend unmeasured, "
-                            "leg held" % (pid, type_name)}
+                            "leg kept (last resort, D-212)" % (pid, type_name)}
     return out
 
 

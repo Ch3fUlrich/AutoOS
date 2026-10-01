@@ -155,6 +155,13 @@ SPEND_PROVIDER_LABEL = "DeepSeek"
 SPEND_WARN_USD = 20.0      # the warning line; the hard cap is providers.<id>.monthly_cap_usd
 BALANCE_FLOOR_USD = 5.0    # warn before the balance runs out mid-lane
 
+# T1-CREDIT-FIX-5 (D-220): a `credit` grant keeps room below its total so the
+# last calls of a draining trial do not land on a card that is already over the
+# vendor's limit. `MANUAL_CREDIT_SPEND_MAX_AGE_DAYS` is how long the operator's
+# dated manual reading is trusted before it is (correctly) treated as unknown.
+CREDIT_HARD_STOP_MARGIN_USD = 20.0
+MANUAL_CREDIT_SPEND_MAX_AGE_DAYS = 7
+
 # Registry path for cost lookup
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
@@ -278,10 +285,34 @@ def spend_warn_usd(registry, provider=SPEND_PROVIDER):
     return monthly_cap_usd(registry, provider) * float(fraction)
 
 
+def credit_hard_stop_margin_usd(registry, provider):
+    """The reserve a `credit` grant keeps below its total, in USD (T1-CREDIT-FIX-5).
+
+    `providers.<id>.credit_hard_stop_margin_usd` (default
+    `CREDIT_HARD_STOP_MARGIN_USD`), so a MEASURED spend refuses the leg at
+    `monthly_cap_usd - margin` instead of at 100 % of the grant. Paid rows and
+    any margin that would zero the cap keep the old refuse-at-cap behaviour; a
+    malformed margin is flagged by `registry.py check` and reads as 0 here
+    rather than turning a guard into a crash."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    if not isinstance(entry, dict) or entry.get("tier") != "credit":
+        return 0.0
+    margin = entry.get("credit_hard_stop_margin_usd", CREDIT_HARD_STOP_MARGIN_USD)
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)) or margin < 0:
+        return 0.0
+    cap = monthly_cap_usd(registry, provider)
+    if margin >= cap:
+        # A margin that would reach or pass the whole grant is no guard at all;
+        # fall back to refusing at the cap (registry.py check already flags it).
+        return 0.0
+    return float(margin)
+
+
 def spend_guard(registry, provider, spend_usd):
     """(state, note) for one provider's spend guard: "ok" below the warn line,
-    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at or
-    above `monthly_cap_usd` (100 %).
+    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at
+    the hard stop -- `monthly_cap_usd` for a paid row, or `monthly_cap_usd`
+    minus `credit_hard_stop_margin_usd` for a `credit` grant (T1-CREDIT-FIX-5).
 
     The refuse half is the same rule deepseek_call.py applies today (WS-DSCALL):
     at or above the cap the call does not happen. This is the shared reading of
@@ -292,7 +323,14 @@ def spend_guard(registry, provider, spend_usd):
     """
     cap = monthly_cap_usd(registry, provider)
     warn = spend_warn_usd(registry, provider)
-    if spend_usd >= cap:
+    margin = credit_hard_stop_margin_usd(registry, provider)
+    hard_stop = cap - margin
+    if spend_usd >= hard_stop:
+        if margin:
+            return "refuse", ("%s spend $%.2f is at or above the $%.2f hard stop "
+                              "($%.2f grant less the $%.2f margin, "
+                              "providers.%s.credit_hard_stop_margin_usd)"
+                              % (provider, spend_usd, hard_stop, cap, margin, provider))
         return "refuse", ("%s spend $%.2f is at or above the $%.2f cap "
                           "(providers.%s.monthly_cap_usd)" % (provider, spend_usd, cap, provider))
     if spend_usd >= warn:
@@ -311,7 +349,26 @@ def credit_guard_providers(registry):
                   if isinstance(entry, dict) and entry.get("tier") == "credit")
 
 
-def manual_credit_spend(registry, provider):
+def _today_date(today=None):
+    """`today` as a `datetime.date`, accepting None (UTC now), a date or an aware/
+    naive datetime -- the injectable clock M1's tests drive without sleeping."""
+    if today is None:
+        return datetime.datetime.now(datetime.timezone.utc).date()
+    if isinstance(today, datetime.datetime):
+        if today.tzinfo is not None:
+            today = today.astimezone(datetime.timezone.utc)
+        return today.date()
+    return today
+
+
+def _manual_age_days(as_of, today=None):
+    """Whole days from `as_of` (YYYY-MM-DD) to `today`; callers have validated
+    the format already, so a parse error here is their bug, not this one's."""
+    parsed = datetime.datetime.strptime(as_of.strip(), "%Y-%m-%d").date()
+    return (_today_date(today) - parsed).days
+
+
+def manual_credit_spend(registry, provider, today=None):
     """(spend_usd, as_of) from the registry's dated manual figure, or (None, None).
 
     `providers.<id>.credit_spent_usd` + `credit_spent_as_of` is the operator's
@@ -319,7 +376,14 @@ def manual_credit_spend(registry, provider):
     ledger cannot be read. Both or neither: a figure with no date cannot age
     and a date with no figure judges nothing, so a half-present or malformed
     pair reads as absent here (tools/registry.py flags it; the plan never
-    crashes on it)."""
+    crashes on it).
+
+    A reading is only trusted while it is fresh (T1-CREDIT-FIX-5 M1): older
+    than `MANUAL_CREDIT_SPEND_MAX_AGE_DAYS` days it reads as absent, and a date
+    more than one day in the future (timezone skew tolerance) is not a reading
+    at all. A stale reading that read as measured is exactly the fail-open the
+    403 made dangerous. `today` is injectable so tests need no clock and no
+    sleep."""
     entry = ((registry or {}).get("providers") or {}).get(provider) or {}
     figure = entry.get("credit_spent_usd")
     as_of = entry.get("credit_spent_as_of")
@@ -334,6 +398,9 @@ def manual_credit_spend(registry, provider):
     try:
         datetime.datetime.strptime(as_of.strip(), "%Y-%m-%d")
     except ValueError:
+        return None, None
+    age = _manual_age_days(as_of, today)
+    if age > MANUAL_CREDIT_SPEND_MAX_AGE_DAYS or age < -1:
         return None, None
     return float(figure), as_of.strip()
 
@@ -387,7 +454,7 @@ def credit_guards_unreadable(registry, failure):
     return out
 
 
-def credit_guards(registry, rows, since=None, failure=None):
+def credit_guards(registry, rows, since=None, failure=None, today=None):
     """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
 
     Field semantics (T1-CREDIT-FIX): `credit_usd` is the trial grant TOTAL in
@@ -418,9 +485,12 @@ def credit_guards(registry, rows, since=None, failure=None):
 
     Each guard is ``{"provider", "state", "spend_usd", "spend_unknown",
     "cap_usd", "warn_usd", "models_unpriced", "note"}``, with `state` from
-    `spend_guard` (`ok` below the warn line, `warn` at it, `refuse` at the cap)
-    or `unknown` when nothing measurable exists. `spend_unknown` is True only
-    for the unknown state, so a reader can tell "measured $0" from "unmeasured".
+    `spend_guard` (`ok` below the warn line, `warn` at it, `refuse` at the hard
+    stop -- the cap, or the cap less a `credit` grant's
+    `credit_hard_stop_margin_usd`), `manual` for a still-valid dated fallback
+    figure (never `ok`; T1-CREDIT-FIX-5 M1) or `unknown` when nothing
+    measurable exists. `spend_unknown` is True only for the unknown state, so a
+    reader can tell "measured $0" from "unmeasured".
     """
     if since is None:
         since = month_start(datetime.datetime.now(datetime.timezone.utc))
@@ -428,19 +498,23 @@ def credit_guards(registry, rows, since=None, failure=None):
     out = {}
     for provider in credit_guard_providers(registry):
         if rows is None:
-            manual, as_of = manual_credit_spend(registry, provider)
+            manual, as_of = manual_credit_spend(registry, provider, today)
             if manual is not None:
-                state, note = spend_guard(registry, provider, manual)
+                state, _note = spend_guard(registry, provider, manual)
+                # T1-CREDIT-FIX-5 M1: a dated manual figure is not a measurement.
+                # Below the hard stop it reads `manual` (never `ok`), and the note
+                # carries its age so a reader can judge how stale the reading is.
+                if state != "refuse":
+                    state = "manual"
+                note = ("manual figure $%.2f as of %s (age %d d)"
+                        % (manual, as_of, _manual_age_days(as_of, today)))
                 out[provider] = {
                     "provider": provider, "state": state,
                     "spend_usd": manual, "spend_unknown": False,
                     "cap_usd": monthly_cap_usd(registry, provider),
                     "warn_usd": spend_warn_usd(registry, provider),
                     "models_unpriced": 0,
-                    "note": "%s (manual figure $%.2f as of %s; gateway ledger "
-                            "unreadable: %s)"
-                            % (note, manual, as_of,
-                               failure or "no call-log rows")}
+                    "note": note}
                 continue
             out[provider] = {
                 "provider": provider, "state": "unknown",
@@ -793,6 +867,11 @@ def render_credit_guards(guards):
             lines.append("credit SPEND UNKNOWN %s - %s; its legs stay available "
                          "(fail open) until spend is measured"
                          % (provider, guard.get("note") or "spend unmeasured"))
+        elif guard.get("state") == "manual":
+            # T1-CREDIT-FIX-5 M1: a dated manual figure is not measured spend.
+            # Name it (with its age, in the note) so it never reads as live.
+            lines.append("credit MANUAL %s - %s; not measured spend"
+                         % (provider, guard.get("note") or "manual figure"))
         elif guard.get("state") == "warn":
             lines.append("credit WARN %s $%.2f of a $%.2f grant (warn line $%.2f)"
                          % (provider, guard["spend_usd"], guard["cap_usd"],

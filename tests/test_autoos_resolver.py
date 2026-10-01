@@ -4747,6 +4747,28 @@ class CreditFailOpenTests(unittest.TestCase):
         self.assertNotIn("ovhcloud/ovh-priced", skipped)
         self.assertTrue(any("spend unknown" in w for w in warns), warns)
 
+    def test_unknown_spend_puts_the_loud_d220_line_in_the_plan_warns(self):
+        """T1-CREDIT-FIX-5 M2 (D-220): while a credit leg is kept on unknown
+        spend the plan says so LOUDLY -- the line is the warn accumulator the
+        plan's `explain` carries, not a quiet note. Production reaches it
+        through `filter_routes` (the entry `plan` uses), not `usable_legs`
+        directly."""
+        reg = self.registry()
+        guards = usage.credit_guards(reg, None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured")
+        warns = []
+        r.filter_routes({"kind": "implement", "privacy": "public"},
+                        {"need_tokens": 10},
+                        {"opencode": {"installed": True, "signed_in": True,
+                                      "reason": ""}},
+                        reg, {}, credit_guards=guards,
+                        credit_warns=warns)
+        self.assertTrue(
+            any(w.startswith("SPEND UNKNOWN: ovhcloud credit leg kept")
+                and "grant $200.00" in w and "fail-open per D-220" in w
+                and "measured spend unavailable" in w for w in warns), warns)
+
     def test_missing_guard_data_keeps_the_leg_with_a_note(self):
         """No guard map at all is also 'nothing known': available, noted --
         with its own `no guard for` line (T1-CREDIT-FIX-2), never borrowing

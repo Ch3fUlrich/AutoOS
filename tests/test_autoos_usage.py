@@ -1172,11 +1172,14 @@ class CreditSpendUnknownTests(UsageCliTests):
         reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
         guards = usage.credit_guards(reg, None, self.SINCE,
                                      failure="manage key rejected (403) - "
-                                             "spend unmeasured")
+                                             "spend unmeasured",
+                                     today=datetime.date(2026, 10, 1))
         guard = guards["morph"]
         self.assertEqual(guard["spend_usd"], 50.0)
-        self.assertEqual(guard["state"], "ok")
-        self.assertIn("2026-09-30", guard["note"])
+        # M1: a manual figure never reads as measured -- state `manual`, not `ok`.
+        self.assertEqual(guard["state"], "manual")
+        self.assertIn("manual figure $50.00 as of 2026-09-30 (age 1 d)",
+                      guard["note"])
 
     def test_a_spent_manual_figure_still_refuses(self):
         """Fail open is for the unknown, not for a known-drained grant."""
@@ -1184,7 +1187,8 @@ class CreditSpendUnknownTests(UsageCliTests):
         reg["providers"]["morph"]["credit_spent_usd"] = 200.0
         reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
         guards = usage.credit_guards(reg, None, self.SINCE,
-                                     failure="gateway unreachable")
+                                     failure="gateway unreachable",
+                                     today=datetime.date(2026, 10, 1))
         self.assertEqual(guards["morph"]["state"], "refuse")
 
     def test_rendered_unknown_never_shows_a_bare_zero(self):
