@@ -370,10 +370,6 @@ model_list:
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t4-researcher
     litellm_params:
-      model: nebius/zai-org/GLM-5.3-Flash
-      api_key: os.environ/NEBIUS_API_KEY
-  - model_name: t4-researcher
-    litellm_params:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY

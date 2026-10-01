@@ -409,14 +409,6 @@
       ]
     },
     {
-      "name": "vertex-gemini-3.8-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
       "name": "t4-researcher",
       "strategy": "priority",
       "context": "128k",
@@ -424,6 +416,14 @@
         "gemini/gemini-3.8-flash",
         "scw/qwen3-235b-a22b-instruct-2507",
         "free-ai/qwen7b"
+      ]
+    },
+    {
+      "name": "vertex-gemini-3.8-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
       ]
     }
   ]
