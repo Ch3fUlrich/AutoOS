@@ -22,8 +22,8 @@ import re
 import sys
 import tarfile
 
-TARBALL = r"C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz"
-LIVE = r"C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute"
+TARBALL = os.path.join(os.environ.get("TEMP", ""), "opencode", "packbackups", "omniroute-3.8.50.tgz")
+LIVE = os.path.join(os.environ.get("APPDATA", ""), "npm", "node_modules", "omniroute")
 PREFIX = "package/"
 SKIP_PREFIXES = (PREFIX + "node_modules/",)
 BACKUP_RE = re.compile(r"\.autoos-backup-pristine-3\.8\.50-\d{8}-\d{6}$")

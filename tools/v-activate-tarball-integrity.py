@@ -10,7 +10,7 @@ import base64
 import hashlib
 import os
 
-TARBALL = r"C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz"
+TARBALL = os.path.join(os.environ.get("TEMP", ""), "opencode", "packbackups", "omniroute-3.8.50.tgz")
 REGISTRY_INTEGRITY = "sha512-qK6REDWQYGh8lwGwDgFMsBqAMXnxIePudr8cSuSYeB9iIlywNhDJxHKt6Cwa31lPci8jXE5bbvl+az0lvyt0Mg=="
 REGISTRY_SHASUM = "d7b4fce4f1b00e5e826b76855665dfae42aab97a"
 

@@ -1,7 +1,7 @@
 # Lane V-activate — coexistence + live-probe proof for the planned `:20128` restart
 
 **Lane:** `ws-verify-activate` (independent verification, lane V)
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-verify-activate`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-verify-activate`
 **Branch:** `L1-backlog/ws-verify-activate-20260930` (cut from `main` @ `d08f7f2`)
 **Dates:** 2026-09-30 → 2026-10-01
 **Reviewer nonce:** `VACT-7Q3Z-9F2K-5R8M` (the reviewer must return this string to prove the
@@ -47,9 +47,9 @@ bugs, with one material caveat (R1: two files have no local backup).
 ## 1. Constraints honoured (refusals)
 
 - Worked **only** inside the worktree above; `git rev-parse --show-toplevel` confirmed
-  `C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-verify-activate` before any work.
+  `C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-verify-activate` before any work.
 - **Never** touched the shared `:20128` gateway, never restarted it, never sent it a request.
-- The npm-global package `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute` and its
+- The npm-global package `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute` and its
   backups were treated as **read-only** — no live file was written, no backup created or
   modified, no existing backup deleted.
 - **Never** pushed, merged, rebased or checked out any branch. No other worktree was touched.
@@ -75,7 +75,7 @@ dist.shasum = 'd7b4fce4f1b00e5e826b76855665dfae42aab97a'
 version = '3.8.50'
 
 $ python tools/v-activate-tarball-integrity.py
-tarball  : C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz
+tarball  : C:\Users\<user>\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz
 size     : 121369534 B
 computed : sha512-qK6REDWQYGh8lwGwDgFMsBqAMXnxIePudr8cSuSYeB9iIlywNhDJxHKt6Cwa31lPci8jXE5bbvl+az0lvyt0Mg==
 registry : sha512-qK6REDWQYGh8lwGwDgFMsBqAMXnxIePudr8cSuSYeB9iIlywNhDJxHKt6Cwa31lPci8jXE5bbvl+az0lvyt0Mg==
@@ -167,7 +167,7 @@ never shares config, SQLite or the WAL with the shared gateway:
 ```
 launcher_pid=121344
 port=20145
-DATA_DIR=C:\Users\mauls\AppData\Local\Temp\opencode\v-activate-iso
+DATA_DIR=C:\Users\<user>\AppData\Local\Temp\opencode\v-activate-iso
 listening=YES pid=125716 after=8s
 ```
 

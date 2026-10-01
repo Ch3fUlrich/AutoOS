@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $nodeExe = 'C:\Program Files\nodejs\node.exe'
-$launcher = 'C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute\bin\omniroute.mjs'
+$launcher = (Join-Path $env:APPDATA 'npm\node_modules\omniroute\bin\omniroute.mjs')
 $dataDir = Join-Path $env:TEMP 'opencode\v-activate-iso'
 $logDir = Join-Path $env:TEMP 'opencode\v-activate-logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
