@@ -35,11 +35,30 @@ expectations in their place, and no wave ran `test_registry_render.py`. This lan
 | 11 | `RouteContextCapTests::test_docs_promise_carries_the_clamped_window` | A | D-TORDER-1(b): t1 keeps only ≥600000 legs, so its promise is the honest **1M**. |
 | 12 | `RouteContextCapTests::test_the_real_t1_combo_does_not_promise_more_than_gemini_takes` | A | same: `t1-orchestrator` and `t1-orchestrator-free-only` render 1M (`spark-1.3-contributor` stays 1M). |
 | 13 | `IdeContextAndEffortFollowServedLegsTests::test_the_real_t1_picker_window_is_clamped` | A | t1's picker window is **1000000** (≤ the model's own 1048576) — a clamp, no longer 131072. |
-| 14 | `IdeContextAndEffortFollowServedLegsTests::test_the_real_free_head_keeps_its_own_default` | A | **the one (B)-candidate, resolved as (A):** the served head is the restored `gemini/gemini-3.8-flash`, whose ladder is `low/medium/high`; the surface default `xhigh` is not a rung it carries, so `render_ide()` correctly **drops** it instead of forwarding an effort the head rejects. No capability was lost — the ladder is forwarded. |
+| 14 | `IdeContextAndEffortFollowServedLegsTests::test_the_real_free_head_drops_a_default_it_does_not_carry` (renamed) | A | **the one (B)-candidate, resolved as (A):** the served head is the restored `gemini/gemini-3.8-flash`, whose ladder is `low/medium/high`; the surface default `xhigh` is not a rung it carries, so `render_ide()` correctly **drops** it instead of forwarding an effort the head rejects. No capability was lost — the ladder is forwarded, and the forward branch stays covered by `test_a_default_the_served_head_carries_is_still_forwarded`. |
 | 15 | `IdeContextAndEffortFollowServedLegsTests::test_openhands_max_input_tokens_is_clamped` | A | t1's openhands/litellm profile window is **1000000** (≤ 1048576), still a clamp. |
 
-No test was deleted, no assertion was relaxed to a tautology, and every renamed test keeps its
-original intent with the new truth pinned in it.
+No test was deleted and no assertion was removed — the assertion count **rose** (267 → 276). Every
+renamed test keeps its original intent with the new truth pinned in it.
+
+**Correction, after review.** The first revision of this file claimed "no assertion was relaxed to
+a tautology" — reviewer `RENDERFIX-NONCE-6Xn2Pq9W` proved that claim **false**: the gateway-only
+litellm test asserted membership on the list its own fixture had just built. The review returned
+**fix-first** on exactly that, and the four required items are now applied:
+
+1. that self-fulfilling `assertIn` is **removed** and replaced with a real assertion on the
+   registry (`t2-worker` declares no `antigravity/*` leg any more);
+2. the positional coverage the free-ai row had dropped is **restored** —
+   `models[0] == "gemini/gemini-3.8-flash"`, `models.index("free-ai/qwen7b") == 8`, and
+   `models[9]` is the `scw/` credits band, for **both** free-only combos (nothing else in the
+   suite pinned those positions);
+3. this paragraph is the corrected claim;
+4. row 14's test is renamed to `…_drops_a_default_it_does_not_carry`, matching what it asserts.
+
+The reviewer also independently reproduced all 15 rows against ground truth and ran controls on
+both synthetic re-opens (a leg prepended under a litellm-capable non-gateway provider **does**
+reach the block, while the antigravity one does not), confirming the drop is caused by
+`GATEWAY_ONLY` and not by the fixture.
 
 ## Verification (quoted, on `ec59a3b5`)
 

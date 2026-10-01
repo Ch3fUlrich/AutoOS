@@ -459,8 +459,14 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         reg["routes"]["t2-worker"]["legs"] = (
             ["antigravity/gemini-3.7-flash-high"]
             + real_registry()["routes"]["t2-worker"]["legs"])
-        legs = reg["routes"]["t2-worker"]["legs"]
-        self.assertIn("antigravity/gemini-3.7-flash-high", legs)
+        # What the drop has to be proved against is the REAL registry's state:
+        # it declares no antigravity leg any more (the provider is unavailable),
+        # which is exactly why the fixture above restores one. (The old
+        # `assertIn` on the list the fixture had just built was self-fulfilling.
+        # Reviewer RENDERFIX-NONCE-6Xn2Pq9W, finding 1.)
+        self.assertFalse(
+            [leg for leg in real_registry()["routes"]["t2-worker"]["legs"]
+             if leg.startswith("antigravity/")])
         rendered = registry.render_litellm_blocks(reg, real_litellm_config())
         self.assertNotIn("gemini-3.7-flash-high", rendered["t2-worker"])
         self.assertIn("scaleway/mistral-small-3.2-24b-instruct-2506",
@@ -1647,8 +1653,15 @@ class FreeAiRenderTests(unittest.TestCase):
                   registry.render_omniroute(real_registry())["combos"]}
         for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
             models = combos[route_id]["models"]
-            self.assertIn("free-ai/qwen7b", models, route_id)
-            self.assertNotEqual(models[0], "free-ai/qwen7b", route_id)
+            # Positions are pinned, not merely presence: the head is the restored
+            # gemini free leg, the stopgap sits at its band index 8, and the
+            # scaleway credit band follows it. Nothing else in the suite pins
+            # these positions, so a reorder that promoted the stopgap or shuffled
+            # the band fails here. (Reviewer finding 2: the first revision had
+            # dropped the old `models[-1]` pin for presence only.)
+            self.assertEqual(models[0], "gemini/gemini-3.8-flash", route_id)
+            self.assertEqual(models.index("free-ai/qwen7b"), 8, route_id)
+            self.assertTrue(models[9].startswith("scw/"), route_id)
 
     def test_t2_worker_combo_carries_the_free_ai_stopgap_leg(self):
         # T2FREE 2026-09-28: the stopgap leg reaches the gateway render with the
@@ -1912,7 +1925,7 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertEqual(entry.get("reasoning_effort"), "xhigh")
         self.assertIn("xhigh", entry["effort_ladder"])
 
-    def test_the_real_free_head_keeps_its_own_default(self):
+    def test_the_real_free_head_drops_a_default_it_does_not_carry(self):
         # RENDERFIX 2026-10-01: the real served head is the RESTORED
         # gemini/gemini-3.8-flash, whose model row declares the ladder
         # low/medium/high. The surface default "xhigh" is not one of its rungs,
