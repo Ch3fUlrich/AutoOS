@@ -18793,12 +18793,68 @@ class GeminiSideModelPinTests(unittest.TestCase):
         # worker_env is what builds the child environment: the pin must survive it,
         # with the very value the argv carries, so an internal call names no other leg.
         flag = argv[0].split("--model", 1)[1].split()[0]
-        child = self.agent.worker_env({"env": self.pin("gemini", flag), "cwd": "."},
+        pinned = self.plan_flag_and_pin()[1]
+        self.assertEqual(pinned, flag, out)
+        child = self.agent.worker_env({"env": self.pin("gemini", pinned), "cwd": "."},
                                       None, base={})
-        self.assertEqual(child.get("GEMINI_MODEL"), flag, out)
+        self.assertEqual(child.get("GEMINI_MODEL"), pinned, out)
 
     def test_a_qwen_spawn_gets_no_gemini_pin(self):
         self.assertNotIn("GEMINI_MODEL", self.generated_env("qwen"))
+
+    def plan_flag_and_pin(self, env_extra=None):
+        """The real spawn path, in-process: returns (--model value in the argv the
+        plan would run, the value the pin call site hands the plan).
+
+        `generated_env` prints env *names* only, so the pinned value is not
+        observable from the dry-run text; recording what the call site passes is
+        the only way to assert the value rather than its presence, and to keep
+        the test off a hand-made pin (G5)."""
+        agent = self.agent
+        seen = []
+        real = clients.gemini_side_model_env
+
+        def spy(name, model):
+            got = real(name, model)
+            if name == "gemini":
+                seen.append(got.get(clients.GEMINI_MODEL_ENV))
+            return got
+
+        buf = io.StringIO()
+        with mock.patch.object(clients, "gemini_side_model_env", spy), \
+                mock.patch.dict(os.environ, env_extra or {}), \
+                contextlib.redirect_stdout(buf):
+            rc = agent.main(["run", "--client", "gemini",
+                             "--model", "omniroute/vertex-3.8-flash",
+                             "--dry-run", "--card", "role=implement", "t"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        argv = [line for line in out.splitlines() if line.startswith("would run: omniroute")]
+        self.assertTrue(argv, out)
+        self.assertEqual(len(seen), 1, out)
+        return argv[0].split("--model", 1)[1].split()[0], seen[0]
+
+    def test_the_pinned_value_is_the_model_the_argv_carries(self):
+        # G5 (RWP3): presence of the name proved nothing about the value. The
+        # child's pin and the argv flag must be the same string, because the pin
+        # exists so an internal side call can name no other leg.
+        flag, pinned = self.plan_flag_and_pin()
+        self.assertEqual(pinned, flag)
+        self.assertEqual(pinned, "vertex-3.8-flash")
+
+    def test_an_explicit_GEMINI_MODEL_in_the_spawner_env_does_not_reach_the_child(self):
+        # G3 (RWP3): the overwrite is the point. A caller-set GEMINI_MODEL is
+        # whatever the caller's shell happened to hold; the leg this run routed is
+        # the only one D-255 and the budget gate cleared, so it wins.
+        flag, pinned = self.plan_flag_and_pin({"GEMINI_MODEL": "gemini-3-pro-preview"})
+        self.assertEqual(pinned, flag)
+        self.assertNotEqual(pinned, "gemini-3-pro-preview")
+        # worker_env is where an inherited value and a plan entry meet; the plan
+        # entry is assigned after the allowlist copy, so it overwrites.
+        child = self.agent.worker_env(
+            {"env": self.pin("gemini", flag), "cwd": "."}, None,
+            base={"GEMINI_MODEL": "gemini-3-pro-preview"})
+        self.assertEqual(child.get("GEMINI_MODEL"), flag)
 
 
 if __name__ == "__main__":

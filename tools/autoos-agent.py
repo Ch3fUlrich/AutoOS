@@ -3766,7 +3766,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # routing, a retry) and with no pin falls to its `auto` default, which its own
     # docs say is gemini-3-pro-preview / gemini-3-flash-preview — a leg this lane
     # never routed (measured 402 side call, 2026-10-01). Pin GEMINI_MODEL to the
-    # value the argv carries so an internal call can only name the same leg.
+    # value the argv carries so an internal call can only name the same leg. The
+    # update is unconditional on purpose: a GEMINI_MODEL the caller's shell happens
+    # to hold is not a leg this lane routed, so the routed model wins. (G3, RWP3)
     env.update(clients.gemini_side_model_env(client.name, model))
     if args.isolate:
         if sandbox is None:
