@@ -4408,6 +4408,90 @@
           "output": 16384
         }
       }
+    },
+    "ovh-qwen3.8-27b": {
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3.8-27B (live ovh/Qwen3.8-27B 128000; registry adv 262000 from OVH catalogue page, renders 256k; priced per OVH pricing page, proven). Class credit. opencode/zed only (no openhands_profile, the groq-qwen/hf-glm precedent).",
+      "class": "credit",
+      "id": "ovh-qwen3.8-27b",
+      "legs": [
+        "ovhcloud/Qwen3.8-27B"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 262144,
+          "context_declared": "256k",
+          "display_name": "Qwen3.8-27B via OVH (credit)",
+          "output": 32768
+        }
+      }
+    },
+    "ovh-gpt-oss-120b": {
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/gpt-oss-120b (live ovh/gpt-oss-120b 400000; registry shared model adv 131072, renders 128k; shared row price 0 = unpriced grant, unproven - renders but resolver refuses until priced, same stance as deepinfra credit tails). Class credit. opencode/zed only.",
+      "class": "credit",
+      "id": "ovh-gpt-oss-120b",
+      "legs": [
+        "ovhcloud/gpt-oss-120b"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "GPT-OSS-120B via OVH (credit)",
+          "output": 32768
+        }
+      }
+    },
+    "ovh-qwen3-coder-30b": {
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3-Coder-30B-A3B-Instruct (live 128000 matches registry 128000; priced, proven). Class credit. opencode/zed only.",
+      "class": "credit",
+      "id": "ovh-qwen3-coder-30b",
+      "legs": [
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "Qwen3-Coder-30B via OVH (credit)",
+          "output": 32768
+        }
+      }
+    },
+    "vertex-gemini-3.8-flash": {
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for vertex/gemini-3.8-flash (live 1048576 matches registry 1048576; unpriced grant (price 0), unproven - renders but resolver refuses until priced/proven, same stance as morph/deepinfra tails; leg uses vertex/ spelling (live id) not vertex_ai/ (which gateway_ref would emit verbatim and live does not know), same as routes.gemini-3.8-flash). Class credit. opencode/zed only.",
+      "class": "credit",
+      "id": "vertex-gemini-3.8-flash",
+      "legs": [
+        "vertex/gemini-3.8-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "Gemini-3.8-Flash via Vertex (credit)",
+          "output": 65536
+        }
+      }
     }
   },
   "version": "2026-09-30"
