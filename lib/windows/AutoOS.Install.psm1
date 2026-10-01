@@ -219,7 +219,8 @@ function Write-AutoOSNoticeOnce {
 }
 
 function Get-AutoOSClientKey {
-    param([string]$KeysFile)
+    # -Optional: a missing key returns $null without a message (callers that treat the key as optional)
+    param([string]$KeysFile, [switch]$Optional)
     # 1. Explicit env always wins
     if (-not [string]::IsNullOrWhiteSpace($env:AUTOOS_OMNIROUTE_KEY)) {
         return $env:AUTOOS_OMNIROUTE_KEY
@@ -238,6 +239,7 @@ function Get-AutoOSClientKey {
         return $legacyKey
     }
     # 4. Missing - clear error
+    if ($Optional) { return $null }
     $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }
     $hostFile = Get-AutoOSHostConfigPath
     Write-AutoOSLine "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname." -Level error
@@ -3440,7 +3442,8 @@ if _files_written:
         $argOpenrouter = if ($openrouterKey) { $openrouterKey } else { 'null' }
         $argContext7 = if ($context7Key) { $context7Key } else { 'null' }
         $keysYml = Join-Path $script:RepoRoot 'configuration\api-keys.yml'
-        $omniKey = Get-AutoOSClientKey -KeysFile $keysYml
+        $omniKey = Get-AutoOSClientKey -KeysFile $keysYml -Optional
+        if (-not $omniKey) { $omniKey = Get-AutoOSClientKey -KeysFile $secretsPath -Optional }
         $argOmni = if ($omniKey) { $omniKey } else { 'null' }
 
         # The gateway default takes its windows from the model catalog; a

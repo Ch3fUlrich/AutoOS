@@ -7103,6 +7103,32 @@ Test-Case 'gwkey: key file rules match tools/keys_file.py (case, comments, place
     Pass
 }
 
+Test-Case 'gwkey: -Optional makes a missing key silent and still honours the env key' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY; $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        $got = Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional
+        Assert-True ($null -eq $got) 'a missing optional key must be $null'
+        $text = if (Test-Path $log) { Get-Content $log -Raw -Encoding utf8 } else { '' }
+        Assert-True ([string]::IsNullOrEmpty($text) -or $text -notmatch 'No OmniRoute client key') 'a missing optional key must not print the error line'
+        $env:AUTOOS_OMNIROUTE_KEY = 'env-key-value'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional) 'env-key-value'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'gwkey: two resolves in one session print the deprecation line once' {
     $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
     $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
@@ -7279,6 +7305,8 @@ Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
         $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $Root 'setup.ps1') -HostName 'testhost' 2>&1 | Out-String
         Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) 'host_name: testhost'
+        $hostBytes = [IO.File]::ReadAllBytes($env:AUTOOS_HOST_CONFIG)
+        Assert-True (-not ($hostBytes.Length -ge 3 -and $hostBytes[0] -eq 0xEF -and $hostBytes[1] -eq 0xBB -and $hostBytes[2] -eq 0xBF)) 'host.yml must be written without a BOM (ReadAllText hides one)'
         Assert-True ($out -like '*Created*') "no created line in: $out"
     } finally {
         if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
