@@ -2148,7 +2148,15 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     leg = entry.get("leg")
     resolved = None
     if leg:
-        provider_id, model_id = resolve_leg(leg, registry)
+        try:
+            provider_id, model_id = resolve_leg(leg, registry)
+        except (ValueError, KeyError):
+            # A registry oddity must not crash the plan (lane Q4 goal):
+            # the entry reads as unknown, never a crash -- skipped with
+            # the broken leg named, so reviewer_for's pre-compute pass
+            # and plan() both survive a ghost leg anywhere in the list.
+            reasons.append("leg %s unresolvable" % leg)
+            return reasons, resolved
         resolved = (provider_id, model_id)
         provider = registry["providers"].get(provider_id) or {}
         if unavailable_now(provider, now):

@@ -3295,6 +3295,55 @@ class PlanReviewCardTests(unittest.TestCase):
         if result["reviewer"] is not None:
             self.assertNotEqual(result["reviewer"]["family"], "meta")
 
+    def ghost_review_plan(self, registry):
+        card = {"kind": "review", "mode": "balanced", "risk": "normal",
+                "spec": "exact", "privacy": "public", "author": "qwen"}
+        return r.plan(card, {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                             "tests": True, "need_tokens": 1000},
+                      self.state(), registry, {}, [], "claude-opus-4-6",
+                      self.NOW)
+
+    def test_a_ghost_leg_after_the_head_does_not_crash_the_review_card(self):
+        # T0-PAID-5 P1: one ghost leg in policy.reviewers (after the usable
+        # head) must not crash every authored review card -- it reads as
+        # unknown (a rejection naming the leg), never a crash.
+        import copy
+        reg = copy.deepcopy(self.registry)
+        reg["policy"]["reviewers"].append(
+            {"client": "opencode", "model": "ghost-model",
+             "family": "ghostfam", "leg": "ghost-p/ghost-model"})
+        plan = self.ghost_review_plan(reg)
+        review = plan["review"]
+        self.assertIsNotNone(review["reviewer"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        ghost_rows = [s for s in review["skipped"]
+                      if s["model"] == "ghost-model"]
+        self.assertTrue(ghost_rows, review["skipped"])
+        self.assertTrue(any("leg ghost-p/ghost-model unresolvable" in reason
+                            for reason in ghost_rows[0]["reasons"]),
+                        ghost_rows[0]["reasons"])
+        self.assertTrue(any("ghost-model" in line for line in plan["explain"]))
+
+    def test_a_ghost_leg_before_the_head_does_not_crash_the_review_card(self):
+        # T0-PAID-5 P1: the same ghost leg placed BEFORE the usable head --
+        # the two-pass walk pre-computes rejections for every entry, so the
+        # crash fired before any reviewer was even considered.
+        import copy
+        reg = copy.deepcopy(self.registry)
+        reg["policy"]["reviewers"].insert(
+            0, {"client": "opencode", "model": "ghost-model",
+                "family": "ghostfam", "leg": "ghost-p/ghost-model"})
+        plan = self.ghost_review_plan(reg)
+        review = plan["review"]
+        self.assertIsNotNone(review["reviewer"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        ghost_rows = [s for s in review["skipped"]
+                      if s["model"] == "ghost-model"]
+        self.assertTrue(ghost_rows, review["skipped"])
+        self.assertTrue(any("leg ghost-p/ghost-model unresolvable" in reason
+                            for reason in ghost_rows[0]["reasons"]),
+                        ghost_rows[0]["reasons"])
+
 
 class PlanLimitsGateTests(unittest.TestCase):
     """MISTRALFIX (S1) 2026-09-28: a plan limit that says the model cannot serve
