@@ -483,3 +483,48 @@ To eliminate the documentation gap identified in the audit (`af20a69`):
 3. **Unpin DeepSeek:** Remove all lane pins to DeepSeek; reviewers, workers, and judges route through the new tier combos, the single-provider credit combos, or free family models (`opencode/*-free`).
 4. **L1 orchestrators:** Switched to vertex-backed `omniroute/gemini-3.8-flash`.
 5. **Hard reasoning / reconciliation:** Switched to `opencode/muse-spark-1.3-contributor-free#xhigh`.
+
+---
+
+## 12. Paid openrouter route legs (operator record 2026-10-01) — TORDER-OR fixes them
+
+Recorded per the operator correction: **openrouter has NO credit**, so these 7 paid
+openrouter legs in `routes.*.legs` are illegitimate and must be gated/dropped (leg → route):
+
+| # | openrouter leg | route |
+|---|---|---|
+| 1 | `openrouter/google/gemini-3.8-flash` | `gemini-3.8-flash` |
+| 2 | `openrouter/meta/muse-spark-1.3-contributor` | `spark-1.3-contributor` |
+| 3 | `openrouter/meta/muse-spark-1.3-contributor` | `t1-orchestrator-clean` |
+| 4 | `openrouter/deepseek/deepseek-v4.1-flash` | `t2-orchestrator` |
+| 5 | `openrouter/deepseek/deepseek-v4.1-flash` | `t2-worker-clean` |
+| 6 | `openrouter/deepseek/deepseek-v4.1-flash` | `t2-worker` |
+| 7 | `openrouter/openai/gpt-oss-120b` | `t2-worker` |
+
+**Fix status:** alpha's TORDER lane commit `c4c3654b` ("TORDER-OR openrouter NO credits
+free-only — drop 7 paid legs, keep t1-clean declared+gated, provider stays available")
+on `L1-backlog/ws-tier-order-20261001` removes them. **The gate literal** —
+`policy.allow-openrouter-free` above `deny-openrouter`, plus each `routes.*.unavailable_legs`
+entry, and `providers.openrouter.available:true` only for the `:free` ids — is the
+enforcement. Do not merge the combos lineage until TORDER lands and the contract gates pass.
+
+## 13. opencode-direct fallback ladder — probes (2026-10-01, L0/operator item 2)
+
+Full doc: `docs/handoff/2026-10-01-opencode-direct-fallback-ladder.md` (branch
+`L1-backlog/ws-fallback-20261001`, commit `6a83bb72`). In-opencode usage is **not**
+gateway proxying. Probe results (tiny ack + one tool call):
+
+| Ref | Result | Family | Session |
+|---|---|---|---|
+| `opencode/longcat-2.5-preview-free` | OK | Meituan | `ses_f09849d36ffem1P7eNAJMjb1al` |
+| `opencode/space-bunny-free` | OK | Space Bunny | `ses_f096fb1b3ffeo63OYaIPXd2pqR` |
+| `opencode/mimo-v2.6-flash-free` | OK | Mimo (Xiaomi) | `ses_f096fb1b2ffeE4UGQksx7jDwDS` |
+| `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | OK | NVIDIA | `ses_f096f887fffewNDgGblugLr5vR` |
+| `openrouter/qwen/qwen3.8-27b:free` | OK | Qwen | `ses_f096f887effeRRR8JWer7z5RwM` |
+| `meta/muse-spark-1.3` | FAIL (`META_API_KEY is not set`) | Meta | — |
+| `litellm/t2-worker` | FAIL (invalid model; server serves `tier2`) | — | — |
+| `ollama/qwen2.5-coder:7b` | opencode ref FAIL (`ConnectionRefused`); direct `127.0.0.1:11434` OK (54 s cold) | Qwen (local) | — |
+
+**Ladder:** omniroute combos → openrouter `:free` only (no credit) → opencode Zen free →
+meta direct (down) → litellm (`tier2`) → ollama (local). **public-only where the model
+trains** (meta contributor, `free_ai/*`).
