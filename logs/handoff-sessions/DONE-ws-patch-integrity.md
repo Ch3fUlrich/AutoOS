@@ -1,6 +1,6 @@
 # DONE — lane `patch-integrity` (ws-patch-integrity)
 
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`
 **Branch:** `L1-backlog/ws-fixes-20260930` (start tip `b49f9e4`)
 **Date:** 2026-09-30
 **Handoff:** `docs/handoff/2026-09-30-lanePatchIntegrity.md`
@@ -52,7 +52,7 @@ Close the two remaining gaps in a complete pre-restart revert/reapply set, from
 ## Constraints honoured
 
 No live package file modified; no gateway restart; no push/merge/rebase/checkout; no work
-in main (`C:\Users\mauls\Documents\Code\AutoOS`). No secrets, binaries or user paths in
+in main (`C:\Users\<user>\Documents\Code\AutoOS`). No secrets, binaries or user paths in
 tracked files.
 
 ## Reviewer

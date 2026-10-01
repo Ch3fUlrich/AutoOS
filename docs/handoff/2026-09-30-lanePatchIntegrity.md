@@ -1,7 +1,7 @@
 # Lane `patch-integrity` — complete revert/reapply set for the three live patch families
 
 **Lane:** `patch-integrity` (ws-patch-integrity) under L1-backlog
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-fixes`
 **Branch:** `L1-backlog/ws-fixes-20260930` (start tip `b49f9e4`)
 **Date:** 2026-09-30
 **Predecessor:** `patch-fix` (commit `6f93452`, branch `L1-backlog/ws-f1-vertex-20260930`) —
@@ -33,14 +33,14 @@ independent and jointly idempotent under both `pwsh` 7.5.8 and Windows PowerShel
 
 ```
 PS> git rev-parse --show-toplevel
-C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-fixes
+C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-fixes
 PS> git status --short --branch
 ## L1-backlog/ws-fixes-20260930
 PS> git log -1 --oneline
 b49f9e4 docs: commit handoff doc edit + DONE note for ws-fixes lane
 ```
 
-`C:\Users\mauls\Documents\Code\AutoOS` (main) was never written to; its pre-existing
+`C:\Users\<user>\Documents\Code\AutoOS` (main) was never written to; its pre-existing
 uncommitted changes are other lanes' and are untouched by this lane.
 
 ### Method note (host deletes Temp extraction trees)
@@ -54,7 +54,7 @@ PS> tar -xzf <...>\packbackups\omniroute-3.8.50.tgz -C <...>\patchintegrity\pris
 exit=0
 ```
 
-Throwaway root: `C:\Users\mauls\AppData\Local\Temp\opencode\patchintegrity`
+Throwaway root: `C:\Users\<user>\AppData\Local\Temp\opencode\patchintegrity`
 (tarball `...\packbackups\omniroute-3.8.50.tgz`, 121369534 B).
 
 ---
@@ -326,7 +326,7 @@ to stay self-contained (no UI-module dependency). No new rule class introduced.
 Honoured: every patch was applied only to throwaway copies of the pristine tarball
 members under `…\Temp\opencode\patchintegrity\`; the live install was read-only.
 
-> Never work or commit in `C:\Users\mauls\Documents\Code\AutoOS` (main).
+> Never work or commit in `C:\Users\<user>\Documents\Code\AutoOS` (main).
 > Never push/merge/rebase/checkout.
 
 Honoured: cwd guard in §1; the only git writes were commits on this branch.
