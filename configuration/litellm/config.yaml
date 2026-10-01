@@ -56,16 +56,8 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: huggingface/zai-org/GLM-5.2
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: huggingface/Qwen/Qwen3.8-27B
-      api_key: os.environ/HUGGINGFACE_API_KEY
   - model_name: t2-worker
     litellm_params:
       model: groq/openai/gpt-oss-20b
@@ -150,16 +142,8 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
-      model: huggingface/zai-org/GLM-5.2
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
-      model: huggingface/Qwen/Qwen3.8-27B
-      api_key: os.environ/HUGGINGFACE_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
       model: groq/openai/gpt-oss-20b
@@ -223,16 +207,8 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: huggingface/zai-org/GLM-5.2
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  - model_name: t3-driver
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: huggingface/Qwen/Qwen3.8-27B
-      api_key: os.environ/HUGGINGFACE_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: groq/openai/gpt-oss-20b
@@ -320,16 +296,8 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
-      model: huggingface/zai-org/GLM-5.2
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
       api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
-      model: huggingface/Qwen/Qwen3.8-27B
-      api_key: os.environ/HUGGINGFACE_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
@@ -493,19 +461,7 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   # AUTOOS-MANAGED-END groq-qwen3.8-27b
 
-  # AUTOOS-MANAGED-START hf-glm-5.2
-  - model_name: hf-glm-5.2
-    litellm_params:
-      model: huggingface/zai-org/GLM-5.2
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  # AUTOOS-MANAGED-END hf-glm-5.2
 
-  # AUTOOS-MANAGED-START hf-qwen3.8-27b
-  - model_name: hf-qwen3.8-27b
-    litellm_params:
-      model: huggingface/Qwen/Qwen3.8-27B
-      api_key: os.environ/HUGGINGFACE_API_KEY
-  # AUTOOS-MANAGED-END hf-qwen3.8-27b
 
   # AUTOOS-MANAGED-START or-laguna-s-2.1-free
   - model_name: or-laguna-s-2.1-free

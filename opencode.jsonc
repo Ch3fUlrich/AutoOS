@@ -363,8 +363,8 @@
           "limit": { "context": 1048576, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
+            { "id": "high", "settings": { "reasoningEffort": "high" } },
+            { "id": "max", "settings": { "reasoningEffort": "max" } }
           ]
         },
         "t3-driver": {
@@ -409,16 +409,6 @@
             { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
           ]
         },
-        "opus-4-6": {
-          "modelID": "opus-4-6",
-          "name": "opus-4-6 — agy free → cc subscription (1M)",
-          "limit": { "context": 1048576, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
-        },
         "t4-rag": {
           "modelID": "t4-rag",
           "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
@@ -443,16 +433,6 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } },
             { "id": "max", "settings": { "reasoningEffort": "max" } }
           ]
-        },
-        "hf-glm-5.2": {
-          "modelID": "hf-glm-5.2",
-          "name": "GLM-5.2 via HuggingFace (free)",
-          "limit": { "context": 128000, "output": 32768 }
-        },
-        "hf-qwen3.8-27b": {
-          "modelID": "hf-qwen3.8-27b",
-          "name": "Qwen3.8-27B via HuggingFace (free)",
-          "limit": { "context": 128000, "output": 32768 }
         },
         "or-nemotron-3-super-free": {
           "modelID": "or-nemotron-3-super-free",
@@ -482,7 +462,7 @@
         "ovh-qwen3.8-27b": {
           "modelID": "ovh-qwen3.8-27b",
           "name": "Qwen3.8-27B via OVH (credit)",
-          "limit": { "context": 262000, "output": 32768 }
+          "limit": { "context": 128000, "output": 32768 }
         },
         "ovh-gpt-oss-120b": {
           "modelID": "ovh-gpt-oss-120b",

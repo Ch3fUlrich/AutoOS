@@ -153,8 +153,8 @@
       "output": 32768,
       "effort_ladder": [
         "low",
-        "medium",
-        "high"
+        "high",
+        "max"
       ],
       "surfaces": {
         "omniroute": [
@@ -261,24 +261,6 @@
       }
     },
     {
-      "id": "opus-4-6",
-      "name": "opus-4-6 — agy free → cc subscription (1M)",
-      "context": 1048576,
-      "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed",
-          "openhands"
-        ]
-      }
-    },
-    {
       "id": "t4-rag",
       "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
       "context": 131072,
@@ -328,30 +310,6 @@
           "opencode",
           "zed",
           "openhands"
-        ]
-      }
-    },
-    {
-      "id": "hf-glm-5.2",
-      "name": "GLM-5.2 via HuggingFace (free)",
-      "context": 128000,
-      "output": 32768,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
-      "id": "hf-qwen3.8-27b",
-      "name": "Qwen3.8-27B via HuggingFace (free)",
-      "context": 128000,
-      "output": 32768,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
         ]
       }
     },
@@ -418,7 +376,7 @@
     {
       "id": "ovh-qwen3.8-27b",
       "name": "Qwen3.8-27B via OVH (credit)",
-      "context": 262000,
+      "context": 128000,
       "output": 32768,
       "surfaces": {
         "omniroute": [
