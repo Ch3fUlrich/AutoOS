@@ -18446,11 +18446,39 @@ class HandEntryPricingTests(unittest.TestCase):
         self.assertIsNone(self.spends("omniroute/no-such-hand-entry"))
 
     def test_a_hand_entry_whose_modelid_has_no_registry_row_is_refused(self):
-        # vertex-3.6/3.7-flash are smoked live before their rows land; until a
-        # registry model describes the leg, nothing can say what answers.
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.6-flash",
-                                                   SHIPPED_REGISTRY, self.cfg), "")
-        self.assertIsNone(self.spends("omniroute/vertex-3.6-flash"))
+        # Until a registry model row describes the leg, nothing can say what
+        # answers, so the name is refused rather than assumed free. RWP1 gave the
+        # shipped vertex-3.6/3.7-flash ids their rows, so the unrowed case is
+        # synthesised here — the guard must keep firing on it.
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-9.9-flash": {"modelID": "vertex/gemini-9.9-flash"}}}}}
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-9.9-flash",
+                                                   SHIPPED_REGISTRY, cfg), "")
+        self.assertIsNone(self.spends("omniroute/vertex-9.9-flash", cfg))
+
+    def test_the_3_6_and_3_7_hand_ids_resolve_to_their_vertex_leg(self):
+        # RWP1: the hand entries shipped in 48f0ac21 could not be priced because
+        # no `models.gemini-3.6-flash` / `models.gemini-3.7-flash` row existed for
+        # the modelID to resolve against. The leg spelling is the provider's
+        # omniroute_id plus the model key.
+        for name, leg in (("omniroute/vertex-3.6-flash", "vertex/gemini-3.6-flash"),
+                          ("omniroute/vertex-3.7-flash", "vertex/gemini-3.7-flash")):
+            self.assertEqual(self.agent.hand_entry_leg(name, SHIPPED_REGISTRY, self.cfg),
+                             leg, name)
+
+    def test_the_3_6_and_3_7_hand_ids_are_priced_and_not_claude(self):
+        for name in ("omniroute/vertex-3.6-flash", "omniroute/vertex-3.7-flash"):
+            self.assertIs(self.spends(name), False, name)
+
+    def test_the_3_6_and_3_7_hand_legs_are_credit_tier_legs(self):
+        # The price the gate reads them at is the provider's trial credit, not a
+        # per-token figure — providers.vertex_ai.tier says which.
+        for leg in ("vertex/gemini-3.6-flash", "vertex/gemini-3.7-flash"):
+            provider_id, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
+            self.assertEqual(provider_id, "vertex_ai", leg)
+            self.assertEqual(SHIPPED_REGISTRY["providers"][provider_id]["tier"],
+                             "credit", leg)
+            self.assertIn(model_id, SHIPPED_REGISTRY["models"], leg)
 
     def test_a_hand_entry_on_an_anthropic_leg_is_claude(self):
         cfg = {"providers": {"omniroute": {"models": {
@@ -18469,6 +18497,69 @@ class HandEntryPricingTests(unittest.TestCase):
         r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+    def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
+        # The same door, on the id whose registry row RWP1 adds.
+        r = run_agent("run", "--model", "omniroute/vertex-3.6-flash",
+                      "--dry-run", "--card", "role=implement", "reply with exactly: ack")
+        self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+
+class VertexFlashRegistryRowsTests(unittest.TestCase):
+    """RWP1 (lane trial-direct, 2026-10-01): `models.gemini-3.6-flash` and
+    `models.gemini-3.7-flash` are the registry half of the `vertex-3.6-flash` /
+    `vertex-3.7-flash` hand entries shipped in 48f0ac21. A hand entry passes its
+    modelID to the gateway verbatim, so with no row for the model behind
+    `vertex/gemini-3.<6,7>-flash` the spawn gate could say nothing about what
+    answers and refused the run. The rows are shaped like the `gemini-3.8-flash`
+    head they sit beside, and carry no invented price: no source was reachable
+    from this lane, so the price stays in the 0.0 unpriced form the 3.8 row uses
+    and the $comment says the Vertex cost is trial credit priced by T1-CREDIT
+    `provider_prices` at train integration."""
+
+    FLASH = ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.models = SHIPPED_REGISTRY["models"]
+
+    def test_exactly_the_three_flash_vertex_ids_are_in_the_registry(self):
+        for model_id in self.FLASH:
+            self.assertIn(model_id, self.models, model_id)
+
+    def test_the_three_flash_vertex_ids_pass_gemini_model_allowed(self):
+        # D-255 allows 3.6 / 3.7 / 3.8 Flash; the row's existence must not read as
+        # a ban, in either the leg or the bare-model spelling.
+        for model_id in self.FLASH:
+            for ref in (model_id, "vertex/" + model_id, "vertex-gemini"
+                        + model_id[len("gemini"):]):
+                self.assertTrue(self.agent.gemini_model_allowed(ref), ref)
+
+    def test_the_two_new_rows_are_shaped_like_the_3_8_head(self):
+        head = self.models["gemini-3.8-flash"]
+        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
+            row = self.models[model_id]
+            self.assertEqual(row["id"], model_id)
+            self.assertEqual(row["family"], "google", model_id)
+            self.assertEqual(row["tool_calls"], "unproven", model_id)
+            self.assertTrue(row["reasoning"], model_id)
+            self.assertEqual(row["effort_ladder"], head["effort_ladder"], model_id)
+            # Never larger than the 3.8 head they were copied from.
+            self.assertLessEqual(row["context_advertised"],
+                                 head["context_advertised"], model_id)
+            self.assertLessEqual(row["output_max"], head["output_max"], model_id)
+
+    def test_the_two_new_rows_carry_no_invented_price_and_say_so(self):
+        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
+            row = self.models[model_id]
+            self.assertEqual((row["price_in"], row["price_out"]), (0.0, 0.0), model_id)
+            comment = row["$comment"].lower()
+            self.assertIn("price not sourced", comment, model_id)
+            self.assertIn("trial credit", comment, model_id)
+            self.assertIn("t1-credit", comment, model_id)
+
+    def test_the_shipped_registry_still_validates(self):
+        self.assertEqual(registry_tool.check_registry(SHIPPED_REGISTRY), [])
 
 
 class GeminiAllowListTests(unittest.TestCase):

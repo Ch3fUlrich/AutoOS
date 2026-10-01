@@ -413,6 +413,46 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "gemini-3.6-flash": {
+      "$comment": "Direct Vertex AI Gemini 3.6 Flash - the model row behind the opencode.jsonc hand entry vertex-3.6-flash (modelID vertex/gemini-3.6-flash), which passes its id to the gateway verbatim and owns no combo. RWP1 (lane trial-direct, 2026-10-01): the hand entry shipped in 48f0ac21 could not be priced by the spawn gate until a row described the model behind that leg - an id that resolves to nothing is never assumed free (D5). Shape mirrored from models.gemini-3.8-flash, the head of the family operator D-255 allows (only 3.6 / 3.7 / 3.8 Flash, variants included); context_advertised/output_max copied from it and never enlarged, context_usable left at the default. tool_calls unproven: no leg probe was run from this sandbox. PRICE NOT SOURCED: the Vertex AI pricing page (https://cloud.google.com/vertex-ai/generative-ai/pricing) is unreachable here (no network), so no accessed date can be recorded and no figure is invented - price_in/price_out stay 0.0 in the same unpriced form models.gemini-3.8-flash and its google/gemini-3.8-flash twin use, which is NOT a free-tier guarantee and must not be used for cost math. What a spawn on this leg costs is paid by the operator's trial credit (providers.vertex_ai tier credit, credit_usd 250) and is priced by T1-CREDIT provider_prices at train integration.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 1048576
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.6-flash",
+      "output_max": 65536,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "gemini-3.7-flash": {
+      "$comment": "Direct Vertex AI Gemini 3.7 Flash - the model row behind the opencode.jsonc hand entry vertex-3.7-flash (modelID vertex/gemini-3.7-flash), which passes its id to the gateway verbatim and owns no combo. RWP1 (lane trial-direct, 2026-10-01): the hand entry shipped in 48f0ac21 could not be priced by the spawn gate until a row described the model behind that leg - an id that resolves to nothing is never assumed free (D5). Shape mirrored from models.gemini-3.8-flash, the head of the family operator D-255 allows (only 3.6 / 3.7 / 3.8 Flash, variants included); context_advertised/output_max copied from it and never enlarged, context_usable left at the default. tool_calls unproven: no leg probe was run from this sandbox. PRICE NOT SOURCED: the Vertex AI pricing page (https://cloud.google.com/vertex-ai/generative-ai/pricing) is unreachable here (no network), so no accessed date can be recorded and no figure is invented - price_in/price_out stay 0.0 in the same unpriced form models.gemini-3.8-flash and its google/gemini-3.8-flash twin use, which is NOT a free-tier guarantee and must not be used for cost math. What a spawn on this leg costs is paid by the operator's trial credit (providers.vertex_ai tier credit, credit_usd 250) and is priced by T1-CREDIT provider_prices at train integration.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 1048576
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.7-flash",
+      "output_max": 65536,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "gemini-3.8-flash": {
       "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded).",
       "context_advertised": 1048576,
