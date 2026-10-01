@@ -75,7 +75,7 @@ retired outright (the mandate says "repoint **or** retire" — that choice is un
 Requested: `L1-backlog/ws-ovh` head `89a9024`, `L1-backlog/ws-combos` head `a5bcb69`; families
 other than gemini/deepseek. Artifacts handed to each leaf by absolute read-only path
 (R-orch-04), extracted from the branches into
-`C:\Users\mauls\AppData\Local\Temp\opencode\ws-records-ovh-review\` (registry/combos extracts +
+`C:\Users\<user>\AppData\Local\Temp\opencode\ws-records-ovh-review\` (registry/combos extracts +
 diffs). Six leaf attempts; **two produced a real verdict** (one of them demonstrably incomplete,
 see 2.2).
 
