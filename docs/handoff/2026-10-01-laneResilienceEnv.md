@@ -159,12 +159,12 @@ gateway, found by grepping every `--no-open --port 20128` / `serve --no-open` oc
 
 | Site | How it passes the env | Covered by |
 |---|---|---|
-| `configuration/start-stack.ps1:132` | `Start-Process` inherits the host env | the six `if (-not $env:X)` guards |
-| `configuration/omniroute/apply.ps1:110` | `Start-Process` (gateway-down branch) | same |
-| `configuration/autostart/Start-AutoOSStack.ps1:66` | `Start-Process` | same |
-| `configuration/start-stack.sh:80` | `nohup` inherits the shell env | the six `export X="${X:-…}"` |
-| `configuration/omniroute/apply.sh:449` | `nohup` | same |
-| `configuration/autostart/Start-AutoOSStack.sh:67` | `nohup` fallback + hand run | same (added after the review, §7) |
+| `configuration/start-stack.ps1:156` | `Start-Process` inherits the host env | the six `if (-not $env:X)` guards |
+| `configuration/omniroute/apply.ps1:134` | `Start-Process` (gateway-down branch) | same |
+| `configuration/autostart/Start-AutoOSStack.ps1:90` | `Start-Process` | same |
+| `configuration/start-stack.sh:92` | `nohup` inherits the shell env | the six `export X="${X:-…}"` |
+| `configuration/omniroute/apply.sh:461` | `nohup` | same |
+| `configuration/autostart/Start-AutoOSStack.sh:78` | `nohup` fallback + hand run | same (added after the review, §7) |
 | `configuration/autostart/autoos-omniroute.service:31` | `ExecStart=… serve` — **no `Environment=` by design** (it would shadow the operator's `.env`); reads `~/.omniroute/.env` | `register-autostart.sh:301-363` appends the six keys to that file (added after the review, §7) |
 
 `configuration/healthcheck.{ps1,sh}` mention the command only in a human-fallback help
@@ -320,9 +320,10 @@ at this file (`export lines extracted: 6`): clean env → the six defaults; oper
 `OMNIROUTE_ROTATE_429_THRESHOLD=9` → `9` kept.
 
 `configuration/autostart/register-autostart.sh` — driven through the suite's own sandbox with
-`OMNIROUTE_ROTATE_429_THRESHOLD=7` preset: it appends the **five** missing keys in one append
-(one backup), leaves `7` and the pre-existing `STORAGE_ENCRYPTION_KEY` alone, and a second run
-prints `= 429 rotation policy already set in … (skipped)`. Asserted by the new
+`OMNIROUTE_ROTATE_429_THRESHOLD=7` preset: it appends the **five** missing policy keys (and
+`REQUIRE_API_KEY=true` in the same append when absent) with one backup, leaves `7` and the
+pre-existing `STORAGE_ENCRYPTION_KEY` alone, and a second run prints
+`= 429 rotation policy already set in … (skipped)`. Asserted by the new
 `tests/linux/34-ai-services.sh` case (`--filter 'register-autostart'` → `passed 11 failed 0`,
 which includes the pre-existing REQUIRE_API_KEY and same-second-backup cases).
 
@@ -343,7 +344,13 @@ unit, whose env surface is `~/.omniroute/.env` — and contradicted this doc's t
 `register-autostart.sh:301-363` defaults them in `~/.omniroute/.env` (one append + one backup
 per run, operator value wins); the tests cover all seven sites; §1.1/§3/§5/§6 were corrected.
 
-**Verdict 2 (re-review): pending** — recorded in the DONE note after the second review.
+**Verdict 2 (re-review): PASS.** The second reviewer (same `t3-driver-clean` family, fresh
+session `ses_f09ac6f94ffeXasIXzU0zpSr75`) quoted the nonce, re-ran the `--no-open --port 20128`
+sweep itself, and confirmed all seven sites carry the six names exactly once, the
+`register-autostart.sh` writer is respect-set with one append/one backup, and the
+`bin/omniroute.mjs` loader claim matches installed 3.8.50. Its only finding was a doc nit —
+this §3 table listed base-revision spawn line numbers — now corrected to HEAD. Verdict line
+in the DONE note.
 
 ---
 
