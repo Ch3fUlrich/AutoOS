@@ -701,3 +701,44 @@ needs **≥2 counted cross-family seats** (writer's family excluded).
   ws-patchbackups, ws-patchlive, ws-providers. Earlier takes: reviewgate-2fam (`d0f70f1`),
   redclear (`f93aee3`).
 - **Not yet taken:** see the merge checklist Refresh (e) for the per-branch list.
+---
+
+## 17. Main-leak escalation (2026-10-01) — Hard Rule 1 violation in `origin/main`, fix branch open
+
+The tier-order take `bd0ad278` (`origin/main` `11757db4`) carried the residual username
+flagged in §15 into the **public** main branch:
+
+- `docs/handoff/2026-09-30-laneFreeWire.md:4`
+- `docs/handoff/2026-10-01-laneConnRotate.md:3,25,30`
+- `docs/handoff/2026-10-01-laneTierOrder.md:4`
+- `tools/combo-contract.py:176` — hardcoded `api-keys.yml` path (a **code** leak)
+
+**Fix branch:** `L1-backlog/ws-mainleak-20261001` @ `72a98835` — docs → `<user>`;
+`tools/combo-contract.py` fallback derived from `pathlib.Path.home()` (no username
+literal). Verified: 0 hits on the branch; `py_compile` OK; `combo-contract.py` gate
+**PASS** (23 combos, LIVE catalog). Free-family review **APPROVED**
+(`opencode/space-bunny-free`, `ses_f08e96ea0ffesTX0tMopnSZk3D`).
+
+**Operator action required:** take the branch. The username also remains in `origin/main`
+**history** — a history rewrite is operator-only (agents must not rewrite).
+
+### 17.1 RESOLVED — main tip is clean; `ws-mainleak` is SUPERSEDED
+
+`origin/main` advanced again (→ `14237978`, several takes incl. freewire/combos-pins/
+free-probe/sweep-review/suite-diag/main-breach) and its **tip is now clean** (0 username
+hits): the redaction landed through the take flow. Alpha replaced the `tools/combo-contract.py`
+literal with a **git-common-dir-derived** path — more robust than `ws-mainleak`'s
+`pathlib.Path.home()`. Therefore **`L1-backlog/ws-mainleak-20261001` @ `72a98835` is
+SUPERSEDED — do NOT take it** (its `Path.home()` change would regress alpha's git-common-dir
+fix). The username still sits in **history** (pre-`14237978` commits) — rewrite is operator-only.
+
+### 17.2 Preventive fix — CI scanned `docs/` but not `tools/`
+
+Root cause of the code copy passing unnoticed: CI's `public-scrub` job scans
+`infra/ scripts/ docs/ catalog/ README.md AGENTS.md` — **`tools/` was out of scope**, so a
+leaked absolute path in `tools/combo-contract.py` was invisible while its `docs/` sibling was
+caught. Branch **`L1-backlog/ws-scrubgap-20261001` @ `f61d09a1`** adds `tools/` to the scope
+and rewrites the one pre-existing `tools/` match (a `/home/…` docstring example in
+`tools/hostexec/policy.py`) to a placeholder so the gate stays green. Verified: full-scope
+`scan.py` exit 0; `test_scan.py` 16/16; `policy.py` compiles; `ci.yml` parses. Review
+**APPROVED** (`openrouter/cohere/north-mini-code:free`, `ses_f08d3d3fdffef9TCZMl3SRqQ2b`).
