@@ -18,9 +18,10 @@ Two modes, and the KIND names what the evidence actually is:
           the seat's session (session_message).
     The output lists each source so a reader can see where they diverge.
 
-  response-side (`--gateway`: the paid/gateway path, high tier, D-261)
-    reads OmniRoute call logs READ-ONLY through the container helper and
-    requires every in-window row's served model (`model` + `provider`) to
+  response-side (`--gateway`: the paid/gateway path, high tier, D-261/D-266)
+    reads OmniRoute call logs READ-ONLY through the container helper, keeps
+    only the rows whose `sessionTag` is this run's recorded session tag, and
+    requires every status-200 row's served model (`model` + `provider`) to
     equal --expect — this is genuine provider-response evidence.
 
 PRIVACY: the db also holds `credential`, `account`, `control_account`,
@@ -43,19 +44,25 @@ Usage:
         [--until <iso>]) [--key <apiKeyName>]
     With --gateway --run-id the window is [record start, record end] padded
     +-5 s (a record without an end time is a REFUSAL, exit 3 — never "until
-    now"); rows are attributed by apiKeyName (default: the spawner key) and,
-    when known to both sides, by session id.
+    now"); rows are attributed by the call-log field `sessionTag`, which must
+    equal the run record's `session_tag` (bare, or the `<tag>/<run-id>` header
+    form) — the window and the apiKeyName are secondary bounds only (D-266 H1).
+    Rows whose status is not 200 drop out iff a 200 row remains and every 200
+    row served --expect (D-266 H2).
 
 Output line:
     evidence <path> sha256 <hex> kind <request-side|response-side> \
-all_match <true|false> turns <n>
+all_match <true|false> turns <n> [n_200=<n> n_dropped=<n>]
 
 Exit codes: 0 every source present and matching (turns>=1); 2 any mismatch, any
 assistant row with a missing model/providerID/id (a gap), a missing required
-source, or gateway rows of other models sharing the window (cannot attribute);
+source, or a status-200 gateway row that served another model;
 3 the db is unreadable / the seat session has no assistant rows at all / the
 gateway fetch failed (status only is printed) / the run record has no end time
-(unverifiable). JSON goes to --out (default <sandbox>.seat-evidence.json).
+(unverifiable) / the gateway rows cannot be attributed to this seat — no
+session tag in the record, no `sessionTag` field on any row, or no status-200
+row at all (a window alone is never attribution). JSON goes to --out
+(default <sandbox>.seat-evidence.json).
 """
 import datetime
 import hashlib
