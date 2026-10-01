@@ -11,6 +11,14 @@ import re
 import sys
 
 
+# Documented exception (operator decision 2026-09-29, compose.yml:159-163; kept
+# by routing-00 2026-09-30): the opencode service runs without mem_limit - the
+# 1536m cap OOM-killed PID 1 and cut every in-flight run across the fleet. Only
+# this key for this one service is exempt; every other hardening check still
+# applies to it.
+MEM_LIMIT_EXEMPT = {"opencode"}
+
+
 def services(text):
     out, cur, in_services = {}, None, False
     for line in text.splitlines():
@@ -46,7 +54,8 @@ def main(path):
         need(r"^    restart: unless-stopped$", "restart must be unless-stopped")
         need(r"no-new-privileges:true", "no-new-privileges missing")
         need(r"^    cap_drop:\n      - ALL$", "cap_drop ALL missing")
-        need(r"^    mem_limit: ", "mem_limit missing")
+        if name not in MEM_LIMIT_EXEMPT:
+            need(r"^    mem_limit: ", "mem_limit missing")
         need(r"^    pids_limit: ", "pids_limit missing")
         need(r"^    healthcheck:", "healthcheck missing")
         need(r"^    container_name: ", "container_name missing")
