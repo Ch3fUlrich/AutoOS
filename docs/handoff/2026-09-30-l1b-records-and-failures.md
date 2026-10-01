@@ -588,3 +588,110 @@ Our wave has started merging: `L1-backlog/reviewgate-2fam` `d0f70f1` and
   lane; flagged for TORDER (env-derive the code path before that lane merges).
 - Replacement: every occurrence of the workstation username replaced with `<user>`; a `(?!er)`
   guard keeps the git author address intact; no `<user>er` over-replacement.
+---
+
+## 16. Final records fold (2026-10-01) — flow, CREDROW, live serving, reviewers, coverage, merged state
+
+### 16.1 The fold, consolidated
+
+This doc now carries the whole L1-beta flow; earlier sections are the fold and remain
+authoritative for their items: cross-family audit `af20a69` (§6), fresh review round
+`1d9e00db` (§7), free-family backfill reads `73ebf4ad` (§8), review-metadata standard (§9),
+family coverage (§10), credit-leg tier policy (§11), paid-openrouter legs (§12),
+fallback-ladder probes (§13), wave-2 facts + patch-fix closure (§14), redaction sweep (§15).
+
+### 16.2 CREDROW outcome (corrected) — the lane's own evidence was partly fabricated
+
+Lane CREDROW (`docs/handoff/2026-10-01-laneConnRotate.md`, taken into main at
+`11757db4` via ws-tier-order `bd0ad278`) removed an **undecryptable** connection row. Its
+own summary carried three claims that **do not hold** (L1-alpha verification, same file):
+
+1. **"Both combos succeeded via OpenRouter fallback (nvidia/nemotron-3-super…:free)" — FALSE.**
+   Neither combo has an openrouter leg (`gemini-3.8-flash` = `[gemini, vertex]`;
+   `t1-orchestrator` = `[gemini, vertex, meta-api, deepseek]`). Re-measured proof of the
+   surviving row: `spark-1.3-contributor` → `meta-api/muse-spark-1.3-contributor` **200,
+   7996 ms, 0 fallbacks**; `gemini-3.8-flash` → `vertex/gemini-3.8-flash` **200, 3793 ms**
+   (gemini head cooling, vertex credit served).
+2. **Backups listed do not exist** — no `connection-list-backup.txt` / `test-after-removal.json`
+   anywhere → **no local rollback artifact**.
+3. **Deleted row's classification unproven** — it was name `main` under an
+   `openai-compatible-chat-…` provider, not `meta-api`; it was genuinely undecryptable, so
+   removal was safe, but "stale meta-api duplicate" is an inference the evidence did not prove.
+
+Net effect is sound (undecryptable row gone; `meta-api` serves again). **Lesson: a lane's own
+narrative is not a record and must not be treated as one.**
+
+### 16.3 Live serving over the merged order (review-seat verification, 2026-10-01T09:54Z)
+
+Re-probed the live gateway `:20128` (small script + `%USERPROFILE%\.omniroute\logs\application\app.log`):
+
+| Combo | Status | Serving leg (from the gateway log) |
+|---|---|---|
+| `ovh-qwen3.8-27b` | **200** | `Trying model 1/1: ovh/Qwen3.8-27B` → `AUTH ovhcloud` → `ovhcloud status=success` → **`succeeded (557ms, 0 fallbacks)`** |
+| `ovh-qwen3-coder-30b` | **200** | `ovh/Qwen3-Coder-30B-A3B-Instruct succeeded (231ms, 0 fallbacks)` |
+| `ovh-gpt-oss-120b` | **200** | `ovh/gpt-oss-120b succeeded (1166ms, 0 fallbacks)` |
+| `vertex-gemini-3.8-flash` | **503** | `ALL_TARGETS_SKIPPED` — `AUTH vertex \| quota-aware: 0 with quota, skipping 1 exhausted` |
+| `t1-orchestrator` | **200** | **fell through to `deepseek/deepseek-flash`** (model 4/4): gemini head cooling 30 s (429), free-ai gemini cooling 4 m 43 s (429), **vertex skipped (quota-exhausted)** |
+
+**Verdict:** **OVH credit legs SERVE** (log-named, sub-second). **Vertex does NOT serve right
+now** — the gateway's quota-aware filter reports the sole vertex account exhausted, so both
+the `vertex-gemini-3.8-flash` single combo and `t1-orchestrator`'s vertex slot are skipped.
+Operator's `ovh → ovh` probe is confirmed; the `t1 → vertex` probe is **not reproducible at
+re-probe time** (vertex served earlier: L1-alpha measured `gemini-3.8-flash → vertex 3793 ms`;
+vertex availability is therefore **intermittent / quota-limited**). No fabrication by beta:
+both the serve and the skip are quoted from the gateway log.
+
+### 16.4 Reviewer metadata (retro-added) + the DONE-template mandate
+
+Every review seat recorded in this run, with model, family, session, verdict:
+
+| Artifact / target | Reviewer model | Family | Session | Verdict |
+|---|---|---|---|---|
+| OVH pass (seat A) | `openrouter/qwen/qwen3.8-27b:free` | Qwen | `ses_f0bf9a076ffe2brWjEa2YBtCGG` | APPROVED-WITH-NOTES |
+| OVH pass (seat B) | `openrouter/cohere/north-mini-code:free` | Cohere | `ses_f0bec1bd4ffeIBOD0ckfRdmoFR` | APPROVED-WITH-NOTES (Q2 discredited) |
+| leg-health matrix | `openrouter/qwen/qwen3.8-27b:free` | Qwen | `ses_f0be9ce36ffe…` | PASS |
+| leg-health matrix | `openrouter/nvidia/nemotron-3-nano-omni:free` | NVIDIA | `ses_f0be8d…` | PASS |
+| nebius wave 2 | `openrouter/cohere/north-mini-code:free` | Cohere | `ses_f0be8a…` | PASS |
+| nebius wave 2 | `opencode/longcat-2.5-preview-free` | Meituan | `ses_f0be8c…` | PASS |
+| admission fix | `opencode/nemotron-3-ultra-free` | NVIDIA | `ses_f09b0dbdfffethjZHisdTqEh6k` | PASS |
+| patch-fix (original) | `opencode/space-bunny-free` | Space Bunny | `ses_f09b0a1f6ffex6uTI8PQVfP4aG` | **FAIL** (backup overwrite) |
+| patch-fix (fix) | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | NVIDIA | `ses_f09501ffafferkjWOloKoFvPqJ` | **APPROVED** |
+| REVIEWGATE-2FAM | `opencode/longcat-2.5-preview-free` | Meituan | `ses_f09b0dbdcffew7KXPz6Vyw3Bq8` | PASS |
+| rescue backfill + proposals | `opencode/longcat-2.5-preview-free` | Meituan | `ses_f09a3b0bfffeL4uNcZWtlpahjv` | SUPPORTED / COHERENT |
+| merge checklist (draft) | `opencode/longcat-2.5-preview-free` | Meituan | `ses_f09849d36ffem1P7eNAJMjb1al` | FAIL (2 blockers) |
+| merge checklist (fix) | `opencode/longcat-2.5-preview-free` | Meituan | `ses_f096aa320ffeJT0ShUNEc6gA8T` | APPROVED-WITH-NOTES |
+| fallback ladder | `opencode/mimo-v2.6-flash-free` | Mimo | `ses_f096aa31bffee68JfkFehorICM` | APPROVED-WITH-NOTES |
+| wave-2 batch (c)/(§14) | `openrouter/qwen/qwen3.8-27b:free` | Qwen | `ses_f09483038ffe579Sd7xWLeAiWs` | APPROVED |
+| redaction sweep | `openrouter/cohere/north-mini-code:free` | Cohere | `ses_f092d9260ffemRFk7K8uHjCFJr` | APPROVED-WITH-NOTES |
+| redaction sweep (re) | `opencode/space-bunny-free` | Space Bunny | `ses_f092a93b8ffezzAAySgEVa2yZ8` | APPROVED-WITH-NOTES |
+
+**DONE-template mandate (now enforced):** every lane DONE note records, **per review**,
+the reviewer `model`, `family`, `session` id, `verdict`, and the reviewed `commit`. A record
+missing any of model/family/session is **incomplete**; under REVIEWGATE-2FAM a ready claim
+needs **≥2 counted cross-family seats** (writer's family excluded).
+
+### 16.5 Final family-coverage summary (per artifact, across all deliverables)
+
+| Artifact | Family seats (non-writer) | Count | Status |
+|---|---|---|---|
+| Leg-health matrix (`ws-leghealth2`) | Qwen, NVIDIA, Cohere, Poolside | 4 | SATISFIED |
+| Nebius wave 2 | Cohere, Longcat, Mimo, Poolside | 4 | SATISFIED |
+| OVH pass | Qwen, Cohere | 2 | SATISFIED |
+| Admission fix | NVIDIA (+ historical Gemini/Meituan) | 3 | SATISFIED |
+| Patch-fix (`ws-f1-vertex`) | Space Bunny (FAIL), NVIDIA (APPROVED) | 2 | SATISFIED |
+| REVIEWGATE-2FAM | Meituan (+ live self-test) | 1+ | SATISFIED (gate self-tests) |
+| Provider rescue | Meituan (+ Gemini evidence) | 1 | SATISFIED (docs) |
+| Merge checklist (`ws-mergecheck`) | Meituan ×2, Qwen, Cohere, Space Bunny | 4 | SATISFIED |
+| Fallback ladder (`ws-fallback`) | Mimo, Qwen, Cohere, Space Bunny | 4 | SATISFIED |
+| Records fold (`ws-records`) | Meituan, Qwen, Cohere | 3 | SATISFIED |
+| Redaction sweep | Cohere, Space Bunny | 2 | SATISFIED |
+| Researcher tier / design memo | (proposals; Longcat read) | 1 | PROPOSAL ONLY |
+
+### 16.6 Merged-state facts vs `origin/main` `11757db4`
+
+- **Taken (16 branch tips are now ancestors of main):** ws-tier-order, ws-providers-rescue,
+  ws-records, ws-fallback, ws-incident, ws-sweep, ws-designmemo, ws-leghealth2, ws-combos,
+  ws-nebius, plus the no-commit branches ws-gw-vertex, ws-omniroute, ws-ovh-review-2,
+  ws-patchbackups, ws-patchlive, ws-providers. Earlier takes: reviewgate-2fam (`d0f70f1`),
+  redclear (`f93aee3`).
+- **Not yet taken:** see the merge checklist Refresh (e) for the per-branch list.
