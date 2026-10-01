@@ -2855,10 +2855,11 @@ class ClaudeBudgetPolicyTests(unittest.TestCase):
     def test_the_shipped_value_is_the_operators_decision(self):
         entry = load_registry()["policy"]["claude_budget"]
         self.assertEqual(entry["mode"], "budget")
-        self.assertEqual(entry["weekly_share_left"], 0.10)
+        self.assertEqual(entry["weekly_share_left"], 0.9)
         self.assertEqual(entry["budget_below"], 0.25)
         self.assertIn("D-102", entry["source"])
         self.assertIn("2026-09-28", entry["source"])
+        self.assertIn("2026-10-01", entry["source"])
 
     def test_the_shipped_registry_stays_clean(self):
         self.assertEqual(registry.check_registry(load_registry()), [])

@@ -2624,9 +2624,9 @@
         "R-coord-03 said this in prose; D-102 makes it data, so an orchestrator that forgets the rule cannot route a writer onto Claude."
       ],
       "mode": "budget",
-      "weekly_share_left": 0.1,
+      "weekly_share_left": 0.9,
       "budget_below": 0.25,
-      "source": "operator D-102 2026-09-28"
+      "source": "operator 2026-10-01 via routing-00, weekly limit reset;operator D-102 2026-09-28"
     }
   },
   "providers": {
