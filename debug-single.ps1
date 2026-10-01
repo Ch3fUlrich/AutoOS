@@ -1,4 +1,4 @@
-# debug-single.ps1 — single request to debug the 400 error
+﻿# debug-single.ps1 — single request to debug the 400 error
 $ErrorActionPreference = 'Continue'
 $Gateway = 'http://127.0.0.1:20128'
 $Key = $env:AUTOOS_OMNIROUTE_KEY

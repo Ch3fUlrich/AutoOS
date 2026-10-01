@@ -1,4 +1,4 @@
-# v-activate-start-iso.ps1 - start ONE isolated OmniRoute gateway for the V-activate probe run.
+﻿# v-activate-start-iso.ps1 - start ONE isolated OmniRoute gateway for the V-activate probe run.
 #
 # Isolation: a separate DATA_DIR (config + a sqlite-backup snapshot of the DB) and a
 # separate port, so the shared gateway on :20128 is never touched and never shares WAL.

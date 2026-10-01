@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Apply configuration/omniroute/capability-overrides.json to a running local OmniRoute gateway.

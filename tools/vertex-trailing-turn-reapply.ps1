@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Idempotent reapply of the Vertex/Gemini trailing-model-turn strip fix.

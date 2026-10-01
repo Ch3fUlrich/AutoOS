@@ -1,4 +1,4 @@
-# measure-admission.ps1 — fire N concurrent heavy chat requests, report accept/reject
+﻿# measure-admission.ps1 — fire N concurrent heavy chat requests, report accept/reject
 # Usage: .\measure-admission.ps1 -Concurrency 4 -Label "before"
 param(
   [int]$Concurrency = 4,

@@ -1,4 +1,4 @@
-#!/usr/bin/env pwsh
+﻿#!/usr/bin/env pwsh
 # start-isolated-gateway.ps1 — Start an isolated OmniRoute gateway for testing.
 #
 # Uses the SAME default DATA_DIR (~/.omniroute/) so the gateway has provider

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Apply (or re-apply) the AutoOS max_tokens output-clamp patch to a local OmniRoute install.

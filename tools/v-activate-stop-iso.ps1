@@ -1,4 +1,4 @@
-# v-activate-stop-iso.ps1 - stop ONLY this lane's isolated OmniRoute instance, by PID.
+﻿# v-activate-stop-iso.ps1 - stop ONLY this lane's isolated OmniRoute instance, by PID.
 #
 # The isolated instance is: launcher (bin/omniroute.mjs --no-open --port 20145) and its
 # child server-ws.mjs listener. Both are killed by PID; nothing else in the 201xx range
