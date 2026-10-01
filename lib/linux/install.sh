@@ -5019,8 +5019,8 @@ autoos_host_name() {
             fi
             line="${line#"${line%%[![:space:]]*}"}"  # ltrim
             line="${line%"${line##*[![:space:]]}"}"  # rtrim
-            if [[ "$line" == host_name:* ]]; then
-                local val="${line#host_name:}"
+            if [[ "$line" =~ ^host_name[[:space:]]*: ]]; then
+                local val="${line#*:}"
                 val="${val#"${val%%[![:space:]]*}"}"
                 val="${val%"${val##*[![:space:]]}"}"
                 val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
@@ -6079,7 +6079,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
 from autoos_gateway_key import resolve_client_key
 try:
-    _gw_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else None)
+    _gw_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else Path(os.devnull))
 except KeyError:
     _gw_key = None
 if _gw_key:
@@ -6245,7 +6245,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
 from autoos_gateway_key import resolve_client_key
 try:
-    omni_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else None)
+    omni_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else Path(os.devnull))
 except KeyError:
     omni_key = None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first

@@ -7090,7 +7090,7 @@ Test-Case 'gwkey: key file rules match tools/keys_file.py (case, comments, place
         foreach ($c in $cases) {
             Set-Content -LiteralPath $keys -Value $c.Text -Encoding utf8
             $got = Get-AutoOSClientKey -KeysFile $keys
-            if ($got -ne $c.Want) { $failures += "$($c.Desc): got '$got' want '$($c.Want)'" }
+            if ([string]$got -ne $c.Want) { $failures += "$($c.Desc): got '$got' want '$($c.Want)'" }
         }
         Assert-True ($failures.Count -eq 0) ($failures -join '; ')
     } finally {

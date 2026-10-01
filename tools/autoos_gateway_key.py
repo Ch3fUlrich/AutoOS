@@ -162,7 +162,7 @@ def host_name(env: Optional[dict] = None) -> str:
         try:
             for line in host_file.read_text(encoding="utf-8-sig").splitlines():
                 line = line.strip()
-                if line.startswith("host_name:"):
+                if re.match(r"^host_name\s*:", line):
                     _, _, value = line.partition(":")
                     val = value.strip().strip("\"'")
                     if val:

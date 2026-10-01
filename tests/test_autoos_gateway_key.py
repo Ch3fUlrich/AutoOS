@@ -206,6 +206,8 @@ class TestResolveClientKey(unittest.TestCase):
         self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
         self.keys_file.close()
         self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
+        # not merely unset: unset means "the real ~/.config/autoos/host.yml", which a dev box may have
+        os.environ["AUTOOS_HOST_CONFIG"] = os.path.join(tempfile.gettempdir(), "autoos-no-such-host-%d.yml" % os.getpid())
 
     def tearDown(self):
         os.unlink(self.keys_file.name)
@@ -329,6 +331,8 @@ class TestKeyFileFormats(unittest.TestCase):
         self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
         self.keys_file.close()
         self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
+        # not merely unset: unset means "the real ~/.config/autoos/host.yml", which a dev box may have
+        os.environ["AUTOOS_HOST_CONFIG"] = os.path.join(tempfile.gettempdir(), "autoos-no-such-host-%d.yml" % os.getpid())
 
     def tearDown(self):
         os.unlink(self.keys_file.name)
@@ -537,6 +541,23 @@ class TestSharedUrlTable(unittest.TestCase):
                           ("http://127.1", 1), ("   ", 1)):
             r = subprocess.run([sys.executable, str(tools), "is-local", url], capture_output=True, text=True)
             self.assertEqual(r.returncode, want, url)
+
+
+class TestRound4fSmallRules(unittest.TestCase):
+    def test_devnull_as_the_keys_file_means_keyless_not_the_repo_file(self):
+        # install.sh passes os.devnull when it has no secrets file: only the env key may answer
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"}, clear=False):
+            os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
+            with self.assertRaises(KeyError):
+                resolve_client_key(os.environ, Path(os.devnull))
+            self.assertEqual(resolve_client_key({**os.environ, "AUTOOS_OMNIROUTE_KEY": "from-env"}, Path(os.devnull)), "from-env")
+
+    def test_host_name_with_a_space_before_the_colon_is_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "host.yml"
+            f.write_text("host_name :  spacey\n", encoding="utf-8")
+            from autoos_gateway_key import host_name
+            self.assertEqual(host_name({"AUTOOS_HOST_CONFIG": str(f)}), "spacey")
 
 
 if __name__ == "__main__":

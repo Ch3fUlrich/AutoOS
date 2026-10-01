@@ -13,18 +13,12 @@ $ErrorActionPreference = 'Continue'
 $Gateway = 'http://127.0.0.1:20128'
 $Key = $env:AUTOOS_OMNIROUTE_KEY
 if ([string]::IsNullOrWhiteSpace($Key)) {
-  # Try reading from api-keys.yml
-  $keysFile = 'C:\Users\<user>\Documents\Code\AutoOS\configuration\api-keys.yml'
-  if (Test-Path $keysFile) {
-    foreach ($line in (Get-Content $keysFile -Encoding utf8)) {
-      if ($line -cmatch '^omniroute\s*:\s*(.+)$') {
-        $v = $Matches[1].Trim()
-        if ($v -notmatch 'REPLACE_WITH' -and $v -notmatch '^\s*#') {
-          $Key = $v -replace '^["'']' -replace '["'']$'
-          break
-        }
-      }
-    }
+  # The one rule (env, then omniroute_server / omniroute_<host>, then the legacy field), by the resolver CLI
+  $keysFile = Join-Path $PSScriptRoot 'configuration\api-keys.yml'
+  $resolver = Join-Path $PSScriptRoot 'tools\autoos_gateway_key.py'
+  if ((Test-Path $keysFile) -and (Test-Path $resolver)) {
+    $env:AUTOOS_OMNIROUTE_URL = $Gateway
+    $Key = ((& python $resolver resolve --optional --no-notice $keysFile) -join '').Trim()
   }
 }
 if ([string]::IsNullOrWhiteSpace($Key)) {

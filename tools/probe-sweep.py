@@ -360,8 +360,13 @@ def main(argv=None) -> int:
     agent = _load_agent_module()
     key = agent.client_key(ROOT)
     if not key:
-        print("probe-sweep: no OmniRoute client key (export AUTOOS_OMNIROUTE_KEY or "
-              "add 'omniroute:' to configuration/api-keys.yml)", file=sys.stderr)
+        try:
+            from autoos_gateway_key import client_key_field
+            field = client_key_field({**os.environ, "AUTOOS_OMNIROUTE_URL": args.gateway})
+        except Exception:
+            field = "omniroute_server` or `omniroute_<host>"
+        print("probe-sweep: no OmniRoute client key (export AUTOOS_OMNIROUTE_KEY or add `%s` "
+              "to configuration/api-keys.yml)" % field, file=sys.stderr)
         return 3
 
     if not gateway_up(args.gateway):

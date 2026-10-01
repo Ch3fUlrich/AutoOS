@@ -7926,10 +7926,14 @@ def cmd_run(args, cfg: dict) -> int:
     if uses_key:
         key = client_key(ROOT)
         if not key:
-            print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add the gateway key to "
-                  "configuration/api-keys.yml (`omniroute_server` for a non-local gateway, "
-                  "`omniroute_<host>` for the local one - docs/api-keys.md) "
-                  "(or use --free for a keyless run).", file=sys.stderr)
+            try:
+                from autoos_gateway_key import client_key_field
+                field = client_key_field({**os.environ, "AUTOOS_OMNIROUTE_URL": GATEWAY})
+            except Exception:
+                field = "omniroute_server` or `omniroute_<host>"
+            print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add `%s` to "
+                  "configuration/api-keys.yml (docs/api-keys.md) "
+                  "(or use --free for a keyless run)." % field, file=sys.stderr)
             return 3
         if not gateway_up():
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "

@@ -6502,9 +6502,10 @@ if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
     fi
     
     # Test tilde expansion in AUTOOS_HOST_CONFIG
-    mkdir -p "$HOME/x"
-    printf 'host_name: tildehost\n' >"$HOME/x/host.yml"
-    key="$( ( . "$ROOT/lib/linux/install.sh"
+    fakehome="$(mktemp -d)"
+    mkdir -p "$fakehome/x"
+    printf 'host_name: tildehost\n' >"$fakehome/x/host.yml"
+    key="$( ( export HOME="$fakehome"; . "$ROOT/lib/linux/install.sh"
         # shellcheck disable=SC2088  # the literal ~ is the point: the resolver expands it itself
         export AUTOOS_HOST_CONFIG="~/x/host.yml"
         export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
@@ -6515,7 +6516,7 @@ if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
         ok=0
         echo "tilde expansion failed: rc=$rc key=$key" >&2
     fi
-    rm -rf "$HOME/x" "$d"
+    rm -rf "$fakehome" "$d"
     if (( ok )); then pass; else fail "F4: URL classification/tilde expansion failed"; fi
 fi
 
@@ -6545,6 +6546,30 @@ if it "gwkey: F5 setup.sh --host-name --dry-run writes nothing"; then
     
     rm -rf "$d"
     if (( ok )); then pass; else fail "F5: setup --host-name --dry-run/skip failed"; fi
+fi
+
+if it "gwkey: setup.sh --host-name refuses a value that is not a plain host name (nothing is written)"; then
+    d="$(mktemp -d)"
+    ok=1
+    for bad in $'a\nb' "has space" "semi;colon" "tab$(printf '\t')x"; do
+        rm -f "$d/host.yml"
+        out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name "$bad" 2>&1)"; rc=$?
+        (( rc == 2 )) || { ok=0; echo "rc=$rc for $(printf '%q' "$bad"): $out" >&2; }
+        [[ -e "$d/host.yml" ]] && { ok=0; echo "wrote host.yml for $(printf '%q' "$bad")" >&2; }
+    done
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name my-host.lan_1 2>&1)"; rc=$?
+    (( rc == 0 )) && [[ "$(cat "$d/host.yml")" == "host_name: my-host.lan_1" ]] || { ok=0; echo "valid name refused: rc=$rc $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup.sh --host-name validation"; fi
+fi
+
+if it "gwkey: host.yml 'host_name :' (space before the colon) is read like 'host_name:' in bash and Python"; then
+    d="$(mktemp -d)"
+    printf 'host_name :   spacey  \n' >"$d/host.yml"
+    b="$( ( . "$ROOT/lib/linux/install.sh"; unset AUTOOS_HOST_NAME; AUTOOS_HOST_CONFIG="$d/host.yml" autoos_host_name ) 2>/dev/null )"
+    p="$(AUTOOS_HOST_CONFIG="$d/host.yml" python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import autoos_gateway_key as k; print(k.host_name())' "$ROOT/tools" 2>/dev/null)"
+    rm -rf "$d"
+    if [[ "$b" == "spacey" && "$p" == "spacey" ]]; then pass; else fail "bash=[$b] python=[$p]"; fi
 fi
 
 # F6: apply/start-stack show the deprecation line (not swallowed)

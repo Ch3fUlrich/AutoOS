@@ -12,11 +12,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 GATEWAY="http://127.0.0.1:20128"
 APP="${1:-none}"
-KEYS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api-keys.yml"
-# Resolve the client key using the new gateway-named field logic
+KEYS_FILE="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api-keys.yml}"
+# Resolve the client key by the one rule. This script always talks to $GATEWAY, so that URL (not a
+# stale AUTOOS_OMNIROUTE_URL left in the environment) decides local vs non-local.
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
     # Let stderr through so deprecation warnings and missing-key errors are visible
-    AUTOOS_OMNIROUTE_KEY="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
+    AUTOOS_OMNIROUTE_KEY="$(AUTOOS_OMNIROUTE_URL="$GATEWAY" autoos_resolve_client_key "$KEYS_FILE" || true)"
     export AUTOOS_OMNIROUTE_KEY
 fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
