@@ -152,7 +152,8 @@ produced byte-identical output apart from the UTC timestamp line.
 
 * No live gateway restart; no package file modified; no other lane's files touched.
 * No push / merge / rebase / checkout.
-* No work in the primary checkout (`C:\Users\mauls\Documents\Code\AutoOS`).
+* No work in the primary checkout (`Documents\Code\AutoOS`); all work was in the
+  `AutoOS-ws-clampprobe` worktree.
 * No secret material in the tool, this doc, or any output: key values are read in
   memory and only labels are printed.
 
@@ -162,7 +163,21 @@ produced byte-identical output apart from the UTC timestamp line.
 
 A `t3-reviewer` subagent on **`omniroute/t3-driver-clean`** (a different family
 from the lane author) was asked to read this doc, read the nonce back verbatim,
-and give a verdict on `tools/probe-clamp.py` only. Verdict recorded below.
+and give a verdict on `tools/probe-clamp.py` only. Reviewed commit: `5b9b7dd7`.
 
-* Status: pending
-* Verdict: _(to be filled after review)_
+* Nonce read back: **`CLAMP-ca9d1ccd`** ✅ (doc lines 7 and 161)
+* Family: **`omniroute/t3-driver-clean`**
+* **Verdict: APPROVE**
+* Findings: all non-blocking nits; none addressed after review so the approved
+  bytes stay frozen (the nits are known and accepted):
+  * FAIL matches only the literal `max_completion_tokens is limited to` phrase, so
+    a differently-worded rejection would report SKIP, not FAIL — the server string
+    is the measured one and §2 states the design (false-negative, not false-PASS).
+  * `discover_legs(models)` is called twice (harmless duplicate work).
+  * the `key source` label hardcodes `api-keys.yml:<field>` even for a
+    `--keys-file`/`AUTOOS_KEYS_FILE` override (cosmetic; no leak).
+  * `--max-tokens` ≤ the cap only warns and proceeds, so an override could yield a
+    trivially-true PASS; the shipped default (20000) is unaffected.
+* Reviewer evidence included: live `VERDICT: PASS ... exit=0`; connection-refused
+  `VERDICT: SKIP ... exit=0`; `--bogus-flag` argparse `exit=2`; key-material check
+  `False`; two runs byte-identical apart from the timestamp.
