@@ -297,8 +297,13 @@
         // AUTOOS-MANAGED-START omniroute
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
-          "name": "t1 orchestrator-128k — free band → meta_api paid (no gemini)",
-          "limit": { "context": 128000, "output": 32768 }
+          "name": "t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t1-orchestrator-paid": {
           "modelID": "t1-orchestrator-paid",
@@ -314,8 +319,13 @@
         },
         "t1-orchestrator-free-only": {
           "modelID": "t1-orchestrator-free-only",
-          "name": "t1 orchestrator-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 32768 }
+          "name": "t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t2-worker": {
           "modelID": "t2-worker",
@@ -360,7 +370,12 @@
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t3-driver-clean": {
           "modelID": "t3-driver-clean",
@@ -375,7 +390,12 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "spark-1.3-contributor": {
           "modelID": "spark-1.3-contributor",
@@ -406,8 +426,8 @@
         },
         "gemini-3.8-flash": {
           "modelID": "gemini-3.8-flash",
-          "name": "gemini-3.8-flash — vertex 3.8 Flash (1M credit)",
-          "limit": { "context": 1048576, "output": 32768 },
+          "name": "gemini-3.8-flash -- gemini free -> vertex credit (1M)",
+          "limit": { "context": 1048576, "output": 65536 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
@@ -459,6 +479,36 @@
           "name": "Qwen3.8-27B via Groq (free)",
           "limit": { "context": 131072, "output": 16384 }
         },
+        "ovh-qwen3.8-27b": {
+          "modelID": "ovh-qwen3.8-27b",
+          "name": "Qwen3.8-27B via OVH (credit)",
+          "limit": { "context": 262000, "output": 32768 }
+        },
+        "ovh-gpt-oss-120b": {
+          "modelID": "ovh-gpt-oss-120b",
+          "name": "GPT-OSS-120B via OVH (credit)",
+          "limit": { "context": 131072, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
+        },
+        "ovh-qwen3-coder-30b": {
+          "modelID": "ovh-qwen3-coder-30b",
+          "name": "Qwen3-Coder-30B via OVH (credit)",
+          "limit": { "context": 128000, "output": 32768 }
+        },
+        "vertex-gemini-3.8-flash": {
+          "modelID": "vertex-gemini-3.8-flash",
+          "name": "Gemini-3.8-Flash via Vertex (credit)",
+          "limit": { "context": 1048576, "output": 65536 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
+        },
         "auto/smart": {
           "modelID": "auto/smart",
           "name": "bootstrap: auto smart (no combo needed)",
@@ -489,8 +539,13 @@
         // AUTOOS-MANAGED-START litellm
         "t1-orchestrator": {
           "modelID": "t1-orchestrator",
-          "name": "t1 orchestrator-128k — free band → meta_api paid (no gemini)",
-          "limit": { "context": 128000, "output": 32768 }
+          "name": "t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t1-orchestrator-paid": {
           "modelID": "t1-orchestrator-paid",
@@ -506,8 +561,13 @@
         },
         "t1-orchestrator-free-only": {
           "modelID": "t1-orchestrator-free-only",
-          "name": "t1 orchestrator-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 32768 }
+          "name": "t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
+          "limit": { "context": 1000000, "output": 32768 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t2-worker": {
           "modelID": "t2-worker",
@@ -537,7 +597,12 @@
         "t3-driver": {
           "modelID": "t3-driver",
           "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t3-driver-paid": {
           "modelID": "t3-driver-paid",
@@ -547,7 +612,12 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         },
         "t4-rag": {
           "modelID": "t4-rag",
