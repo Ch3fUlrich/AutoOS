@@ -29,6 +29,33 @@ $ErrorActionPreference = 'Stop'
 # session (same rule AutoOS.Install.psm1 documents at its own top).
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 
+# ─── Wall-clock bounds on every network fetch (Get-AutoOSRawDownload) ───────
+# 2026-10-01 defect: a stalled mirror hung a provision forever - neither curl
+# nor Invoke-WebRequest bounds a transfer by default, so a server that
+# accepted the connection and then sent nothing left the fetch parked with
+# nothing to break it. 30 s to establish a connection kills a dead host fast;
+# the total-transfer ceiling stays generous because this one helper also
+# streams multi-GB installer ISOs (a 6 GB image is recorded in this module's
+# own history), where a 300 s cap would abort a legitimate transfer on any
+# link slower than ~160 Mbit/s. AUTOOS_DOWNLOAD_TIMEOUT_SEC lowers the ceiling
+# for tests and for an operator on a link slower still.
+$script:AutoOSDownloadConnectTimeoutSec = 30
+$script:AutoOSDownloadTimeoutSec = 3600
+
+# The effective total-transfer bound: the constant above unless the env seam
+# lowers it (same shape as AUTOOS_FAKE_NO_UNCACHED further down). Validated
+# here so a typo is a clear error, never a silently absent bound.
+function Get-AutoOSDownloadTimeoutSec {
+    if ($env:AUTOOS_DOWNLOAD_TIMEOUT_SEC) {
+        $configured = 0
+        if (-not [int]::TryParse($env:AUTOOS_DOWNLOAD_TIMEOUT_SEC, [ref]$configured) -or $configured -lt 1) {
+            throw 'AUTOOS_DOWNLOAD_TIMEOUT_SEC must be a positive whole number of seconds.'
+        }
+        return $configured
+    }
+    $script:AutoOSDownloadTimeoutSec
+}
+
 # Prints the resolved AutoOS download cache directory (plan ruling P6):
 # $env:AUTOOS_CACHE_DIR, else $env:LOCALAPPDATA\AutoOS\images - always
 # outside the repository. Pure: does not create the directory. Callers
@@ -215,8 +242,9 @@ function Test-AutoOSSha256Match {
 
 # Fetches <Uri> to <OutFile>. file:// sources are copied directly since
 # Invoke-WebRequest does not support that scheme; everything else goes
-# through Invoke-WebRequest with an explicit redirect cap - never
-# Start-BitsTransfer (plan finding A8).
+# through curl.exe (streaming) or Invoke-WebRequest with an explicit redirect
+# cap - never Start-BitsTransfer (plan finding A8). Every network arm carries
+# the wall-clock bounds defined at the top of this module.
 function Get-AutoOSRawDownload {
     param([Parameter(Mandatory)][string]$Uri, [Parameter(Mandatory)][string]$OutFile)
     if ($Uri -match '^file://') {
@@ -224,6 +252,9 @@ function Get-AutoOSRawDownload {
         Copy-Item -LiteralPath $localPath -Destination $OutFile -Force
         return
     }
+
+    # Resolved once for whichever transport is taken below.
+    $maxTime = Get-AutoOSDownloadTimeoutSec
 
     # curl.exe first (it ships with Windows 10 1803+ / 11): it STREAMS to
     # disk. Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the
@@ -233,6 +264,8 @@ function Get-AutoOSRawDownload {
     # same URL. -L follows the mirror redirect (plan finding A8); -f turns
     # an HTTP error page into a non-zero exit instead of a saved HTML file
     # under the ISO's name (A7) - the same flags lib/linux/download.sh uses.
+    # --connect-timeout/--max-time are the wall-clock bounds (top of module):
+    # curl has no default, so a stalled mirror would otherwise hang forever.
     # stderr (curl's own error text) must not become a terminating error
     # under this module's $ErrorActionPreference = 'Stop' (handoff L6):
     # the exit code is the verdict, the text is only for the message.
@@ -241,7 +274,7 @@ function Get-AutoOSRawDownload {
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            $errText = & $curl.Source -fsSL --retry 3 --retry-delay 2 -o $OutFile -- $Uri 2>&1 | Out-String
+            $errText = & $curl.Source -fsSL --connect-timeout $script:AutoOSDownloadConnectTimeoutSec --max-time $maxTime --retry 3 --retry-delay 2 -o $OutFile -- $Uri 2>&1 | Out-String
             if ($LASTEXITCODE -ne 0) {
                 throw "curl exited $LASTEXITCODE downloading ${Uri}: $($errText.Trim())"
             }
@@ -260,7 +293,7 @@ function Get-AutoOSRawDownload {
     # function: $ProgressPreference is dynamically scoped, so callers'
     # own setting is untouched once we return.
     $ProgressPreference = 'SilentlyContinue'
-    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
+    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10 -TimeoutSec $maxTime
 }
 
 # Verifies <Path> against the detached signature at <SignatureUri>, trusting
