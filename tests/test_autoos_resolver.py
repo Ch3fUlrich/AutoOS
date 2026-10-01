@@ -4332,17 +4332,14 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertIn("last_resort", blob)
         self.assertIn("free-p/free-model", blob)
 
-    def test_reviewer_preference_list_is_out_of_scope_for_paid_holdback(self):
-        # R4a scope note: policy.reviewers is the operator's ORDERED preference
-        # for who reads a diff (REVROUTE S2) -- its head is deliberately the
-        # paid meta leg, and the rule's "same route class" has no meaning for
-        # entries that name no route. Route legs (writer AND reviewer routes,
-        # both scored through usable_legs) hold paid back; this walk keeps the
-        # operator's order. Pinned so a later lane does not "fix" it by
-        # accident: author qwen still resolves to the paid meta head while the
-        # free google entry behind it is healthy.
+    def test_reviewer_paid_entry_first_healthy_free_entry_wins(self):
+        # T0-PAID-4 Q1 (operator rule D-212/D-219): paid reviewers are
+        # LAST-RESORT, used only when no free/trial/credit reviewer serves.
+        # The walk tries every NON-paid entry first (registry order kept),
+        # then the paid ones -- so a paid head must not win while a free
+        # entry behind it is healthy.
         reviewers = [
-            {"client": "opencode", "family": "paidfam",
+            {"client": "opencode", "family": "paidfam", "paid": True,
              "leg": "paid-p/paid-model", "model": "paid-model"},
             {"client": "opencode", "family": "freefam",
              "leg": "free-p/free-model", "model": "free-model"}]
@@ -4351,7 +4348,50 @@ class PaidLastResortTests(unittest.TestCase):
                                          "family": "otherfam"}
         got = r.reviewer_for("author-model", reg, self.state(), self.now())
         self.assertIsNotNone(got["reviewer"])
+        self.assertEqual(got["reviewer"]["model"], "free-model")
+        self.assertNotIn("last resort", got["reason"])
+
+    def test_reviewer_all_free_skipped_paid_allowed_as_last_resort(self):
+        # T0-PAID-4 Q1: when every free entry is skipped (same family here),
+        # the paid entry is chosen and the reason says it was last resort.
+        reviewers = [
+            {"client": "opencode", "family": "freefam",
+             "leg": "free-p/free-model", "model": "free-model"},
+            {"client": "opencode", "family": "paidfam", "paid": True,
+             "leg": "paid-p/paid-model", "model": "paid-model"}]
+        reg = self.fixture(policy_reviewers=reviewers)
+        reg["models"]["author-model"] = {"id": "author-model",
+                                         "family": "freefam"}
+        got = r.reviewer_for("author-model", reg, self.state(), self.now())
+        self.assertIsNotNone(got["reviewer"])
         self.assertEqual(got["reviewer"]["model"], "paid-model")
+        self.assertIn("last resort", got["reason"])
+
+    def test_shipped_registry_reviewers_prefer_free_over_paid_head(self):
+        # T0-PAID-4 Q1 on shipped data: the paid meta head
+        # (omniroute/spark-1.3-contributor) must NOT review while a free
+        # entry is usable. Authors are spelled as the registry resolves
+        # them (bare "gemini" is not a registry spelling -- the model id
+        # "gemini-3.8-flash" is). A deepseek-family author must still get
+        # a cross-family reviewer, never a same-family one.
+        import copy
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            shipped = copy.deepcopy(json.load(fh))
+        state = {client: {"installed": True, "signed_in": True, "reason": ""}
+                 for client in ("opencode", "gemini", "qoder", "qwen",
+                                "claude", "codex")}
+        for author, family in (("gemini-3.8-flash", "google"),
+                               ("qwen3.8-27b", "qwen"),
+                               ("muse-spark-1.3-contributor", "meta")):
+            got = r.reviewer_for(author, shipped, state, self.now())
+            self.assertIsNotNone(got["reviewer"], author)
+            self.assertIsNot(got["reviewer"].get("paid"), True, author)
+            self.assertNotEqual(got["reviewer"]["family"], family, author)
+        got = r.reviewer_for("deepseek/deepseek-v4.1-flash", shipped,
+                             state, self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertNotEqual(got["reviewer"]["family"], "deepseek")
 
     def test_shipped_registry_standard_card_chooses_non_paid_while_free_healthy(self):
         # Card complexity=standard, ctx=128k, privacy=public, role=implement,

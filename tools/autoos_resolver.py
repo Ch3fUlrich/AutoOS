@@ -2162,6 +2162,27 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     return reasons, resolved
 
 
+def _reviewer_is_paid(entry, registry):
+    """Whether a ``policy.reviewers`` entry is a paid leg (T0-PAID-4 Q1).
+
+    Operator rule D-212/D-219: paid legs are LAST-RESORT, used only when no
+    free/trial/credit leg serves. An entry is paid when it says so
+    (``paid: true``) or when its leg's effective tier (``leg_tier``: the
+    model-level tier, else the provider's) is ``paid``. A leg whose tier
+    cannot be read counts as non-paid here -- the explicit flag decides,
+    and the walk's own rejection reasons still report the broken leg.
+    """
+    if entry.get("paid"):
+        return True
+    leg = entry.get("leg")
+    if not leg:
+        return False
+    try:
+        return leg_tier(leg, registry) == _PAID_TIER
+    except (ValueError, KeyError):
+        return False
+
+
 def reviewer_for(author, registry, client_state, now=None, risk="normal",
                  privacy="public"):
     """The reviewer decision for an authored review card (spec 5.7 + D2).
@@ -2169,10 +2190,14 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
     Returns ``{author, author_family, reviewer, skipped, state, retry_at,
     reason}``:
 
-    - ``reviewer`` -- the first ``policy.reviewers`` entry that clears the
-      family, availability and privacy checks, or None. The list is an ORDERED
-      preference, so the walk stops at the first usable entry and ``skipped``
-      holds exactly what it passed over, each with all of its reasons.
+    - ``reviewer`` -- the first usable ``policy.reviewers`` entry, paid
+      LAST (operator rule D-212/D-219, T0-PAID-4 Q1): the walk tries every
+      NON-paid entry first (registry order kept), then the paid ones
+      (registry order kept), stopping at the first entry that clears the
+      family, availability and privacy checks. A paid entry chosen this way
+      says so in the reason (``last resort: no free reviewer usable``).
+      ``skipped`` holds every rejected entry in registry order, each with
+      all of its reasons.
     - ``state`` -- ``resolved``, ``queued`` (nothing usable, and at least one
       entry the walk passed over is down *temporarily* with a known reset: a
       reviewer will come back), or ``unresolved`` (nobody eligible, and no wait
@@ -2200,13 +2225,25 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
 
     skipped = []
     waits = []
+    examined = []
     for entry in reviewers:
         if not isinstance(entry, dict):
             continue
         reasons, _resolved = _reviewer_rejections(entry, family, registry,
                                                  client_state, now, risk,
                                                  privacy)
-        if not reasons:
+        examined.append((entry, reasons))
+        if reasons:
+            temporary = _is_temporary(reasons)
+            skipped.append({"client": entry.get("client"),
+                            "model": entry.get("model"),
+                            "family": entry.get("family"),
+                            "reasons": reasons,
+                            "waiting": temporary})
+            if temporary:
+                waits.extend(_entry_unavailable_until(entry, registry, now))
+    for entry, reasons in examined:
+        if not reasons and not _reviewer_is_paid(entry, registry):
             model = entry.get("model")
             return {
                 "author": author, "author_family": family,
@@ -2216,14 +2253,19 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
                           % (entry.get("client"), model, entry.get("family"),
                              family),
             }
-        temporary = _is_temporary(reasons)
-        skipped.append({"client": entry.get("client"),
-                        "model": entry.get("model"),
-                        "family": entry.get("family"),
-                        "reasons": reasons,
-                        "waiting": temporary})
-        if temporary:
-            waits.extend(_entry_unavailable_until(entry, registry, now))
+    for entry, reasons in examined:
+        if not reasons:
+            model = entry.get("model")
+            return {
+                "author": author, "author_family": family,
+                "reviewer": dict(entry), "skipped": skipped,
+                "state": "resolved", "retry_at": None,
+                "reason": "reviewer: %s %s (family %s, author %s) -- "
+                          "last resort: no free reviewer usable, paid "
+                          "reviewer %s serves"
+                          % (entry.get("client"), model, entry.get("family"),
+                             family, model),
+            }
 
     if waits:
         retry_at = _format_retry(min(waits))
