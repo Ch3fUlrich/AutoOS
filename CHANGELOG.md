@@ -4,6 +4,24 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- T2-ISOLATE-SECRETS-3 (2026-10-01, lane `t2-isolate-secrets-3`, cross-family FAIL round):
+  **R1** `_isolate_materialise` no longer trusts a tracked *name* — a new
+  `_isolate_safe_path` refuses `..`, empty / `.` components, a leading `/`, a NUL,
+  a drive- or UNC-shaped name and any component spelling `.git`;
+  `_isolate_link_inside` refuses a tracked symlink whose target is absolute or
+  climbs out of the tree; `_isolate_clear_below` refuses a write whose ancestor
+  below the sandbox is a symlink or whose realpath parent is outside the sandbox.
+  An unsafe entry is skipped with one stderr line naming the path only, never its
+  content. **R2** the isolation claim is now stated and canary-tested: an
+  untracked, git-ignored fake key file in a checkout and in a `worktree` of it is
+  unreachable from either sandbox (`ISOLATION STATEMENT:` in `isolate_clone` names
+  what *is* isolated — the sandbox tree and its own `.git` for every --isolate
+  worker and reviewer — and what is *not*: an absolute path read outside the
+  sandbox, in-session Claude Code subagents, and any run without --isolate).
+  **R3** the dry-run plan says *one-commit materialisation of allowed HEAD files*
+  where it still said `git clone --local` (tests, docs/handoff.md included).
+  **R4/R5** the `.agentignore` negation drop and the cone-reconstruction fallback
+  of the sparse filter are covered by tests.
 - T2-ISOLATE-SECRETS (2026-10-01, lane `t2-isolate-secrets-2`, review round 2): `--isolate` no longer builds its sandbox with `git archive HEAD -- <paths>`. HEAD is now **materialised in Python** — `ls-tree -r -z --full-tree` names the entries, the allow filter is applied to names already in hand, and ONE `git cat-file --batch` streams their bytes into a fresh `git init` with a single `sandbox base (source <sha>)` commit (100755 keeps its exec bit, 120000 becomes a symlink that is never followed, 160000 gitlinks are skipped). That removes the whole class of failure the pathspec list carried: a tracked file named `*` or `secrets-*` is no longer re-read as a glob that pulls `secrets-generated/` back in (I1), 30k tracked files no longer overflow ARG_MAX (I2), and `.gitattributes` `export-ignore`/`export-subst` no longer silently rewrites or drops files (I3). Around it: `.agentignore` matches with real gitignore semantics instead of basename equality (I4), blobs are read as bytes so a binary secret cannot leak its own value through a `UnicodeDecodeError` traceback (I5), cone **and** non-cone sparse sources are honoured by asking git's own index (skip-worktree) rather than guessing from patterns (I6/I14), `*.example`-shaped exemption and secret-name matching are no longer fooled by `api.example.com.key`, `ID_RSA`, `.ENV` or a `.pub` (I7/I8), a SOPS blob must actually be SOPS — column-0 `sops:`, a top-level JSON `"sops"` key, or every value an `ENC[AES256_GCM,data:` (I9), `secrets-generated` is excluded as a path component at any depth and any case (I10), a build that fails half way leaves no sandbox directory behind (I11), the plaintext-secret refusal runs before `~/fleet/sandboxes/<repo>/` is created (I12), and the take-it hint names the cherry-pick range of the sandbox base, because the base shares no history with the source (I13). 28 tests in `tests/test_autoos_spawner.py` (`T2IsolateSecrets*`).
 - opencode-direct fallback ladder (2026-10-01, L0/operator): documented the no-gateway model ladder for lanes when the omniroute combos fail — openrouter `:free` only (NO credit; every paid openrouter leg is denied) → opencode Zen free → meta direct → litellm → ollama. In-opencode usage is not gateway proxying (no combos/admission/backoff). Live probes: `opencode/longcat-2.5-preview-free`, `opencode/space-bunny-free`, `opencode/mimo-v2.6-flash-free`, `openrouter/nvidia/nemotron-3-super-120b-a12b:free`, `openrouter/qwen/qwen3.8-27b:free` OK; `meta/muse-spark-1.3` DOWN (`META_API_KEY` unset); `litellm/t2-worker` rejected — the server serves `tier2` (use `litellm/tier2`); `ollama/qwen2.5-coder:7b` answers direct on `127.0.0.1:11434` (54 s cold) but the opencode ref refuses (per-user `baseURL: host.docker.internal`). Also records the 7 paid openrouter route legs TORDER-OR drops. See `docs/handoff/2026-10-01-opencode-direct-fallback-ladder.md`.
 - REVIEWGATE-2FAM (2026-09-30, operator): `review-status`/`ready` now count SEATS — a ready record needs at least two `kind=cross-family` entries, each READY, from distinct registry families, none the author's; the detail names missing/duplicated seats, an optional `family=` token is cross-checked against the registry, every counted seat prints as `seat N: <model> (<family>) verdict=<v>`, and more than 3 seats is a non-blocking note (no cap). One seat + the Sonnet final no longer reads as reviewed.

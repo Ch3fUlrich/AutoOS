@@ -25,6 +25,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 from unittest import mock
 from pathlib import Path
 
@@ -18810,6 +18811,76 @@ class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
         self.assertIn("link.txt", _t2_tree(self.cli, dest))
 
 
+    def test_negation_line_never_turns_the_filter_into_include_everything(self):
+        # R4: `.agentignore` negation is NOT implemented for the sandbox filter,
+        # and an unimplemented rule must fail closed — a `!keep.txt` line dropped
+        # with a warning is inert, while reading it as gitignore's "re-include"
+        # would walk back `private`, `!private/k.txt` and the generated-secrets
+        # directory. No existing test covers a `!` line
+        # (test_agentignore_patterns_follow_gitignore_semantics has only positive
+        # patterns), so this is the guard.
+        files = {"keep.txt": "keep\n", "private/k.txt": "p\n",
+                 "private/keep.txt": "pk\n",
+                 "sub/secrets-generated/x.txt": "FAKE-GEN\n",
+                 ".agentignore": "private\n!keep.txt\n!private/k.txt\n"
+                                 "!sub/secrets-generated/\n"}
+        root = _t2_repo(self.git, files, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        patterns = []
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            patterns = self.cli._isolate_agentignore_patterns(root)
+        self.assertEqual(patterns, ["private"])
+        self.assertFalse([p for p in patterns if p.startswith("!")])
+        for line in ("!keep.txt", "!private/k.txt", "!sub/secrets-generated/"):
+            self.assertIn(line, err.getvalue())
+        # one warning per dropped line, and a real newline ends it (the escape
+        # was written `\\n` in the source, so the operator read a literal one).
+        self.assertEqual([ln for ln in err.getvalue().splitlines()
+                          if chr(92) in ln], [])
+        self.assertEqual(err.getvalue().count("autoos: .agentignore negation"), 3)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/r4neg")
+        # `.agentignore` is itself a committed, allowed file: what must be gone
+        # is everything its positive pattern excludes, and the negation must not
+        # have brought any of it back.
+        self.assertEqual(_t2_tree(self.cli, dest),
+                         [".agentignore", "keep.txt"])
+
+    def test_cone_fallback_reconstructs_the_index_answer(self):
+        # R5: the cone RECONSTRUCTION is the fallback for a checkout whose index
+        # cannot be asked, and nothing exercised it — `ls-files -v` answers for
+        # every real fixture. Stub that one call to say nothing and the same
+        # tree must come back, so the fallback is covered, not aspirational.
+        files = {"top.txt": "t\n", "keep/a.txt": "k\n",
+                 "keep/sub/a2.txt": "k2\n", "drop/c.txt": "d\n",
+                 "nested/d.txt": "n\n", "nested/keep/b.txt": "b\n",
+                 "nested/deep/x.txt": "x\n"}
+        root = _t2_repo(self.git, files, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(["git", "-C", root, "sparse-checkout", "set", "--cone",
+                        "keep", "nested/keep"], check=True)
+        expected = ["keep/a.txt", "keep/sub/a2.txt", "nested/d.txt",
+                    "nested/keep/b.txt", "top.txt"]
+        real_run = self.cli.subprocess.run
+
+        def blind_index(argv, *a, **k):
+            if isinstance(argv, list) and "ls-files" in argv and "-v" in argv:
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return real_run(argv, *a, **k)
+
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        with mock.patch.object(self.cli.subprocess, "run", blind_index):
+            self.cli.isolate_clone(root, dest, "agent/r5cone")
+        self.assertEqual(_t2_tree(self.cli, dest), expected)
+        # and the fallback really ran: with the index blind, the pattern list
+        # alone decided, so a stub that returned the index answer proves nothing.
+        with mock.patch.object(self.cli.subprocess, "run", blind_index):
+            allowed = self.cli._isolate_sparse_allowed(
+                root, sorted(files))
+        self.assertEqual(sorted(allowed), expected)
+
+
 class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
     """S3: tracked plaintext-secret names refuse before any sandbox exists."""
 
@@ -19089,6 +19160,301 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
         self.assertIn("sandbox_root_prepare(", src)
         self.assertLess(src.index("sandbox_root_prepare(source"),
                         src.index("def isolate_clone("))
+
+
+class T2IsolateSecretsS5PathSafetyTests(unittest.TestCase):
+    """R1: materialise validates every path and never writes through a symlink.
+
+    Every entry here is hand-made (mode, blob sha, path) with blobs from
+    `git hash-object -w`, because a real repo cannot hold a tracked path with a
+    `..` component or a leading `/` — the defect is exactly that the materialiser
+    trusts the name it is handed.
+    """
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+        self.root = _t2_repo(self.git, {"keep.txt": "keep\n"},
+                             tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _blob(self, text):
+        return subprocess.run(
+            ["git", "-C", self.root, "hash-object", "-w", "--stdin"],
+            input=text, capture_output=True,
+            text=True, check=True).stdout.strip()
+
+    def _mat(self, entries, setup=None):
+        """Materialise into a fresh dest; returns (dest, stderr, sibling dir).
+
+        `setup(dest, sibling)` runs first, so a test can plant a symlink on disk
+        that the materialiser itself would refuse to create.
+        """
+        parent = tempfile.mkdtemp(dir=self.tmp)
+        dest = os.path.join(parent, "sandbox")
+        os.makedirs(dest)
+        sibling = os.path.join(parent, "sibling")
+        os.makedirs(sibling)
+        if setup:
+            setup(dest, sibling)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.cli._isolate_materialise(self.root, entries, dest)
+        return dest, sibling, err.getvalue()
+
+    def _tree(self, path):
+        out = []
+        for dirpath, dirnames, filenames in os.walk(path):
+            for n in dirnames + filenames:
+                out.append(os.path.relpath(os.path.join(dirpath, n), path))
+        return sorted(out)
+
+    def test_safe_path_helper_rejects_every_escape_shape(self):
+        safe = self.cli._isolate_safe_path
+        for bad in ("../evil", "a/../b", "../../x", "..", "", "/abs/path",
+                    "a//x", "./a", "a/./x", ".git/hooks/pre-commit",
+                    "sub/.git/config", "sub/.GIT/config", "a\x00b",
+                    "C:\\windows\\x"):
+            self.assertFalse(safe(bad), bad)
+        for good in ("keep.txt", "a/b/c.txt", ".agentignore", "a/git/x",
+                     "gitignore.d/x", "sub/.hidden", "weird name.txt"):
+            self.assertTrue(safe(good), good)
+
+    def test_traversal_and_gitdir_entries_are_skipped_with_one_warning(self):
+        self.addCleanup(lambda: os.path.lexists("/tmp/autoos-abs-evil") and
+                        os.unlink("/tmp/autoos-abs-evil"))
+        blob = self._blob("evil\n")
+        dest, sibling, err = self._mat([
+            ("100644", blob, "../evil"),
+            ("100644", blob, "/tmp/autoos-abs-evil"),
+            ("100644", blob, "a/../b"),
+            ("100644", blob, "a//x"),
+            ("100644", blob, "./a/./y"),
+            ("100644", blob, ".git/hooks/pre-commit"),
+            ("100644", blob, "sub/.GIT/config"),
+            ("100644", self._blob("keep\n"), "keep.txt")])
+        self.assertEqual(self._tree(sibling), [])
+        self.assertFalse(os.path.lexists("/tmp/autoos-abs-evil"))
+        self.assertEqual(self._tree(dest), ["keep.txt"])
+        self.assertEqual(err.count("autoos:"), 7, err)
+        for named in ("../evil", "/tmp/autoos-abs-evil", "a/../b", "a//x",
+                      "./a/./y", ".git/hooks/pre-commit", "sub/.GIT/config"):
+            self.assertIn(named, err)
+        self.assertNotIn("evil\n", err)              # path only, never content
+
+    def test_symlink_ancestor_never_writes_through(self):
+        # R1a: `a` is already a link out of dest when `a/x` is written, so
+        # makedirs + open would land the bytes in the sibling directory.
+        def plant(dest, sibling):
+            os.symlink(sibling, os.path.join(dest, "a"))
+        dest, sibling, err = self._mat(
+            [("100644", self._blob("outside\n"), "a/x"),
+             ("100644", self._blob("outside\n"), "a/y/z"),
+             ("100644", self._blob("keep\n"), "keep.txt")],
+            setup=plant)
+        self.assertEqual(self._tree(sibling), [])
+        self.assertEqual(self._tree(dest), ["a", "keep.txt"])
+        self.assertTrue(os.path.islink(os.path.join(dest, "a")))
+        self.assertIn("autoos:", err)
+        self.assertIn("a/x", err)
+        self.assertIn("a/y/z", err)
+
+    def test_escaping_symlink_targets_are_skipped_and_benign_kept(self):
+        ok = self._blob("ok\n")
+        abs_link = self._blob(os.path.join(self.root, "configuration",
+                                           "api-keys.yml"))
+        esc_link = self._blob("../../x")
+        benign = self._blob("../ok.txt")
+        dest, _sibling, err = self._mat([
+            ("100644", ok, "ok.txt"),
+            ("120000", abs_link, "abs.txt"),
+            ("120000", esc_link, "esc.txt"),
+            ("120000", self._blob("\\\\server\\share\\x"), "esc2.txt"),
+            ("100644", ok, "sub/ok.txt"),
+            ("120000", benign, "sub/l")])
+        self.assertFalse(os.path.lexists(os.path.join(dest, "abs.txt")))
+        self.assertFalse(os.path.lexists(os.path.join(dest, "esc.txt")))
+        self.assertFalse(os.path.lexists(os.path.join(dest, "esc2.txt")))
+        self.assertTrue(os.path.islink(os.path.join(dest, "sub", "l")))
+        self.assertEqual(os.readlink(os.path.join(dest, "sub", "l")), "../ok.txt")
+        self.assertIn("abs.txt", err)
+        self.assertIn("esc.txt", err)
+        self.assertNotIn("sub/l", err)
+
+    def test_clone_skips_an_escaping_tracked_symlink_and_keeps_the_rest(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+        with open(os.path.join(root, "keep.txt"), "w", encoding="utf-8") as fh:
+            fh.write("keep\n")
+        os.symlink("../secret.txt", os.path.join(root, "escape.txt"))
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"],
+                       check=True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.cli.isolate_clone(root, dest, "agent/r1esc")
+        self.assertTrue(os.path.isfile(os.path.join(dest, "keep.txt")))
+        self.assertFalse(os.path.lexists(os.path.join(dest, "escape.txt")))
+        self.assertEqual(_t2_tree(self.cli, dest), ["keep.txt"])
+
+
+class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
+    """R2 acceptance: an --isolate worker cannot read the source's UNTRACKED key.
+
+    The claim this lane made was "the sandbox excludes secrets". The strongest
+    form of it is a canary: a file that exists in the source checkout, is
+    git-ignored (so it is exactly what a real `configuration/api-keys.yml` is),
+    and holds one fake string nowhere else. If any byte of it can be reached
+    from inside the sandbox — tree, `.git`, or by following the common dir out
+    of it — this test finds it. Fixture B is a `git worktree`, which is how the
+    real AutoOS lanes sit: its `.git` is a file pointing at A's, so a sandbox
+    built by copying the worktree's git dir would inherit a path back to A.
+    """
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.canary = "CANARY-NOT-A-KEY-%s" % uuid.uuid4()
+
+    def _fixture_a(self):
+        a = os.path.join(self.tmp, "src")
+        subprocess.run(self.git + ["init", "-q", a], check=True)
+        with open(os.path.join(a, ".gitignore"), "w", encoding="utf-8") as fh:
+            fh.write("configuration/api-keys.yml\n")
+        with open(os.path.join(a, "keep.txt"), "w", encoding="utf-8") as fh:
+            fh.write("keep\n")
+        subprocess.run(self.git + ["-C", a, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", a, "commit", "-q", "-m", "head"],
+                       check=True)
+        os.makedirs(os.path.join(a, "configuration"), exist_ok=True)
+        with io.open(os.path.join(a, "configuration", "api-keys.yml"),
+                     "w", encoding="utf-8") as fh:
+            fh.write("omniroute: %s\n" % self.canary)
+        return a
+
+    def _fixture_b(self, a):
+        b = os.path.join(self.tmp, "worktree")
+        subprocess.run(self.git + ["-C", a, "worktree", "add", "-q", "-b",
+                                   "lane/canary", b], check=True)
+        return b
+
+    def _sandbox(self, source):
+        dest = os.path.join(tempfile.mkdtemp(dir=self.tmp), "sandbox")
+        base = self.cli.isolate_clone(source, dest, "agent/r2canary")
+        return dest, base
+
+    def _probe_clamp(self, root):
+        """Load tools/probe-clamp.py fresh and point its ROOT at `root`."""
+        spec = importlib.util.spec_from_file_location("probe_clamp",
+                                                      str(TOOLS / "probe-clamp.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.ROOT = root
+        return mod
+
+    def _bytes_hits(self, path, needle):
+        hits = []
+        for dirpath, _dirs, files in os.walk(path):
+            for name in files:
+                full = os.path.join(dirpath, name)
+                try:
+                    with io.open(full, "rb") as fh:
+                        if needle.encode("utf-8") in fh.read():
+                            hits.append(full)
+                except OSError:
+                    hits.append(full)          # unreadable counts as a hit
+        return hits
+
+    def _assert_sandbox_is_clean(self, dest, source_paths):
+        # (1) no canary byte anywhere in the sandbox, .git included.
+        self.assertEqual(self._bytes_hits(dest, self.canary), [])
+        # (2) the sandbox's own git common dir is inside the sandbox.
+        common = subprocess.run(
+            ["git", "-C", dest, "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], capture_output=True, text=True,
+            check=True).stdout.strip()
+        self.assertTrue(os.path.realpath(common).startswith(
+            os.path.realpath(dest) + os.sep), common)
+        # (3) no source PATH in any git metadata file (the sha is allowed).
+        gitdir = os.path.join(dest, ".git")
+        for needle in source_paths:
+            hits = self._bytes_hits(gitdir, needle)
+            self.assertEqual(hits, [], "source path %s leaked into %s"
+                             % (needle, hits))
+        # (4) probe-clamp pointed AT the sandbox finds nothing.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ["PATH"] = os.defpath
+            mod = self._probe_clamp(dest)
+            main = mod._git_common_root()
+            self.assertTrue(main is None or main == os.path.realpath(dest)
+                            or main.startswith(os.path.realpath(dest) + os.sep),
+                            repr(main))
+            keys = mod.candidate_keys(None)
+        self.assertEqual([k for k, _l in keys if k == self.canary], [])
+
+    def test_worker_sandbox_of_a_plain_checkout_cannot_reach_the_canary(self):
+        a = self._fixture_a()
+        dest, _base = self._sandbox(a)
+        self._assert_sandbox_is_clean(dest, [a])
+        self.assertIn("keep.txt", _t2_tree(self.cli, dest))
+
+    def test_reviewer_sandbox_of_a_worktree_cannot_reach_the_canary(self):
+        a = self._fixture_a()
+        b = self._fixture_b(a)
+        # the worktree's own git dir is the MAIN checkout — that is the leak.
+        common = subprocess.run(
+            ["git", "-C", b, "rev-parse", "--path-format=absolute",
+             "--git-common-dir"], capture_output=True, text=True,
+            check=True).stdout.strip()
+        self.assertEqual(os.path.realpath(common),
+                         os.path.realpath(os.path.join(a, ".git")))
+        dest, _base = self._sandbox(b)
+        self._assert_sandbox_is_clean(dest, [a, b])
+
+    def test_positive_control_a_worktree_reads_the_mains_key_file(self):
+        """(5) The vector is real: pointed at the worktree, probe-clamp finds it.
+
+        Without this, assertions (1)-(4) would also pass on a probe-clamp that
+        stopped reading the common dir at all.
+        """
+        a = self._fixture_a()
+        b = self._fixture_b(a)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            os.environ["PATH"] = os.defpath
+            mod = self._probe_clamp(b)
+            self.assertEqual(os.path.realpath(mod._git_common_root()),
+                             os.path.realpath(a))
+            keys = mod.candidate_keys(None)
+        self.assertIn(self.canary, [k for k, _l in keys])
+        self.assertTrue(any("api-keys.yml" in lbl for _k, lbl in keys), keys)
+
+    def test_sandbox_config_names_the_source_sha_not_its_path(self):
+        """(3) `autoos.sandboxSource` is kept because provenance needs it — and
+        it holds the 40-hex sha, never the directory, so it cannot name a path
+        for a worker to read out of the sandbox."""
+        a = self._fixture_a()
+        sha = subprocess.run(["git", "-C", a, "rev-parse", "HEAD"],
+                             capture_output=True, text=True,
+                             check=True).stdout.strip()
+        dest, base = self._sandbox(a)
+        got = subprocess.run(
+            ["git", "-C", dest, "config", "--local", "--get",
+             "autoos.sandboxSource"], capture_output=True, text=True,
+             check=True).stdout.strip()
+        self.assertEqual(got, sha)
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{40}", got), got)
+        self.assertNotIn(os.sep, got)
+        self.assertNotEqual(base, sha)          # the base is the sandbox commit
 
 
 if __name__ == "__main__":

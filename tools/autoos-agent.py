@@ -236,6 +236,7 @@ import datetime
 import io
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -760,7 +761,7 @@ def _isolate_agentignore_patterns(root: str) -> list:
             # warning and never read as "include everything".
             sys.stderr.write("autoos: .agentignore negation '%s' is not "
                              "supported by the sandbox filter; the line is "
-                             "ignored, the paths stay excluded\\n" % stripped)
+                             "ignored, the paths stay excluded\n" % stripped)
             continue
         out.append(stripped)
     return out
@@ -1048,6 +1049,78 @@ def _isolate_batch_blobs(root: str, entries: list) -> dict:
     return blobs
 
 
+def _isolate_safe_path(rel: str) -> bool:
+    """Whether `rel` may be written under the sandbox destination (R1).
+
+    A tracked NAME is trusted by nothing else: git tree objects can and do hold
+    `..`, an empty or `.` component, a leading `/`, a NUL, and a `.git`
+    directory — every one of them is a write outside the sandbox or into its own
+    repo metadata (`sub/.GIT/config` is the same directory, another spelling). A
+    NUL truncates the path in any later C caller. A backslash-shaped name
+    (drive or UNC) is refused whole: the sandbox is a POSIX tree, and
+    `os.path.join(dest, "C:\\x")` abandons `dest` for the drive. Conservative
+    costs one skipped file on the rare checkout; the alternative is a sandbox
+    whose contents are not HEAD.
+    """
+    if not rel or "\x00" in rel or "\\" in rel:
+        return False
+    posix = rel.replace(os.sep, "/")
+    if posix.startswith("/"):
+        return False
+    if re.match(r"^[A-Za-z]:", posix) or posix.startswith("?:"):
+        return False
+    for seg in posix.split("/"):
+        if seg in ("", ".", "..") or seg.lower() == ".git":
+            return False
+    return True
+
+
+def _isolate_link_inside(path: str, target: str) -> bool:
+    """Whether a tracked symlink's own target stays inside the sandbox (R1b).
+
+    `path` is the POSIX relative name and `target` the blob's bytes. An absolute
+    or drive/UNC target, or one that climbs out of the tree
+    (`normpath(dirname(path) + target)` starting with `..`), materialises a link
+    the worker can read straight through into a host file — the source's own
+    untracked `configuration/api-keys.yml` is exactly such a target. Refused:
+    the link is simply not created.
+    """
+    if not target or "\\" in target or os.path.isabs(target):
+        return False
+    posix = target.replace(os.sep, "/")
+    if posix.startswith("/") or re.match(r"^[A-Za-z]:", posix):
+        return False
+    rel = os.path.normpath(posixpath.join(
+        posixpath.dirname(path.replace(os.sep, "/")), posix))
+    return rel != ".." and not rel.startswith("../") and rel != "."
+
+
+def _isolate_clear_below(dest: str, rel: str) -> bool:
+    """Whether `rel` can be written under `dest` without leaving it (R1c).
+
+    Refuses when any ancestor of the target below `dest` is a symlink — the
+    `a` -> /tmp/sibling entry followed by `a/x` writes OUTSIDE dest — and when
+    realpath of the parent is not inside realpath(dest) (the belt after the
+    component walk: it also catches a dest that a link pointed into).
+    """
+    real_dest = os.path.realpath(dest)
+    cursor = dest
+    for seg in rel.replace(os.sep, "/").split("/")[:-1]:
+        cursor = os.path.join(cursor, seg)
+        if os.path.islink(cursor):
+            return False
+    parent = os.path.dirname(os.path.join(dest, rel.replace("/", os.sep)))
+    real_parent = os.path.realpath(parent) if parent else real_dest
+    return real_parent == real_dest or \
+        real_parent.startswith(real_dest + os.sep)
+
+
+def _isolate_refuse_path(path: str, why: str) -> None:
+    """One stderr line naming the PATH only — never its content (R1)."""
+    sys.stderr.write("autoos: sandbox refused tracked path %s (%s)\n"
+                     % (repr(path), why))
+
+
 def _isolate_materialise(root: str, entries: list, dest: str) -> None:
     """Write the allowed HEAD entries into `dest`, verbatim from the object DB.
 
@@ -1065,11 +1138,31 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
     never reaches an argv and no name is ever pattern-matched; HEAD arrives
     verbatim, a symlink is created rather than followed, and the exec bit is
     carried. A gitlink has no bytes here and is skipped.
+
+    A NAME is the one thing that is NOT trusted (R1): the tree object is the
+    worker's/source's own data, and `ls-tree` happily prints `../x`, `//x`,
+    `/abs/x`, `.git/hooks/pre-commit` and a symlink whose target is
+    `/home/user/.ssh/id_ed25519`. `_isolate_safe_path` vetts the shape,
+    `_isolate_link_inside` vetts where a link points, and
+    `_isolate_clear_below` vetts the destination itself (no symlinked ancestor,
+    parent still under `dest`). An unsafe entry is skipped with one stderr line
+    naming the PATH only; a sandbox missing one weird file is still HEAD for
+    every path the filter allowed, while the alternative is bytes outside it.
     """
     blobs = _isolate_batch_blobs(root, entries)
     for mode, sha, path in entries:
         data = blobs.get(sha)
         if data is None:
+            continue
+        if not _isolate_safe_path(path):
+            _isolate_refuse_path(path, "unsafe path")
+            continue
+        target = data.decode("utf-8", "surrogateescape")
+        if mode == "120000" and not _isolate_link_inside(path, target):
+            _isolate_refuse_path(path, "symlink target escapes the sandbox")
+            continue
+        if not _isolate_clear_below(dest, path):
+            _isolate_refuse_path(path, "an ancestor is a symlink or outside")
             continue
         full = os.path.join(dest, path.replace("/", os.sep))
         parent = os.path.dirname(full)
@@ -1079,12 +1172,22 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
             if os.path.lexists(full):
                 os.unlink(full)
             # Never follow the link: create it, pointing where HEAD says.
-            os.symlink(data.decode("utf-8", "surrogateescape"), full)
+            try:
+                os.symlink(target, full)
+            except OSError as exc:
+                _isolate_refuse_path(path, "link: %s" % exc)
             continue
-        with io.open(full, "wb") as fh:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        # O_NOFOLLOW so a final-component link is refused, not written through.
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(full, flags, 0o600)
+        except OSError as exc:
+            _isolate_refuse_path(path, "open: %s" % exc)
+            continue
+        with io.open(fd, "wb", closefd=True) as fh:
             fh.write(data)
-        if mode == "100755":
-            os.chmod(full, 0o755)
+        os.chmod(full, 0o755 if mode == "100755" else 0o644)
 
 
 def is_autoos_source(source: str) -> bool:
@@ -1207,6 +1310,27 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
     only, so nothing git-ignored and nothing untracked exists in it (KEYDENY3b),
     and the push fence plus the credential-free env make a push out of it an
     accident guard, not a boundary (FF1, D-106).
+
+    ISOLATION STATEMENT (accepted by canary — tests/test_autoos_spawner.py
+    T2IsolateSecretsS5CanaryTests: an untracked, git-ignored
+    `configuration/api-keys.yml` holding one unique fake string, in a plain
+    checkout AND in a `git worktree` of it):
+
+    ISOLATED — the sandbox tree *and its own `.git`*, for every worker and every
+    reviewer launched with --isolate. A reviewer gets a sandbox built from its
+    material worktree's committed HEAD, never the worktree itself, whose
+    `--git-common-dir` is the main checkout's `.git`: that is how an untracked
+    secret outside the sandbox is reachable from inside it, and the reason the
+    sandbox is a fresh `git init` with one materialised commit.
+
+    NOT ISOLATED —
+      (i) a client process that reads an ABSOLUTE path outside the sandbox. The
+          outside-path fence exists for opencode only; every other client gets
+          the containment prompt line, the post-run leak check (exit 7) and the
+          credential-free env, which are guards, not a boundary;
+      (ii) in-session subagents of a Claude Code session — they run in the
+          caller's checkout, which is not a sandbox;
+      (iii) a run launched WITHOUT --isolate: its cwd is the caller's checkout.
     """
     if os.path.lexists(path):
         raise FileExistsError("sandbox destination already exists: %s" % path)
@@ -8472,7 +8596,9 @@ def cmd_run(args, cfg: dict) -> int:
     if plan["sandbox"] and client.name != "opencode":
         print("note: --isolate gives %s a private clone as its cwd; the outside-path fence is "
               "opencode-only, but every client gets the containment prompt line and the "
-              "post-run leak check (exit 7)." % client.name)
+              "post-run leak check (exit 7). What is and is not isolated: "
+              "\"ISOLATION STATEMENT\" in isolate_clone (tools/autoos-agent.py)."
+              % client.name)
     if args.dry_run:
         # CLAUDEBUDGET-g item A: the last-mile gate, on the plan this process would
         # hand the client. The early gate proved the *flags*; a reviewer override,
@@ -8489,7 +8615,7 @@ def cmd_run(args, cfg: dict) -> int:
             print("claude-budget: %s" % last_mile_note, file=sys.stderr)
         if plan["sandbox"]:
             print("would run: sandbox from %s at %s (branch %s; one-commit "
-                  "archive of allowed HEAD files, secrets excluded)" % (
+                  "materialisation of allowed HEAD files, secrets excluded)" % (
                 plan["sandbox"].get("source") or isolate_source(),
                 plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))

@@ -562,7 +562,7 @@ fi
 
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
     out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
-    assert_contains "$out" "git clone --local"
+    assert_contains "$out" "one-commit materialisation of allowed HEAD files"
     # The env the child gets, named in the plan (FF1/FF1b, D-106). Sorted and
     # padded by whatever the caller legitimately exports, so name the entries
     # that must be there instead of one exact line nobody can reproduce.
