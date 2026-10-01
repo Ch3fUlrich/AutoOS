@@ -321,11 +321,12 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
 - `ws-verify-activate` needed **code** fixes (not a blanket replace): the `TARBALL` / `LIVE` /
   `launcher` absolute paths were **env-derived** (`%TEMP%`, `%APPDATA%`) and the `.py` files
   compile-checked.
-- **Residual (1 branch):** `L1-backlog/ws-tier-order-20261001` — 4 hits incl.
-  `tools/combo-contract.py` (code). **alpha's in-flight lane — flagged, not touched.**
+- **Residual (1 branch, in flight):** `L1-backlog/ws-tier-order-20261001` — 7 hits (grows with
+  the lane) incl. `tools/combo-contract.py:176` hardcoding an `api-keys.yml` path in **code**.
+  **alpha's in-flight lane — flagged, not touched; env-derive the code path before merge.**
 - Superseded / no-commit branches (`ws-combos`, `ws-leghealth`, `ws-nebius-combos`,
   `ws-nebiuswave`, `ws-nebius2`, `ws-main-breach`, `ws-providers`, `ws-gw-vertex`,
-  `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`, `ws-patchlive`) retain only the
+  `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`) retain only the
   inherited `workstation-omniroute-handoff.md` line; their tips are superseded or already
   ancestors of main, whose tip is clean.
 - Method: tracked files scanned (case-insensitive) for the workstation username; each
