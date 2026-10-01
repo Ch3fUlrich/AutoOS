@@ -13346,6 +13346,12 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
 
     def setUp(self):
         self.agent = load_agent()
+        # The CLI/MCP tests below run real subprocesses that read ROOT from
+        # disk, not the mocked in-process registry, so give them a throwaway root
+        # whose catalog carries the ON registry too. Shipped is budget OFF
+        # (operator 2026-10-01); these tests prove the ON refusal.
+        self.root = budget_on_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
@@ -13486,7 +13492,8 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # qoder answers with whatever the caller names, on the operator's own
         # account. HEAD priced it by name, saw no Claude marker, and allowed it.
         r = run_agent("run", "--client", "qoder", "--model", "Efficient",
-                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+                      "--dry-run", "--card", "role=review", "t", env=clean_env(),
+                      root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
         self.assertIn("Efficient", r.stderr)
@@ -13494,7 +13501,8 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
 
     def test_an_unknown_native_model_is_refused_on_agy_too(self):
         r = run_agent("run", "--client", "agy", "--model", "Efficient",
-                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+                      "--dry-run", "--card", "role=review", "t", env=clean_env(),
+                      root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
 
@@ -13527,7 +13535,8 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # --free replaces the argv model with the promo model, but a caller that
         # names Claude alongside it is refused, not quietly re-priced.
         r = run_agent("run", "--client", "opencode", "--free", "--model", "opus",
-                      "--dry-run", "--card", "role=review", "t", env=clean_env())
+                      "--dry-run", "--card", "role=review", "t", env=clean_env(),
+                      root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
 
@@ -13556,8 +13565,16 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
     # --- item A: the MCP spawn path reaches the same gate ----------------------
 
     def test_the_mcp_spawn_path_reports_the_last_mile_refusal(self):
-        out = mcp_server.spawn({"client": "qoder", "model": "Efficient", "task": "t",
-                                "card": {"role": "review"}, "dry_run": True})
+        # Shipped is budget OFF, so point both halves of the MCP gate at the
+        # throwaway ON root: spawn()'s in-process gate reads REGISTRY_PATH and
+        # its preflight subprocess runs AGENT (as ClaudeBudgetMcpSpawnTests does).
+        on_registry = os.path.join(self.root, "catalog", "ai-registry.json")
+        on_agent = os.path.join(self.root, "tools", "autoos-agent.py")
+        with mock.patch.object(mcp_server.agent, "REGISTRY_PATH", on_registry), \
+                mock.patch.object(mcp_server, "AGENT", on_agent):
+            out = mcp_server.spawn({"client": "qoder", "model": "Efficient",
+                                    "task": "t", "card": {"role": "review"},
+                                    "dry_run": True})
         self.assertEqual(out.get("state"), "rejected", out)
         self.assertIn("claude_budget", out.get("error", ""))
         self.assertIn("Efficient", out.get("error", ""))
@@ -13782,11 +13799,26 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
                if not k.startswith(self.agent.CLAUDE_ENV_PREFIX)}
         self.assertNotIn(self.agent.resolver.CLAUDE_CRITICAL_ENV, env)
         r = run_agent("run", "--client", "qoder", "--model", "opus", "--dry-run",
-                      "--card", "role=review", "t", env=env)
+                      "--card", "role=review", "t", env=env, root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
         self.assertIn("opus", r.stderr)
         self.assertNotIn("would run:", r.stdout)
+
+    def test_the_shipped_budget_off_does_not_refuse_an_undeclared_claude_model(self):
+        # D-219/operator 2026-10-01: shipped budget is off. The OFF path prints an
+        # informational `claude-budget: claude_budget: off` note, so the literal
+        # token cannot be absent from stderr; the pin is that the spawn is NOT
+        # refused -- exit 0, the plan printed, and no refusal citation.
+        env = {k: v for k, v in clean_env().items()
+               if not k.startswith(self.agent.CLAUDE_ENV_PREFIX)}
+        self.assertNotIn(self.agent.resolver.CLAUDE_CRITICAL_ENV, env)
+        r = run_agent("run", "--client", "qoder", "--model", "opus", "--dry-run",
+                      "--card", "role=review", "t", env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would run:", r.stdout)
+        self.assertNotIn("AUTOOS_CLAUDE_CRITICAL", r.stderr)
+        self.assertIn("off", r.stderr)
 
 
 
