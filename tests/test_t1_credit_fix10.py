@@ -635,7 +635,144 @@ class T1CreditFix11R6RemainingValidationTests(unittest.TestCase):
             guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
             with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
                 out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
-            self.assertIn(out["deepseek"]["state"], ("ok", "warn", "refuse"))
+            # No balance series reaches the ledger path (the bad-lines file
+            # is not the ledger), so the ledger guard stands exactly.
+            self.assertEqual(out["deepseek"]["state"], "ok")
+            self.assertEqual(out["deepseek"]["spend_usd"], 0.0)
+            self.assertEqual(out["deepseek"]["note"],
+                             "ledger ok [measured via call ledger]")
+
+
+class T1CreditFix12N1EstimateVsMeasuredTests(unittest.TestCase):
+    """N1 (D-240/D-253): a D-240 local-estimate refuse ranks as UNKNOWN in the
+    overlay merge, so MEASURED balance spend governs; a REAL measured ledger
+    refuse still beats a flat balance; with no balance series D-240 stands.
+
+    Real `balance_paid_guard` path throughout (seeded ledger series via
+    `record_balance_readings`/`load_balance_readings` in a temp state dir):
+    `balance_paid_guard` itself is never mocked here.
+    """
+
+    def setUp(self):
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+
+    def _plan(self, tmp, rows, truncated, limits, seed=()):
+        state = os.path.join(tmp, "state")
+        os.makedirs(os.path.join(state, "routing"), exist_ok=True)
+        if seed:
+            usage.record_balance_readings(
+                os.path.join(state, "routing", "provider-balances.jsonl"),
+                seed)
+        fetch = _helper_fetch({"/api/usage/provider-limits": limits})
+        with mock.patch.object(
+                usage, "fetch_window", return_value=(rows, 20, truncated)):
+            return agent.plan_credit_guards(
+                _reg_paid(), now=NOW, env=_bare_env(tmp), helper=fetch)
+
+    def test_estimate_refuse_yields_to_measured_balance(self):
+        rows = [_ds_row("t1", {"in": 11_000_000, "out": 11_000_000})]
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0}]
+        limits = _limits_payload(
+            [("c1", "deepseek", 49.0, "2026-10-01T10:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            guards = self._plan(tmp, rows, True, limits, seed)
+        guard = guards["deepseek"]
+        self.assertIn(guard["state"], ("ok", "warn"))
+        self.assertEqual(guard["spend_usd"], 1.0)
+        self.assertIn("measured via provider balance", guard["note"])
+        self.assertNotIn(">= $20 cap (D-240)", guard["note"])
+
+    def test_measured_ledger_refuse_survives_flat_balance(self):
+        rows = [_ds_row("t1", {"in": 15_000_000, "out": 15_000_000})]
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T08:00:00Z", "remaining": 44.0}]
+        limits = _limits_payload(
+            [("c1", "deepseek", 44.0, "2026-10-01T10:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            guards = self._plan(tmp, rows, False, limits, seed)
+        guard = guards["deepseek"]
+        self.assertEqual(guard["state"], "refuse")
+        self.assertEqual(guard["spend_usd"], 30.0)
+        self.assertIn("provider balance", guard["note"])
+
+    def test_estimate_refuse_stands_with_no_balance_series(self):
+        rows = [_ds_row("t1", {"in": 11_000_000, "out": 11_000_000})]
+        limits = _limits_payload(
+            [("c1", "deepseek", 44.0, "2026-10-01T10:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            guards = self._plan(tmp, rows, True, limits)
+        guard = guards["deepseek"]
+        self.assertEqual(guard["state"], "refuse")
+        self.assertIn("paid spend unmeasured - local estimate $22.00 "
+                      ">= $20 cap (D-240)", guard["note"])
+
+
+class T1CreditFix12N2HelperPathCharTests(unittest.TestCase):
+    def test_backslash_question_hash_rejected(self):
+        for url in ("http://127.0.0.1:1/api/usage/%5cevil",
+                    "http://127.0.0.1:1/api/usage/%3Fevil",
+                    "http://127.0.0.1:1/api/usage/%23evil",
+                    "http://127.0.0.1:1/api/usage/a%5Cb"):
+            called = []
+            def _fail(*a, **k):
+                called.append(1)
+                raise AssertionError("subprocess must not run")
+            with self.assertRaises(usage.UsageError) as ctx:
+                usage.helper_fetch(url, None, 5, _run=_fail)
+            self.assertEqual(called, [], url)
+            self.assertIn("(ValueError)", str(ctx.exception), url)
+
+    def test_nested_usage_prefix_still_rejected(self):
+        called = []
+        def _fail(*a, **k):
+            called.append(1)
+            raise AssertionError("subprocess must not run")
+        with self.assertRaises(usage.UsageError) as ctx:
+            usage.helper_fetch("http://127.0.0.1:1/api/usage/../api/usage/x",
+                               None, 5, _run=_fail)
+        self.assertEqual(called, [])
+        self.assertIn("(ValueError)", str(ctx.exception))
+
+
+class T1CreditFix12N3BadLinesExactTests(unittest.TestCase):
+    def test_bad_lines_skipped_and_balance_spend_exact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.jsonl")
+            lines = [
+                {"provider": "deepseek",
+                 "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0},
+                {"provider": "deepseek",
+                 "fetched_at": "2026-10-01T09:00:00Z",
+                 "remaining": "oops"},
+                {"provider": "deepseek",
+                 "fetched_at": "2026-10-01T10:00:00Z", "remaining": 40.0},
+            ]
+            with open(path, "w", encoding="utf-8") as fh:
+                for o in lines:
+                    fh.write(json.dumps(o) + "\n")
+            got = usage.load_balance_readings(path)
+            self.assertEqual(len(got), 2)
+            spend, _topups = usage.balance_month_spend(
+                got, "deepseek", SINCE_MONTH)
+            self.assertEqual(spend, 10.0)
+            reg = _reg_paid(cap=25.0)
+            guards = {"deepseek": {"provider": "deepseek", "state": "ok",
+                                   "spend_usd": 0.0, "spend_unknown": False,
+                                   "cap_usd": 25.0, "warn_usd": 20.0,
+                                   "models_unpriced": 0, "note": "ledger ok"}}
+            with mock.patch.object(usage, "balance_ledger_path",
+                                   return_value=path):
+                with mock.patch.object(usage, "parse_provider_limits",
+                                       return_value=[]):
+                    out = usage.overlay_balance_guards(
+                        reg, guards, "http://127.0.0.1:1",
+                        lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+            self.assertEqual(out["deepseek"]["state"], "ok")
+            self.assertEqual(out["deepseek"]["spend_usd"], 10.0)
+            self.assertIn("measured via provider balance",
+                          out["deepseek"]["note"])
 
 
 if __name__ == "__main__":

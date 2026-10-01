@@ -1068,6 +1068,10 @@ def apply_paid_local_cap(registry, guards, rows, since):
     D-212 last resort). Measured states (`ok`/`warn`/`refuse`/`manual`) and
     `guard error` are untouched -- measured spend governs, and an unforeseen
     bug keeps its own state. Returns `guards` (mutated in place).
+
+    Every guard this touches carries `local_estimate: True`, so the balance
+    overlay can rank it as UNKNOWN (D-240/D-253: the estimate applies only
+    while spend is unmeasured; measured spend governs).
     """
     for pid, guard in (guards or {}).items():
         if not isinstance(guard, dict):
@@ -1094,6 +1098,7 @@ def apply_paid_local_cap(registry, guards, rows, since):
             guard["state"] = "refuse"
             guard["spend_unknown"] = False
             guard["spend_usd"] = amount
+            guard["local_estimate"] = True
             guard["note"] = ("%spaid spend unmeasured - local estimate $%.2f "
                              ">= $%g cap (D-240)"
                              % (("unpriced runs: %d; " % est["unpriced_runs"]
@@ -1101,6 +1106,7 @@ def apply_paid_local_cap(registry, guards, rows, since):
                                 amount, local_cap))
         else:
             guard["spend_usd"] = amount
+            guard["local_estimate"] = True
             guard["note"] = ("%s%s; paid spend unmeasured - leg kept, local "
                              "estimate $%.2f of $%g (D-240)"
                              % (guard.get("note") or "spend unmeasured",
@@ -1204,7 +1210,9 @@ def load_balance_readings(path):
     `fetchedAt` (the gateway's spelling) normalises to `fetched_at` on load,
     so hand-written seeds and recorded lines dedupe against each other.
     A line whose `remaining` is non-numeric or non-finite is skipped too
-    (counted as malformed, never crashing the overlay)."""
+    (never crashing the overlay). Skipped lines are not counted anywhere --
+    callers that need the exact surviving set assert on the returned list
+    (and on the guard the overlay builds from it), not on a count."""
     readings = []
     try:
         fh = open(path, encoding="utf-8")
@@ -1432,7 +1440,16 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
             # (refuse > warn > ok > unknown), spend is the max, the note
             # names both sources when they differ -- a flat $0 balance must
             # never overwrite a $30 ledger refuse with ok/$0.
-            if _balance_guard_rank(balanced.get("state")) >= _balance_guard_rank(guard.get("state")):
+            # T1-CREDIT-FIX-12 N1 (D-240/D-253): a ledger guard carrying the
+            # `local_estimate` marker (set by `apply_paid_local_cap`) ranks
+            # as UNKNOWN here -- the estimate applies only while spend is
+            # unmeasured, so any measured balance guard wins, its spend
+            # governs alone, and its note stands alone. A REAL measured
+            # ledger refuse/warn still outranks a balance ok (R2 stands).
+            is_estimate = bool(guard.get("local_estimate"))
+            ledger_rank = 1 if is_estimate else _balance_guard_rank(
+                guard.get("state"))
+            if _balance_guard_rank(balanced.get("state")) >= ledger_rank:
                 winner, loser = balanced, guard
             else:
                 winner, loser = guard, balanced
@@ -1448,10 +1465,15 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
                 spend_ledger = 0.0
             if not math.isfinite(spend_bal):
                 spend_bal = 0.0
-            spend = max(spend_ledger, spend_bal)
+            if is_estimate:
+                spend = spend_bal
+            else:
+                spend = max(spend_ledger, spend_bal)
             note_winner = winner.get("note") or ""
             note_loser = loser.get("note") or ""
-            if note_winner != note_loser and note_winner and note_loser:
+            if is_estimate and winner is balanced:
+                note = note_winner
+            elif note_winner != note_loser and note_winner and note_loser:
                 note = "%s; %s" % (loser.get("note"), winner.get("note"))
                 # Keep the worse state's note first when the ledger wins.
                 if winner is guard:
@@ -1580,6 +1602,8 @@ def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
         decoded = urllib.parse.unquote(parts.path or "")
         if ".." in decoded.split("/"):
             raise ValueError("dot-dot path")
+        if "\\" in decoded or "?" in decoded or "#" in decoded:
+            raise ValueError("bad path character")
         norm = posixpath.normpath(decoded)
         if not norm.startswith("/api/usage/"):
             raise ValueError("non-usage path")
