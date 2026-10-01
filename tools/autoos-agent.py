@@ -4618,6 +4618,10 @@ def _credit_guard_error(registry: dict, type_name: str) -> dict:
                          "spend_usd": 0.0, "spend_unknown": True,
                          "cap_usd": cap, "warn_usd": warn,
                          "models_unpriced": 0,
+                         "hard_stop_usd": usage_mod.hard_stop_usd(
+                             registry, provider, cap),
+                         "window_limited": usage_mod.credit_window_limited(
+                             registry, provider),
                          "note": "credit guard error %s (%s) - spend "
                                  "unmeasured, leg kept" % (provider, type_name)}
     for pid in _paid_guard_ids(registry):

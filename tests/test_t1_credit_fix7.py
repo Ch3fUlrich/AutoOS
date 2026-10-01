@@ -55,6 +55,7 @@ def _reg():
             "gemini-3.8-flash": {
                 "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
                 "tool_calls": "proven",
+                "context_usable": {"tokens": 100000, "source": "default"},
                 "provider_prices": {
                     "vertex_ai": {"price_in": 1.5e-06, "price_out": 7.5e-06,
                                   "price_source": "https://example.invalid",
@@ -184,6 +185,33 @@ class R4NonFiniteSpend(unittest.TestCase):
                                  provider="vertex_ai")
         self.assertEqual(spend["calls"], 1)
         self.assertGreater(spend["spend_usd"], 0.0)
+
+
+class R6RefuseReasonNamesThreshold(unittest.TestCase):
+    def test_reason_prints_grant_minus_margin(self):
+        reg = _reg()
+        rows = [_row("vertex", "vertex/gemini-3.8-flash")]
+        guards = usage.credit_guards(reg, rows, SINCE_MONTH)
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse")
+        reg["routes"] = {"r-v": {"id": "r-v",
+                                 "legs": ["vertex/gemini-3.8-flash"]}}
+        reg["models"]["gemini-3.8-flash"]["tool_calls"] = "proven"
+        warns = []
+        _kept, skipped, _notes = r.usable_legs(
+            reg["routes"]["r-v"], {"kind": "review", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards, credit_warns=warns)
+        # $375 spend; the $250 grant less the $20 default margin = $230 stop.
+        self.assertEqual(skipped["vertex/gemini-3.8-flash"],
+                         ["credit exhausted vertex_ai $375.00/$230.00"])
+
+    def test_margin_zero_refuses_at_the_cap(self):
+        reg = _reg()
+        reg["providers"]["vertex_ai"]["credit_hard_stop_margin_usd"] = 0
+        rows = [_row("vertex", "vertex/gemini-3.8-flash")]
+        guards = usage.credit_guards(reg, rows, SINCE_MONTH)
+        self.assertEqual(guards["vertex_ai"]["hard_stop_usd"], 250.0)
 
 
 class R5LoudLineOnlyForSurvivors(unittest.TestCase):

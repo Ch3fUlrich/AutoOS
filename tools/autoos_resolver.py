@@ -953,9 +953,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       on file -- ``credit leg unpriced <model>`` -- because an unpriced grant
       bills $0 and would read as an untouched allowance while it drains; this
       half needs no `credit_guards` at all, which is what makes it fail closed
-      rather than open. And the guard's own ``refuse`` at 100 % of
-      ``providers.<id>.monthly_cap_usd`` -- ``credit exhausted <provider>
-      $x/$cap`` -- reading the state `autoos_usage.credit_guards` computes from
+      rather than open. And the guard's own ``refuse`` at the effective
+      threshold -- the grant less ``credit_hard_stop_margin_usd``
+      (``credit exhausted <provider> $spent/$threshold``) -- reading the state
+      `autoos_usage.credit_guards` computes from
       recorded usage rows, so the figure the resolver acts on is the figure the
       usage report prints. Field semantics: ``credit_usd`` is the trial grant
       TOTAL; remaining = credit_usd minus spent; ``$0 spent of $N`` is intact,
@@ -972,6 +973,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       there is money left. It is named in `credit_warns` so the plan's
       ``explain`` and the caller's report say so instead of the guard being
       silent until it blocks.
+    - LIMIT (D-220 follow-up T1-COMBO3, T1-CREDIT-FIX-7 R3): the hard stop
+      above filters resolver plans ONLY. `registry.gateway_legs` and the
+      rendered gateway combos do no credit gating -- a refused grant's leg
+      stays a gateway fall-through leg at run time. Gateway-side credit
+      gating is explicitly not built here.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -1127,9 +1133,16 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 # branch -- a guard that is both drained and `spend_unknown`
                 # must be refused, or the fail-open branch resurrects a grant
                 # the measured figure already drained.
+                # T1-CREDIT-FIX-7 R6: the reason names the EFFECTIVE threshold
+                # (the grant less its hard-stop margin), not the cap -- the
+                # figure the leg was actually refused at.
+                thresh = guard.get("hard_stop_usd")
+                if isinstance(thresh, bool) or \
+                        not isinstance(thresh, (int, float)):
+                    thresh = guard.get("cap_usd")
                 reasons.append("credit exhausted %s $%.2f/$%.2f"
                                % (provider_id, float(guard.get("spend_usd") or 0.0),
-                                  float(guard.get("cap_usd") or 0.0)))
+                                  float(thresh or 0.0)))
             elif guard.get("state") in ("unknown", "guard error") or \
                     guard.get("spend_unknown"):
                 if credit_warns is not None:

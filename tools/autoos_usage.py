@@ -502,6 +502,8 @@ def credit_guards_unreadable(registry, failure):
         out[provider] = {"provider": provider, "state": "unknown",
                          "spend_usd": 0.0, "spend_unknown": True,
                          "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                         "hard_stop_usd": hard_stop_usd(registry, provider,
+                                                          cap),
                          "window_limited": credit_window_limited(registry,
                                                                  provider),
                          "note": "credit spend unknown %s: %s"
@@ -582,6 +584,20 @@ def _effective_since(registry, provider, since, today=None):
     return min(since, start_dt)
 
 
+def hard_stop_usd(registry, provider, cap):
+    """The spend figure that refuses a leg: the grant less its
+    `credit_hard_stop_margin_usd` (T1-CREDIT-FIX-7 R6: the reason names this
+    effective threshold, not the cap). Best-effort -- a margin that cannot
+    be read refuses at the cap rather than raising."""
+    try:
+        margin = credit_hard_stop_margin_usd(registry, provider)
+    except Exception:
+        margin = 0.0
+    if not isinstance(margin, float):
+        margin = 0.0
+    return float(cap) - margin
+
+
 def _unmeasured_guard(registry, provider, note):
     """One `unknown` guard that never raises: best-effort cap reads only."""
     cap = warn = 0.0
@@ -593,6 +609,7 @@ def _unmeasured_guard(registry, provider, note):
     return {"provider": provider, "state": "unknown",
             "spend_usd": 0.0, "spend_unknown": True,
             "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+            "hard_stop_usd": hard_stop_usd(registry, provider, cap),
             "window_limited": credit_window_limited(registry, provider),
             "note": note}
 
@@ -664,6 +681,9 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                     "provider": provider, "state": state,
                     "spend_usd": manual, "spend_unknown": False,
                     "cap_usd": monthly_cap_usd(registry, provider),
+                    "hard_stop_usd": hard_stop_usd(
+                        registry, provider,
+                        monthly_cap_usd(registry, provider)),
                     "warn_usd": spend_warn_usd(registry, provider),
                     "models_unpriced": 0,
                     "window_limited": credit_window_limited(
@@ -674,6 +694,9 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                 "provider": provider, "state": "unknown",
                 "spend_usd": 0.0, "spend_unknown": True,
                 "cap_usd": monthly_cap_usd(registry, provider),
+                    "hard_stop_usd": hard_stop_usd(
+                        registry, provider,
+                        monthly_cap_usd(registry, provider)),
                 "warn_usd": spend_warn_usd(registry, provider),
                 "models_unpriced": 0,
                 "window_limited": credit_window_limited(
@@ -711,6 +734,9 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                          "spend_usd": spend["spend_usd"],
                          "spend_unknown": state == "unknown",
                          "cap_usd": monthly_cap_usd(registry, provider),
+                         "hard_stop_usd": hard_stop_usd(
+                             registry, provider,
+                             monthly_cap_usd(registry, provider)),
                          "warn_usd": spend_warn_usd(registry, provider),
                          "models_unpriced": spend["models_unpriced"],
                          "window_limited": credit_window_limited(

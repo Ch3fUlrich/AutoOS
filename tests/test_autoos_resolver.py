@@ -4739,9 +4739,11 @@ class CreditFailOpenTests(unittest.TestCase):
                                      self.SINCE)
         self.assertEqual(guards["ovhcloud"]["state"], "refuse")
         _kept, skipped, _warns = self.legs(guards)
+        # T1-CREDIT-FIX-7 R6: the reason names the effective threshold (the
+        # $200 grant less the $20 default margin), not the cap.
         self.assertEqual(skipped["ovhcloud/ovh-priced"],
                          ["credit exhausted ovhcloud $%.2f/$%.2f"
-                          % (self.CAP, self.CAP)])
+                          % (self.CAP, self.CAP - 20.0)])
 
     def test_unknown_spend_keeps_the_leg_with_a_note(self):
         """No measurable figure (gateway unreadable, no manual fallback) is
