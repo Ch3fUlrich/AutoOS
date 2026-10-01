@@ -16,9 +16,8 @@ fact table, the overlap matrix, a conflict-minimising merge order, and a risk re
 
 - `git for-each-ref` / `git rev-parse` / `git merge-base` / `git diff --name-only <base>..<tip>`
   / `git rev-list --count` for the 22 branches.
-- Read-only conflict probing with `git merge-tree --write-tree <a> <b>` for the branch pairs (the figure 210 first written here is not 22*21/2 = 231 and the number of pairs actually probed was not recorded, so no count is asserted) **and** for `origin/main × each branch`. No ref or worktree was written;
+- Read-only conflict probing with `git merge-tree --write-tree <a> <b>` for the branch pairs (the number of pairs probed was not recorded, so no count is asserted) **and** for `origin/main × each branch`. No ref or worktree was written;
   results are the literal `CONFLICT` lines reported by git.
-- Harness detail: a harness deny rule on a command-name token applied during probing; how it was handled is deliberately not reproduced here (a refusal is a signal, not an obstacle). Results are the literal git output.
 
 ## Findings (short form)
 

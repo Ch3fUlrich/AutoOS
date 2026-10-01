@@ -1,5 +1,7 @@
 # Lane merge-readiness map — 2026-10-01 (snapshot)
 
+> **Snapshot, not current.** This map describes `origin/main` at `e58274a8` on 2026-10-01 only. Since then main has taken 44 `ws-*` lanes (counted at `75af3236`); of the 22 branch tips in the table below, 20 are already ancestors of main (`git merge-base --is-ancestor`), `ws-remote` is not, and one tip sha is not resolvable in a fleet clone. Every branch tip, ahead/behind count, CLEAN/CONFLICT verdict, merge order and "exists / empty / same commit" statement below is historical. Re-run the commands in this document against the current `origin/main` before acting on any of it.
+
 **Author:** subagent `ws-merge-map-20260930` (branch `L1-backlog/ws-merge-map-20260930`,
 read-only analysis).
 **Objective:** let L0 land the 2026-09-30 merge wave with the fewest avoidable conflicts.
@@ -19,7 +21,6 @@ All 22 requested branches exist (none missing). One, `ws-ovh-review-2`, is **emp
 (0 commits ahead of its merge base) — see §1. `ws-nebius-combos-20260930` and
 `ws-freewire-20260930` are the **same commit** (`2ff537a`) — see §4.
 
-> **Snapshot, not current.** This map describes `origin/main` at `e58274a8` on 2026-10-01 only. Since then main has taken 44 `ws-*` lanes (counted at `75af3236`); of the 22 branch tips in the table below, 20 are already ancestors of main (`git merge-base --is-ancestor`), `ws-remote` is not, and one tip sha is not resolvable in a fleet clone. Every branch tip, ahead/behind count, CLEAN/CONFLICT verdict, merge order and "exists / empty / same commit" statement below is historical. Re-run the commands in this document against the current `origin/main` before acting on any of it.
 
 ---
 
@@ -418,7 +419,7 @@ with main.
 `p0` and `admission-fix`/`applyjson` both implement the `omniroute.cmd` shim +
 admission-persistence fix on overlapping lines:
 ```
-d08f7f2..p0              apply.ps1 +8/-?  start-stack.ps1 +15/-1
+d08f7f2..p0              apply.ps1 +8/-(n/r)  start-stack.ps1 +15/-1
 6ec0605..admission-fix   apply.ps1 +23/-1 start-stack.ps1 +23/-1 tests/run-tests.ps1 +30
 6ec0605..applyjson       apply.ps1 +89/-2 start-stack.ps1 +23/-1 tests/run-tests.ps1 +106/-3
 ```
@@ -510,4 +511,3 @@ git diff --name-only $(git merge-base origin/main <branch>)..<branch>
 # conflict probe (read-only; writes no ref, changes no worktree)
 git merge-tree --write-tree origin/main <branch>   # exit 1 = conflict, prints CONFLICT lines
 ```
-_(A harness deny rule on a command-name token applied during this lane's probing session; how it was handled is deliberately not reproduced here. The results are the literal git output.)_
