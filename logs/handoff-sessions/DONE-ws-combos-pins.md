@@ -52,13 +52,28 @@ merge), so applying it would reverse main. Full decisions: evidence §3.
 - **No gateway restart, no live apply.**
 - No other lane's files touched.
 
+## 3b. Flags for L0 (see evidence §6)
+
+- **F3:** the rebase surface is two files, not one — `combos.json` (conflicts) and
+  `tests/test_autoos_spawner.py` (disjoint hunks, auto-merges, no pin content).
+- **F4 (rebase target):** the local `main` checkout is **not** `origin/main` — it
+  is `08bd972f` = common base `d08f7f23` + one docs commit, **84 commits behind**
+  `origin/main e58274a8`, and its `combos.json` lacks the `24a98228` 1M pins.
+  Rebase onto **`origin/main`**, not the stale local `main`.
+
 ## 4. Reviews
 
 Two `t3-reviewer` leaves, **free model families only** (operator: NOT
-`t3-driver-clean`/DeepSeek), read-only, nonce-gated on `COMBOSPIN-NONCE-7Qm3Vt9K`.
-Verdicts recorded in the follow-up commit to the evidence file.
+`t3-driver-clean`/DeepSeek), read-only, nonce-gated on `COMBOSPIN-NONCE-7Qm3Vt9K`
+— **both APPROVED**:
 
 | # | Reviewer route (family) | Verdict | Session |
 |---|---|---|---|
-| 1 | _pending_ | _pending_ | — |
-| 2 | _pending_ | _pending_ | — |
+| 1 | `opencode/longcat-2.5-preview-free` (LongCat / Meituan, free) | APPROVED | `ses_f09ab6eaeffeoTiSLXiopWxZ8X` |
+| 2 | `opencode/space-bunny-free` (Space Bunny / stealth, free) | APPROVED | `ses_f09ab6ea7ffeFRPEZEgbA4umMP` |
+
+Both quoted the nonce from the evidence file and reproduced the checks
+independently. #2 corrected two evidence-narration details (commit count; a
+second non-overlapping rebase file `tests/test_autoos_spawner.py`) — fixed in the
+evidence file; neither affects the committed `combos.json`. No
+`chat_admission_busy` / `Rate limit exceeded` seen; no backoff needed.
