@@ -4972,15 +4972,23 @@ autoos_api_keys_conf() {
 is_local_gateway() {
     local url="${1:-}"
     [[ -z "$url" ]] && return 0
+    # Trim leading/trailing whitespace (parity with Python/PowerShell)
+    url="${url#"${url%%[![:space:]]*}"}"
+    url="${url%"${url##*[![:space:]]}"}"
     # Without a scheme there is no gateway host to match: non-local.
     [[ "$url" != *"://"* ]] && return 1
     local host
-    # Strip scheme, then userinfo (user:pass@), then path.
-    # Python's urlparse().hostname and [Uri].Host already strip userinfo.
+    # Strip scheme
     host="${url#*://}"
-    # Strip userinfo if present (username:password@host)
-    host="${host#*@}"
+    # Strip path (everything after first /)
     host="${host%%/*}"
+    # Strip userinfo: use LAST @ within authority (before first /)
+    # This matches Python's urlparse().hostname and PowerShell's [Uri]::Host
+    local at_idx
+    at_idx="${host##*@}"
+    if [[ "$at_idx" != "$host" ]]; then
+        host="$at_idx"
+    fi
     # Strip port - except a bracketed IPv6 literal ([::1]:20128 -> ::1)
     if [[ "$host" == \[*\]* ]]; then
         host="${host#\[}"; host="${host%%\]*}"
@@ -5024,7 +5032,13 @@ autoos_host_name() {
     local host_file
     host_file="$(_host_config_path)"
     if [[ -f "$host_file" ]]; then
+        # Strip UTF-8 BOM (EF BB BF) from first line if present
+        local first_line=1
         while IFS= read -r line; do
+            if [[ $first_line -eq 1 ]]; then
+                line="${line#$'\xef\xbb\xbf'}"
+                first_line=0
+            fi
             line="${line#"${line%%[![:space:]]*}"}"  # ltrim
             line="${line%"${line##*[![:space:]]}"}"  # rtrim
             if [[ "$line" == host_name:* ]]; then
@@ -5062,6 +5076,7 @@ autoos_client_key_field() {
 # autoos_resolve_client_key: resolve the OmniRoute client key.
 # Precedence: 1) AUTOOS_OMNIROUTE_KEY env, 2) new field, 3) legacy field (with deprecation), 4) error.
 # Args: [keys_file] - defaults to configuration/api-keys.yml
+# Uses tools/keys_file.py which handles both `name=value` and `name: value` formats.
 autoos_resolve_client_key() {
     local keys_file="${1:-}"
     if [[ -z "$keys_file" ]]; then
@@ -5080,10 +5095,11 @@ autoos_resolve_client_key() {
     local is_local=0
     is_local_gateway "${AUTOOS_OMNIROUTE_URL:-}" && is_local=1
 
-    # 2. New field
+    # 2. New field - use keys_file.py which handles both formats
     if [[ -f "$keys_file" ]]; then
         local key
-        key="$(sed -n "s/^${field}[[:space:]]*:[[:space:]]*//p" "$keys_file" | head -1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r')"
+        local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+        key="$(python3 "$repo_root/tools/keys_file.py" "$keys_file" "$field" 2>/dev/null | tr -d '\n\r')"
         if [[ -n "$key" && "$key" != REPLACE_WITH_* ]]; then
             printf '%s\n' "$key"
             return 0
@@ -5099,7 +5115,8 @@ autoos_resolve_client_key() {
     fi
     if [[ -f "$keys_file" ]]; then
         local legacy_key
-        legacy_key="$(sed -n "s/^${legacy_field}[[:space:]]*:[[:space:]]*//p" "$keys_file" | head -1 | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" | tr -d '\r')"
+        local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+        legacy_key="$(python3 "$repo_root/tools/keys_file.py" "$keys_file" "$legacy_field" 2>/dev/null | tr -d '\n\r')"
         if [[ -n "$legacy_key" && "$legacy_key" != REPLACE_WITH_* ]]; then
             printf 'api-keys.yml: '\''%s'\'' is deprecated, rename it to '\''%s'\''\n' "$legacy_field" "$field" >&2
             printf '%s\n' "$legacy_key"

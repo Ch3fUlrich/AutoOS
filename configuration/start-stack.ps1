@@ -84,9 +84,13 @@ function Test-AutoOSLocalGateway {
 function Get-AutoOSHostConfigPath {
     if ($env:AUTOOS_HOST_CONFIG) { return [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG) }
     if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
-        return Join-Path ($env:LOCALAPPDATA -or "$env:USERPROFILE\AppData\Local") 'autoos\host.yml'
+        $base = $env:LOCALAPPDATA
+        if (-not $base) { $base = "$env:USERPROFILE\AppData\Local" }
+        return Join-Path $base 'autoos\host.yml'
     }
-    return Join-Path ($env:XDG_CONFIG_HOME -or "$env:HOME/.config") 'autoos/host.yml'
+    $base = $env:XDG_CONFIG_HOME
+    if (-not $base) { $base = "$env:HOME/.config" }
+    return Join-Path $base 'autoos/host.yml'
 }
 
 function ConvertTo-AutoOSHostName {

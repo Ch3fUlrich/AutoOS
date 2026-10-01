@@ -15,7 +15,8 @@ APP="${1:-none}"
 KEYS_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api-keys.yml"
 # Resolve the client key using the new gateway-named field logic
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-    AUTOOS_OMNIROUTE_KEY="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
+    # Let stderr through so deprecation warnings and missing-key errors are visible
+    AUTOOS_OMNIROUTE_KEY="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
     export AUTOOS_OMNIROUTE_KEY
 fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then

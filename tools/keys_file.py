@@ -19,10 +19,14 @@ want a case-insensitive lookup normalise on their side.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
-PLACEHOLDER = "REPLACE"
+# Placeholder prefixes that mark a value as "not filled in".
+# Tracked .example files use REPLACE_WITH_..., but some tests use bare REPLACE.
+# A value starting with either is treated as empty.
+PLACEHOLDER_PREFIXES = ("REPLACE_WITH_", "REPLACE")
 
 
 def read_keys(path) -> dict:
@@ -30,9 +34,15 @@ def read_keys(path) -> dict:
 
     Missing or unreadable files read as no keys: a machine with nothing
     configured is the common case, not an error. Values carrying the
-    ``REPLACE`` placeholder (the shape every tracked ``.example`` uses) are
+    ``REPLACE_WITH_`` placeholder (the shape every tracked ``.example`` uses) are
     dropped — they are truthy and would be written into a client config as if
     they were real keys.
+
+    Parsing rules (matching the original bash keys_value):
+    - Lines starting with # are comments
+    - Format: name=value or name: value
+    - Quoted values (single or double): content between first and matching quote
+    - Unquoted values: cut at first # preceded by space or tab, then trim
     """
     out: dict[str, str] = {}
     try:
@@ -47,10 +57,36 @@ def read_keys(path) -> dict:
         if eq < 0 and colon < 0:
             continue
         cut = eq if colon < 0 else (colon if eq < 0 else min(eq, colon))
-        name, value = row[:cut].strip(), row[cut + 1:].strip().strip("\"'")
-        if name and value and PLACEHOLDER not in value:
+        name = row[:cut].strip()
+        raw_val = row[cut + 1:].strip()
+        if not name or not raw_val:
+            continue
+        value = parse_value(raw_val)
+        if value and not value.startswith(PLACEHOLDER_PREFIXES):
             out.setdefault(name, value)
     return out
+
+
+def parse_value(raw: str) -> str:
+    """Parse a value following the original bash keys_value rules."""
+    if not raw:
+        return ""
+    # Quoted values: "..." or '...' - extract between first and matching quote
+    if raw[0] == '"':
+        end = raw.find('"', 1)
+        if end > 0:
+            return raw[1:end]
+        return raw[1:]  # no closing quote, return rest
+    if raw[0] == "'":
+        end = raw.find("'", 1)
+        if end > 0:
+            return raw[1:end]
+        return raw[1:]  # no closing quote, return rest
+    # Unquoted: cut at first # preceded by space or tab, then trim
+    m = re.search(r'([ \t])#', raw)
+    if m:
+        raw = raw[:m.start() + 1]  # keep the space/tab before #
+    return raw.rstrip()
 
 
 def main(argv=None) -> int:

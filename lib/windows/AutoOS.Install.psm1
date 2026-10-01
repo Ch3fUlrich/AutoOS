@@ -44,6 +44,8 @@ function Get-AutoOSAnswer {
 function Test-AutoOSLocalGateway {
     param([string]$Url)
     if ([string]::IsNullOrWhiteSpace($Url)) { return $true }
+    # Trim whitespace (parity with Python/bash)
+    $Url = $Url.Trim()
     try {
         $uri = [Uri]$Url
         $gwHost = $uri.Host
@@ -57,11 +59,22 @@ function Test-AutoOSLocalGateway {
 }
 
 function Get-AutoOSHostConfigPath {
-    if ($env:AUTOOS_HOST_CONFIG) { return [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG) }
-    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
-        return Join-Path ($env:LOCALAPPDATA -or "$env:USERPROFILE\AppData\Local") 'autoos\host.yml'
+    if ($env:AUTOOS_HOST_CONFIG) {
+        $path = [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG)
+        # Expand leading ~ (parity with Python/bash)
+        if ($path -like '~*') {
+            $path = $path -replace '^~', $env:USERPROFILE
+        }
+        return $path
     }
-    return Join-Path ($env:XDG_CONFIG_HOME -or "$env:HOME/.config") 'autoos/host.yml'
+    if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
+        $base = $env:LOCALAPPDATA
+        if (-not $base) { $base = "$env:USERPROFILE\AppData\Local" }
+        return Join-Path $base 'autoos\host.yml'
+    }
+    $base = $env:XDG_CONFIG_HOME
+    if (-not $base) { $base = "$env:HOME/.config" }
+    return Join-Path $base 'autoos/host.yml'
 }
 
 function ConvertTo-AutoOSHostName {
@@ -101,45 +114,30 @@ function Get-AutoOSClientKeyField {
 }
 
 function Get-AutoOSKeyValue {
-    # Last uncommented (as bash keys_value, tail -n1) `<Name>: <value>` line in a YAML-ish key file.
-    # YAML plain/quoted scalar parse (enough for this file):
-    #   - starts with " : up to the next " (no escapes)
-    #   - starts with ' : up to the next '
-    #   - otherwise    : up to the first # preceded by space or tab, then trim
-    # CR is stripped. Returns '' when the file or key is missing, or when the
-    # value starts with REPLACE_WITH_ (the placeholder for "not filled in").
+    # Reads a flat key file with either `name=value` or `name: value` format.
+    # Case-insensitive key match. First occurrence wins (matching keys_file.py).
+    # Returns '' when the file or key is missing, or when the value starts with REPLACE_WITH_.
     param([string]$Path, [string]$Name)
     if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
     $escaped = [regex]::Escape($Name)
-    $last = ''
-    $found = $false
     foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
         $line = $raw -replace '\r$',''
-        if ($line -cmatch "^$escaped\s*:\s*(.+)$") {
-            $v = $Matches[1]
+        # Match name=value format
+        if ($line -cmatch "^$escaped\s*=\s*(.+)$") {
+            $v = $Matches[1].Trim()
             if ($v -match '^\s*#') { continue }
-            if ($v.Length -gt 0 -and $v[0] -eq '"') {
-                $rest = $v.Substring(1)
-                $q = $rest.IndexOf('"')
-                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
-            }
-            elseif ($v.Length -gt 0 -and $v[0] -eq "'") {
-                $rest = $v.Substring(1)
-                $q = $rest.IndexOf("'")
-                if ($q -lt 0) { $v = $rest } else { $v = $rest.Substring(0, $q) }
-            }
-            else {
-                $m = [regex]::Match($v, '([ \t])#')
-                if ($m.Success) { $v = $v.Substring(0, $m.Index + 1) }
-                $v = $v.TrimEnd()
-            }
-            if ($v -clike 'REPLACE_WITH_*') { $v = '' }
-            $last = $v
-            $found = $true
+            if ($v -clike 'REPLACE_WITH_*') { return '' }
+            return $v.Trim('"', "'")
+        }
+        # Match name: value format
+        if ($line -cmatch "^$escaped\s*:\s*(.+)$") {
+            $v = $Matches[1].Trim()
+            if ($v -match '^\s*#') { continue }
+            if ($v -clike 'REPLACE_WITH_*') { return '' }
+            return $v.Trim('"', "'")
         }
     }
-    if (-not $found) { return '' }
-    $last
+    return ''
 }
 
 function Get-AutoOSClientKey {

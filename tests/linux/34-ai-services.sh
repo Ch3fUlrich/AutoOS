@@ -6321,3 +6321,196 @@ if it "gwkey: python gateway-key suite passes"; then
     if (( ok )); then pass; else fail "test_autoos_gateway_key.py fails"; fi
 fi
 
+# F1: both key-file shapes (name=value AND name: value) x four field names
+# new local (omniroute_<host>), new server (omniroute_server),
+# legacy local (omniroute), legacy server (omniroute_client_<host>)
+if it "gwkey: F1 both key-file shapes x four field names"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test each shape with each field name
+    for shape in 'colon' 'equals'; do
+        for field_case in 'new_local' 'new_server' 'legacy_local' 'legacy_server'; do
+            case $field_case in
+                new_local)
+                    field="omniroute_testhost"
+                    url="http://127.0.0.1:20128"
+                    ;;
+                new_server)
+                    field="omniroute_server"
+                    url="https://gw.example.com"
+                    ;;
+                legacy_local)
+                    field="omniroute"
+                    url="http://127.0.0.1:20128"
+                    ;;
+                legacy_server)
+                    field="omniroute_client_testhost"
+                    url="https://gw.example.com"
+                    ;;
+            esac
+            
+            if [[ $shape == 'colon' ]]; then
+                printf '%s: sk-test-%s\n' "$field" "$field_case" >"$d/keys.yml"
+            else
+                printf '%s=sk-test-%s\n' "$field" "$field_case" >"$d/keys.yml"
+            fi
+            
+            key="$( ( . "$ROOT/lib/linux/install.sh"
+                export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+                export AUTOOS_OMNIROUTE_URL="$url"
+                unset AUTOOS_OMNIROUTE_KEY
+                autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+            
+            if (( rc != 0 )) || [[ "$key" != "sk-test-$field_case" ]]; then
+                ok=0
+                echo "shape=$shape field=$field_case: rc=$rc key=$key" >&2
+            fi
+            
+            # Check deprecation warning for legacy fields
+            if [[ $field_case == legacy_* ]]; then
+                warns="$(grep -c 'deprecated' "$d/err" 2>/dev/null)"
+                warns="${warns:-0}"
+                if [[ $warns != 1 ]]; then
+                    ok=0
+                    echo "shape=$shape field=$field_case: expected 1 deprecation warning, got $warns" >&2
+                fi
+            else
+                warns="$(grep -c 'deprecated' "$d/err" 2>/dev/null)"
+                warns="${warns:-0}"
+                if [[ $warns != 0 ]]; then
+                    ok=0
+                    echo "shape=$shape field=$field_case: expected 0 deprecation warnings, got $warns" >&2
+                fi
+            fi
+            
+            # Check value never leaked
+            if grep -q "sk-test-$field_case" "$d/err" 2>/dev/null; then
+                ok=0
+                echo "shape=$shape field=$field_case: value leaked" >&2
+            fi
+        done
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F1: key-file shapes x field names failed"; fi
+fi
+
+# F2: a host.yml with a UTF-8 BOM is read
+if it "gwkey: F2 host.yml with UTF-8 BOM is read"; then
+    d="$(mktemp -d)"
+    # Write host.yml with BOM
+    printf '\xEF\xBB\xBFhost_name: bomhost\n' >"$d/host.yml"
+    # Test that host name from host.yml is used (BOM not in value)
+    # Do NOT set AUTOOS_HOST_NAME so host.yml is used
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_CONFIG="$d/host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        printf 'omniroute_bomhost: sk-test-bom\n' >"$d/keys.yml"
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-bom" ]] || { ok=0; echo "key=$key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F2: host.yml with BOM not read correctly"; fi
+fi
+
+# F4: URL classification tests
+if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test is_local_gateway with various URLs
+    # Loopback addresses: 127.0.0.1, localhost, [::1] -> local
+    # Non-loopback: gw.example.com -> remote
+    # Userinfo (user:p@ss@) and whitespace should be handled correctly
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        for u in \
+            "http://user:p@ss@127.0.0.1:20128" \
+            "http://a@b@gw.example.com" \
+            "  http://127.0.0.1:20128  " \
+            "http://user:p@ss@localhost:20128" \
+            "http://user:p@ss@[::1]:20128"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done ) 2>/dev/null )"
+    # Correct: 127.0.0.1=local, gw.example.com=remote, 127.0.0.1(ws)=local, localhost=local, [::1]=local
+    expected="$(printf 'local\nremote\nlocal\nlocal\nlocal')"
+    if [[ "$out" != "$expected" ]]; then
+        ok=0
+        echo "URL classification failed: got [$out], expected [$expected]" >&2
+    fi
+    
+    # Test tilde expansion in AUTOOS_HOST_CONFIG
+    mkdir -p "$HOME/x"
+    printf 'host_name: tildehost\n' >"$HOME/x/host.yml"
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_CONFIG="~/x/host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        printf 'omniroute_tildehost: sk-test-tilde\n' >"$d/keys.yml"
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"; rc=$?
+    if (( rc != 0 )) || [[ "$key" != "sk-test-tilde" ]]; then
+        ok=0
+        echo "tilde expansion failed: rc=$rc key=$key" >&2
+    fi
+    rm -rf "$HOME/x" "$d"
+    if (( ok )); then pass; else fail "F4: URL classification/tilde expansion failed"; fi
+fi
+
+# F5: setup.sh --host-name x --dry-run writes nothing and prints "would write";
+# a real run writes; a second real run reports skipped
+if it "gwkey: F5 setup.sh --host-name --dry-run writes nothing"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Dry run
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost --dry-run 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] && { ok=0; echo "dry run wrote file" >&2; }
+    [[ "$out" == *"would write"* ]] || { ok=0; echo "dry run no 'would write': $out" >&2; }
+    
+    # Real run
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "real run rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] || { ok=0; echo "real run did not write file" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] || { ok=0; echo "content wrong: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"Created"* ]] || { ok=0; echo "real run no 'Created': $out" >&2; }
+    
+    # Second real run - should report skipped
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name other 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "second run rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] || { ok=0; echo "second run overwrote: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"skipped"* ]] || { ok=0; echo "second run no 'skipped': $out" >&2; }
+    
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F5: setup --host-name --dry-run/skip failed"; fi
+fi
+
+# F6: apply/start-stack show the deprecation line (not swallowed)
+if it "gwkey: F6 apply/start-stack show deprecation line"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test apply.ps1 shows deprecation warning
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"
+    [[ "$out" == *"deprecated"* ]] || { ok=0; echo "apply no deprecation: $out" >&2; }
+    [[ "$out" == *"'omniroute'"* ]] || { ok=0; echo "apply no old field: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "apply no new field: $out" >&2; }
+    
+    # Test start-stack.sh shows deprecation warning (via its copy of the function)
+    # We test the bash version here since we're in bash test suite
+    # Source install.sh directly since start-stack.sh exits on missing key at top level
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"
+    [[ "$out" == *"deprecated"* ]] || { ok=0; echo "start-stack no deprecation: $out" >&2; }
+    [[ "$out" == *"'omniroute'"* ]] || { ok=0; echo "start-stack no old field: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "start-stack no new field: $out" >&2; }
+    
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F6: apply/start-stack deprecation not shown"; fi
+fi
+

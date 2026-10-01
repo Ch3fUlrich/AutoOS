@@ -20,6 +20,7 @@ from autoos_gateway_key import (
     client_key_field,
     resolve_client_key,
 )
+from keys_file import read_keys
 
 
 class TestIsLocalGateway(unittest.TestCase):
@@ -51,6 +52,21 @@ class TestIsLocalGateway(unittest.TestCase):
     def test_unparseable(self):
         # Unparseable URLs treated as non-local for safety
         self.assertFalse(is_local_gateway("not-a-url"))
+
+    def test_userinfo_last_at(self):
+        # Userinfo with multiple @ - should use LAST @ in authority (parity with Python urlparse)
+        # http://a@b@127.0.0.1:20128 -> host is 127.0.0.1 (local)
+        self.assertTrue(is_local_gateway("http://a@b@127.0.0.1:20128"))
+        # http://user:p@ss@127.0.0.1:20128 -> host is 127.0.0.1 (local)
+        self.assertTrue(is_local_gateway("http://user:p@ss@127.0.0.1:20128"))
+        # http://a@b@gw.example.com -> host is gw.example.com (non-local)
+        self.assertFalse(is_local_gateway("http://a@b@gw.example.com"))
+
+    def test_whitespace_trim(self):
+        # Leading/trailing whitespace should be trimmed
+        self.assertTrue(is_local_gateway("  http://127.0.0.1:20128  "))
+        self.assertTrue(is_local_gateway("\thttp://localhost:20128\n"))
+        self.assertFalse(is_local_gateway("  https://gw.example.com  "))
 
 
 class TestNormalizeHostname(unittest.TestCase):
@@ -101,6 +117,11 @@ class TestHostConfigPath(unittest.TestCase):
                     path = _host_config_path()
                     self.assertEqual(path, Path("/custom/config") / "autoos" / "host.yml")
 
+    def test_tilde_expansion(self):
+        with patch.dict(os.environ, {"AUTOOS_HOST_CONFIG": "~/custom/host.yml"}):
+            with patch("os.path.expanduser", return_value="/home/user/custom/host.yml"):
+                self.assertEqual(_host_config_path(), Path("/home/user/custom/host.yml"))
+
 
 class TestHostName(unittest.TestCase):
     def test_env_override(self):
@@ -136,6 +157,16 @@ class TestHostName(unittest.TestCase):
                 with patch("autoos_gateway_key._host_config_path", return_value=Path("/nonexistent/host.yml")):
                     result = host_name()
                     self.assertEqual(result, "server")
+
+    def test_host_yml_with_bom(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host_file = Path(tmpdir) / "host.yml"
+            # Write with UTF-8 BOM
+            with open(host_file, "wb") as f:
+                f.write(b"\xef\xbb\xbfhost_name: bom-workstation\n")
+            with patch.dict(os.environ, {"AUTOOS_HOST_CONFIG": str(host_file)}):
+                os.environ.pop("AUTOOS_HOST_NAME", None)
+                self.assertEqual(host_name(), "bom_workstation")
 
 
 class TestClientKeyField(unittest.TestCase):
@@ -273,6 +304,142 @@ class TestResolveClientKey(unittest.TestCase):
         with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
             self.write_keys("omniroute_server: 'server-key'\n")
             self.assertEqual(resolve_client_key(os.environ, Path(self.keys_file.name)), "server-key")
+
+
+class TestKeyFileFormats(unittest.TestCase):
+    """Test that both key file formats (name=value and name: value) work."""
+    
+    _SCRUB = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_HOST_NAME", "AUTOOS_HOST_CONFIG")
+
+    def setUp(self):
+        self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
+        self.keys_file.close()
+        self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
+
+    def tearDown(self):
+        os.unlink(self.keys_file.name)
+        for v, val in self._saved_env.items():
+            if val is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = val
+
+    def write_keys(self, content: str):
+        with open(self.keys_file.name, "w") as f:
+            f.write(content)
+
+    # --- name=value format (api_keys.conf style) ---
+    
+    def test_new_local_field_equals_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
+            self.write_keys("omniroute_workstation=local-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="workstation"):
+                self.assertEqual(resolve_client_key(os.environ, Path(self.keys_file.name)), "local-key")
+
+    def test_new_server_field_equals_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
+            self.write_keys("omniroute_server=server-key\n")
+            self.assertEqual(resolve_client_key(os.environ, Path(self.keys_file.name)), "server-key")
+
+    def test_legacy_local_fallback_equals_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
+            self.write_keys("omniroute=legacy-local-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="workstation"):
+                buf = StringIO()
+                with redirect_stderr(buf):
+                    result = resolve_client_key(os.environ, Path(self.keys_file.name))
+                self.assertEqual(result, "legacy-local-key")
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute'", lines[0])
+                self.assertIn("'omniroute_workstation'", lines[0])
+
+    def test_legacy_server_fallback_equals_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
+            self.write_keys("omniroute_client_laptop=legacy-server-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="laptop"):
+                buf = StringIO()
+                with redirect_stderr(buf):
+                    result = resolve_client_key(os.environ, Path(self.keys_file.name))
+                self.assertEqual(result, "legacy-server-key")
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute_client_laptop'", lines[0])
+                self.assertIn("'omniroute_server'", lines[0])
+
+    # --- name: value format (api-keys.yml style) ---
+    
+    def test_new_local_field_colon_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
+            self.write_keys("omniroute_workstation: local-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="workstation"):
+                self.assertEqual(resolve_client_key(os.environ, Path(self.keys_file.name)), "local-key")
+
+    def test_new_server_field_colon_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
+            self.write_keys("omniroute_server: server-key\n")
+            self.assertEqual(resolve_client_key(os.environ, Path(self.keys_file.name)), "server-key")
+
+    def test_legacy_local_fallback_colon_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128"}):
+            self.write_keys("omniroute: legacy-local-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="workstation"):
+                buf = StringIO()
+                with redirect_stderr(buf):
+                    result = resolve_client_key(os.environ, Path(self.keys_file.name))
+                self.assertEqual(result, "legacy-local-key")
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute'", lines[0])
+                self.assertIn("'omniroute_workstation'", lines[0])
+
+    def test_legacy_server_fallback_colon_format(self):
+        with patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "https://gw.example.com"}):
+            self.write_keys("omniroute_client_laptop: legacy-server-key\n")
+            with patch("autoos_gateway_key.host_name", return_value="laptop"):
+                buf = StringIO()
+                with redirect_stderr(buf):
+                    result = resolve_client_key(os.environ, Path(self.keys_file.name))
+                self.assertEqual(result, "legacy-server-key")
+                lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertIn("'omniroute_client_laptop'", lines[0])
+                self.assertIn("'omniroute_server'", lines[0])
+
+    # --- read_keys() handles both formats ---
+    
+    def test_read_keys_equals_format(self):
+        self.write_keys("key1=value1\nkey2=value2\n")
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key2": "value2"})
+
+    def test_read_keys_colon_format(self):
+        self.write_keys("key1: value1\nkey2: value2\n")
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key2": "value2"})
+
+    def test_read_keys_mixed_format(self):
+        # First occurrence wins (per keys_file.py spec)
+        self.write_keys("key1=value1\nkey1: value2\nkey2: value2\nkey2=value3\n")
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key2": "value2"})
+
+    def test_read_keys_ignores_comments_and_placeholders(self):
+        self.write_keys("# comment\nkey1=value1\nkey2=REPLACE_WITH_KEY\nkey3: value3\n")
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key3": "value3"})
+
+    def test_read_keys_strips_quotes(self):
+        self.write_keys('key1="value1"\nkey2=\'value2\'\nkey3: "value3"\nkey4: \'value4\'\n')
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key2": "value2", "key3": "value3", "key4": "value4"})
+
+    def test_read_keys_handles_bom(self):
+        # Write with BOM
+        with open(self.keys_file.name, "wb") as f:
+            f.write(b"\xef\xbb\xbfkey1=value1\nkey2: value2\n")
+        result = read_keys(self.keys_file.name)
+        self.assertEqual(result, {"key1": "value1", "key2": "value2"})
 
 
 if __name__ == "__main__":

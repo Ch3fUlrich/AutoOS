@@ -44,25 +44,13 @@ done
 # shellcheck source=../env-file.sh
 . "$REPO/configuration/env-file.sh"
 
-# keys_value <file> <name>: last uncommented `^<name>[[:space:]]*:` line,
-# YAML plain/quoted scalar parse (enough for this file). See ai-stack.sh
-# keys_value for the rule.
+# keys_value <file> <name>: read the keys file using tools/keys_file.py which handles
+# both `name=value` (api_keys.conf) and `name: value` (api-keys.yml) formats.
+# Returns empty string if key not found or file missing.
 keys_value() {
-    local file="$1" name="$2" raw val
+    local file="$1" name="$2"
     [[ -f "$file" ]] || return 0
-    raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$file" \
-        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r' || true)"
-    [[ -n "$raw" ]] || return 0
-    case "$raw" in
-        \"*) val="${raw#\"}"; val="${val%%\"*}" ;;
-        \'*) val="${raw#\'}"; val="${val%%\'*}" ;;
-        *)   val="$raw"
-             val="$(printf '%s' "$val" | sed -E 's/([[:space:]])#.*$/\1/')"
-             val="${val%"${val##*[![:space:]]}"}"
-             ;;
-    esac
-    [[ "$val" == REPLACE_WITH_* ]] && return 0
-    printf '%s' "$val"
+    python3 "$REPO/tools/keys_file.py" "$file" "$name" 2>/dev/null || true
 }
 
 LOADED=()

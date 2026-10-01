@@ -151,6 +151,7 @@ done
 # install.sh is already sourced above, so _host_config_path/_normalize_hostname
 # are available. An explicit name is written exactly; a bare --host-name
 # defaults to the normalised short hostname.
+# Honors --dry-run: prints what would be written without writing.
 if [[ "${AUTOOS_HOST_NAME_GIVEN:-0}" == 1 ]]; then
     host_file="$(_host_config_path)"
     if [[ -f "$host_file" ]]; then
@@ -160,9 +161,13 @@ if [[ "${AUTOOS_HOST_NAME_GIVEN:-0}" == 1 ]]; then
         if [[ -z "$_host_name_value" ]]; then
             _host_name_value="$(_normalize_hostname "$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)")"
         fi
-        mkdir -p "$(dirname "$host_file")"
-        printf 'host_name: %s\n' "$_host_name_value" >"$host_file"
-        ui_ok "Created $host_file with host_name: $_host_name_value"
+        if (( AUTOOS_DRY_RUN )); then
+            ui_info "would write $host_file (host_name: $_host_name_value)"
+        else
+            mkdir -p "$(dirname "$host_file")"
+            printf 'host_name: %s\n' "$_host_name_value" >"$host_file"
+            ui_ok "Created $host_file with host_name: $_host_name_value"
+        fi
     fi
     exit 0
 fi

@@ -211,30 +211,13 @@ ensure_env_file() {
     else echo "  + wrote $file (${add[*]})"; fi
 }
 
-# keys_value <name>: read $KEYS_FILE, last uncommented `^<name>[[:space:]]*:`
-# line, and parse the scalar. YAML plain/quoted, enough for this file:
-#   - starts with " : up to the next " (no escapes)
-#   - starts with ' : up to the next '
-#   - otherwise    : up to the first # preceded by space or tab, then trim
-# CR is stripped. A value starting with REPLACE_WITH_ counts as empty.
+# keys_value <name>: read $KEYS_FILE using tools/keys_file.py which handles
+# both `name=value` (api_keys.conf) and `name: value` (api-keys.yml) formats.
+# Returns empty string if key not found or file missing.
 keys_value() {
-    local name="$1" raw val
+    local name="$1"
     [[ -f "$KEYS_FILE" ]] || return 0
-    raw="$(sed -n "s/^${name}[[:space:]]*:[[:space:]]*//p" "$KEYS_FILE" \
-        | grep -v '^[[:space:]]*#' | tail -n1 | tr -d '\r' || true)"
-    [[ -n "$raw" ]] || return 0
-    case "$raw" in
-        \"*) val="${raw#\"}"; val="${val%%\"*}" ;;
-        \'*) val="${raw#\'}"; val="${val%%\'*}" ;;
-        *)   val="$raw"
-             # cut at the first # that is preceded by a space or tab
-             val="$(printf '%s' "$val" | sed -E 's/([[:space:]])#.*$/\1/')"
-             # trim trailing whitespace
-             val="${val%"${val##*[![:space:]]}"}"
-             ;;
-    esac
-    [[ "$val" == REPLACE_WITH_* ]] && return 0
-    printf '%s' "$val"
+    python3 "$REPO/tools/keys_file.py" "$KEYS_FILE" "$name" 2>/dev/null | tr -d '\n\r' || true
 }
 
 omniroute_client_key() {

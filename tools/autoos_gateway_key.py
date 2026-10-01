@@ -33,11 +33,17 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Import the shared key parser that handles both name=value and name: value formats
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from keys_file import read_keys
+
 
 def is_local_gateway(url: str) -> bool:
     """True when the gateway URL points to the local machine (loopback)."""
     if not url:
         return True
+    # Trim whitespace (parity with bash/PowerShell)
+    url = url.strip()
     try:
         from urllib.parse import urlparse
         parsed = urlparse(url)
@@ -104,7 +110,7 @@ def host_name(env: Optional[dict] = None) -> str:
     host_file = _host_config_path(env)
     if host_file.is_file():
         try:
-            for line in host_file.read_text(encoding="utf-8").splitlines():
+            for line in host_file.read_text(encoding="utf-8-sig").splitlines():
                 line = line.strip()
                 if line.startswith("host_name:"):
                     _, _, value = line.partition(":")
@@ -142,25 +148,6 @@ def client_key_field(env: Optional[dict] = None) -> str:
     return f"omniroute_{host}"
 
 
-def _read_flat_key(keys_file: Path, field: str) -> Optional[str]:
-    """Read a single `field: value` line from a flat key file (case-insensitive key match)."""
-    try:
-        for line in keys_file.read_text(encoding="utf-8-sig").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" not in line:
-                continue
-            key, _, value = line.partition(":")
-            if key.strip().lower() == field.lower():
-                value = value.strip().strip("\"'")
-                if value and not value.startswith("REPLACE_WITH_"):
-                    return value
-    except OSError:
-        pass
-    return None
-
-
 def resolve_client_key(
     env: Optional[dict] = None,
     keys_file: Optional[Path] = None,
@@ -190,22 +177,24 @@ def resolve_client_key(
         root = Path(__file__).resolve().parent.parent
         keys_file = root / "configuration" / "api-keys.yml"
 
-    # 2. New field
-    if keys_file and keys_file.is_file():
-        key = _read_flat_key(keys_file, field)
-        if key:
-            return key
+    # Read all keys using the shared parser (handles both name=value and name: value)
+    keys = read_keys(keys_file) if keys_file and keys_file.is_file() else {}
+
+    # 2. New field (case-insensitive match per keys_file.py behavior)
+    # read_keys preserves case, so we need case-insensitive lookup
+    for k, v in keys.items():
+        if k.lower() == field.lower():
+            return v
 
     # 3. Legacy fallback (one release, read-only)
     legacy_field = "omniroute" if is_local else f"omniroute_client_{host_name(env)}"
-    if keys_file and keys_file.is_file():
-        legacy_key = _read_flat_key(keys_file, legacy_field)
-        if legacy_key:
+    for k, v in keys.items():
+        if k.lower() == legacy_field.lower():
             print(
                 f"api-keys.yml: '{legacy_field}' is deprecated, rename it to '{field}'",
                 file=sys.stderr,
             )
-            return legacy_key
+            return v
 
     # 4. Missing - clear error
     context = "a local gateway" if is_local else "a non-local gateway"

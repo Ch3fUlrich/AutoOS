@@ -186,6 +186,7 @@ Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameCheck
 # An explicit name is written exactly; -HostName '' defaults to the normalised
 # short hostname. $PSBoundParameters (not $HostName truthiness) is the test so
 # an empty value still means "default", never "skip and run the whole setup".
+# Honors -DryRun: prints what would be written without writing.
 if ($PSBoundParameters.ContainsKey('HostName')) {
     $hostFile = Get-AutoOSHostConfigPath
     if (Test-Path -LiteralPath $hostFile) {
@@ -196,9 +197,14 @@ if ($PSBoundParameters.ContainsKey('HostName')) {
             try { $defaultHost = [System.Net.Dns]::GetHostName() } catch { $defaultHost = 'localhost' }
             $hostNameValue = ConvertTo-AutoOSHostName $defaultHost
         }
-        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
-        "host_name: $hostNameValue" | Set-Content -LiteralPath $hostFile -Encoding utf8
-        Write-AutoOSLine "Created $hostFile with host_name: $hostNameValue" -Level ok
+        if ($DryRun) {
+            Write-AutoOSLine "would write $hostFile (host_name: $hostNameValue)" -Level info
+        } else {
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
+            # Write without BOM: [IO.File]::WriteAllText with UTF8Encoding(false)
+            [IO.File]::WriteAllText($hostFile, "host_name: $hostNameValue`n", [System.Text.UTF8Encoding]::new($false))
+            Write-AutoOSLine "Created $hostFile with host_name: $hostNameValue" -Level ok
+        }
     }
     exit 0
 }

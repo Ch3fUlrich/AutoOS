@@ -1017,7 +1017,8 @@ fi
 # machine can read it out of `ps` for the lifetime of the call.
 live_ids=""
 # Resolve the client key using the new gateway-named field logic
-_client_key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
+# Let stderr through so deprecation warnings and missing-key errors are visible
+_client_key="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
 if command -v python3 >/dev/null; then
     if omni_rest GET /v1/models "" "$_client_key"; then
         live_ids="$(python3 -c 'import json,sys
@@ -1336,7 +1337,8 @@ fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then
-    key="$(autoos_resolve_client_key "$KEYS_FILE" 2>/dev/null || true)"
+    # Let stderr through so deprecation warnings and missing-key errors are visible
+    key="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
     if [[ -z "$key" || $DRY -eq 1 ]]; then
         echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
     elif (( ${#PROBE_COMBOS[@]} == 0 )); then
