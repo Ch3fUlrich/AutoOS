@@ -149,7 +149,7 @@ $ Select-String -Path "$env:TEMP\opencode\suite-admission-fix.log" -Pattern 'pas
   `git diff --numstat` = 30/0 (additive only); the four commits exist with the
   stated shape; the three still-open sites are bare `Start-Process -FilePath
   'opencode'`/`'litellm'` at the recorded lines; and `Select-String -Pattern
-  'mauls|C:\Users'` on the doc returned no match.
+  '<user>|C:\Users'` on the doc returned no match.
 - **Verdict: PASS** - no defect found.
 
 ### Constraints observed
