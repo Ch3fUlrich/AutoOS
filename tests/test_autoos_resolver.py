@@ -2200,15 +2200,21 @@ class GatewayOrderTests(unittest.TestCase):
         # 16:4xZ revision: OpenRouter has no shared credit (BYOK only) - the
         # four openrouter/qwen legs added for the withdrawn 15:44Z SPEED
         # directive keep their model entries (operator instruction) but are
-        # "unavailable and in no route order" - confirmed here by absence,
-        # since an unreferenced leg needs no unavailable_legs entry at all.
+        # "unavailable and in no route order". FREEWIRE 2026-09-30: the $0
+        # ':free' qwen leg is now referenced (the operator's free-provider
+        # wiring); every PAID openrouter/qwen leg stays unreferenced.
         registry = self.registry()
         for mid in ("qwen/qwen3.8-flash", "qwen/qwen3-coder-flash",
                    "qwen/qwen3.8-max-0902"):
             self.assertIn(mid, registry["models"])
+        seen_free = False
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
-                self.assertFalse(leg.startswith("openrouter/qwen/"), leg)
+                if not leg.startswith("openrouter/qwen/"):
+                    continue
+                self.assertTrue(leg.endswith(":free"), leg)
+                seen_free = True
+        self.assertTrue(seen_free, "the :free openrouter qwen leg should be wired")
 
     def test_only_deepseek_v41_flash_survives_of_the_deepseek_family(self):
         # 16:4xZ revision: "DeepSeek = ONLY V4.1 Flash ... no v4-pro, v4-flash,
@@ -2651,19 +2657,22 @@ class UnavailableUntilResolverTests(unittest.TestCase):
     # that the caller is told WHEN, not just that nothing served.
 
     REAL_UNTILS = {
-        # The cooldown the measured run was told, and two longer sibling
-        # outages: the earliest is the one the reason must name.
-        "google_ai_studio": "2026-09-28T12:00:37Z",
-        "antigravity": "2026-09-28T13:00:00Z",
+        # FREEWIRE 2026-09-30: the gemini head left t2-worker, so the cooling
+        # provider whose earliest return the reason must name is now
+        # antigravity (still a t2-worker free leg); google_ai_studio is kept
+        # cooled too (it is now provider-unavailable anyway). Every provider a
+        # t2-worker combo can still be served by is cooled, so the premise
+        # "every leg of the t2-worker routes is cooling" holds.
+        "antigravity": "2026-09-28T12:00:37Z",
+        "google_ai_studio": "2026-09-28T12:30:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
-        # FREEKEYS-2 (D-141 item 3) put the two probe-passed free grants in the
-        # free band of every tier route, so the premise these two tests state —
-        # "every leg of the t2-worker routes is cooling" — now has to cool them
-        # too, or the route really is servable and the test would be asserting a
-        # falsehood. Both return later than google_ai_studio, so the "earliest
-        # return is the retry" limb still has teeth.
         "scaleway": "2026-09-28T15:00:00Z",
         "nebius": "2026-09-28T16:00:00Z",
+        "hugging_face": "2026-09-28T17:00:00Z",
+        "groq": "2026-09-28T18:00:00Z",
+        "openrouter": "2026-09-28T19:00:00Z",
+        "ovhcloud": "2026-09-28T20:00:00Z",
+        "deepseek": "2026-09-28T21:00:00Z",
     }
 
     def real_registry(self):
@@ -2683,7 +2692,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
                       self.real_registry(), {}, [], "muse-spark",
                       self.dt(2026, 9, 28, 12, 0, 0))
 
-    def test_a_gemini_cooldown_sends_the_t2_worker_routes_away(self):
+    def test_a_free_band_cooldown_sends_the_t2_worker_routes_away(self):
         cooled = {"t2-worker", "t2-worker-free-only", "t2-worker-clean"}
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public"}
@@ -2693,14 +2702,15 @@ class UnavailableUntilResolverTests(unittest.TestCase):
                          "is how the next task gets the same 429: %s"
                          % result["reason"])
         # The reason names the cooldown, and names the EARLIEST return as the
-        # retry -- a caller reading it must not wait for the last one.
-        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:00:37Z",
+        # retry -- a caller reading it must not wait for the last one. FREEWIRE
+        # 2026-09-30: the earliest cooled provider is now antigravity.
+        self.assertIn("unavailable: antigravity until 2026-09-28T12:00:37Z",
                       result["reason"], result["reason"])
         dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
                            result["reason"])
         self.assertEqual(min(dates), "2026-09-28T12:00:37Z", result["reason"])
 
-    def test_a_gemini_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
+    def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "t2-worker"}}
@@ -2708,9 +2718,9 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("t2-worker", result["reason"])
-        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:00:37Z",
+        self.assertIn("unavailable: antigravity until 2026-09-28T12:00:37Z",
                       result["reason"])
-        self.assertIn("unavailable: antigravity until 2026-09-28T13:00:00Z",
+        self.assertIn("unavailable: meta_api until 2026-09-28T14:00:00Z",
                       result["reason"])
 
 
@@ -3910,14 +3920,14 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                              "opencode", self.NOW, env)
 
     # card kind -> (route, leg) with the budget off, read off the shipped
-    # catalog on 2026-09-28 and approved as the before/after pin.
+    # catalog on 2026-09-28 and approved as the before/after pin. FREEWIRE
+    # 2026-09-30: removing the gemini head and adding the pinned free combos
+    # moved all three small cards onto the probe-passed groq-qwen3.8-27b combo
+    # (free, and the cheapest usable leg for these non-agentic kinds).
     BEFORE_AFTER = {
-        "review": ("t1-orchestrator-free-only",
-                   "google_ai_studio/gemini-3.8-flash"),
-        "research": ("t1-orchestrator-free-only",
-                     "google_ai_studio/gemini-3.8-flash"),
-        "plan": ("t1-orchestrator-free-only",
-                 "google_ai_studio/gemini-3.8-flash"),
+        "review": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
+        "research": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
+        "plan": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
     }
 
     def test_budget_off_routes_are_the_pinned_table(self):

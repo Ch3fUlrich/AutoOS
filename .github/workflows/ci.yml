@@ -99,6 +99,13 @@ jobs:
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 140}}}' \
             catalog/ Windows/ansible/ Linux/ubuntu_autoinstall/ .github/
 
+      - name: Combo contract gate (TORDER)
+        run: |
+          python3 tools/combo-contract.py
+          python3 tools/registry.py render omniroute --check
+          python3 tools/registry.py render ide --check
+          python3 tools/sync-ide-models.py --check
+
       - name: Documentation links
         run: python3 tests/check-links.py .
 

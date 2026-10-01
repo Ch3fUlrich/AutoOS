@@ -1313,6 +1313,19 @@ IDE_MODEL_ORDER = (
     "t4-rag",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
+    # FREEWIRE 2026-09-30: pinned single-provider free combos for the
+    # probe-passed free legs (L1-backlog/ws-free-probe-20260930). Listed here
+    # because render_ide() requires this constant to name every route id (a
+    # route added without it raises rather than silently mis-ordering).
+    "hf-glm-5.2", "hf-qwen3.8-27b",
+    "or-nemotron-3-super-free", "or-qwen3.8-27b-free",
+    "or-north-mini-code-free", "or-laguna-s-2.1-free",
+    "groq-qwen3.8-27b",
+    # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
+    # Listed here because render_ide() requires this constant to name every
+    # route id (a route added without it raises rather than silently mis-ordering).
+    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
+    "vertex-gemini-3.8-flash",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",

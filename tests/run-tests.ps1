@@ -310,6 +310,7 @@ Test-Case 'registry: no generated file drifts' {
     # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
     # only semantically (regenerate: python3 tools/registry.py render ide
     # --out catalog/ide-models.json).
+    # TORDER 2026-10-01: combo-contract gate (fail-closed) runs here too.
     if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
@@ -317,6 +318,8 @@ Test-Case 'registry: no generated file drifts' {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
             Assert-True ($rc -eq 0) "render $t drift: $out"
         }
+        $out = & python3 (Join-Path $Root 'tools\combo-contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
@@ -8757,25 +8760,32 @@ print('%s|%s|%s' % (
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
-        # PROVFIX3 finding 1: a combo may only promise what its smallest
-        # servable leg takes. Both t1 free-bearing tiers fall through to gemini
-        # (131,072), so they render 128k; the two 1M-only tiers keep 1M.
-        't1-orchestrator' = '128k'
-        't1-orchestrator-free-only' = '128k'
+        # TORDER 2026-10-01 (D-TORDER-1b, CTXFIX, MAINPIN): t1 1M-only (>=600k,
+        # all 1048576, renders 1M); gemini 1M (live 1048576); opus/t2-orchestrator
+        # 1M (antigravity opus 1048576, CTXFIX); t2/t3-clean 1M (deepseek 1M,
+        # CTXFIX); t2/t3 full + free-only 128k clamp (sub-1M allowed, do not raise).
+        't1-orchestrator' = '1M'
+        't1-orchestrator-free-only' = '1M'
         't1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
-        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
+        't2-worker-clean' = '1M'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '1M'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
         # out, so the 128k clamp was stale data (models.deepseek-flash).
         'deepseek-v4.1-flash' = '1M'
+        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
+        'or-nemotron-3-super-free' = '256k'; 'or-qwen3.8-27b-free' = '256k'
+        'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
+        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'; 'ovh-qwen3-coder-30b' = '128k'
+        'vertex-gemini-3.8-flash' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
         foreach ($m in $c.models) {
-            Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
+            Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
@@ -8809,7 +8819,9 @@ print('%s|%s|%s' % (
     }
     # *-free-only = zero paid/keyed legs: only free pools may appear (the
     # zen contributor-free promo counts as free; other opencode-zen legs bill).
-    $paidRe = 'cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
+    # TORDER-OR: openrouter :free ids are $0 free (model tier override) and ARE
+    # allowed in free-only; paid openrouter (no :free suffix) is banned.
+    $paidRe = 'cheaperinference|openrouter/(?!.*:free$)|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-free-only' })) {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"

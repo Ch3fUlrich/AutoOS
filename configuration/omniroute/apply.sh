@@ -10,6 +10,12 @@
 #   3. (re)creates the tier combos from configuration/omniroute/combos.json
 #   4. prunes the combos listed there as "retired" from the store (only those)
 #
+# B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
+# file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+# content is the credential, NOT a plain API key; git-ignored), not from
+# api-keys.yml. Credential-store repair (two vertex/meta connections, one
+# undecryptable 401) is L0's, not apply's.
+#
 # Safe to re-run: providers are add-or-update, a combo the store already holds
 # unchanged is left alone, and a retired combo that is already gone is simply
 # not found again. Model refs the live catalog does not know are skipped with a
@@ -1006,6 +1012,12 @@ else
     done
 fi
 
+# TORDER 2026-10-01: combo-contract gate (fail-closed, also under --dry-run).
+if ! python3 "$ROOT/tools/combo-contract.py"; then
+  echo "combo-contract failed - refusing to create combos" >&2
+  exit 1
+fi
+
 # ─── (Re)create combos ──────────────────────────────────────────────────────
 # The gateway's model catalog, read once. The omniroute *client* key authorises
 # /v1/models, and it goes to omni_rest — which writes a 0600 curl --config file
@@ -1041,6 +1053,25 @@ echo "Resilience:"
 # zen free promo stays FIRST (free when it works), but a 403 is a permanent
 # error, so at 12 the gateway retried the dead promo on every request. At 2 it
 # is skipped for resetTimeoutMs (30s) after two failures, then retried again.
+# Fast failover (CTXFIX 2026-09-30): the breaker IS the fast-skip mechanism,
+# not maxWaitMs. degradationThreshold=1 hops on the first degradation signal
+# (a 429 counts), failureThreshold=2 opens the breaker after two hard
+# failures - at most two cheap round-trips before the leg is skipped for
+# resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
+# not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
+# chain hops immediately. No value change needed for this lane.
+# B2-LATENCY 2026-10-01 (t1 22556 ms crawl: gemini 503 -> free-ai 429 ->
+# vertex error -> meta-api 401 before deepseek served): live
+# get-api-resilience shows requestQueue.maxWaitMs 180000 (queue wait, NOT
+# per-leg), providerBreaker.apikey 2/1/30000, oauth 8/5/60000,
+# connectionCooldown apikey base 3000/maxBackoff 5 (oauth 5000/8),
+# waitForCooldown 3 retries/30 s, comboCooldownWait 90 s/5 attempts/300 s budget,
+# providerCooldown DISABLED. No per-leg timeout knob exists in this API surface
+# (no legTimeoutMs); the 30-min hard-down park + 3x429/120 s->300 s cooldown +
+# CHAT_MAX_HEAVY=8 are gateway process env (08:07Z restart), not patchable here.
+# So no wiring change: current == proposed (180000 / 2 / 1 / 30000). The crawl
+# stops by REMOVING dead legs (B2-HF/B2-AGY: huggingface 401 + antigravity
+# rate-limited gone from bands), shortening the chain, not by retuning.
 # Through the CLI, not curl + the client key: /api/resilience is a management
 # route and answers the client key with 403 "Invalid management token"
 # (measured 2026-09-24); the local CLI sends the machine loopback token.

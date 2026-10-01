@@ -10,6 +10,12 @@
   4. Prunes the combos listed there as "retired" or "omitted" from the store
      (only those).
 
+  B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
+  file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+  content is the credential, NOT a plain API key; git-ignored), not from
+  api-keys.yml. Credential-store repair (two vertex/meta connections, one
+  undecryptable 401) is L0's, not apply's.
+
   Safe to re-run: providers are add-or-update, combos are replaced in place,
   and a managed orphan (retired/omitted) that is already gone is simply not
   found again.
@@ -474,6 +480,24 @@ if ($LiveIds.Count -eq 0) {
 #    dead promo on EVERY request. At 2 it is skipped for resetTimeoutMs (30s)
 #    after two failures, then retried - at most two cheap round-trips, and
 #    every other failing free leg hops fast too.
+# 3. Fast failover (CTXFIX 2026-09-30): the breaker IS the fast-skip mechanism,
+#    not maxWaitMs. degradationThreshold=1 hops on the first degradation signal
+#    (a 429 counts), failureThreshold=2 opens the breaker after two hard
+#    failures - at most two cheap round-trips before the leg is skipped for
+#    resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
+#    not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
+#    chain hops immediately. No value change needed for this lane.
+#    B2-LATENCY 2026-10-01 (t1 22556 ms crawl: gemini 503 -> free-ai 429 ->
+#    vertex error -> meta-api 401 before deepseek served): live
+#    get-api-resilience shows requestQueue.maxWaitMs 180000 (queue wait, NOT
+#    per-leg), providerBreaker.apikey 2/1/30000, oauth 8/5/60000,
+#    connectionCooldown apikey base 3000/maxBackoff 5 (oauth 5000/8),
+#    waitForCooldown 3 retries/30 s, comboCooldownWait 90 s/5 attempts/300 s
+#    budget, providerCooldown DISABLED. No per-leg timeout knob exists here
+#    (no legTimeoutMs); the 30-min park + 3x429/120 s->300 s + CHAT_MAX_HEAVY=8
+#    are gateway env (08:07Z restart), not patchable via patch-api-resilience.
+#    Current == proposed (180000 / 2 / 1 / 30000). The crawl stops by REMOVING
+#    dead legs (B2-HF/B2-AGY), shortening the chain, not by retuning.
 $MaxWaitMs = 180000
 $Breaker = @{ failureThreshold = 2; degradationThreshold = 1; resetTimeoutMs = 30000 }
 Write-Host 'Resilience:'
@@ -519,6 +543,14 @@ if ($DryRun) {
         } finally { Remove-Item -LiteralPath $bodyFile -ErrorAction SilentlyContinue }
     }
 }
+
+# TORDER 2026-10-01: combo-contract gate (fail-closed, also under -DryRun).
+# Every combo must satisfy tools/combo-contract.py (contexts, trial->free->
+# credits->paid with paid last/deepseek last/no-free-after-paid, openrouter
+# :free-only, resolve+live, t1 >=600k 1M, t2/t3 128k) before anything is created.
+$contractScript = Join-Path $Root 'tools\combo-contract.py'
+& python $contractScript
+if ($LASTEXITCODE -ne 0) { Write-Host 'combo-contract failed - refusing to create combos'; exit 1 }
 
 # --- (Re)create combos --- ---
 Write-Host 'Combos:'
