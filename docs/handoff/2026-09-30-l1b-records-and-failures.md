@@ -621,9 +621,9 @@ own summary carried three claims that **do not hold** (L1-alpha verification, sa
 Net effect is sound (undecryptable row gone; `meta-api` serves again). **Lesson: a lane's own
 narrative is not a record and must not be treated as one.**
 
-### 16.3 Live serving over the merged order (review-seat verification, 2026-10-01T09:54Z)
+### 16.3 Live serving over the merged order (review-seat verification)
 
-Re-probed the live gateway `:20128` (small script + `%USERPROFILE%\.omniroute\logs\application\app.log`):
+**Measurement 1 — 2026-10-01T09:54Z** (beta re-probe; `%USERPROFILE%\.omniroute\logs\application\app.log`):
 
 | Combo | Status | Serving leg (from the gateway log) |
 |---|---|---|
@@ -633,13 +633,19 @@ Re-probed the live gateway `:20128` (small script + `%USERPROFILE%\.omniroute\lo
 | `vertex-gemini-3.8-flash` | **503** | `ALL_TARGETS_SKIPPED` — `AUTH vertex \| quota-aware: 0 with quota, skipping 1 exhausted` |
 | `t1-orchestrator` | **200** | **fell through to `deepseek/deepseek-flash`** (model 4/4): gemini head cooling 30 s (429), free-ai gemini cooling 4 m 43 s (429), **vertex skipped (quota-exhausted)** |
 
-**Verdict:** **OVH credit legs SERVE** (log-named, sub-second). **Vertex does NOT serve right
-now** — the gateway's quota-aware filter reports the sole vertex account exhausted, so both
-the `vertex-gemini-3.8-flash` single combo and `t1-orchestrator`'s vertex slot are skipped.
-Operator's `ovh → ovh` probe is confirmed; the `t1 → vertex` probe is **not reproducible at
-re-probe time** (vertex served earlier: L1-alpha measured `gemini-3.8-flash → vertex 3793 ms`;
-vertex availability is therefore **intermittent / quota-limited**). No fabrication by beta:
-both the serve and the skip are quoted from the gateway log.
+**Measurement 2 — 2026-10-01 ~11:5xZ** (independent review seat
+`opencode/longcat-2.5-preview-free`, `ses_f08ff0e6fffev1U7KNZWwvuduv`): `vertex-gemini-3.8-flash`
+→ **200** (`gemini-3.8-flash`, 3.4 s); `t1-orchestrator` → **200 via `vertex`** (3.6 s). OVH legs
+re-confirmed 200.
+
+**Verdict.** **OVH credit legs SERVE** — log-named at 09:54Z (sub-second) and re-confirmed by the
+independent seat. **The vertex credit leg is INTERMITTENT / quota-limited, not dead:** skipped
+(quota-exhausted) at 09:54Z, then **200 (3.4 s)** at the re-review; `t1-orchestrator` accordingly
+fell through to deepseek at 09:54Z and served **via vertex** at re-review. So the merged order
+**does serve both OVH and vertex**; alpha's `t1→vertex` probe is **confirmed by the re-review**
+(the 09:54Z skip was a quota-park, not a breakage). Note: the gateway log rotates, so the 09:54Z
+lines are no longer in the tail — the quotes above were captured live at the time. Nothing here
+is fabricated: each status is a measured value with its timestamp.
 
 ### 16.4 Reviewer metadata (retro-added) + the DONE-template mandate
 
