@@ -19370,6 +19370,48 @@ class T2IsolateSecretsS5PathSafetyTests(unittest.TestCase):
         with io.open(os.path.join(sibling, "target"), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "original\n")
         self.assertIn("evil", err)
+    def test_r7_symlink_entry_after_a_directory_skips_not_crashes(self):
+        """R7: `a/x` then a tracked symlink `a` — the unlink hits a directory.
+
+        IsADirectoryError out of `os.unlink` aborted the whole clone instead of
+        the contracted one-line skip, so every later entry was lost too.
+        """
+        dest, _sibling, err = self._mat([
+            ("100644", self._blob("keep\n"), "keep.txt"),
+            ("100644", self._blob("x\n"), "a/x"),
+            ("120000", self._blob("keep.txt"), "a"),
+            ("100644", self._blob("after\n"), "after.txt")])
+        self.assertTrue(os.path.isdir(os.path.join(dest, "a")))
+        with io.open(os.path.join(dest, "a", "x"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "x\n")
+        self.assertIn("after.txt", self._tree(dest))
+        self.assertIn("'a'", err)
+
+    def test_r7_nested_entry_after_a_regular_file_skips_not_crashes(self):
+        """R7: a tracked file `p` then `p/q` — makedirs meets a regular file."""
+        dest, _sibling, err = self._mat([
+            ("100644", self._blob("keep\n"), "keep.txt"),
+            ("100644", self._blob("p\n"), "p"),
+            ("100644", self._blob("q\n"), "p/q"),
+            ("100644", self._blob("after\n"), "after.txt")])
+        with io.open(os.path.join(dest, "p"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "p\n")
+        self.assertFalse(os.path.lexists(os.path.join(dest, "p", "q")))
+        self.assertIn("after.txt", self._tree(dest))
+        self.assertIn("p/q", err)
+
+    def test_r7_regular_entry_after_its_own_directory_skips_not_crashes(self):
+        """R7, the other order: `p/q` first, then a tracked file named `p`."""
+        dest, _sibling, err = self._mat([
+            ("100644", self._blob("keep\n"), "keep.txt"),
+            ("100644", self._blob("q\n"), "p/q"),
+            ("100644", self._blob("p\n"), "p"),
+            ("100644", self._blob("after\n"), "after.txt")])
+        with io.open(os.path.join(dest, "p", "q"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "q\n")
+        self.assertTrue(os.path.isdir(os.path.join(dest, "p")))
+        self.assertIn("after.txt", self._tree(dest))
+        self.assertIn("'p'", err)
 
 
 class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
