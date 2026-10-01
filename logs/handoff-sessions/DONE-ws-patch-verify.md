@@ -2,7 +2,7 @@
 
 **Lane:** `patch-verify` (verification, pinned). Verifies/completes the three lanes cancelled
 mid-work before the `:20128` restart.
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchr1`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchr1`
 (`git rev-parse --show-toplevel` = that path; branch `L1-backlog/ws-patchr1-20260930`,
 tracking `origin/main`). Main checkout never touched.
 **Doc:** `docs/handoff/2026-10-01-lanePatchVerify.md`

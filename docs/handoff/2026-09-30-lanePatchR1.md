@@ -7,8 +7,8 @@ fast revert path. This lane installs a certified-pristine copy of each, streamed
 straight out of the signed-off `omniroute@3.8.50` tarball.
 
 - **Host:** Windows workstation (`win32`).
-- **Live install root:** `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`
-- **Certified tarball:** `C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`
+- **Live install root:** `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`
+- **Certified tarball:** `C:\Users\<user>\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`
   (121 369 534 bytes; produced by `npm pack omniroute@3.8.50`).
 - **Scope:** no live file content modified, no gateway restart, no other worktree touched.
 
@@ -42,11 +42,11 @@ Each tarball member was written directly to a sibling of its live file:
 `Get-ChildItem` listing (both new backups):
 
 ```
-path   : C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute\open-sse\config\providers\registry\scaleway\index.ts.autoos-backup-pristine-3.8.50-20261001-002911
+path   : C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute\open-sse\config\providers\registry\scaleway\index.ts.autoos-backup-pristine-3.8.50-20261001-002911
 length : 837
 sha256 : BF39CEF1FD8E252850452ED8C18B760F3BCB1637B99969AA8B6055F343A0B40F
 
-path   : C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute\open-sse\translator\paramSupport.ts.autoos-backup-pristine-3.8.50-20261001-002911
+path   : C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute\open-sse\translator\paramSupport.ts.autoos-backup-pristine-3.8.50-20261001-002911
 length : 10765
 sha256 : 806D530225FEBBFD913110B336D42AC06D7202677FF2145BBCB27B11A9B4D049
 ```

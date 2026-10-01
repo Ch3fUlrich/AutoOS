@@ -1,7 +1,7 @@
 # Lane `patch-verify` — pre-restart verification of the three cancelled patch lanes (R1 + patch-live + functional proof)
 
 **Lane:** `patch-verify` (ws-patch-verify)
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchr1`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchr1`
 **Branch:** `L1-backlog/ws-patchr1-20260930` (base `origin/main` = `main` = `08bd972`)
 **Date:** 2026-10-01
 **Scope:** three lanes were **cancelled mid-work** (external), leaving state that must be
@@ -17,19 +17,19 @@ a single **GO/NO-GO**.
 
 ```
 PS> git rev-parse --show-toplevel
-C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-patchr1
+C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-patchr1
 PS> git branch --show-current
 L1-backlog/ws-patchr1-20260930
 PS> git log -1 --oneline
 e58274a Take L2-general/fallback-phase1 0615d16: FALLBACK phase-1 probe + facts (D-147 key lookup, systemd env pass, output-token cap)
 ```
 
-`C:\Users\mauls\Documents\Code\AutoOS` (main) was **never** written to. No push, merge,
+`C:\Users\<user>\Documents\Code\AutoOS` (main) was **never** written to. No push, merge,
 rebase or checkout was run.
 
-**Live install root:** `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`
+**Live install root:** `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`
 (`package.json` version `3.8.50`).
-**Certified tarball:** `C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`.
+**Certified tarball:** `C:\Users\<user>\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`.
 
 ### 0.1 Tarball is the certified vendor artefact (re-verified here)
 
@@ -102,7 +102,7 @@ d94fe151b1a5add588eb97d4961f99592ab41f33
 ### 2.2 Reapply run against the live package (verbatim, `pwsh` 7)
 
 ```
-$ pwsh -NoProfile -File <tmp>\reason-fix-reapply.ps1 -PackageDir C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute
+$ pwsh -NoProfile -File <tmp>\reason-fix-reapply.ps1 -PackageDir C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute
 
 === Compiled .js chunk patches (runtime fix) ===
 
@@ -204,14 +204,14 @@ snapshot of the live DB, so the shared WAL is never opened). One instance, both 
 
 ```
 $ python tools/copy-datadir.py
-copied .env: 63 bytes -> C:\Users\mauls\AppData\Local\Temp\opencode\patchr1-iso\.env
+copied .env: 63 bytes -> C:\Users\<user>\AppData\Local\Temp\opencode\patchr1-iso\.env
 sqlite backup: 117608448 B -> 117624832 B at …\patchr1-iso\storage.sqlite
 
 $ pwsh -File tools/start-isolated-gateway.ps1 -Port 20146
 launcher_pid=122900
 port=20146
-DATA_DIR=C:\Users\mauls\AppData\Local\Temp\opencode\patchr1-iso
-logs=C:\Users\mauls\AppData\Local\Temp\opencode\patchr1-logs
+DATA_DIR=C:\Users\<user>\AppData\Local\Temp\opencode\patchr1-iso
+logs=C:\Users\<user>\AppData\Local\Temp\opencode\patchr1-logs
 listening=YES pid=131712 after=6s
 
 $ GET /api/health  -> {"status":"ok","timestamp":"2026-10-01T01:55:05.452Z"}
