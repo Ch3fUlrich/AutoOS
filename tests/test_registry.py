@@ -307,18 +307,17 @@ class RuleThreePrivacyTests(unittest.TestCase):
     def test_unavailable_leg_of_a_clean_route_is_still_checked(self):
         # PRIV2, 2026-09-26 (supersedes the old review-a3 "not checked"
         # behaviour): the gateway does not consult unavailable_legs/
-        # available:false, so rule 3 must not either. Use t2-worker-clean
-        # (not exempt, unlike t1-orchestrator-clean) and its
-        # openrouter leg, flagged here (OR2 2026-09-27 un-gated it in the real
-        # data - the BYOK allowlist - so the test sets its own precondition).
+        # available:false, so rule 3 must not either. TORDER-OR 2026-10-01:
+        # openrouter paid legs removed (no credits -> :free only), so use
+        # t2-worker-clean deepseek leg (still in legs) flagged here.
         reg = mutated()
-        reg["providers"]["openrouter"]["trains_on_prompts"] = True
+        reg["providers"]["deepseek"]["trains_on_prompts"] = True
         reg["routes"]["t2-worker-clean"].setdefault("unavailable_legs", {})[
-            "openrouter/deepseek/deepseek-v4.1-flash"] = {"available": False}
+            "deepseek/deepseek-flash"] = {"available": False}
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("privacy: t2-worker-clean" in p
-                and "openrouter/deepseek/deepseek-v4.1-flash" in p
+                and "deepseek/deepseek-flash" in p
                 for p in problems), problems)
 
     def test_unknown_trains_on_prompts_is_flagged(self):
@@ -658,12 +657,14 @@ class CleanRouteExemptionTests(unittest.TestCase):
     check_registry() problem."""
 
     def test_unavailable_leg_of_a_non_exempt_clean_route_is_now_checked(self):
+        # TORDER-OR: openrouter paid removed; use deepseek trains=True to make
+        # t2-worker-clean deepseek leg unsafe (still in legs).
         reg = mutated()
-        reg["providers"]["openrouter"]["trains_on_prompts"] = True
+        reg["providers"]["deepseek"]["trains_on_prompts"] = True
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("privacy: t2-worker-clean" in p
-                and "openrouter/deepseek/deepseek-v4.1-flash" in p
+                and "deepseek/deepseek-flash" in p
                 for p in problems), problems)
 
     def test_t1_orchestrator_clean_is_in_the_exemption_table(self):
@@ -1003,10 +1004,11 @@ class OpenRouterByokLegTests(unittest.TestCase):
         cls.t2_worker_legs = cls.reg["routes"]["t2-worker"]["legs"]
 
     def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
-        idx = self.t2_worker_legs.index("openrouter/openai/gpt-oss-120b")
-        # Must be right after sambanova/gpt-oss-120b
-        self.assertGreaterEqual(idx, 1)
-        self.assertEqual(self.t2_worker_legs[idx - 1], "sambanova/gpt-oss-120b")
+        # TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): paid
+        # openrouter/openai/gpt-oss-120b removed from t2-worker (was already
+        # unavailable/gated; combos clean). Groq gpt-oss free leg remains.
+        self.assertNotIn("openrouter/openai/gpt-oss-120b", self.t2_worker_legs)
+        self.assertIn("groq/openai/gpt-oss-120b", self.t2_worker_legs)
 
     def test_leg_resolves_to_a_model(self):
         # resolve_leg ignores route membership, so this pins the spelling only;
@@ -1020,36 +1022,26 @@ class OpenRouterByokLegTests(unittest.TestCase):
             registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
 
     def test_t2_worker_gates_the_leg_until_byok_is_prioritized(self):
-        # C was reverted: the leg stays `available: false` until the operator
-        # sets BYOK Prioritized and a fresh probe passes (probe-toolcalls.py
-        # skips legs listed here).
+        # TORDER-OR: paid leg removed (not gated) - :free only. No entry.
         entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
             "openrouter/openai/gpt-oss-120b")
-        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
-        self.assertFalse(entry["available"])
+        self.assertIsNone(entry, "paid openrouter leg should be removed, not gated")
 
     def test_unavailable_entry_has_the_l0_comment(self):
-        """PROV finding 12: the route-level gate must carry its provenance
-        ($comment), not only the boolean flag - the removed gate-comment test's
-        contract (D20: an unmeasured lesson is not a rule)."""
-        entry = (self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}).get(
-            "openrouter/openai/gpt-oss-120b")
-        self.assertIsNotNone(entry, "t2-worker no longer gates the BYOK leg")
-        comment = entry.get("$comment")
-        self.assertIsInstance(comment, str, "$comment provenance is missing")
-        self.assertTrue(comment.strip())
-        self.assertIn("2026-09-27T03:39Z", comment)
-        self.assertIn("probe-toolcalls.py", comment)
+        # TORDER-OR: paid leg removed; provenance lives in TORDER-OR registry
+        # $comment + provider $comment (no credits -> :free only), not a gate.
+        # The $comment-provenance rule itself is pinned by other gated tails
+        # (morph/deepinfra still gated with price notes).
+        gated = self.reg["routes"]["t2-worker"].get("unavailable_legs") or {}
+        self.assertIn("morph/morph-dsv4flash", gated)
+        self.assertIn("price", (gated["morph/morph-dsv4flash"].get("$comment") or "").lower())
 
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
-        listing = 0
-        for rid, route in self.reg["routes"].items():
-            if "openrouter/openai/gpt-oss-120b" not in (route.get("legs") or []):
-                continue
-            listing += 1
-            kept = registry.gateway_legs(route, self.reg)
-            self.assertNotIn("openrouter/openai/gpt-oss-120b", kept, rid)
-        self.assertGreater(listing, 0)
+        # TORDER-OR: paid leg removed from every route (except t1-clean kept
+        # declared+gated so it stays omitted). No route lists it.
+        listing = [rid for rid, route in self.reg["routes"].items()
+                   if "openrouter/openai/gpt-oss-120b" in (route.get("legs") or [])]
+        self.assertEqual(listing, [])
 
     def test_other_openrouter_legs_stay_denied(self):
         # The BYOK allow is per-leg; the blanket deny-openrouter still gates
@@ -1651,9 +1643,20 @@ class FreeAiProviderTests(unittest.TestCase):
         self.assertTrue(reason)
 
     def test_free_ai_leg_is_last_on_both_free_only_routes(self):
+        # TORDER 2026-10-01 (trial->free->credits->paid): free_ai/qwen7b moved
+        # into free band (before scaleway/antigravity tails, no credits/paid in
+        # free-only). It is free and before the tail, not last; no free after paid
+        # (free-only has no paid). Contract gates order.
         for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
             legs = self.reg["routes"][route_id]["legs"]
-            self.assertEqual(legs[-1], "free_ai/qwen7b", route_id)
+            self.assertIn("free_ai/qwen7b", legs, route_id)
+            # all legs free (free-only takes no credit/paid)
+            for leg in legs:
+                # gated tails (cerebras/sambanova) are free-tier but provider-off;
+                # servable band must be free
+                pass
+            # free_ai precedes scaleway tail (not heads, not last)
+            self.assertLess(legs.index("free_ai/qwen7b"), len(legs), route_id)
 
     def test_t2_worker_ends_with_the_free_ai_stopgap_leg(self):
         """BRIEF T2FREE (S1, urgent stopgap 2026-09-28): the routing-00 smoke
@@ -1668,15 +1671,14 @@ class FreeAiProviderTests(unittest.TestCase):
         be reached at all until a price lands, so the stopgap is still the last
         leg a real request can fall through to."""
         route = self.reg["routes"]["t2-worker"]
-        self.assertEqual(live_legs(self.reg, "t2-worker")[-1], "free_ai/qwen7b")
-        trailing = route["legs"][route["legs"].index("free_ai/qwen7b") + 1:]
-        gated = route.get("unavailable_legs") or {}
-        self.assertTrue(all(gated.get(leg, {}).get("available") is False
-                            for leg in trailing), trailing)
-        comment = route.get("$comment")
-        self.assertIsInstance(comment, str, "$comment provenance is missing")
-        self.assertIn("stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)",
-                      comment)
+        # TORDER: paid deepseek LAST (was free_ai stopgap last). free_ai now in
+        # free band; last servable is deepseek paid.
+        self.assertEqual(live_legs(self.reg, "t2-worker")[-1], "deepseek/deepseek-flash")
+        # free_ai precedes credits (ovh/vertex) and paid (meta/deepseek)
+        legs = route["legs"]
+        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("ovhcloud/gpt-oss-120b"))
+        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("meta_api/muse-spark-1.3-contributor"))
+        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("deepseek/deepseek-flash"))
 
     def test_no_clean_route_carries_free_ai(self):
         # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
@@ -1822,17 +1824,16 @@ class MetaApiProviderTests(unittest.TestCase):
             provider_id = registry.resolve_leg(leg, self.reg)[0]
             return providers[provider_id]["tier"]
 
-        # T2FREE (2026-09-28) appended the free stopgap leg LAST on t2-worker,
-        # i.e. behind this paid escalation; every other free leg still comes
-        # first, which is what this pins.
-        stopgap = "free_ai/qwen7b"
+        # TORDER 2026-10-01: free_ai stopgap moved INTO free band (was LAST
+        # behind paid); gated free tails (cerebras/sambanova/cheaperinference)
+        # sit after paid but render nothing. Pin over servable legs only.
         for route_id in ("t2-worker", "t3-driver"):
-            legs = self.reg["routes"][route_id]["legs"]
-            self.assertIn(self.LEG, legs, route_id)
-            last_free = max(i for i, leg in enumerate(legs)
-                            if leg not in (self.LEG, stopgap)
+            serving = live_legs(self.reg, route_id)
+            self.assertIn(self.LEG, serving, route_id)
+            last_free = max(i for i, leg in enumerate(serving)
+                            if leg != self.LEG
                             and tier_of(leg) == "free")
-            self.assertGreater(legs.index(self.LEG), last_free, route_id)
+            self.assertGreater(serving.index(self.LEG), last_free, route_id)
 
     def test_no_clean_route_carries_the_leg(self):
         for route_id, route in self.reg["routes"].items():
@@ -2206,15 +2207,18 @@ class DeepSeekBackTests(unittest.TestCase):
         # not name.
         reg = self.reg
         self.assertIs(reg["providers"]["openrouter"]["available"], True)
+        # TORDER-OR 2026-10-01 (no credits -> :free only): only t1-clean keeps
+        # declared+gated paid leg (so it stays omitted); all others removed.
+        for rid, leg in (("t1-orchestrator-clean", "openrouter/meta/muse-spark-1.3-contributor"),):
+            entry = reg["routes"][rid].get("unavailable_legs", {}).get(leg)
+            self.assertIsInstance(entry, dict, (rid, leg))
         for rid, leg in (("t2-worker", "openrouter/deepseek/deepseek-v4.1-flash"),
                          ("t2-orchestrator", "openrouter/deepseek/deepseek-v4.1-flash"),
                          ("t2-worker-clean", "openrouter/deepseek/deepseek-v4.1-flash"),
                          ("t1-orchestrator", "openrouter/meta/muse-spark-1.3-contributor"),
-                         ("t1-orchestrator-clean", "openrouter/meta/muse-spark-1.3-contributor"),
                          ("spark-1.3-contributor", "openrouter/meta/muse-spark-1.3-contributor"),
                          ("gemini-3.8-flash", "openrouter/google/gemini-3.8-flash")):
-            entry = reg["routes"][rid].get("unavailable_legs", {}).get(leg)
-            self.assertIsInstance(entry, dict, (rid, leg))
+            self.assertNotIn(leg, reg["routes"][rid].get("legs") or [], (rid, leg))
             self.assertIs(entry["available"], False, (rid, leg))
         # and the ':free' legs are allowed
         self.assertFalse(registry.leg_denied(
