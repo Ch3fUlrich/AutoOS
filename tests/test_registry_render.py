@@ -1642,7 +1642,8 @@ class FreeAiRenderTests(unittest.TestCase):
                           "openrouter/nvidia/nemotron-3-super-120b-a12b:free"])
         self.assertIn("openrouter/poolside/laguna-s-2.1:free", models)
         self.assertIn("free-ai/qwen7b", models)
-        self.assertNotEqual(models[0], "free-ai/qwen7b")
+        # (no `assertNotEqual(models[0], ...)` here: line 1639's assertEqual on
+        # models[0] already pins the head - reviewer finding 3.)
 
     def test_free_ai_is_a_mid_band_stopgap_in_the_free_only_combos(self):
         # RENDERFIX 2026-10-01: the operator's order keeps the scaleway credit

@@ -23,8 +23,8 @@ expectations in their place, and no wave ran `test_registry_render.py`. This lan
 | # | test | class | why it was red / what changed |
 |---|---|---|---|
 | 1 | `RenderMatchesTodayTests::test_operator_flagged_dead_leg_is_not_mirrored_into_combos` | A | GEMRESTORE reversed the head removal: `gemini/gemini-3.8-flash` **is** served in `t2-worker` again → `assertNotIn`→`assertIn`. |
-| 2 | `GatewayRefTests::test_registry_legs_keep_their_own_spelling` | A | antigravity's legs were removed (provider unavailable), so the rule is re-pinned on a live leg: `openrouter/nvidia/nemotron-3-super-120b-a12b:free` in `routes.t2-worker.legs`, `resolve_leg` still splitting at the first `/`. |
-| 3 | `GatewayRefTests::test_render_omniroute_renders_antigravity_by_its_canonical_id` | A | same removal; AGYCANON is exercised on a copy that re-opens `providers.antigravity` and restores one declared leg, plus a loop proving no `agy/*` spelling survives anywhere in the real render. |
+| 2 | `GatewayRefTests::test_render_omniroute_renders_antigravity_by_its_canonical_id` | A | antigravity's legs were removed (provider unavailable); AGYCANON is exercised on a copy that re-opens `providers.antigravity` and restores one declared leg, plus a loop proving no `agy/*` spelling survives anywhere in the real render. |
+| 3 | `GatewayRefTests::test_registry_legs_keep_their_own_spelling` | A | same removal, so the rule is re-pinned on a live leg: `openrouter/nvidia/nemotron-3-super-120b-a12b:free` in `routes.t2-worker.legs`, `resolve_leg` still splitting at the first `/`. |
 | 4 | `LitellmRenderMatchesTodayTests::test_gateway_only_leg_is_dropped_not_silently_kept_or_missing` | A | same; `GATEWAY_ONLY = {antigravity, agy, cc}` (verified in `tools/sync-router-tiers.py`), so the synthetic re-open still proves the leg is dropped while `scaleway/mistral-small-3.2-24b-instruct-2506` is kept. |
 | 5 | `ModelsDocCellsComeFromTheRegistryTests::test_leg_whose_provider_is_globally_unavailable_is_marked` | A | `t2-orchestrator` lost its paid openrouter leg (openrouter has no credits), so the flip is re-pinned on `t2-worker`, which still declares openrouter `:free` legs. |
 | 6 | `ChangedLegAvailabilityFailsModelsDocCheckTests::test_marking_a_leg_unavailable_exits_one_and_names_the_route` | A | `opus-4-6` lost the antigravity leg and is **omitted**, so the mutation-detection flip moved to a leg that exists and serves: `groq/qwen/qwen3.8-27b` on `t2-worker`. |
@@ -38,7 +38,9 @@ expectations in their place, and no wave ran `test_registry_render.py`. This lan
 | 14 | `IdeContextAndEffortFollowServedLegsTests::test_the_real_free_head_drops_a_default_it_does_not_carry` (renamed) | A | **the one (B)-candidate, resolved as (A):** the served head is the restored `gemini/gemini-3.8-flash`, whose ladder is `low/medium/high`; the surface default `xhigh` is not a rung it carries, so `render_ide()` correctly **drops** it instead of forwarding an effort the head rejects. No capability was lost — the ladder is forwarded, and the forward branch stays covered by `test_a_default_the_served_head_carries_is_still_forwarded`. |
 | 15 | `IdeContextAndEffortFollowServedLegsTests::test_openhands_max_input_tokens_is_clamped` | A | t1's openhands/litellm profile window is **1000000** (≤ 1048576), still a clamp. |
 
-No test was deleted and no assertion was removed — the assertion count **rose** (267 → 276). Every
+No test was deleted and no assertion was weakened: every assertion this branch removed was either
+redundant with a stronger one or replaced by one, and the count rose from **267 at base to 276 at
+this tip** (277 before the review's redundant-assertion cleanup removed the last of them). Every
 renamed test keeps its original intent with the new truth pinned in it.
 
 **Correction, after review.** The first revision of this file claimed "no assertion was relaxed to
