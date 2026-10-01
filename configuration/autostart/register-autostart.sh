@@ -298,25 +298,66 @@ else
     done
 fi
 
-# ─── The gateway must refuse keyless /v1 requests ──────────────────────────
-# REQUIRE_API_KEY lives in ~/.omniroute/.env, which OmniRoute reads itself.
-# Read-modify-write: only a missing line is appended, after a backup.
+# ─── Gateway env defaults in ~/.omniroute/.env ──────────────────────────────
+# Two jobs share this file, so they share ONE append (and ONE backup) per run:
+#   1. REQUIRE_API_KEY - OmniRoute reads ~/.omniroute/.env itself
+#      (bin/omniroute.mjs loadEnvFile()); it is deliberately NOT a unit
+#      Environment= line, which would shadow the operator's own edit of it.
+#   2. The repeated-429 rotation policy. The autoos-omniroute unit runs
+#      `omniroute serve` with WorkingDirectory=~/.omniroute and the loader
+#      fills a key only when the process env does not already hold it, so this
+#      file is the unit's env surface too (no Environment= line). A native
+#      nohup launch loads the same file.
+# Read-modify-write, respect-set: only a key absent from the file is appended,
+# any value the operator already set is left alone, and a second run appends
+# nothing.
 if [[ -z "$ONLY" || ",$ONLY," == *",autoos-omniroute,"* ]]; then
     omni_env="${AUTOOS_OMNIROUTE_ENV:-$HOME/.omniroute/.env}"
-    if [[ -f "$omni_env" ]] && grep -qE '^[[:space:]]*REQUIRE_API_KEY[[:space:]]*=[[:space:]]*"?true"?[[:space:]]*$' "$omni_env"; then
-        echo "REQUIRE_API_KEY=true is set in $omni_env (skipped)."
-    elif [[ -f "$omni_env" ]] && grep -qE '^[[:space:]]*REQUIRE_API_KEY[[:space:]]*=' "$omni_env"; then
-        echo "  ! $omni_env sets REQUIRE_API_KEY to something other than true - left alone; /v1 may accept keyless requests."
+    rotation_defaults=(
+        OMNIROUTE_ROTATION_ENABLED=true
+        OMNIROUTE_ROTATE_ON_429=true
+        OMNIROUTE_ROTATE_429_THRESHOLD=3
+        OMNIROUTE_ROTATE_429_WINDOW_SECONDS=120
+        OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS=300
+        OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=1800000
+    )
+    env_line_present() { grep -qE "^[[:space:]]*$1[[:space:]]*=" "$omni_env" 2>/dev/null; }
+    to_append=()
+    require_missing=0
+    if env_line_present REQUIRE_API_KEY; then
+        if grep -qE '^[[:space:]]*REQUIRE_API_KEY[[:space:]]*=[[:space:]]*"?true"?[[:space:]]*$' "$omni_env"; then
+            echo "REQUIRE_API_KEY=true is set in $omni_env (skipped)."
+        else
+            echo "  ! $omni_env sets REQUIRE_API_KEY to something other than true - left alone; /v1 may accept keyless requests."
+        fi
+    else
+        require_missing=1
+        if ! grep -qF '# AutoOS: /v1 is reachable from the LAN' "$omni_env" 2>/dev/null; then
+            to_append+=("# AutoOS: /v1 is reachable from the LAN - every request must carry a client key.")
+        fi
+        to_append+=("REQUIRE_API_KEY=true")
+    fi
+    rotation_missing=0
+    for pair in "${rotation_defaults[@]}"; do
+        name="${pair%%=*}"
+        if env_line_present "$name"; then continue; fi
+        to_append+=("$pair")
+        rotation_missing=$((rotation_missing + 1))
+    done
+    if (( ${#to_append[@]} == 0 )); then
+        echo "  = 429 rotation policy already set in $omni_env (skipped)."
     elif [[ $DRY -eq 1 ]]; then
-        echo "  - would append REQUIRE_API_KEY=true to $omni_env (backup first if it exists)"
+        if (( require_missing )); then echo "  - would append REQUIRE_API_KEY=true to $omni_env (backup first if it exists)"; fi
+        if (( rotation_missing )); then echo "  - would append $rotation_missing rotation default(s) to $omni_env (backup first if it exists)"; fi
     else
         mkdir -p "$(dirname "$omni_env")"
         if [[ -f "$omni_env" ]] && ! autoos_backup "$omni_env" >/dev/null; then
             echo "  ! could not back up $omni_env - leaving it untouched; /v1 may accept keyless requests."
         else
-            printf '# AutoOS: /v1 is reachable from the LAN - every request must carry a client key.\nREQUIRE_API_KEY=true\n' >>"$omni_env"
+            for line in "${to_append[@]}"; do printf '%s\n' "$line"; done >>"$omni_env"
             chmod 600 "$omni_env"
-            echo "  + appended REQUIRE_API_KEY=true to $omni_env (restart the gateway to apply)"
+            if (( require_missing )); then echo "  + appended REQUIRE_API_KEY=true to $omni_env (restart the gateway to apply)"; fi
+            if (( rotation_missing )); then echo "  + appended $rotation_missing rotation default(s) to $omni_env (restart the gateway to apply)"; fi
         fi
     fi
 fi

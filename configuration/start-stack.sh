@@ -84,6 +84,18 @@ elif ! gateway_ok; then
     : "${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:=8}"
     export OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT
     echo "Starting OmniRoute in the background..."
+    # Sane skip-on-repeated-429 policy (operator 2026-10-01): the gateway reads
+    # these from its own process env at startup (open-sse/services/rotationConfig.ts:84-110;
+    # provider-breaker family at open-sse/config/constants.ts:251-277), so the
+    # launcher that spawns it is the only surface. Rotate a leg only after three
+    # 429s inside a 120s window (the shipped default of 1 hops on the first
+    # 429), then cool the leg for 300s. Respect-set: an operator value wins.
+    export OMNIROUTE_ROTATION_ENABLED="${OMNIROUTE_ROTATION_ENABLED:-true}"
+    export OMNIROUTE_ROTATE_ON_429="${OMNIROUTE_ROTATE_ON_429:-true}"
+    export OMNIROUTE_ROTATE_429_THRESHOLD="${OMNIROUTE_ROTATE_429_THRESHOLD:-3}"
+    export OMNIROUTE_ROTATE_429_WINDOW_SECONDS="${OMNIROUTE_ROTATE_429_WINDOW_SECONDS:-120}"
+    export OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS="${OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS:-300}"
+    export OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS="${OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS:-1800000}"
     nohup omniroute --no-open --port 20128 >/tmp/omniroute.log 2>&1 &
     for _ in $(seq 1 24); do gateway_ok && break; sleep 5; done
     gateway_ok || { echo "Gateway did not answer. Run: omniroute doctor"; exit 1; }

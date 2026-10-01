@@ -64,6 +64,17 @@ elif ! command -v omniroute >/dev/null; then
     echo "omniroute is not installed - run setup.sh --only omniroute --yes once, then re-run this."
 else
     echo "Starting OmniRoute in the background..."
+    # Sane skip-on-repeated-429 policy (operator 2026-10-01): same defaults as
+    # configuration/start-stack.sh. The systemd unit path above reads them from
+    # ~/.omniroute/.env instead (register-autostart.sh writes it); this export
+    # covers the nohup fallback and a hand run. Respect-set: an operator value
+    # wins.
+    export OMNIROUTE_ROTATION_ENABLED="${OMNIROUTE_ROTATION_ENABLED:-true}"
+    export OMNIROUTE_ROTATE_ON_429="${OMNIROUTE_ROTATE_ON_429:-true}"
+    export OMNIROUTE_ROTATE_429_THRESHOLD="${OMNIROUTE_ROTATE_429_THRESHOLD:-3}"
+    export OMNIROUTE_ROTATE_429_WINDOW_SECONDS="${OMNIROUTE_ROTATE_429_WINDOW_SECONDS:-120}"
+    export OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS="${OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS:-300}"
+    export OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS="${OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS:-1800000}"
     (cd "$HOME" && nohup omniroute --no-open --port 20128 >>"$STATE_DIR/omniroute.log" 2>&1 &)
     if wait_for gateway_ok; then echo "Gateway OK on 20128."
     else echo "Gateway did not answer - run: omniroute doctor"; fi
