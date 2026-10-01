@@ -349,6 +349,7 @@ class MainCiStatusParserTests(unittest.TestCase):
         self.assertEqual(seen["argv"],
                          ["gh", "run", "list", "--branch", "main",
                           "--status", "completed", "--limit", "1",
+                          "--workflow", "ci.yml", "--event", "push",
                           "--json", "databaseId,conclusion,headSha"])
 
     def test_it_times_out_rather_than_hanging_the_gate(self):

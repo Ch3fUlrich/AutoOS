@@ -3083,7 +3083,8 @@ def main_ci_status(runner=None):
     (source: plan v3 T0-FREEZE). The gate is fail-closed: an unreadable gh is
     exit 2, never an allow.
 
-    ``gh run list --branch main --status completed --limit 1 --json
+    ``gh run list --branch main --status completed --limit 1 --workflow
+    ci.yml --event push --json
     databaseId,conclusion,headSha``, through the same injectable-runner pattern
     ``ci_run_status`` uses for ``--ci-run`` (no new network style). Unlike ``gh
     run view``'s single object, ``gh run list`` prints a JSON ARRAY of such
@@ -3093,7 +3094,8 @@ def main_ci_status(runner=None):
     """
     runner = runner or subprocess.run
     argv = ["gh", "run", "list", "--branch", "main", "--status", "completed",
-            "--limit", "1", "--json", "databaseId,conclusion,headSha"]
+            "--limit", "1", "--workflow", "ci.yml", "--event", "push",
+            "--json", "databaseId,conclusion,headSha"]
     try:
         proc = runner(argv, capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -3135,7 +3137,7 @@ def cmd_ready(args) -> int:
     ``git push --no-verify`` — which steps over every hook — is refused here
     unless an orchestrator names a reason with ``--allow-unverified``. The sixth
     (T0-FREEZE, plan v3) refuses while main CI is red: the latest completed
-    workflow run on ``main`` must conclude ``success``, else the lane is refused
+    push run of the CI workflow on ``main`` must conclude ``success``, else the lane is refused
     as ``main-ci-red`` naming the run id — unless the lane fixes main itself,
     declared with ``--fixes-main`` AND the environment declaring
     ``AUTOOS_FIXES_MAIN=<lane>@<sha>`` whose sha equals ``--sha`` (T0-FREEZE-2:
