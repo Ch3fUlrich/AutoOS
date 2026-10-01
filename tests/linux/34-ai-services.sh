@@ -6440,6 +6440,22 @@ if it "gwkey: F2 host.yml with UTF-8 BOM is read"; then
     if (( ok )); then pass; else fail "F2: host.yml with BOM not read correctly"; fi
 fi
 
+# One table, three implementations: the same rows are read by the Python and PowerShell tests
+if it "gwkey: the shared URL table classifies every row the same way"; then
+    table="$ROOT/tests/fixtures/gateway-url-classification.json"
+    bad=""; n=0
+    while IFS= read -r -d '' want && IFS= read -r -d '' u; do
+        n=$((n+1))
+        got=remote; ( . "$ROOT/lib/linux/install.sh"; is_local_gateway "$u" ) 2>/dev/null && got=local
+        [[ "$got" == "$want" ]] || bad="$bad [$want!=$got:$(printf '%q' "$u")]"
+    done < <(python3 -c '
+import json, sys
+for r in json.load(open(sys.argv[1], encoding="utf-8")):
+    sys.stdout.write(("local" if r["local"] else "remote") + chr(0) + r["url"] + chr(0))
+' "$table")
+    if (( n > 60 )) && [[ -z "$bad" ]]; then pass; else fail "table rows=$n wrong:$bad"; fi
+fi
+
 # Authority parsing: path, query and fragment never contribute userinfo or a host
 if it "gwkey: an @ or ? or # after the authority does not change the host"; then
     out="$( ( . "$ROOT/lib/linux/install.sh"

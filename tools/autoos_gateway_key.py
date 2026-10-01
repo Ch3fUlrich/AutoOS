@@ -50,26 +50,64 @@ def _notice(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def is_local_gateway(url: str) -> bool:
-    """True when the gateway URL points to the local machine (loopback)."""
-    if not url:
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
+_ASCII_WS = " " + chr(9) + chr(10) + chr(11) + chr(12) + chr(13)
+
+
+def is_local_gateway(url: Optional[str]) -> bool:
+    """True when the gateway URL points to the local machine (loopback).
+
+    ONE rule, spelled the same in lib/windows/AutoOS.Install.psm1 (and its copy in
+    configuration/start-stack.ps1); bash calls this function through the CLI. It is a plain
+    string parse on purpose: urlparse, System.Uri and a shell glob each read odd URLs
+    differently, and a local key must never be sent to a remote gateway because they disagreed.
+
+      - unset (exactly empty)                          -> local
+      - ASCII whitespace around the URL is trimmed; anything left that is not printable ASCII
+        (control characters, spaces inside, non-ASCII) or is a backslash -> NON-local
+      - no `scheme://`                                 -> non-local
+      - the authority ends at the first / ? or #; userinfo is cut at the LAST @
+      - a port, when present, is digits only and at most 65535 (an empty port is allowed)
+      - local only for the literals 127.0.0.1 and localhost (any case), or a bracketed [::1];
+        127.1, 0x7f.1, 2130706433, 127.0.0.2, 0.0.0.0, a trailing dot, an unbracketed ::1 are NOT.
+    """
+    if url is None or url == "":
         return True
-    # Trim whitespace (parity with bash/PowerShell)
-    url = url.strip()
-    try:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        # If no scheme, it's not a valid gateway URL -> treat as non-local
-        if not parsed.scheme:
+    url = url.strip(_ASCII_WS)
+    if not url:
+        return False
+    if any(not (0x21 <= ord(ch) <= 0x7E) or ch == chr(92) for ch in url):
+        return False
+    scheme, sep, rest = url.partition("://")
+    if not sep or not _SCHEME_RE.match(scheme):
+        return False
+    for i, ch in enumerate(rest):
+        if ch in "/?#":
+            rest = rest[:i]
+            break
+    authority = rest.rsplit("@", 1)[-1]
+    if authority.startswith("["):
+        end = authority.find("]")
+        if end < 0:
             return False
-        host = parsed.hostname or ""
-    except Exception:
-        # If we can't parse it, treat as non-local to be safe
-        return False
-    if not host:
-        return False
-    host_l = host.lower()
-    return host_l in ("127.0.0.1", "localhost", "::1")
+        host, tail = authority[1:end], authority[end + 1:]
+        bracketed = True
+    else:
+        host, colon, port_text = authority.partition(":")
+        if ":" in port_text:
+            return False  # an IPv6 literal without brackets
+        tail = colon + port_text
+        bracketed = False
+    if tail:
+        if not tail.startswith(":"):
+            return False
+        port = tail[1:]
+        if port and (not port.isdigit() or not port.isascii() or len(port) > 5 or int(port) > 65535):
+            return False
+    host = host.lower()
+    if bracketed:
+        return host == "::1"
+    return host in ("127.0.0.1", "localhost")
 
 
 def _host_config_path(env: Optional[dict] = None) -> Path:
@@ -221,6 +259,8 @@ def main(argv: Optional[list] = None) -> int:
       autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE]
           key on stdout (no trailing noise); notices and errors on stderr.
           A missing key exits 1 with the message, or with --optional exits 0 and prints nothing.
+      autoos_gateway_key.py is-local URL
+          exit 0 when the URL is a loopback gateway, 1 when not (the one classifier bash uses).
       autoos_gateway_key.py info
           which gateway class, host name and field this environment resolves to (no key).
     """
@@ -242,6 +282,9 @@ def main(argv: Optional[list] = None) -> int:
             return 1
         sys.stdout.write(key + chr(10))
         return 0
+    if cmd == "is-local":
+        # exit 0 = local, 1 = not local; the URL is the one argument ("" = unset = local)
+        return 0 if is_local_gateway(args[0] if args else "") else 1
     if cmd == "info":
         env = dict(os.environ)
         print(json.dumps({
@@ -250,7 +293,7 @@ def main(argv: Optional[list] = None) -> int:
             "field": client_key_field(env),
         }, indent=2))
         return 0
-    print("usage: autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE] | info", file=sys.stderr)
+    print("usage: autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE] | is-local URL | info", file=sys.stderr)
     return 2
 
 

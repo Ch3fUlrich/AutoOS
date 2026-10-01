@@ -7130,6 +7130,23 @@ Test-Case 'gwkey: two resolves in one session print the deprecation line once' {
     Pass
 }
 
+Test-Case 'gwkey: the shared URL table classifies every row the same way (module and start-stack copy)' {
+    $table = Get-Content -LiteralPath (Join-Path $Root 'tests\fixtures\gateway-url-classification.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    Assert-True ($table.Count -gt 60) 'the shared table is missing rows'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true))
+    Assert-Equal $fn.Count 1 'start-stack.ps1 must carry exactly one Test-AutoOSLocalGateway'
+    $inCopy = { param($text, $u) . ([scriptblock]::Create($text)); Test-AutoOSLocalGateway -Url $u }
+    $wrong = @()
+    foreach ($r in $table) {
+        $m = [bool](Test-AutoOSLocalGateway -Url $r.url)
+        $c = [bool](& $inCopy $fn[0].Extent.Text $r.url)
+        if ($m -ne [bool]$r.local) { $wrong += "module: '$($r.url | ConvertTo-Json -Compress)' got $m want $($r.local)" }
+        if ($c -ne [bool]$r.local) { $wrong += "start-stack copy: '$($r.url | ConvertTo-Json -Compress)' got $c want $($r.local)" }
+    }
+    Assert-True ($wrong.Count -eq 0) ($wrong -join '; ')
+}
+
 Test-Case 'gwkey: start-stack.ps1 parity with module function' {
     # start-stack.ps1 carries a copy of the local-gateway check (Test-AutoOSLocalGateway).
     # This test loads both and asserts they give identical answers for the WS-OMNIREMOTE URL table.

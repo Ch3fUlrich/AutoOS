@@ -518,5 +518,26 @@ class TestResolveOncePerProcessAndCli(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "legacy-key-value\n", ""))
 
 
+class TestSharedUrlTable(unittest.TestCase):
+    """The table tests/fixtures/gateway-url-classification.json is also read by the bash and the
+    PowerShell tests: one list of URLs, one expected answer, three implementations."""
+
+    def test_every_row(self):
+        import json
+        table = Path(__file__).resolve().parent / "fixtures" / "gateway-url-classification.json"
+        rows = json.loads(table.read_text(encoding="utf-8"))
+        self.assertGreater(len(rows), 60)
+        wrong = [(r["url"], r["local"]) for r in rows if is_local_gateway(r["url"]) != r["local"]]
+        self.assertEqual(wrong, [])
+
+    def test_cli_is_local_agrees_with_the_function(self):
+        import subprocess
+        tools = Path(__file__).resolve().parent.parent / "tools" / "autoos_gateway_key.py"
+        for url, want in (("", 0), ("http://localhost:20128", 0), ("http://evil.example\\@127.0.0.1", 1),
+                          ("http://127.1", 1), ("   ", 1)):
+            r = subprocess.run([sys.executable, str(tools), "is-local", url], capture_output=True, text=True)
+            self.assertEqual(r.returncode, want, url)
+
+
 if __name__ == "__main__":
     unittest.main()

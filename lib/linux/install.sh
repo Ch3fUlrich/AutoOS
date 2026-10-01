@@ -4968,38 +4968,15 @@ autoos_api_keys_conf() {
 }
 
 # ─── OmniRoute gateway key resolution (shared with apply.sh, start-stack.sh) ───
-# is_local_gateway <url>: true (0) when the URL points to loopback.
+# is_local_gateway <url>: true (0) when the URL points to loopback. There is ONE classifier,
+# tools/autoos_gateway_key.py (the PowerShell module carries the same rule in its own language);
+# unset or empty is local. Scheme-less values such as 127.0.0.1:20128 are NOT local: say
+# http://127.0.0.1:20128.
 is_local_gateway() {
-    local url="${1:-}"
+    local url="${1-}"
     [[ -z "$url" ]] && return 0
-    # Trim leading/trailing whitespace (parity with Python/PowerShell)
-    url="${url#"${url%%[![:space:]]*}"}"
-    url="${url%"${url##*[![:space:]]}"}"
-    # Without a scheme there is no gateway host to match: non-local.
-    [[ "$url" != *"://"* ]] && return 1
-    local host
-    # Strip scheme
-    host="${url#*://}"
-    # The authority ends at the first / ? or #. Cut there BEFORE looking for userinfo,
-    # or an '@' in the path/query/fragment is mistaken for userinfo.
-    host="${host%%[/?#]*}"
-    # Strip userinfo: use LAST @ within the authority
-    # This matches Python's urlparse().hostname and PowerShell's [Uri]::Host
-    local at_idx
-    at_idx="${host##*@}"
-    if [[ "$at_idx" != "$host" ]]; then
-        host="$at_idx"
-    fi
-    # Strip port - except a bracketed IPv6 literal ([::1]:20128 -> ::1)
-    if [[ "$host" == \[*\]* ]]; then
-        host="${host#\[}"; host="${host%%\]*}"
-    else
-        host="${host%%:*}"
-    fi
-    case "${host,,}" in
-        127.0.0.1|localhost|::1) return 0 ;;
-        *) return 1 ;;
-    esac
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    python3 "$repo_root/tools/autoos_gateway_key.py" is-local "$url"
 }
 
 # _host_config_path: path to the machine-wide host.yml config.

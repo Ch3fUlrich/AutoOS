@@ -91,18 +91,52 @@ function Write-AutoOSNoticeOnce {
 # If the logic changes, update both. A parity test in tests/run-tests.ps1 asserts
 # they give the same answers for the WS-OMNIREMOTE URL table.
 function Test-AutoOSLocalGateway {
+    # The same rule as tools/autoos_gateway_key.py is_local_gateway (see its docstring): a plain
+    # string parse, not [Uri], because [Uri] and urlparse read odd URLs differently and a local key
+    # must never reach a remote gateway because they disagreed.
     param([string]$Url)
-    if ([string]::IsNullOrWhiteSpace($Url)) { return $true }
-    try {
-        $uri = [Uri]$Url
-        $gwHost = $uri.Host
-    } catch {
-        return $false
+    if ([string]::IsNullOrEmpty($Url)) { return $true }
+    $Url = $Url.Trim([char[]]@(32, 9, 10, 11, 12, 13))
+    if ($Url.Length -eq 0) { return $false }
+    foreach ($ch in $Url.ToCharArray()) {
+        $code = [int]$ch
+        if ($code -lt 0x21 -or $code -gt 0x7E -or $code -eq 92) { return $false }
     }
-    # A relative or host-less URI (e.g. 'not-a-url') has no Host: non-local, like Python and bash.
-    if ([string]::IsNullOrEmpty($gwHost)) { return $false }
-    $gwHost = $gwHost.Trim('[',']').ToLowerInvariant()
-    $gwHost -in @('127.0.0.1','localhost','::1')
+    $sep = $Url.IndexOf('://')
+    if ($sep -lt 0) { return $false }
+    $scheme = $Url.Substring(0, $sep)
+    if ($scheme -notmatch '^[A-Za-z][A-Za-z0-9+.-]*$') { return $false }
+    $rest = $Url.Substring($sep + 3)
+    $cut = $rest.IndexOfAny([char[]]@('/', '?', '#'))
+    if ($cut -ge 0) { $rest = $rest.Substring(0, $cut) }
+    $at = $rest.LastIndexOf('@')
+    $authority = if ($at -ge 0) { $rest.Substring($at + 1) } else { $rest }
+    $bracketed = $false
+    if ($authority.StartsWith('[')) {
+        $end = $authority.IndexOf(']')
+        if ($end -lt 0) { return $false }
+        $gwHost = $authority.Substring(1, $end - 1)
+        $tail = $authority.Substring($end + 1)
+        $bracketed = $true
+    } else {
+        $colon = $authority.IndexOf(':')
+        if ($colon -lt 0) { $gwHost = $authority; $tail = '' }
+        else {
+            $gwHost = $authority.Substring(0, $colon)
+            $tail = $authority.Substring($colon)
+            if ($tail.Substring(1).Contains(':')) { return $false }
+        }
+    }
+    if ($tail.Length -gt 0) {
+        if (-not $tail.StartsWith(':')) { return $false }
+        $port = $tail.Substring(1)
+        if ($port.Length -gt 0) {
+            if ($port.Length -gt 5 -or $port -notmatch '^[0-9]+$' -or [int]$port -gt 65535) { return $false }
+        }
+    }
+    $gwHost = $gwHost.ToLowerInvariant()
+    if ($bracketed) { return ($gwHost -eq '::1') }
+    return ($gwHost -eq '127.0.0.1' -or $gwHost -eq 'localhost')
 }
 
 function Get-AutoOSHostConfigPath {
