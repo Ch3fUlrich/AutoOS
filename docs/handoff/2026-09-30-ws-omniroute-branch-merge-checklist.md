@@ -306,6 +306,31 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
 - **t1 fallback latency 22556 ms** is being fixed.
 - **Vertex credential file `.gitignore` rule** — LANDED on TORDER `4fd66091` ("fix(secrets): ignore vertex credential JSONs + red-first gate test (CREDIGNORE)").
 
+### (d) Redaction sweep (Hard Rule 1) — 2026-10-01
+
+- `origin/main` `88359146` is **clean** (0 `mauls` hits): the inherited
+  `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` leak is already redacted on main
+  (`1ddcff16`), so a rebase fixes it on every branch.
+- Sweep across the lane worktrees redacted and committed **30 branches** (one
+  `redact(Hard Rule 1): …` commit each): ws-changelog, ws-combos-pins, ws-designmemo,
+  ws-failures-doc, ws-fixes, ws-freereads, ws-freewire, ws-gemini-restore, ws-incident,
+  ws-invariant-fix, ws-leghealth2, ws-mergecheck, ws-merge-map, ws-nebius2-combos,
+  ws-nebiuswave2, ws-ovh, ws-ovh-finish, ws-patchbackups-2, ws-patchbackups-3, ws-patchr1,
+  ws-providers-rescue, ws-qwenclamp, ws-records, ws-researcher, ws-revaudit, ws-review,
+  ws-revround, ws-sweep, ws-sweep-review, ws-verify-activate.
+- `ws-verify-activate` needed **code** fixes (not a blanket replace): the `TARBALL` / `LIVE` /
+  `launcher` absolute paths were **env-derived** (`%TEMP%`, `%APPDATA%`) and the `.py` files
+  compile-checked.
+- **Residual (1 branch):** `L1-backlog/ws-tier-order-20261001` — 4 hits incl.
+  `tools/combo-contract.py` (code). **alpha's in-flight lane — flagged, not touched.**
+- Superseded / no-commit branches (`ws-combos`, `ws-leghealth`, `ws-nebius-combos`,
+  `ws-nebiuswave`, `ws-nebius2`, `ws-main-breach`, `ws-providers`, `ws-gw-vertex`,
+  `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`, `ws-patchlive`) retain only the
+  inherited `workstation-omniroute-handoff.md` line; their tips are superseded or already
+  ancestors of main, whose tip is clean.
+- Method: `git grep -n -I -i 'mauls'`; replacement `(?i)mauls(?!er)` → `<user>` (the `(?!er)`
+  guard preserves `maulser@…`); code paths env-derived. No `<user>er` over-replacement anywhere.
+
 ## Branch table
 
 18 local `L1-backlog/*` branches enumerated. 5 at base (`d08f7f2`, no commits);
