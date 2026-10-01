@@ -6489,6 +6489,7 @@ if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
     mkdir -p "$HOME/x"
     printf 'host_name: tildehost\n' >"$HOME/x/host.yml"
     key="$( ( . "$ROOT/lib/linux/install.sh"
+        # shellcheck disable=SC2088  # the literal ~ is the point: the resolver expands it itself
         export AUTOOS_HOST_CONFIG="~/x/host.yml"
         export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
         unset AUTOOS_OMNIROUTE_KEY
