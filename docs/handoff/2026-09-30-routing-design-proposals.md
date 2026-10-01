@@ -17,7 +17,7 @@ Every file:line anchor below was verified by grep against the worktree at `d08f7
 
 ### Check 1 — both rules present in the repo SKILL.md
 
-Confirmed. `C:\Users\mauls\Documents\Code\AutoOS\.agents\skills\unattended-orchestration\SKILL.md`:
+Confirmed. `C:\Users\<user>\Documents\Code\AutoOS\.agents\skills\unattended-orchestration\SKILL.md`:
 
 - **Line 110:** `- R-coord-12: L0 and L1 sessions are interactive top-level sessions, never subagent children. (why: unattended parents must be watchable and addressable; source: operator 2026-09-30, ws-omniroute run)`
 - **Line 111:** `- R-coord-13: L1 and L2 follow this skill, never fix or research; they spawn L2/L3 sized to complexity. (why: orchestrators that work stop orchestrating; source: operator 2026-09-30)`
