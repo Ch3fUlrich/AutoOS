@@ -535,14 +535,14 @@ class ClientCommandTests(unittest.TestCase):
         # bypass_permissions is only acceptable inside the private sandbox
         # clone, where the leak check still applies: the spawner forces it.
         r = plan_of("--client", "qoder", "t")
-        self.assertIn("git clone --local", r.stdout)
+        self.assertIn("sandbox from", r.stdout)
         self.assertIn("is your only writable checkout", r.stdout)
 
     def test_qoder_without_auto_is_isolated_too(self):
         # review of 6622d29 (qoder Qwen3.8-Flash): --no-auto gave level "ask",
         # no permission flag and NO sandbox. Every non-read qoder run is isolated.
         r = plan_of("--client", "qoder", "--no-auto", "t")
-        self.assertIn("git clone --local", r.stdout)
+        self.assertIn("sandbox from", r.stdout)
 
     def test_qoder_plan_names_the_model_it_runs(self):
         r = plan_of("--client", "qoder", "t")
@@ -707,7 +707,7 @@ class ClientCapabilityTests(unittest.TestCase):
     def test_qoder_takes_an_explicit_editing_card(self):
         r = plan_of("--client", "qoder", "--card", "role=implement", "edit README.md")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("git clone --local", r.stdout)
+        self.assertIn("sandbox from", r.stdout)
 
     def test_qoder_can_still_take_a_read_only_card(self):
         r = plan_of("--client", "qoder", "--card", "role=review", "t")
@@ -10540,7 +10540,7 @@ class McpIsolateForceTests(unittest.TestCase):
             self.assertIn("--isolate", argv, "tier %s would run in place" % tier)
             self.wait_done(out["id"])
             text = mcp_server.result(out["id"])["text"]
-            self.assertIn("git clone --local", text)
+            self.assertIn("sandbox from", text)
             self.assertNotIn("would be refused", text)
 
     def test_the_forced_clone_is_visible_in_the_spawn_answer(self):
@@ -10818,8 +10818,8 @@ class IsolateSourceTests(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        self.assertIn("git clone --local %s" % worktree, text)
-        self.assertNotIn("git clone --local %s" % str(ROOT), text)
+        self.assertIn("sandbox from %s" % worktree, text)
+        self.assertNotIn("sandbox from %s" % str(ROOT), text)
 
 
 class ClientSpawnGateTests(unittest.TestCase):
@@ -18399,6 +18399,241 @@ class WinshimMcpJobTests(unittest.TestCase):
         self.assertIn("not installed", tail)
         self.assertNotIn("Traceback", tail)
         self.assertEqual(mcp_server.status(run_id)["state"], "failed")
+
+
+class T2IsolateSecretsS1HistoryTests(unittest.TestCase):
+    """S1: the sandbox clone carries one commit and no old plaintext blob."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def _fixture_history(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+        os.makedirs(os.path.join(root, "secrets-generated"), exist_ok=True)
+        with open(os.path.join(root, "secrets-generated", "old.txt"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("FAKE-PLAINTEXT-A\n")
+        with open(os.path.join(root, "keep.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("keep\n")
+        subprocess.run(self.git + ["-C", root, "add", "."], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "A"],
+                       check=True)
+        old_blob = subprocess.run(
+            ["git", "-C", root, "rev-parse", "HEAD:secrets-generated/old.txt"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        shutil.rmtree(os.path.join(root, "secrets-generated"))
+        os.makedirs(os.path.join(root, "secrets-generated"), exist_ok=True)
+        with open(os.path.join(root, "secrets-generated", "new.enc"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("ENC[AES256_GCM,data:fake]\n")
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "B"],
+                       check=True)
+        return root, old_blob
+
+    def test_sandbox_has_single_commit_and_no_old_blob(self):
+        root, old_blob = self._fixture_history()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2s1")
+        count = subprocess.run(
+            ["git", "-C", dest, "rev-list", "--all", "--count"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(count, "1")
+        probe = subprocess.run(["git", "-C", dest, "cat-file", "-e", old_blob],
+                               capture_output=True, text=True)
+        self.assertNotEqual(probe.returncode, 0)
+        hits = subprocess.run(["grep", "-r", "FAKE-PLAINTEXT-A", dest],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(hits.strip(), "")
+
+
+class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
+    """S2: secrets-generated/ and .agentignore paths are absent incl. .git."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def _fixture(self):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+        os.makedirs(os.path.join(root, "secrets-generated"), exist_ok=True)
+        with open(os.path.join(root, "secrets-generated", "new.enc"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("ENC[AES256_GCM,data:fake-new]\n")
+        os.makedirs(os.path.join(root, "private"), exist_ok=True)
+        with open(os.path.join(root, "private", "note.txt"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("FAKE-PRIVATE-CONTENT\n")
+        with open(os.path.join(root, "keep.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("keep\n")
+        with open(os.path.join(root, ".agentignore"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("# comment\nprivate/\n")
+        subprocess.run(self.git + ["-C", root, "add", "."], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"],
+                       check=True)
+        return root
+
+    def test_excluded_dirs_absent_from_worktree_and_git(self):
+        root = self._fixture()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2s2")
+        self.assertFalse(os.path.exists(os.path.join(dest, "secrets-generated")))
+        self.assertFalse(os.path.exists(os.path.join(dest, "private")))
+        names = subprocess.run(
+            ["git", "-C", dest, "ls-tree", "-r", "HEAD", "--name-only"],
+            capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("secrets-generated", names)
+        self.assertNotIn("private", names)
+        self.assertIn("keep.txt", names)
+        for needle in ("FAKE-PRIVATE-CONTENT", "fake-new"):
+            hits = subprocess.run(["grep", "-r", needle, dest],
+                                  capture_output=True, text=True).stdout
+            self.assertEqual(hits.strip(), "", needle)
+
+
+class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
+    """S3: tracked plaintext-secret names refuse before any sandbox exists."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def _root_with(self, rel, content):
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+        with open(os.path.join(root, "keep.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("keep\n")
+        d = os.path.dirname(os.path.join(root, rel))
+        if d and not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
+        with open(os.path.join(root, rel), "w", encoding="utf-8") as fh:
+            fh.write(content)
+        subprocess.run(self.git + ["-C", root, "add", "."], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"],
+                       check=True)
+        return root
+
+    def test_tracked_deploy_key_is_refused_and_names_path_only(self):
+        root = self._root_with("deploy.key", "FAKE-KEY\n")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        with self.assertRaises(self.cli.PrivacyRefused) as ctx:
+            self.cli.isolate_clone(root, dest, "agent/t2s3")
+        self.assertIn("deploy.key", str(ctx.exception))
+        self.assertNotIn("FAKE-KEY", str(ctx.exception))
+        self.assertFalse(os.path.exists(dest))
+
+    def test_sops_encrypted_key_is_allowed(self):
+        root = self._root_with("deploy.key", "ENC[AES256_GCM,data:fake]\n")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2s3enc")
+        self.assertTrue(os.path.isdir(dest))
+
+    def test_example_template_is_exempt(self):
+        root = self._root_with("api-keys.example.yml", "api-keys: FAKE\n")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2s3ex")
+        self.assertTrue(os.path.isdir(dest))
+
+
+class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
+    """S4: non-AutoOS cards live under ~/fleet/sandboxes/<repo>/, not logs/."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t",
+                    "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def _repo(self, name):
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        root = os.path.join(base, name)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+        with open(os.path.join(root, "keep.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("keep\n")
+        subprocess.run(self.git + ["-C", root, "add", "."], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "init"],
+                       check=True)
+        return root
+
+    def _args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=2, card=None, allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False,
+            model="omniroute/t2-worker",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL, isolate=True,
+            auto=True, lean=False, title=None, dry_run=True, task="do it",
+            no_defer=False, read_only=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def _cfg(self):
+        return {"providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+
+    def test_non_autoos_sandbox_leaves_the_autoos_tree(self):
+        from unittest import mock as _mock
+        root = self._repo("Server")
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/x",
+                 "reason": "stub", "privacy": "public", "review": False,
+                 "resolver": False, "read_only": False, "effort": None}
+        with _mock.patch.object(self.cli, "resolve_route",
+                                lambda *a, **k: dict(route)):
+            with _mock.patch.object(self.cli, "isolate_source",
+                                    lambda cwd=None: root):
+                with _mock.patch.dict(os.environ, {"HOME": home}):
+                    plan = self.cli.build_plan(self._args(), self._cfg())
+        sb = plan["sandbox"]
+        want_base = os.path.join(home, "fleet", "sandboxes", "Server")
+        self.assertTrue(sb["path"].startswith(want_base + os.sep), sb["path"])
+        self.assertNotIn("logs/sandboxes", sb["path"])
+        self.assertIn("Server", sb["branch"])
+        self.assertNotIn("AutoOS", sb["branch"])
+        self.assertIn("Server", plan["session_tag"])
+        self.assertTrue(sb["branch"].split("/")[0] != "agent" or
+                        "Server" in sb["branch"])
+
+    def test_autoos_cards_stay_in_logs_sandboxes(self):
+        from unittest import mock as _mock
+        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/x",
+                 "reason": "stub", "privacy": "public", "review": False,
+                 "resolver": False, "read_only": False, "effort": None}
+        with _mock.patch.object(self.cli, "resolve_route",
+                                lambda *a, **k: dict(route)):
+            with _mock.patch.object(self.cli, "isolate_source",
+                                    lambda cwd=None: self.cli.ROOT):
+                plan = self.cli.build_plan(self._args(), self._cfg())
+        sb = plan["sandbox"]
+        self.assertIn(os.path.join("logs", "sandboxes"), sb["path"])
 
 
 if __name__ == "__main__":

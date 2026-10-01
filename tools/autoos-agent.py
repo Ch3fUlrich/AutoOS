@@ -612,16 +612,270 @@ def isolate_source(cwd: str | None = None) -> str:
     return top or ROOT
 
 
+ISOLATE_EXCLUDED_TOPDIR = "secrets-generated"
+
+# T2-ISOLATE-SECRETS S3: tracked names that look like a plaintext secret.
+_ISOLATE_SECRET_PATTERNS = ("*.key", "*.pem", ".env", ".env.*", "api-keys.yml",
+                            "api_keys.*", "id_rsa*", "*.p12", "credentials*.json")
+_ISOLATE_SECRET_EXEMPT = (".example.", ".sample", ".template")
+
+
+def _isolate_exempt_name(rel: str) -> bool:
+    base = os.path.basename(rel)
+    if ".example." in base:
+        return True
+    return base.endswith(".sample") or base.endswith(".template") or \
+        ".template." in base or ".sample." in base
+
+
+def _isolate_secret_name(rel: str) -> bool:
+    import fnmatch as _fn
+    if _isolate_exempt_name(rel):
+        return False
+    base = os.path.basename(rel)
+    if base in (".env", "api-keys.yml"):
+        return True
+    for pat in _ISOLATE_SECRET_PATTERNS:
+        if _fn.fnmatchcase(base, pat) or _fn.fnmatchcase(rel, pat):
+            return True
+    return False
+
+
+def _isolate_blob_encrypted(text: str) -> bool:
+    if "ENC[AES256_GCM," in text:
+        return True
+    for line in text.splitlines():
+        stripped = line.strip().strip("\"'").lower()
+        if stripped.startswith("sops:"):
+            return True
+    if "sops_" in text:
+        return True
+    return False
+
+
+def _isolate_agentignore_patterns(root: str) -> list:
+    """One gitignore-style pattern per line from the source HEAD's .agentignore.
+
+    Read from the committed blob (the worktree file may be edited or absent);
+    `#` comments and blanks are skipped, absent file means no patterns.
+    """
+    proc = subprocess.run(["git", "-C", root, "show", "HEAD:.agentignore"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        out.append(stripped)
+    return out
+
+
+def _isolate_pattern_matches(rel: str, pat: str) -> bool:
+    import fnmatch as _fn
+    posix = rel.replace(os.sep, "/")
+    pat = pat.strip()
+    if not pat or pat.startswith("#"):
+        return False
+    if pat.startswith("/"):
+        pat = pat[1:]
+    dir_only = pat.endswith("/")
+    core = pat.rstrip("/")
+    if "/" not in core:
+        if _fn.fnmatchcase(os.path.basename(posix), core):
+            return True
+        if dir_only and (posix == core or posix.startswith(core + "/")):
+            return True
+        return False
+    if _fn.fnmatchcase(posix, core) or _fn.fnmatchcase(posix, core + "/*"):
+        return True
+    if dir_only and (posix == core or posix.startswith(core + "/")):
+        return True
+    return False
+
+
+def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
+    """The HEAD files the source's own sparse-checkout allows, or None.
+
+    None means the source is not sparse, so every non-excluded HEAD file is
+    allowed. A sparse source lists only its checked-out subset in
+    `.git/info/sparse-checkout` with `core.sparseCheckout` true; honour it by
+    filtering the same way, so the sandbox never materialises what the source
+    itself hides.
+    """
+    proc = subprocess.run(["git", "-C", root, "config", "--bool",
+                           "core.sparseCheckout"],
+                          capture_output=True, text=True)
+    if proc.stdout.strip() != "true":
+        return None
+    gitdir = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
+                            capture_output=True, text=True)
+    gd = (gitdir.stdout.strip() or ".git")
+    if not os.path.isabs(gd):
+        gd = os.path.join(root, gd)
+    patterns = []
+    try:
+        with io.open(os.path.join(gd, "info", "sparse-checkout"),
+                     encoding="utf-8") as fh:
+            for line in fh.read().splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#"):
+                    patterns.append(stripped)
+    except OSError:
+        return None
+    if not patterns:
+        return None
+    includes = [p for p in patterns if not p.startswith("!")]
+    excludes = [p[1:] for p in patterns if p.startswith("!")]
+    allowed = set()
+    for rel in head_files:
+        if includes and not any(_isolate_pattern_matches(rel, p) for p in includes):
+            continue
+        if any(_isolate_pattern_matches(rel, p) for p in excludes):
+            continue
+        allowed.add(rel)
+    return allowed
+
+
+def _isolate_path_excluded(rel: str, agentignore: list) -> bool:
+    posix = rel.replace(os.sep, "/")
+    if posix == ISOLATE_EXCLUDED_TOPDIR or \
+            posix.startswith(ISOLATE_EXCLUDED_TOPDIR + "/"):
+        return True
+    return any(_isolate_pattern_matches(rel, p) for p in agentignore)
+
+
+def _isolate_allowed_files(root: str) -> tuple:
+    """`(source_sha, allowed, agentignore)`: HEAD files minus every exclusion."""
+    source_sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                                capture_output=True, text=True,
+                                check=True).stdout.strip()
+    proc = subprocess.run(["git", "-C", root, "ls-tree", "-r", "--name-only",
+                           "-z", "HEAD"], capture_output=True, text=True,
+                          check=True)
+    head_files = [p for p in proc.stdout.split("\0") if p]
+    agentignore = _isolate_agentignore_patterns(root)
+    sparse = _isolate_sparse_allowed(root, head_files)
+    allowed = [p for p in head_files
+               if not _isolate_path_excluded(p, agentignore)
+               and (sparse is None or p in sparse)]
+    return source_sha, allowed, agentignore
+
+
+def isolate_preflight_refuse(root: str) -> None:
+    """Raise PrivacyRefused when the source HEAD tracks a plaintext secret.
+
+    Only files outside the excluded dirs are examined, and only blobs whose
+    name looks secret-shaped are read (via `git cat-file -p`, never the
+    worktree). SOPS-encrypted blobs (`ENC[AES256_GCM,` or a top-level `sops:`
+    key / `sops_` keys, the semantics of scripts/secrets.sh status) and
+    `*.example.*` / `*.sample` / `*.template` fixtures are not secrets. The
+    message names PATHS only, never contents.
+    """
+    source_sha, allowed, agentignore = _isolate_allowed_files(root)
+    del source_sha
+    del agentignore
+    allowed_set = set(allowed)
+    bad = []
+    for rel in sorted(allowed_set):
+        if not _isolate_secret_name(rel):
+            continue
+        blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
+                               "HEAD:" + rel],
+                              capture_output=True, text=True)
+        if blob.returncode != 0:
+            continue
+        if _isolate_blob_encrypted(blob.stdout):
+            continue
+        bad.append(rel)
+    if bad:
+        raise PrivacyRefused(
+            "refusing sandbox: source HEAD tracks plaintext secret "
+            "file(s): %s (encrypt with SOPS or list them in .agentignore; "
+            "nothing was cloned)" % ", ".join(bad))
+
+
+def sandbox_repo_slug(source: str) -> str:
+    """Filesystem/branch-safe basename of the source repo (S4)."""
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-",
+                  os.path.basename(os.path.abspath(source))).strip("-")
+    return slug or "repo"
+
+
+def is_autoos_source(source: str) -> bool:
+    """Whether an --isolate source is this AutoOS checkout (S4)."""
+    try:
+        return os.path.abspath(source) == os.path.abspath(ROOT)
+    except OSError:
+        return False
+
+
+def sandbox_path_for(source: str, run_id: str) -> str:
+    """Where a sandbox for `source` lives (S4).
+
+    AutoOS's own cards keep the git-ignored `logs/sandboxes/` tree. A card
+    whose cwd repo is anywhere else gets `~/fleet/sandboxes/<repo>/` outside
+    the AutoOS tree, so a foreign checkout's files never land inside it.
+    """
+    slug = sandbox_repo_slug(source)
+    name = "%s-%s" % (slug if not is_autoos_source(source)
+                       else os.path.basename(ROOT), run_id)
+    if is_autoos_source(source):
+        return os.path.join(clients.state_dir(), "sandboxes", name)
+    return os.path.join(os.path.expanduser("~"), "fleet", "sandboxes",
+                        slug, name)
+
+
+def sandbox_branch_for(source: str, run_id: str) -> str:
+    """The sandbox branch for `source` (S4): it names the target repo."""
+    if is_autoos_source(source):
+        return "agent/%s" % run_id
+    return "%s/%s" % (sandbox_repo_slug(source), run_id)
+
+
 def isolate_clone(root: str, path: str, branch: str) -> str:
     """Create the --isolate sandbox and return its base sha.
 
+    DESIGN (T2-ISOLATE-SECRETS S2) — WHY an archive into a fresh repo instead
+    of a clone: `git clone` copies the source's object DB, so HEAD blobs of
+    excluded paths (`secrets-generated/`, `.agentignore` entries, sparse-hidden
+    files) would still sit inside the sandbox's `.git` even when the worktree
+    hides them, and the full history keeps every old plaintext blob reachable
+    via `git show <old sha>:path`. `git archive HEAD` of the allowed paths
+    into a fresh `git init` with one `sandbox base (source <sha>)` commit
+    carries no history (S1: `rev-list --all` is 1, old blobs are unknown) and
+    no excluded blob anywhere including `.git`, shares no objects with the
+    source (`--no-hardlinks` is moot: there is no clone at all), and cannot
+    inherit the source's refs. The source sha rides in the commit message and
+    in `autoos.sandboxSource`, so provenance survives; the spawner still
+    fetches `git fetch <path> <branch>` from the sandbox path, and the
+    sandbox_* diff helpers keep working with `base` = this single commit.
+
     The steps are one function because the containment claim is about the
-    directory the worker lands in: `git clone --local` copies HEAD's tracked
-    files, so nothing git-ignored and nothing untracked exists in the clone
-    (KEYDENY3b), and the push fence plus the credential-free env make a push
-    out of it an accident guard, not a boundary (FF1, D-106).
+    directory the worker lands in: the sandbox holds committed allowed files
+    only, so nothing git-ignored and nothing untracked exists in it (KEYDENY3b),
+    and the push fence plus the credential-free env make a push out of it an
+    accident guard, not a boundary (FF1, D-106).
     """
-    subprocess.run(["git", "clone", "-q", "--local", root, path], check=True)
+    if os.path.lexists(path):
+        raise FileExistsError("sandbox destination already exists: %s" % path)
+    isolate_preflight_refuse(root)
+    source_sha, allowed, _agentignore = _isolate_allowed_files(root)
+    os.makedirs(path, exist_ok=True)
+    subprocess.run(["git", "init", "-q", path], check=True)
+    if allowed:
+        archive = subprocess.run(["git", "-C", root, "archive", "HEAD", "--",
+                                  *allowed],
+                                 capture_output=True, check=True)
+        subprocess.run(["tar", "-x", "-C", path], input=archive.stdout,
+                       check=True)
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
+                    "sandbox base (source %s)" % source_sha], check=True)
+    subprocess.run(["git", "-C", path, "config", "--local",
+                    "autoos.sandboxSource", source_sha], check=True)
     # The orchestrator still fetches from the sandbox path (unchanged); every
     # remote's push URL is disabled and a pre-push hook is installed, so an
     # unplanned `git push` — to origin or to the parent's absolute path the
@@ -3535,8 +3789,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # with the clone it was told to reuse would be a lie either way.
     given_run_id = getattr(args, "run_id", None)
     run_id = given_run_id or mint_run_id(title, args.task)
-    if sandbox is not None and not given_run_id \
-            and (sandbox.get("branch") or "").startswith("agent/"):
+    if sandbox is not None and not given_run_id:
         # a fallthrough re-run shares the first attempt's clone and branch, so it
         # shares its id: one spawn is one id, not one per attempt.
         # FLEETP0 review LOW: only when that suffix IS a run id. A branch named
@@ -3544,9 +3797,12 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # pasting its tail into the header, the record and `ps` unvalidated is
         # exactly what is_canonical_run_id was written to refuse. A fresh id
         # still names a fresh record; the reused clone is unchanged either way.
-        inherited = sandbox["branch"][len("agent/"):]
-        if is_canonical_run_id(inherited):
-            run_id = inherited
+        # S4: non-AutoOS branches carry "<reposlug>/<run_id>", so the id is the
+        # tail after the last slash, not an "agent/" prefix.
+        _inherited = (sandbox.get("branch") or "").rsplit("/", 1)[-1] \
+            if "/" in (sandbox.get("branch") or "") else ""
+        if _inherited and is_canonical_run_id(_inherited):
+            run_id = _inherited
     env["AUTOOS_AGENT_RUN_ID"] = run_id
     tag = None
     # FAMILYFENCE-b: the two provenance fields every writer record reads. Both are
@@ -3637,15 +3893,20 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
             # keeps two spawns in the same second (same task) from naming the
-            # same clone (bug 1).
-            name = "%s-%s" % (os.path.basename(ROOT), run_id)
-            # Inside the repo's git-ignored logs/ (clients.state_dir). The clone has
-            # its own .git, so opencode resolves it as its own project root.
-            sandbox = {"path": os.path.join(clients.state_dir(), "sandboxes", name),
-                       "branch": "agent/%s" % run_id,
+            # same sandbox (bug 1). S4: the source repo decides the home —
+            # AutoOS's own cards keep logs/sandboxes, a foreign cwd repo goes
+            # to ~/fleet/sandboxes/<repo>/ outside the AutoOS tree.
+            _sandbox_source = isolate_source()
+            sandbox = {"path": sandbox_path_for(_sandbox_source, run_id),
+                       "branch": sandbox_branch_for(_sandbox_source, run_id),
                        # Forked from the caller's checkout, not from wherever this
                        # script happens to live (KEYDENY3g item 7).
-                       "source": isolate_source()}
+                       "source": _sandbox_source}
+            if tag is not None and not is_autoos_source(_sandbox_source):
+                # S4: the session-tag prefix names the target repo, not AutoOS/.
+                _slug = sandbox_repo_slug(_sandbox_source)
+                tag = "%s/%s" % (_slug, tag.split("/", 1)[1]) if "/" in tag \
+                    else _slug
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
@@ -7876,7 +8137,8 @@ def cmd_run(args, cfg: dict) -> int:
         if last_mile_note is not None:
             print("claude-budget: %s" % last_mile_note, file=sys.stderr)
         if plan["sandbox"]:
-            print("would run: git clone --local %s %s && git switch -c %s" % (
+            print("would run: sandbox from %s at %s (branch %s; one-commit "
+                  "archive of allowed HEAD files, secrets excluded)" % (
                 plan["sandbox"].get("source") or isolate_source(),
                 plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))
@@ -7976,7 +8238,24 @@ def cmd_run(args, cfg: dict) -> int:
         source = sb.get("source") or isolate_source()
         parent_snap = parent_snapshot(source)
         os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
-        isolate_clone(source, sb["path"], sb["branch"])
+        if not is_autoos_source(source):
+            # S4: a foreign repo's sandbox lives under ~/fleet/sandboxes with
+            # owner-only access.
+            _fleet = os.path.join(os.path.expanduser("~"), "fleet",
+                                  "sandboxes")
+            _p = sb["path"]
+            while _p.startswith(_fleet + os.sep) or _p == _fleet:
+                try:
+                    os.chmod(_p, 0o700)
+                except OSError:
+                    pass
+                if _p == _fleet:
+                    break
+                _p = os.path.dirname(_p)
+        try:
+            isolate_clone(source, sb["path"], sb["branch"])
+        except PrivacyRefused as exc:
+            return refuse(str(exc))
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True).stdout.strip()
         # SB-A (D-103) item 2 (NOOPCOMMIT): the ref tips as the clone stands up.
