@@ -3137,7 +3137,12 @@ def cmd_ready(args) -> int:
     (T0-FREEZE, plan v3) refuses while main CI is red: the latest completed
     workflow run on ``main`` must conclude ``success``, else the lane is refused
     as ``main-ci-red`` naming the run id — unless the lane fixes main itself,
-    declared with ``--fixes-main``. The bypass is a CLI flag, not a record
+    declared with ``--fixes-main`` AND the environment declaring
+    ``AUTOOS_FIXES_MAIN=<lane>@<sha>`` whose sha equals ``--sha`` (T0-FREEZE-2:
+    a bare flag, or a declaration for a different sha, is refused as
+    ``main-ci-red`` saying the waiver was not declared; a declared waiver is
+    logged as ``<lane>@<sha>`` on the ready line's note). The bypass is a CLI
+    flag plus an orchestrator-owned env declaration, not a record
     field, because the record's machine-readable vocabulary is the closed
     ``REVIEW_ENTRY_FIELDS`` list and a free-form token there would be ignored
     prose. The gates
@@ -3211,7 +3216,26 @@ def cmd_ready(args) -> int:
     # T0-FREEZE (plan v3): no lane merges while main CI is red, except the lane
     # that fixes main. Runs after the pre-push gate so each refusal names the
     # gate the caller actually hit; fail-closed like every other unreadable gate.
-    if not getattr(args, "fixes_main", False):
+    # T0-FREEZE-2 F1: --fixes-main alone waives nothing. The waiver is honoured
+    # ONLY when the environment declares AUTOOS_FIXES_MAIN=<lane>@<sha> whose
+    # sha equals the --sha being readied — a bare flag, or a declaration for a
+    # different sha, is refused here naming main-ci-red. WHY the env dance: the
+    # flag is typed by whoever runs the command (including a writer clearing
+    # its own gate), while the env is set by the orchestrator that owns the
+    # lane — so only a lane whose owner declared the fix can claim it.
+    fixes_waiver = ""
+    if getattr(args, "fixes_main", False):
+        declared = os.environ.get("AUTOOS_FIXES_MAIN", "")
+        lane, sep, declared_sha = declared.partition("@")
+        if sep and lane and declared_sha == args.sha:
+            fixes_waiver = declared
+        else:
+            print("ready: not appended -- main-ci-red: --fixes-main was given "
+                  "but the waiver was not declared for this sha (want "
+                  "AUTOOS_FIXES_MAIN=<lane>@%s); merge nothing until main is "
+                  "green" % args.sha)
+            return 1
+    if not fixes_waiver:
         main_conclusion, main_run_id, main_error = main_ci_status()
         if main_error:
             print("ready: cannot read main CI: %s" % main_error, file=sys.stderr)
@@ -3222,8 +3246,8 @@ def cmd_ready(args) -> int:
                   "the fix with --fixes-main" % (main_run_id, main_conclusion))
             return 1
     else:
-        print("note: --fixes-main -- the lane declares it fixes main, "
-              "so the main-ci-red gate is waived")
+        print("note: --fixes-main -- %s declares it fixes main, "
+              "so the main-ci-red gate is waived" % fixes_waiver)
     line = "%s ready %s %s reviews: %s | %s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
@@ -8893,9 +8917,11 @@ def _parser_ready(sub):
                               "a writer clearing its own gate is not what this is for")
     ready_p.add_argument("--fixes-main", dest="fixes_main", action="store_true",
                          help="this lane fixes main itself: waive the main-ci-red gate "
-                              "(T0-FREEZE). Without it a red main freezes every lane; "
-                              "with it the lane is allowed onto a red main and one "
-                              "note says the gate was waived")
+                              "(T0-FREEZE). Honoured only with AUTOOS_FIXES_MAIN="
+                              "<lane>@<sha> in the environment naming this lane's sha; "
+                              "a bare flag is refused. Without a declared waiver a red "
+                              "main freezes every lane; with it the lane is allowed "
+                              "onto a red main and one note logs the <lane>@<sha>")
 
 
 def _parser_inbox(sub):

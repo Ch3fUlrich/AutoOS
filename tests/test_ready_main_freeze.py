@@ -156,19 +156,29 @@ class MainCiFreezeTests(unittest.TestCase):
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
 
-    def run_ready_with_main(self, conclusion, run_id="777", error=None, extra=()):
+    def run_ready_with_main(self, conclusion, run_id="777", error=None, extra=(),
+                            declare_waiver=False):
         """Drive the real CLI with the main-CI gh read replaced.
 
         The fake mirrors the injectable-runner contract `ci_run_status` uses
         (tools/autoos-agent.py:3059-3075): it returns (conclusion, run_id, error)
         exactly as the parsed `gh run list --json databaseId,conclusion,headSha`
         array row would. `error` non-None is the gh-unreadable case.
+        declare_waiver=True exports AUTOOS_FIXES_MAIN=<branch>@<sha> for the
+        lane under test (T0-FREEZE-2: --fixes-main alone waives nothing).
+        The env is scrubbed of any outer declaration first, so the tests mean
+        what they say even if the harness exports one.
         """
         repo, sha = self.make_repo()
         inbox = self.make_inbox("")
         record = self.write_record(*self.READY_RECORD)
-        with mock.patch.object(self.agent, "main_ci_status",
-                               lambda runner=None: (conclusion, run_id, error)):
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        if declare_waiver:
+            outer["AUTOOS_FIXES_MAIN"] = "%s@%s" % (self.BRANCH, sha)
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: (conclusion, run_id, error)):
             rc, out, err = self.ready(record, repo, sha, inbox, extra=extra)
         return rc, out, err, self.read_inbox(inbox)
 
@@ -181,7 +191,8 @@ class MainCiFreezeTests(unittest.TestCase):
 
     def test_red_main_with_fixes_main_is_allowed(self):
         rc, out, err, inbox = self.run_ready_with_main(
-            "failure", run_id="777", extra=("--fixes-main",))
+            "failure", run_id="777", extra=("--fixes-main",),
+            declare_waiver=True)
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(len(inbox.splitlines()), 1, out + err + inbox)
 
@@ -196,6 +207,227 @@ class MainCiFreezeTests(unittest.TestCase):
         self.assertEqual(rc, 2, out + err)
         self.assertIn("gh", err)
         self.assertEqual(inbox, "")
+
+
+class FixMainWaiverTests(MainCiFreezeTests):
+    """F1: --fixes-main is an env-declared waiver, not a bare flag.
+
+    The waiver is honoured ONLY when the environment declares
+    AUTOOS_FIXES_MAIN=<lane>@<sha> whose sha equals the --sha being readied;
+    a bare flag, or a mismatching env, REFUSES with exit 1 naming main-ci-red
+    and saying the waiver was not declared. The ready line logs the waiver
+    use (lane@sha only).
+    """
+
+    def run_ready_env(self, env_value, conclusion="failure", run_id="777",
+                      error=None, extra=("--fixes-main",)):
+        """Drive the real CLI with a controlled AUTOOS_FIXES_MAIN value.
+
+        env_value=None is the bare flag (any outer declaration scrubbed, so
+        the test means "no declaration" even if the harness exports one).
+        """
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        if env_value is not None:
+            outer["AUTOOS_FIXES_MAIN"] = env_value
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: (conclusion, run_id, error)):
+            rc, out, err = self.ready(record, repo, sha, inbox, extra=extra)
+        return rc, out, err, self.read_inbox(inbox), sha
+
+    def test_bare_fixes_main_flag_is_refused(self):
+        rc, out, err, inbox, _sha = self.run_ready_env(None)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_bare_flag_is_refused_even_when_main_is_green(self):
+        rc, out, err, inbox, _sha = self.run_ready_env(None, conclusion="success")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_mismatching_env_sha_is_refused(self):
+        rc, out, err, inbox, _sha = self.run_ready_env(
+            "lane/work@" + "0" * 40)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_malformed_env_without_lane_at_sha_is_refused(self):
+        for bad in ("justalane", "", "@", "lane/work@"):
+            with self.subTest(env=bad):
+                rc, out, err, inbox, _sha = self.run_ready_env(bad)
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("main-ci-red", out + err)
+                self.assertIn("waiver was not declared", out + err)
+                self.assertEqual(inbox, "")
+
+    def test_matching_env_waiver_is_honoured_and_logs_lane_at_sha(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        declared = "%s@%s" % (self.BRANCH, sha)
+        outer = dict(os.environ)
+        outer["AUTOOS_FIXES_MAIN"] = declared
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: ("failure", "777", None)):
+            rc, out, err = self.ready(record, repo, sha, inbox,
+                                      extra=("--fixes-main",))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(declared, out)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1,
+                         out + err + self.read_inbox(inbox))
+
+    def test_matching_env_without_the_flag_still_freezes(self):
+        """The env alone waives nothing: red main blocks a lane that never
+        passed --fixes-main, even when the declaration names its sha."""
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        outer = dict(os.environ)
+        outer["AUTOOS_FIXES_MAIN"] = "%s@%s" % (self.BRANCH, sha)
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: ("failure", "777", None)):
+            rc, out, err = self.ready(record, repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+
+class MainCiStatusParserTests(unittest.TestCase):
+    """F2: main_ci_status parses the real `gh run list` array contract.
+
+    Fakes mirror tests/test_autoos_spawner.py CIRunStatusTests (line 10031):
+    its proc() wraps stdout in subprocess.CompletedProcess and its read()
+    injects the runner, asserting argv and the timeout kwarg (lines ~10036-10060).
+    Same shape here, against the ARRAY stdout `gh run list --json
+    databaseId,conclusion,headSha` prints. Parser-level contract: a non-None
+    error is the gh-unreadable case (the ready gate turns it into exit 2);
+    a returned conclusion is what the gate compares (non-success -> exit 1
+    main-ci-red, success -> allowed).
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def parse(self, stdout, rc=0, stderr="", exc=None):
+        seen = {}
+
+        def runner(argv, **kw):
+            seen["argv"] = list(argv)
+            seen["kw"] = kw
+            if exc is not None:
+                raise exc
+            return subprocess.CompletedProcess(["gh"], rc,
+                                               stdout=stdout, stderr=stderr)
+
+        return self.agent.main_ci_status(runner=runner), seen
+
+    def test_it_asks_gh_for_main_completed_runs_and_three_fields(self):
+        (_conclusion, _run_id, err), seen = self.parse(
+            json.dumps([{"databaseId": 1, "conclusion": "success",
+                         "headSha": "abc"}]))
+        self.assertIsNone(err)
+        self.assertEqual(seen["argv"],
+                         ["gh", "run", "list", "--branch", "main",
+                          "--status", "completed", "--limit", "1",
+                          "--json", "databaseId,conclusion,headSha"])
+
+    def test_it_times_out_rather_than_hanging_the_gate(self):
+        (_c, _r, _e), seen = self.parse(
+            json.dumps([{"databaseId": 1, "conclusion": "success",
+                         "headSha": "a"}]))
+        self.assertLessEqual(seen["kw"].get("timeout", 10 ** 9), 120)
+
+    def test_success_returns_conclusion_and_run_id(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            json.dumps([{"databaseId": 777, "conclusion": "success",
+                         "headSha": "deadbeef"}]))
+        self.assertIsNone(err)
+        self.assertEqual((conclusion, run_id), ("success", "777"))
+
+    def test_red_conclusions_are_returned_for_the_gate_to_refuse(self):
+        for conclusion in ("failure", "cancelled", "skipped", "timed_out",
+                           "action_required", "stale"):
+            with self.subTest(conclusion=conclusion):
+                (got, run_id, err), _seen = self.parse(
+                    json.dumps([{"databaseId": 42, "conclusion": conclusion,
+                                 "headSha": "deadbeef"}]))
+                self.assertIsNone(err)
+                self.assertEqual((got, run_id), (conclusion, "42"))
+
+    def test_empty_array_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse("[]")
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertTrue(err)
+
+    def test_non_dict_row_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse('["nope"]')
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertTrue(err)
+
+    def test_missing_database_id_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            json.dumps([{"conclusion": "failure", "headSha": "deadbeef"}]))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertTrue(err)
+
+    def test_missing_conclusion_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            json.dumps([{"databaseId": 7, "headSha": "deadbeef"}]))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertTrue(err)
+
+    def test_null_or_empty_conclusion_is_unreadable(self):
+        for bad in (None, ""):
+            with self.subTest(conclusion=bad):
+                (conclusion, run_id, err), _seen = self.parse(
+                    json.dumps([{"databaseId": 7, "conclusion": bad,
+                                 "headSha": "deadbeef"}]))
+                self.assertIsNone(conclusion)
+                self.assertIsNone(run_id)
+                self.assertTrue(err)
+
+    def test_invalid_json_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse("not json at all")
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertIn("json", err.lower())
+
+    def test_nonzero_gh_is_unreadable_naming_its_output(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            "", rc=1, stderr="gh: no runs found")
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertIn("no runs found", err)
+
+    def test_a_gh_timeout_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            "", exc=subprocess.TimeoutExpired(["gh"], 60))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertTrue(err)
+
+    def test_a_gh_that_cannot_start_is_unreadable(self):
+        (conclusion, run_id, err), _seen = self.parse(
+            "", exc=OSError("No such file or directory"))
+        self.assertIsNone(conclusion)
+        self.assertIsNone(run_id)
+        self.assertIn("No such file", err)
 
 
 if __name__ == "__main__":
