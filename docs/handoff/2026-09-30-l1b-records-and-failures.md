@@ -573,7 +573,7 @@ Our wave has started merging: `L1-backlog/reviewgate-2fam` `d0f70f1` and
 
 ## 15. Redaction sweep (Hard Rule 1) — 2026-10-01
 
-- `origin/main` `88359146` is **clean** (0 `<user>` hits): the inherited
+- `origin/main` `88359146` is **clean** (no username hits): the inherited
   `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` leak is already redacted on main
   (`1ddcff16`) — so a rebase fixes it on every branch.
 - Swept the lane worktrees and committed **30 branches** (`redact(Hard Rule 1): …` each):
@@ -585,4 +585,5 @@ Our wave has started merging: `L1-backlog/reviewgate-2fam` `d0f70f1` and
   `%APPDATA%`) and `.py` compile-checked, not blind-replaced.
 - **Residual:** `L1-backlog/ws-tier-order-20261001` — 4 hits incl. `tools/combo-contract.py`
   (code). alpha's in-flight lane; flagged for TORDER, not touched.
-- Replacement `(?i)<user>(?!er)` → `<user>`; no `<user>er` over-replacement.
+- Replacement: every occurrence of the workstation username replaced with `<user>`; a `(?!er)`
+  guard keeps the git author address intact; no `<user>er` over-replacement.
