@@ -215,7 +215,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
 
     The waiver is honoured ONLY when the environment declares
     AUTOOS_FIXES_MAIN=<lane>@<sha> whose sha equals the --sha being readied;
-    a bare flag, or a mismatching env, REFUSES with exit 1 naming main-ci-red
+    a bare flag, or a mismatching env, REFUSES with exit 1 naming waiver-not-declared
     and saying the waiver was not declared and the CI was not consulted. The
     ready line logs the waiver use (lane@sha in stdout and as
     fixes_main="lane@sha" on the inbox line).
@@ -244,7 +244,8 @@ class FixMainWaiverTests(MainCiFreezeTests):
     def test_bare_fixes_main_flag_is_refused(self):
         rc, out, err, inbox, _sha = self.run_ready_env(None)
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
@@ -252,7 +253,8 @@ class FixMainWaiverTests(MainCiFreezeTests):
     def test_bare_flag_is_refused_even_when_main_is_green(self):
         rc, out, err, inbox, _sha = self.run_ready_env(None, conclusion="success")
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
@@ -261,7 +263,8 @@ class FixMainWaiverTests(MainCiFreezeTests):
         rc, out, err, inbox, _sha = self.run_ready_env(
             "lane/work@" + "0" * 40)
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
@@ -271,7 +274,8 @@ class FixMainWaiverTests(MainCiFreezeTests):
             with self.subTest(env=bad):
                 rc, out, err, inbox, _sha = self.run_ready_env(bad)
                 self.assertEqual(rc, 1, out + err)
-                self.assertIn("main-ci-red", out + err)
+                self.assertIn("waiver-not-declared", out + err)
+                self.assertNotIn("main-ci-red", out + err)
                 self.assertIn("waiver was not declared", out + err)
                 self.assertIn("CI was not consulted", out + err)
                 self.assertEqual(inbox, "")
@@ -491,7 +495,8 @@ class Freeze3WaiverLineTests(FixMainWaiverTests):
         rc, out, err, inbox, sha = self.ready_with_env(
             lambda s: "other@%s" % s)
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver lane mismatch", out + err)
         self.assertIn("other", out + err)
         self.assertEqual(inbox, "")
@@ -500,7 +505,8 @@ class Freeze3WaiverLineTests(FixMainWaiverTests):
         rc, out, err, inbox, sha = self.ready_with_env(
             lambda s: " @%s" % s)
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertEqual(inbox, "")
 
@@ -518,7 +524,8 @@ class Freeze3WaiverLineTests(FixMainWaiverTests):
         rc, out, err, inbox, sha = self.ready_with_env(
             lambda s: "%s@extra@%s" % (self.BRANCH, s))
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertNotIn("waiver lane mismatch", out + err)
         self.assertEqual(inbox, "")
@@ -529,7 +536,8 @@ class Freeze3WaiverLineTests(FixMainWaiverTests):
         rc, out, err, inbox, sha = self.ready_with_env(
             lambda s: "%s@%s" % (self.BRANCH, s[:12]))
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver-not-declared", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
         self.assertEqual(inbox, "")
 
@@ -581,14 +589,25 @@ class Freeze4ScopedCiTests(MainCiStatusParserTests):
 class Freeze4WaiverLaneCharsTests(Freeze3WaiverLineTests):
     """T0-FREEZE-4 H3: the waiver lane is safe for the durable line."""
 
-    BRANCH = 'lane/a"b'
-
     def test_quote_in_waiver_lane_is_refused(self):
+        self.BRANCH = 'lane/a"b'
         rc, out, err, inbox, sha = self.ready_with_env(
             lambda s: '%s@%s' % (self.BRANCH, s))
         self.assertEqual(rc, 1, out + err)
         self.assertIn("waiver-not-declared", out + err)
+        self.assertIn("cannot be written", out + err)
+        self.assertNotIn("main-ci-red", out + err)
         self.assertEqual(inbox, "")
+
+    def test_backslash_and_space_in_waiver_lane_are_refused(self):
+        for bad_lane in ("la\\ne", "la ne", "la\tne"):
+            with self.subTest(lane=bad_lane):
+                rc, out, err, inbox, sha = self.ready_with_env(
+                    lambda s, b=bad_lane: '%s@%s' % (b, s))
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("waiver-not-declared", out + err)
+                self.assertIn("cannot be written", out + err)
+                self.assertEqual(inbox, "")
 
 
 class Freeze4WaiverGateNameTests(FixMainWaiverTests):

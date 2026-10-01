@@ -3142,7 +3142,7 @@ def cmd_ready(args) -> int:
     declared with ``--fixes-main`` AND the environment declaring
     ``AUTOOS_FIXES_MAIN=<lane>@<sha>`` whose sha equals ``--sha`` (T0-FREEZE-2:
     a bare flag, or a declaration for a different sha, is refused as
-    ``main-ci-red`` saying the waiver was not declared and the CI was not
+    ``waiver-not-declared`` saying the waiver was not declared and the CI was not
     consulted; a declared waiver is
     logged as ``<lane>@<sha>`` on the ready line's note and as
     ``fixes_main="<lane>@<sha>"`` on the ready line itself, copying the
@@ -3225,7 +3225,7 @@ def cmd_ready(args) -> int:
     # T0-FREEZE-2 F1: --fixes-main alone waives nothing. The waiver is honoured
     # ONLY when the environment declares AUTOOS_FIXES_MAIN=<lane>@<sha> whose
     # sha equals the --sha being readied — a bare flag, or a declaration for a
-    # different sha, is refused here naming main-ci-red. WHY the env dance: the
+    # different sha, is refused here naming waiver-not-declared. WHY the env dance: the
     # flag is typed by whoever runs the command (including a writer clearing
     # its own gate), while the env is set by the orchestrator that owns the
     # lane — so only a lane whose owner declared the fix can claim it.
@@ -3235,7 +3235,7 @@ def cmd_ready(args) -> int:
     # equal args.branch EXACTLY or equal its basename after the last '/'
     # (documented: exact or basename), and a whitespace-only lane is refused
     # like a missing one. A sha-matching declaration for another lane is
-    # refused naming main-ci-red and 'waiver lane mismatch'. The waiver field
+    # refused naming waiver-not-declared and 'waiver lane mismatch'. The waiver field
     # copies the unverified="..." style so inbox readers still parse the line.
     fixes_waiver = ""
     fixes_field = ""
@@ -3243,15 +3243,26 @@ def cmd_ready(args) -> int:
         declared = os.environ.get("AUTOOS_FIXES_MAIN", "").strip()
         lane, sep, declared_sha = declared.partition("@")
         if not sep or not lane or not lane.strip() or declared_sha != args.sha:
-            print("ready: not appended -- main-ci-red: --fixes-main was given "
+            print("ready: not appended -- waiver-not-declared: --fixes-main was given "
                   "but the waiver was not declared for this sha (want "
                   "AUTOOS_FIXES_MAIN=<lane>@%s); CI was not consulted; merge "
                   "nothing until main is green" % args.sha)
             return 1
+        # T0-FREEZE-4: the waiver rides the durable line as fixes_main="<lane>@<sha>",
+        # so a lane carrying a quote, a backslash, whitespace or a control
+        # character would break the quoting (or the inbox parser). Refused here,
+        # before it is written, naming the problem.
+        if any(c == '"' or c == "\\" or c.isspace() or ord(c) < 0x20
+               or ord(c) == 0x7f for c in lane):
+            print("ready: not appended -- waiver-not-declared: waiver lane %r "
+                  "cannot be written on the ready line (it contains a quote, "
+                  "backslash, whitespace or control character); declare a "
+                  "plain lane name" % lane)
+            return 1
         want_exact = args.branch
         want_base = args.branch.rsplit("/", 1)[-1]
         if lane != want_exact and lane != want_base:
-            print("ready: not appended -- main-ci-red: waiver lane mismatch: "
+            print("ready: not appended -- waiver-not-declared: waiver lane mismatch: "
                   "AUTOOS_FIXES_MAIN declares lane %r but the lane being "
                   "readied is %r (want exact match or basename after the last "
                   "'/'); CI was not consulted; merge nothing until main is "
