@@ -334,6 +334,51 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
   author address (`…er@…`) survives. Code paths were env-derived, not blind-replaced. No
   `<user>er` over-replacement anywhere.
 
+## Refresh 2026-10-01 (e) — base `origin/main` = `11757db4` (takes landed; remaining untaken)
+
+**The merge is well advanced.** `origin/main` is now `11757db4`. **Pre-flight gate RESOLVED:**
+the combos-wave carrier `L1-backlog/ws-tier-order-20261001` (TORDER1–6 + TORDER-OR +
+CREDIGNORE + the CREDROW corrections) is **taken** at `bd0ad278`; the earlier combos HOLD
+no longer applies. *Live caveat:* re-probe at `09:54Z` shows **OVH credit legs serve** but the
+**vertex credit leg is quota-exhausted / skipped** (records §16.3) — an operational issue, not a
+merge one.
+
+### Taken into `origin/main` (16 branch tips are ancestors of main)
+
+- Carrier: `ws-tier-order-20261001`.
+- Also taken: `ws-providers-rescue`, `ws-records`, `ws-fallback`, `ws-incident`, `ws-sweep`,
+  `ws-designmemo`, `ws-leghealth2`, `ws-combos` (subsumed), `ws-nebius` (alias).
+- No-commit branches now in main's history: `ws-gw-vertex`, `ws-omniroute`, `ws-ovh-review-2`,
+  `ws-patchbackups`, `ws-patchlive`, `ws-providers`.
+- Earlier takes: `reviewgate-2fam` `d0f70f1`, `redclear` `f93aee3`.
+
+### Remaining UNTAKEN (operator: revaudit/revround/changelog/freereads/failures-doc/mergecheck + config lanes + researcher)
+
+44 `L1-backlog/*` branches still diverge from main (`git rev-list --count origin/main..<branch> > 0`):
+
+- **Docs riders:** `ws-revaudit` (+2), `ws-revround` (+2), `ws-changelog` (+3), `ws-freereads`
+  (+2), `ws-failures-doc` (+3), `ws-mergecheck` (this doc, +13), `ws-merge-map` (+2),
+  `ws-review` (+4), `ws-sweep-review` (+2), `ws-suite-diag` (+2), `ws-hygiene-main` (+1),
+  `ws-patchr1` (+2), `ws-patchbackups-3` (+2), `ws-patchbackups-2` (+2, reference),
+  `ws-leghealth` (+1, superseded).
+- **Config lanes:** `ws-admission-fix` (+5), `ws-applyjson` (+6), `ws-suite-fix` (+3),
+  `ws-p0-admission-fix` (+3), `ws-remote` (+10), `ws-fixes` (+12), `ws-gw-admission` (+2),
+  `ws-verify-activate` (+2), `ws-qwenclamp` (+4), `ws-resilience-env` (+10),
+  `ws-resilience-env2` (+7, superseded), `ws-dl-timeout` (+9), `ws-clamp-probe` (+2),
+  `ws-f1-vertex` (+9).
+- **Registry / combos lineage:** `ws-ovh` (+1), `ws-ovh-finish` (+1), `ws-freewire` (+3),
+  `ws-free-probe` (+1), `ws-nebius2-combos` (+1), `ws-nebiuswave2` (+3), `ws-invariant-fix`
+  (+1), `ws-combos-pins` (+3), `ws-gemini-restore` (+3).
+- **Proposal:** `ws-researcher` (+2).
+- **Do-not-merge / superseded:** `ws-nebius-combos` (+1), `ws-nebius2` (+1), `ws-nebiuswave`
+  (+1), `ws-main-breach` (+1).
+- New lane seen this refresh: `ws-closeout-20261001` (+1).
+
+**Rebase target = `11757db4`.** Carry list from Refresh (c) still applies (the `24a98228` combos
+pins are now moot — TORDER's render fixpoint supersedes them; the redacted workstation handoff;
+main's `R-coord-12`; REVIEWGATE-2FAM's two-seat requirement). `ws-incident` is now taken, so the
+C6 renumber has already been resolved in main.
+
 ## Branch table
 
 18 local `L1-backlog/*` branches enumerated. 5 at base (`d08f7f2`, no commits);
