@@ -4228,20 +4228,23 @@ class ComboFallthroughTests(unittest.TestCase):
                 % (route_id, usable, combo["models"]))
 
 class PaidLastResortTests(unittest.TestCase):
-    """R4a (lane T0-PAID-2b1, operator decision D-212): paid legs are the TAIL.
+    """R4a (lane T0-PAID-2b1, operator decision D-212): paid legs are the TAIL,
+    extended by T0-PAID-3 P1 to every non-free leg.
 
     A leg whose effective tier (models.<id>.tier else providers.<id>.tier) is
-    "paid" must never be selected while a free/trial/credit leg of the same
-    route is healthy -- even when the paid leg is listed FIRST. When no
-    free/trial/credit leg is servable the paid leg is allowed and the plan
-    carries a `last_resort` line naming every skipped non-paid leg + reason.
-    Applies to implement AND review cards, reviewers included. Existing
-    credit/trial fail-open behaviour stays untouched (credit legs are blockers
-    of paid here, never blocked themselves).
-    Fixture style copies PlanTests.registry/card/features/state (lines 1634+)
-    and the leg-overlay shape {"legs": {leg: {"tool_calls": {"value": ...}}}}
-    (lines 622, 667, 688); real-registry style copies ComboFallthroughTests
-    (lines 4122+, setUpClass loading catalog/ai-registry.json).
+    outside the known free-ish set (free/trial/credit) must never be selected
+    while a free/trial/credit leg of the same route is healthy -- even when
+    the non-free leg is listed FIRST. A missing or unrecognised tier
+    ("subscription" included) is non-free: held back like paid, never counted
+    as healthy. When no free/trial/credit leg is servable the non-free leg is
+    allowed and the plan carries a `last_resort` line naming every skipped
+    free-ish leg + reason. Applies to implement AND review cards, reviewers
+    included. Existing credit/trial fail-open behaviour stays untouched
+    (credit legs are blockers of paid here, never blocked themselves).
+    Fixture style copies the PlanTests registry/card/features/state shapes
+    and the leg-overlay shape {"legs": {leg: {"tool_calls": {"value": ...}}}};
+    real-registry style copies the ComboFallthroughTests setUpClass loading
+    catalog/ai-registry.json.
     """
 
     def fixture(self, legs=("paid-p/paid-model", "free-p/free-model"),
@@ -4354,12 +4357,21 @@ class PaidLastResortTests(unittest.TestCase):
         # Card complexity=standard, ctx=128k, privacy=public, role=implement,
         # spend=free-ok: v1 shape; resolver v2 equivalent is kind=implement,
         # privacy=public, need_tokens well under 128k. Uses the real
-        # route/plan entry (t1-orchestrator, whose tail holds the paid legs
-        # meta_api/muse-spark-1.3-contributor + deepseek/deepseek-flash).
+        # route/plan entry (t1-orchestrator). The tail property is derived
+        # from the registry, not pinned by leg name: every paid-tier leg of
+        # the route is listed after every non-paid leg.
         with (Path(__file__).resolve().parent.parent
               / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
             shipped = json.load(fh)
         route = shipped["routes"]["t1-orchestrator"]
+        paid_idx = [i for i, leg in enumerate(route["legs"])
+                    if r.leg_tier(leg, shipped) == "paid"]
+        non_paid_idx = [i for i, leg in enumerate(route["legs"])
+                        if r.leg_tier(leg, shipped) != "paid"]
+        self.assertTrue(paid_idx, "route has no paid leg to hold back")
+        self.assertTrue(non_paid_idx, "route has no non-paid leg to prefer")
+        self.assertLess(max(non_paid_idx), min(paid_idx),
+                        "paid legs are not the tail: %s" % (route["legs"],))
         overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
                             for leg in route["legs"]}}
         legs, _skipped, _notes = r.usable_legs(
