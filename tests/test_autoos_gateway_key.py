@@ -201,6 +201,8 @@ class TestResolveClientKey(unittest.TestCase):
     _SCRUB = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_HOST_NAME", "AUTOOS_HOST_CONFIG")
 
     def setUp(self):
+        import autoos_gateway_key
+        autoos_gateway_key._NOTICED.clear()  # notices print once per process
         self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
         self.keys_file.close()
         self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
@@ -322,6 +324,8 @@ class TestKeyFileFormats(unittest.TestCase):
     _SCRUB = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_HOST_NAME", "AUTOOS_HOST_CONFIG")
 
     def setUp(self):
+        import autoos_gateway_key
+        autoos_gateway_key._NOTICED.clear()  # notices print once per process
         self.keys_file = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
         self.keys_file.close()
         self._saved_env = {v: os.environ.pop(v, None) for v in self._SCRUB}
@@ -450,6 +454,68 @@ class TestKeyFileFormats(unittest.TestCase):
             f.write(b"\xef\xbb\xbfkey1=value1\nkey2: value2\n")
         result = read_keys(self.keys_file.name)
         self.assertEqual(result, {"key1": "value1", "key2": "value2"})
+
+
+class TestResolveOncePerProcessAndCli(unittest.TestCase):
+    """One resolver: notices print once per process, and the shell callers use the CLI."""
+
+    def setUp(self):
+        import autoos_gateway_key
+        autoos_gateway_key._NOTICED.clear()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keys = Path(self.tmp.name) / "api-keys.yml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_two_resolves_in_one_process_warn_once(self):
+        self.keys.write_text("omniroute: legacy-key-value\n", encoding="utf-8")
+        env = {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"}
+        buf = StringIO()
+        with redirect_stderr(buf):
+            self.assertEqual(resolve_client_key(env, self.keys), "legacy-key-value")
+            self.assertEqual(resolve_client_key(env, self.keys), "legacy-key-value")
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, lines)
+
+    def _cli(self, *args, env=None):
+        import subprocess
+        tools = Path(__file__).resolve().parent.parent / "tools" / "autoos_gateway_key.py"
+        full = {k: v for k, v in os.environ.items() if not k.startswith("AUTOOS_")}
+        full.update(env or {})
+        return subprocess.run([sys.executable, str(tools), *args], env=full,
+                              capture_output=True, text=True)
+
+    def test_cli_resolve_prints_the_key_and_one_notice(self):
+        self.keys.write_text("omniroute: legacy-key-value\n", encoding="utf-8")
+        r = self._cli("resolve", str(self.keys),
+                      env={"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "legacy-key-value\n")
+        self.assertEqual(len([ln for ln in r.stderr.splitlines() if ln.strip()]), 1, r.stderr)
+        self.assertNotIn("legacy-key-value", r.stderr)
+
+    def test_cli_resolve_is_case_insensitive_like_the_library(self):
+        self.keys.write_text("OmniRoute_WS: mixed-case-key\n", encoding="utf-8")
+        r = self._cli("resolve", str(self.keys),
+                      env={"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"})
+        self.assertEqual((r.returncode, r.stdout), (0, "mixed-case-key\n"), r.stderr)
+
+    def test_cli_missing_key_exits_1_naming_the_field_or_is_silent_when_optional(self):
+        self.keys.write_text("other: x\n", encoding="utf-8")
+        env = {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"}
+        r = self._cli("resolve", str(self.keys), env=env)
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout, "")
+        self.assertIn("omniroute_ws", r.stderr)
+        o = self._cli("resolve", "--optional", str(self.keys), env=env)
+        self.assertEqual((o.returncode, o.stdout, o.stderr), (0, "", ""))
+
+    def test_cli_no_notice_silences_the_deprecation_line(self):
+        self.keys.write_text("omniroute: legacy-key-value\n", encoding="utf-8")
+        r = self._cli("resolve", "--no-notice", str(self.keys),
+                      env={"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws"})
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, "legacy-key-value\n", ""))
 
 
 if __name__ == "__main__":

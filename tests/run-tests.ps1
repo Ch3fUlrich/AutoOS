@@ -8068,9 +8068,12 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
     $script = Join-Path $Root 'configuration\start-stack.ps1'
     $tokens = $null; $parseErrors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
-    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-AutoOSKeyValue' }, $true))
-    if ($fn.Count -ne 1) { throw "want exactly one function Get-AutoOSKeyValue in start-stack.ps1, found $($fn.Count)" }
-    . ([scriptblock]::Create($fn[0].Extent.Text))
+    # The reader is three functions (value parser, file reader, exact-name lookup): extract all of them.
+    foreach ($fname in 'ConvertFrom-AutoOSKeyValue', 'Read-AutoOSKeyMap', 'Get-AutoOSKeyValue') {
+        $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fname }, $true))
+        if ($fn.Count -ne 1) { throw "want exactly one function $fname in start-stack.ps1, found $($fn.Count)" }
+        . ([scriptblock]::Create($fn[0].Extent.Text))
+    }
 
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ockey-$([Guid]::NewGuid().ToString('N'))"
     try {
@@ -8101,9 +8104,10 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
         Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
 
-        # Two uncommented lines: the last one wins (bash uses tail -n1).
+        # Two uncommented lines: the first one wins - the one rule in tools/keys_file.py, which
+        # the bash launchers and the Python tools now share.
         Set-Content -LiteralPath $keys -Value "opencode_password: first`nopencode_password: second" -Encoding utf8
-        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'second'
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'first'
 
         # Case-sensitive key match: Opencode_password is not opencode_password.
         Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8

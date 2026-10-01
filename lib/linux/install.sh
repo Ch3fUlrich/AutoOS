@@ -5075,68 +5075,17 @@ autoos_client_key_field() {
 }
 
 # autoos_resolve_client_key: resolve the OmniRoute client key.
-# Precedence: 1) AUTOOS_OMNIROUTE_KEY env, 2) new field, 3) legacy field (with deprecation), 4) error.
+# One implementation: tools/autoos_gateway_key.py (env AUTOOS_OMNIROUTE_KEY, then the
+# gateway-named field, then the legacy field with ONE deprecation line). The key goes to
+# stdout; the deprecation line and the missing-key error go to stderr; rc 1 when missing.
 # Args: [keys_file] - defaults to configuration/api-keys.yml
-# Uses tools/keys_file.py which handles both `name=value` and `name: value` formats.
 autoos_resolve_client_key() {
     local keys_file="${1:-}"
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
     if [[ -z "$keys_file" ]]; then
-        local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
         keys_file="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
     fi
-
-    # 1. Explicit env always wins
-    if [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
-        printf '%s\n' "${AUTOOS_OMNIROUTE_KEY}"
-        return 0
-    fi
-
-    local field
-    field="$(autoos_client_key_field)"
-    local is_local=0
-    is_local_gateway "${AUTOOS_OMNIROUTE_URL:-}" && is_local=1
-
-    # 2. New field - use keys_file.py which handles both formats
-    if [[ -f "$keys_file" ]]; then
-        local key
-        local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-        key="$(python3 "$repo_root/tools/keys_file.py" "$keys_file" "$field" 2>/dev/null | tr -d '\n\r')"
-        if [[ -n "$key" && "$key" != REPLACE_WITH_* ]]; then
-            printf '%s\n' "$key"
-            return 0
-        fi
-    fi
-
-    # 3. Legacy fallback (one release, read-only)
-    local legacy_field
-    if [[ $is_local -eq 1 ]]; then
-        legacy_field="omniroute"
-    else
-        legacy_field="omniroute_client_$(autoos_host_name)"
-    fi
-    if [[ -f "$keys_file" ]]; then
-        local legacy_key
-        local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-        legacy_key="$(python3 "$repo_root/tools/keys_file.py" "$keys_file" "$legacy_field" 2>/dev/null | tr -d '\n\r')"
-        if [[ -n "$legacy_key" && "$legacy_key" != REPLACE_WITH_* ]]; then
-            printf 'api-keys.yml: '\''%s'\'' is deprecated, rename it to '\''%s'\''\n' "$legacy_field" "$field" >&2
-            printf '%s\n' "$legacy_key"
-            return 0
-        fi
-    fi
-
-    # 4. Missing - clear error
-    local context
-    if [[ $is_local -eq 1 ]]; then
-        context="a local gateway"
-    else
-        context="a non-local gateway"
-    fi
-    local host_file
-    host_file="$(_host_config_path)"
-    printf 'No OmniRoute client key for %s. Expected field '\''%s'\'' in %s (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or %s (host_name:), falling back to short hostname.\n' \
-        "$context" "$field" "$keys_file" "$host_file" >&2
-    return 1
+    python3 "$repo_root/tools/autoos_gateway_key.py" resolve "$keys_file"
 }
 
 # graphify_mcp_link_prepare: decide what may sit at ~/.local/bin/graphify-mcp, and

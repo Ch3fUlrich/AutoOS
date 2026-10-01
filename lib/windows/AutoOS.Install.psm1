@@ -100,7 +100,7 @@ function Get-AutoOSHostName {
     }
     try { $fqdn = [System.Net.Dns]::GetHostName() } catch { $fqdn = 'localhost' }
     $normalized = ConvertTo-AutoOSHostName $fqdn
-    Write-AutoOSLine "AutoOS: using hostname '$normalized' for omniroute key field (set AUTOOS_HOST_NAME or host_name in $hostFile to override)"
+    Write-AutoOSNoticeOnce "AutoOS: using hostname '$normalized' for omniroute key field (set AUTOOS_HOST_NAME or host_name in $hostFile to override)"
     return $normalized
 }
 
@@ -113,31 +113,70 @@ function Get-AutoOSClientKeyField {
     }
 }
 
-function Get-AutoOSKeyValue {
-    # Reads a flat key file with either `name=value` or `name: value` format.
-    # Case-insensitive key match. First occurrence wins (matching keys_file.py).
-    # Returns '' when the file or key is missing, or when the value starts with REPLACE_WITH_.
-    param([string]$Path, [string]$Name)
-    if (-not $Path -or -not $Name -or -not (Test-Path -LiteralPath $Path)) { return '' }
-    $escaped = [regex]::Escape($Name)
+function ConvertFrom-AutoOSKeyValue {
+    # Mirrors tools/keys_file.py parse_value: a quoted value is what sits between the quotes,
+    # an unquoted one is cut at the first space-or-tab followed by '#', then right-trimmed.
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    $first = $Raw[0]
+    if ($first -eq '"' -or $first -eq "'") {
+        $end = $Raw.IndexOf($first, 1)
+        if ($end -gt 0) { return $Raw.Substring(1, $end - 1) }
+        return $Raw.Substring(1)
+    }
+    $cut = -1
+    for ($k = 0; $k -lt $Raw.Length - 1; $k++) {
+        if (($Raw[$k] -eq ' ' -or $Raw[$k] -eq [char]9) -and $Raw[$k + 1] -eq '#') { $cut = $k; break }
+    }
+    if ($cut -ge 0) { $Raw = $Raw.Substring(0, $cut + 1) }
+    return $Raw.TrimEnd()
+}
+
+function Read-AutoOSKeyMap {
+    # Mirrors tools/keys_file.py read_keys: name=value and name: value, names keep their case,
+    # empty values and REPLACE* placeholders are skipped, the first filled-in value wins.
+    param([string]$Path)
+    $map = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $map }
     foreach ($raw in (Get-Content -LiteralPath $Path -Encoding utf8)) {
-        $line = $raw -replace '\r$',''
-        # Match name=value format
-        if ($line -cmatch "^$escaped\s*=\s*(.+)$") {
-            $v = $Matches[1].Trim()
-            if ($v -match '^\s*#') { continue }
-            if ($v -clike 'REPLACE_WITH_*') { return '' }
-            return $v.Trim('"', "'")
-        }
-        # Match name: value format
-        if ($line -cmatch "^$escaped\s*:\s*(.+)$") {
-            $v = $Matches[1].Trim()
-            if ($v -match '^\s*#') { continue }
-            if ($v -clike 'REPLACE_WITH_*') { return '' }
-            return $v.Trim('"', "'")
+        $row = $raw.Trim()
+        if ($row.Length -eq 0 -or $row.StartsWith('#')) { continue }
+        $eq = $row.IndexOf('='); $colon = $row.IndexOf(':')
+        if ($eq -lt 0 -and $colon -lt 0) { continue }
+        $cut = if ($colon -lt 0) { $eq } elseif ($eq -lt 0) { $colon } else { [Math]::Min($eq, $colon) }
+        $name = $row.Substring(0, $cut).Trim()
+        $rawVal = $row.Substring($cut + 1).Trim()
+        if (-not $name -or -not $rawVal) { continue }
+        $value = ConvertFrom-AutoOSKeyValue $rawVal
+        if ($value -and -not $value.StartsWith('REPLACE', [StringComparison]::Ordinal) -and -not $map.ContainsKey($name)) {
+            $map[$name] = $value
         }
     }
+    return $map
+}
+
+function Get-AutoOSKeyValue {
+    # Exact-name lookup, like `tools/keys_file.py <file> <name>`. Returns '' when the file or key is missing.
+    param([string]$Path, [string]$Name)
+    $map = Read-AutoOSKeyMap $Path
+    if ($Name -and $map.ContainsKey($Name)) { return $map[$Name] }
     return ''
+}
+
+function Find-AutoOSKey {
+    # Case-insensitive lookup, like tools/autoos_gateway_key.py resolve_client_key.
+    param($Map, [string]$Name)
+    foreach ($k in $Map.Keys) { if ($k -ieq $Name) { return $Map[$k] } }
+    return ''
+}
+
+function Write-AutoOSNoticeOnce {
+    # A notice prints once per session, like the Python resolver, even when two callers resolve.
+    param([string]$Message)
+    if (-not $script:AutoOSNoticed) { $script:AutoOSNoticed = @{} }
+    if ($script:AutoOSNoticed.ContainsKey($Message)) { return }
+    $script:AutoOSNoticed[$Message] = $true
+    Write-AutoOSLine $Message
 }
 
 function Get-AutoOSClientKey {
@@ -148,19 +187,16 @@ function Get-AutoOSClientKey {
     }
     $field = Get-AutoOSClientKeyField
     $isLocal = Test-AutoOSLocalGateway $env:AUTOOS_OMNIROUTE_URL
+    $map = Read-AutoOSKeyMap $KeysFile
     # 2. New field
-    if (Test-Path -LiteralPath $KeysFile) {
-        $key = Get-AutoOSKeyValue -Path $KeysFile -Name $field
-        if (-not [string]::IsNullOrWhiteSpace($key)) { return $key }
-    }
+    $key = Find-AutoOSKey $map $field
+    if (-not [string]::IsNullOrWhiteSpace($key)) { return $key }
     # 3. Legacy fallback (one release, read-only)
     $legacyField = if ($isLocal) { 'omniroute' } else { "omniroute_client_$(Get-AutoOSHostName)" }
-    if (Test-Path -LiteralPath $KeysFile) {
-        $legacyKey = Get-AutoOSKeyValue -Path $KeysFile -Name $legacyField
-        if (-not [string]::IsNullOrWhiteSpace($legacyKey)) {
-            Write-AutoOSLine "api-keys.yml: '$legacyField' is deprecated, rename it to '$field'"
-            return $legacyKey
-        }
+    $legacyKey = Find-AutoOSKey $map $legacyField
+    if (-not [string]::IsNullOrWhiteSpace($legacyKey)) {
+        Write-AutoOSNoticeOnce "api-keys.yml: '$legacyField' is deprecated, rename it to '$field'"
+        return $legacyKey
     }
     # 4. Missing - clear error
     $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }

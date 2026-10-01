@@ -63,7 +63,8 @@ if autoos_read_env_file "$LIT_ENV"; then
     done
 fi
 if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" && -f "$KEYS_FILE" ]]; then
-    key="$(keys_value "$KEYS_FILE" omniroute)"
+    # One resolver: gateway-named field first, then the legacy `omniroute` with one deprecation line
+    key="$(python3 "$REPO/tools/autoos_gateway_key.py" resolve --optional "$KEYS_FILE" | tr -d '\n\r')"
     if [[ -n "$key" ]]; then
         export AUTOOS_OMNIROUTE_KEY="$key"
         LOADED+=(AUTOOS_OMNIROUTE_KEY)

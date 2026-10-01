@@ -222,7 +222,10 @@ keys_value() {
 
 omniroute_client_key() {
     if [[ -n "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then printf '%s' "$AUTOOS_OMNIROUTE_KEY"; return; fi
-    keys_value omniroute
+    [[ -f "$KEYS_FILE" ]] || return 0
+    # One resolver (gateway-named field, then the legacy one). Called more than once per
+    # run, so its deprecation line is left to the launchers that resolve a single time.
+    python3 "$REPO/tools/autoos_gateway_key.py" resolve --optional --no-notice "$KEYS_FILE" 2>/dev/null | tr -d '\n\r' || true
 }
 
 # keys_add_opencode_password <value>: append `opencode_password: '<v>'` to

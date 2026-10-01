@@ -37,6 +37,18 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from keys_file import read_keys
 
+# Notices (hostname fallback, legacy-field deprecation) go to stderr once per process: a
+# program that resolves the key twice (one installer, two config writers) must not nag twice.
+_NOTICED: set = set()
+_QUIET = False
+
+
+def _notice(message: str) -> None:
+    if _QUIET or message in _NOTICED:
+        return
+    _NOTICED.add(message)
+    print(message, file=sys.stderr)
+
 
 def is_local_gateway(url: str) -> bool:
     """True when the gateway URL points to the local machine (loopback)."""
@@ -126,10 +138,9 @@ def host_name(env: Optional[dict] = None) -> str:
     except Exception:
         fqdn = "localhost"
     normalized = _normalize_hostname(fqdn)
-    print(
+    _notice(
         f"AutoOS: using hostname '{normalized}' for omniroute key field "
-        f"(set AUTOOS_HOST_NAME or host_name in {host_file} to override)",
-        file=sys.stderr,
+        f"(set AUTOOS_HOST_NAME or host_name in {host_file} to override)"
     )
     return normalized
 
@@ -190,10 +201,7 @@ def resolve_client_key(
     legacy_field = "omniroute" if is_local else f"omniroute_client_{host_name(env)}"
     for k, v in keys.items():
         if k.lower() == legacy_field.lower():
-            print(
-                f"api-keys.yml: '{legacy_field}' is deprecated, rename it to '{field}'",
-                file=sys.stderr,
-            )
+            _notice(f"api-keys.yml: '{legacy_field}' is deprecated, rename it to '{field}'")
             return v
 
     # 4. Missing - clear error
@@ -207,12 +215,44 @@ def resolve_client_key(
     )
 
 
-if __name__ == "__main__":
-    # Quick manual test
+def main(argv: Optional[list] = None) -> int:
+    """CLI used by the shell and PowerShell callers, so there is ONE resolver.
+
+      autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE]
+          key on stdout (no trailing noise); notices and errors on stderr.
+          A missing key exits 1 with the message, or with --optional exits 0 and prints nothing.
+      autoos_gateway_key.py info
+          which gateway class, host name and field this environment resolves to (no key).
+    """
+    global _QUIET
     import json
-    env = dict(os.environ)
-    print(json.dumps({
-        "is_local": is_local_gateway(env.get("AUTOOS_OMNIROUTE_URL", "")),
-        "host_name": host_name(env),
-        "field": client_key_field(env),
-    }, indent=2))
+    args = list(sys.argv[1:] if argv is None else argv)
+    cmd = args.pop(0) if args else "info"
+    if cmd == "resolve":
+        optional = "--optional" in args
+        _QUIET = "--no-notice" in args
+        rest = [a for a in args if not a.startswith("--")]
+        keys_file = Path(rest[0]) if rest and rest[0] else None
+        try:
+            key = resolve_client_key(os.environ, keys_file)
+        except KeyError as exc:
+            if optional:
+                return 0
+            print(str(exc.args[0]) if exc.args else str(exc), file=sys.stderr)
+            return 1
+        sys.stdout.write(key + chr(10))
+        return 0
+    if cmd == "info":
+        env = dict(os.environ)
+        print(json.dumps({
+            "is_local": is_local_gateway(env.get("AUTOOS_OMNIROUTE_URL", "")),
+            "host_name": host_name(env),
+            "field": client_key_field(env),
+        }, indent=2))
+        return 0
+    print("usage: autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE] | info", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
