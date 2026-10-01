@@ -16163,6 +16163,86 @@ class NativeComboTests(unittest.TestCase):
         self.assertNotIn("native:opencode", out)
 
 
+class FreeOnlyComboTests(unittest.TestCase):
+    """T0-PAID-2a1: a --free run pins the keyless opencode model, so its combo
+    is only ever a label — but it must be an honest one. select_combo knows
+    nothing of free (it stays pure: the MCP `route` tool takes only a card),
+    so a free run was labelled `t1-orchestrator`, a combo with a paid tail it
+    never resolves. A free run is now labelled with the matching *-free-only
+    twin when one exists."""
+
+    def _route_line(self, *args, env=None):
+        r = plan_of(*args, env=env or clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_a_free_strong_card_is_labelled_t1_orchestrator_free_only(self):
+        out = self._route_line("--free", "--card",
+                               "complexity=hard,ctx=128k,privacy=public,"
+                               "role=implement,spend=free-ok", "t")
+        self.assertIn("route: t1-orchestrator-free-only", out)
+        self.assertNotIn("route: t1-orchestrator ", out)
+
+    def test_a_free_default_card_is_labelled_t2_worker_free_only(self):
+        out = self._route_line("--free", "--card",
+                               "complexity=standard,ctx=128k,privacy=public,"
+                               "role=implement,spend=free-ok", "t")
+        self.assertIn("route: t2-worker-free-only", out)
+        self.assertNotIn("route: t2-worker ", out)
+
+    def test_a_free_light_card_is_labelled_t3_driver_free_only(self):
+        out = self._route_line("--free", "--card",
+                               "complexity=trivial,ctx=128k,privacy=public,"
+                               "role=implement,spend=free-ok", "t")
+        self.assertIn("route: t3-driver-free-only", out)
+        self.assertNotIn("route: t3-driver ", out)
+
+    def test_a_paid_strong_card_keeps_its_paid_combo(self):
+        out = self._route_line("--card",
+                               "complexity=hard,ctx=128k,privacy=public,"
+                               "role=implement,spend=free-ok", "t")
+        self.assertRegex(out, r"route: t1-orchestrator reason=")
+        self.assertNotIn("free-only", out)
+
+    def test_the_build_plan_route_combo_is_the_free_only_one_too(self):
+        # The record, the log and the print all read build_plan's route, so the
+        # rewrite has to live on the resolve path — not only in the printed line.
+        agent = load_agent()
+        allow_in_place(self, agent)
+        args = argparse.Namespace(client="opencode", tier=None,
+                                  card="complexity=hard,ctx=128k,"
+                                  "privacy=public,role=implement,"
+                                  "spend=free-ok",
+                                  task="t", free=True,
+                                  free_model=agent.DEFAULT_FREE_MODEL,
+                                  model=None, clean=False,
+                                  allow_training=False, title=None, lean=False,
+                                  joinable=False, auto=True, isolate=False,
+                                  max_depth=None, dry_run=True, no_defer=False,
+                                  not_family=None, review_of=None,
+                                  no_fallthrough=False, run_id=None)
+        cfg = {"agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator"}},
+               "providers": {"omniroute": {"models": {"t1-orchestrator": {}}}}}
+        with mock.patch.object(agent, "gateway_up", lambda: True):
+            plan = agent.build_plan(args, cfg)
+        self.assertEqual(plan["route"]["combo"], "t1-orchestrator-free-only")
+        self.assertTrue(plan["free"])
+        self.assertIn(agent.DEFAULT_FREE_MODEL, " ".join(plan["cmd"]))
+
+    def test_free_only_combo_maps_each_paid_twin_and_leaves_the_rest(self):
+        agent = load_agent()
+        self.assertEqual(agent.free_only_combo("t1-orchestrator"),
+                         "t1-orchestrator-free-only")
+        self.assertEqual(agent.free_only_combo("t2-worker"),
+                         "t2-worker-free-only")
+        self.assertEqual(agent.free_only_combo("t3-driver"),
+                         "t3-driver-free-only")
+        self.assertEqual(agent.free_only_combo("t2-worker-clean"),
+                         "t2-worker-clean")
+        self.assertEqual(agent.free_only_combo("t4-rag"), "t4-rag")
+        self.assertIsNone(agent.free_only_combo(None))
+
+
 class QoderFenceTests(unittest.TestCase):
     """FAMILYFENCE-b requirement 2, the gate half: a pinned model is a model
     choice, so the fence rules it for an own-account client exactly as it rules
