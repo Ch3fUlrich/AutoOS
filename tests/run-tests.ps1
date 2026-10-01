@@ -2394,7 +2394,14 @@ function Start-AutoOSTestHttpServer {
     # Start-Process and never got a port back on the windows-latest CI
     # runner. No python, no HttpListener URL ACL, nothing to install.
     # Returns @{ Job; Port; StopFile }; the caller must Stop-AutoOSTestHttpServer it.
-    param([Parameter(Mandatory)][string]$Directory)
+    # -Hang makes every accepted request stall forever: the connection is
+    # accepted and the request read, then nothing is ever sent until teardown.
+    # That is the stalled-mirror shape the download timeout exists for.
+    param([Parameter(Mandatory)][string]$Directory, [switch]$Hang)
+    # Read the switch into a plain boolean in THIS scope: the job below reaches
+    # it with $using:, so the parameter is genuinely used here even though the
+    # job scriptblock is where the value is consumed.
+    $hangRequested = [bool]$Hang
     $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
     $stopFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
     $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
@@ -2415,6 +2422,14 @@ function Start-AutoOSTestHttpServer {
                 $reader = [IO.StreamReader]::new($stream)
                 $request = $reader.ReadLine()
                 while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                if ($using:hangRequested) {
+                    # Hold the socket open, answer nothing, and leave only when
+                    # teardown writes the stop-file (the cooperative stop the
+                    # 2026-10-01 harness fix requires: an uninterruptible job
+                    # makes Remove-Job -Force wait the full 120 s).
+                    while (-not (Test-Path -LiteralPath $using:stopFile)) { Start-Sleep -Milliseconds 50 }
+                    continue
+                }
                 $status = '404 Not Found'; $body = [byte[]]::new(0)
                 if ($request -match '^GET\s+(\S+)') {
                     $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
@@ -2495,6 +2510,62 @@ Test-Case 'test http server: Stop-AutoOSTestHttpServer returns promptly, never t
         Stop-AutoOSTestHttpServer $srv
         Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
     }
+}
+
+Test-Case 'verified download: a stalled endpoint fails within the wall-clock bound instead of hanging (timeout)' {
+    # 2026-10-01 defect, failing-first: Get-AutoOSRawDownload shelled out to
+    # curl / Invoke-WebRequest with no time bound, so a mirror that accepted
+    # the connection and then sent nothing pinned the provision forever. The
+    # bound is injectable through AUTOOS_DOWNLOAD_TIMEOUT_SEC exactly so this
+    # is provable without waiting an hour: with a 2 s ceiling the fetch must
+    # fail fast, with a transport-failure message, and leave no .part behind.
+    # Against the pre-fix code this test has no bound to honour and hangs.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_stall_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp -Hang
+    $prev = $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC
+    $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = '2'
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/stall.bin" -Destination $out | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        $sw.Stop()
+        # 30 s is generous: the injected bound is 2 s (plus curl's own bounded
+        # retries); the unfixed behaviour is unbounded.
+        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
+            ("threw={0} elapsed={1:N1}s part={2} msg=[{3}]" -f $threw, $sw.Elapsed.TotalSeconds, (Test-Path -LiteralPath "$out.part"), $msg)
+    } finally {
+        if ($null -eq $prev) { Remove-Item Env:\AUTOOS_DOWNLOAD_TIMEOUT_SEC -ErrorAction SilentlyContinue } else { $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = $prev }
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'every production network fetch in lib\windows carries a wall-clock bound' {
+    # The same 2026-10-01 defect class, enforced structurally so a NEW unbounded
+    # call site fails here instead of hanging a real provision: every shipped
+    # Invoke-WebRequest/Invoke-RestMethod invocation needs -TimeoutSec, and every
+    # direct curl invocation needs --max-time. Comment lines are skipped; only
+    # invocation lines are judged.
+    $dir = Join-Path $Root 'lib\windows'
+    $bad = @()
+    foreach ($file in Get-ChildItem -Path $dir -Filter '*.psm1') {
+        $n = 0
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            $n++
+            $code = $line.Trim()
+            if ($code.StartsWith('#')) { continue }
+            if ($code -match 'Invoke-WebRequest\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-WebRequest without -TimeoutSec"
+            } elseif ($code -match 'Invoke-RestMethod\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-RestMethod without -TimeoutSec"
+            } elseif ($code -match '(&\s*\$curl\.Source|curl\.exe).*?-o\s' -and $code -notmatch '--max-time') {
+                $bad += "$($file.Name):$n curl without --max-time"
+            }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ($bad -join '; ')
 }
 
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
