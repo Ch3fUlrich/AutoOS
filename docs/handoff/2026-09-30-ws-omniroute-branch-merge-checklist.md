@@ -379,6 +379,12 @@ pins are now moot — TORDER's render fixpoint supersedes them; the redacted wor
 main's `R-coord-12`; REVIEWGATE-2FAM's two-seat requirement). `ws-incident` is now taken, so the
 C6 renumber has already been resolved in main.
 
+> **⚠ HARD RULE 1 — MAIN CARRIES A USERNAME LEAK.** The tier-order take `bd0ad278`
+> brought `C:\Users\<user>\…` into **public `origin/main`** (`docs/handoff/2026-09-30-laneFreeWire.md`,
+> `2026-10-01-laneConnRotate.md` ×3, `2026-10-01-laneTierOrder.md`, and `tools/combo-contract.py:176`
+> — a code path). **Fix branch `L1-backlog/ws-mainleak-20261001` @ `72a98835` is ready and reviewed
+> (APPROVED)** — take it; the username also remains in main's **history** (rewrite is operator-only).
+
 ## Branch table
 
 18 local `L1-backlog/*` branches enumerated. 5 at base (`d08f7f2`, no commits);
