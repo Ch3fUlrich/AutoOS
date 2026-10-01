@@ -751,6 +751,37 @@ def month_start(now):
         day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
+def fetch_cutoff(registry, now=None):
+    """The oldest instant the gateway fetch must reach: this month's start
+    extended back to the earliest usable `credit_started` over every
+    `credit` grant (T1-CREDIT-FIX-8 C1).
+
+    `fetch_window` stops paging at the first page holding a row older than
+    its cutoff, so a month-start cutoff fetches September rows only by luck
+    of pagination -- a grant started 2026-09-01 then reads $150 on one page
+    size and $450 on another. Fetching from the earliest grant start reaches
+    every grant's rows on every page size; each grant is still FILTERED by
+    its own window (`_effective_since` in `credit_guards`, month-to-date for
+    paid), so a leg is never refused on money spent elsewhere. Single home:
+    both fetch callers read this, never a bare `month_start`."""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    base = month_start(now)
+    earliest = base
+    for provider in credit_guard_providers(registry or {}):
+        try:
+            started = credit_started_date(registry, provider, now)
+        except Exception:
+            continue
+        if started is None:
+            continue
+        start_dt = datetime.datetime.combine(
+            started, datetime.time.min, tzinfo=datetime.timezone.utc)
+        if start_dt < earliest:
+            earliest = start_dt
+    return earliest
+
+
 def _provider_spellings(provider, registry=None):
     """Every namespace a provider's call-log rows may carry, lowercased.
 
@@ -1370,10 +1401,20 @@ def main(argv=None, *, fetch=None, env=None, now=None):
 
     gateway = (env.get("AUTOOS_OMNIROUTE_URL") or DEFAULT_GATEWAY).rstrip("/")
     fetch = fetch or urllib_fetch
+    # T1-CREDIT-FIX-8 C1: the fetch reaches the earliest grant start, not
+    # just month-start -- one home (`fetch_cutoff`), read by both fetch
+    # callers. The registry loads here (it is needed for the cutoff and again
+    # below); `read_registry` returns {} when unreadable, never raises.
+    priced = args.cost or args.lines or spend_on
+    registry = read_registry(args.registry) if priced else {}
+    fetch_depths = [cutoff]
+    if spend_on:
+        fetch_depths.append(spend_cutoff)
+    if priced:
+        fetch_depths.append(fetch_cutoff(registry, now))
     try:
         rows, pages, truncated = fetch_window(fetch, gateway, key,
-                                              min(cutoff, spend_cutoff)
-                                              if spend_on else cutoff)
+                                              min(fetch_depths))
     except UsageError as e:
         # Print only the exception type name, not the message which may contain URLs
         print("autoos-usage: spend unmeasured (%s)" % type(e).__name__, file=sys.stderr)
@@ -1389,8 +1430,6 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                   file=sys.stderr)
         return 3
 
-    priced = args.cost or args.lines or spend_on
-    registry = read_registry(args.registry) if priced else {}
     prices = prices_from_registry(registry)
     price_source = price_source_name(args.registry) if priced else None
     spend = paid_spend(rows, prices, registry, spend_cutoff, balance=balance,
@@ -1402,7 +1441,7 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     guards = None
     if guarded:
         try:
-            guards = credit_guards(registry, rows, spend_cutoff)
+            guards = credit_guards(registry, rows, spend_cutoff, today=now)
         except Exception as e:
             # A grant that cannot state its own cap (ValueError) must read as
             # unmeasured, never as a traceback: the documented exit code is 3.

@@ -4685,13 +4685,14 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     env = os.environ if env is None else env
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = usage_mod.month_start(now)
+    fetch_cut = usage_mod.fetch_cutoff(registry, now)
     gateway = (env.get("AUTOOS_OMNIROUTE_URL")
                or usage_mod.DEFAULT_GATEWAY).rstrip("/")
     fetch = fetch or usage_mod.urllib_fetch
     try:
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
-        rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
-        guards = usage_mod.credit_guards(registry, rows, cutoff)
+        rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
+        guards = usage_mod.credit_guards(registry, rows, cutoff, today=now)
         guards.update(_paid_guards_measured(registry, rows, cutoff))
     except (usage_mod.UsageError, OSError, ValueError) as exc:
         # Every failure mode the read predicts (gateway refusal/unreachable,
