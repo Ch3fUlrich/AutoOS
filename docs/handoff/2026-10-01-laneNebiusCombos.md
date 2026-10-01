@@ -279,10 +279,41 @@ introduced or worsened by the nebius removal (which touches no `credit` leg).
 
 ## 10. Reviews
 
-Three `t3-reviewer` subagents run read-only, on three families, **including two
+Three `t3-reviewer` subagents ran read-only, on three families, **including two
 free models** (operator mandate), each nonce-gated on
-`NEBREMOVAL-NONCE-4Kt7Wq2Z` (must be quoted back from THIS file). Recorded in
-the DONE note → see `logs/handoff-sessions/DONE-ws-nebius-combos.md` §Reviews.
+`NEBREMOVAL-NONCE-4Kt7Wq2Z`. All three quoted the nonce back correctly from
+THIS file and none edited anything.
+
+| # | Reviewer route (family) | Verdict | Session |
+|---|---|---|---|
+| 1 | `omniroute/t3-driver-clean` (DeepSeek, paid) | APPROVED | `ses_f09ffb27affe2JFlXvKDBEtHer` |
+| 2 | `omniroute/or-qwen3.8-27b-free` (Qwen, **free**) | APPROVED | `ses_f09ffb276ffeDFA4qxHNaN2skw` |
+| 3 | `omniroute/or-nemotron-3-super-free` (NVIDIA, **free**) | APPROVED | `ses_f09fe507effecLdCSAga5b7I5W` |
+
+What each read and verified:
+
+- **#1 (DeepSeek):** `git show --stat f6e2e5ad` (combos.json + the two docs only);
+  the committed blob scanned for nebius model refs → `[]`; the diff scan (only
+  the `NEBREMOVAL` comment adds the word "nebius", six legs deleted);
+  `render omniroute --check` → the same six `differs:` lines; independently
+  recomputed the invariant — `t1-orchestrator ['scaleway']` (1), the other five
+  `4/5/4/5/4`, confirming the doc's honesty claim. Verdict APPROVED.
+- **#2 (Qwen, free):** `git show --stat`, the committed-blob scan → `combos 22
+  nebius legs []`, `Select-String nebius` (only the NEBREMOVAL comment + the
+  pre-existing CTXFIX prose line), `registry.py check` (`ok:` exit 0),
+  `audit-router.py --offline` (`no drift`). Verdict APPROVED.
+- **#3 (NVIDIA, free):** `render omniroute --check` (the exact six lines),
+  cross-checked against §4 (same set, no extra), and all four other renders +
+  `sync-ide-models.py --check` → `ok`. Verdict APPROVED.
+
+**One routed attempt failed, recorded verbatim:** a first third leaf sent to
+`omniroute/hf-glm-5.2` returned, before doing any work —
+`Service temporarily unavailable: all targets were skipped by pre-dispatch
+filters` (session `ses_f09ffb26effeWgtdVLa7rOOfMT`). This is a pre-dispatch
+routing skip, not a `chat_admission_busy` / `Rate limit exceeded`; the leaf was
+re-run on `omniroute/or-nemotron-3-super-free` and completed (reviewer #3).
+No 429/`chat_admission_busy` was seen during any probe or review; no backoff was
+required.
 
 ## 11. Explicitly NOT done here
 

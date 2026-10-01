@@ -73,5 +73,14 @@ second distinct-provider usable leg is added/marked. Full detail: evidence §7.
 
 ## 5. Reviews
 
-Recorded after the lane commit; see evidence §10. (Filled in the follow-up
-commit.)
+Three `t3-reviewer` leaves, three families (two free), read-only, nonce-gated on
+`NEBREMOVAL-NONCE-4Kt7Wq2Z` — **all three APPROVED**:
+
+| # | Reviewer route (family) | Verdict | Session |
+|---|---|---|---|
+| 1 | `omniroute/t3-driver-clean` (DeepSeek) | APPROVED | `ses_f09ffb27affe2JFlXvKDBEtHer` |
+| 2 | `omniroute/or-qwen3.8-27b-free` (Qwen, free) | APPROVED | `ses_f09ffb276ffeDFA4qxHNaN2skw` |
+| 3 | `omniroute/or-nemotron-3-super-free` (NVIDIA, free) | APPROVED | `ses_f09fe507effecLdCSAga5b7I5W` |
+
+Full detail (what each read + the one pre-dispatch-routing skip) in the evidence
+§10.
