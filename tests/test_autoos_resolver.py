@@ -4611,8 +4611,11 @@ class PaidLastResortTests(unittest.TestCase):
         plan = self.run_plan(reg, card)
         self.assertEqual(plan["leg"], "paid-p/paid-model")
         blob = " ".join(plan["explain"])
-        self.assertIn("last_resort", blob)
-        self.assertIn("meta-p/meta-model", blob)
+        # T0-PAID-5 P4: the fenced free leg is ineligible, not down -- it
+        # reads as skipped, never as a last-resort cause for the paid leg.
+        self.assertIn("meta-p/meta-model skipped (same family as author)",
+                      blob)
+        self.assertNotIn("last_resort", blob)
 
     def test_v1_role_review_card_arms_the_author_fence(self):
         # T0-PAID-4 Q3: v1 cards spell the review as role=review (see

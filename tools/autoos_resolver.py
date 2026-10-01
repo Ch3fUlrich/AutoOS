@@ -1200,8 +1200,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     # non-free leg is listed (T0-PAID-3 P1: only _FREEISH_TIERS count as free;
     # a missing or unrecognised tier is held back like paid). This also covers reviewer *routes* (_select_reviewers
     # scores through here) for implement and review cards alike. The
-    # operator-ordered policy.reviewers walk (reviewer_for) is out of scope:
-    # its entries name no route, so "same route class" cannot apply.
+    # operator-ordered policy.reviewers walk (reviewer_for) enforces the
+    # same last-resort rule across entries with its own two-pass walk
+    # (every NON-paid entry first, then the paid ones): its entries name
+    # no route, so the per-route holdback here cannot apply to them.
     legs, skipped = _hold_back_paid_legs(legs, leg_names, skipped, registry)
 
     return legs, skipped, re_probe_notes
@@ -2440,6 +2442,12 @@ def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
         chosen_tier = None
     if chosen_tier not in _FREEISH_TIERS:
         for leg, reasons in skipped_legs.items():
+            if any("same family as author" in reason for reason in reasons):
+                # T0-PAID-5 P4: a same-family-fenced free leg is ineligible,
+                # not down -- it reads as skipped, never as a last-resort
+                # cause for the non-free leg.
+                lines.append("%s skipped (same family as author)" % leg)
+                continue
             try:
                 tier = leg_tier(leg, registry)
                 unreadable = False
