@@ -84,6 +84,19 @@ R-orch-14. Put both ids in every L2 brief.
 - Before relying on an unmeasured route, run it once on a tiny task, record the exact command
   and result in the DONE note, then scale.
 
+**Seat-model evidence (D-260).** A review seat run keyless on the opencode path
+(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word: the
+fence may serve a different model than the one requested (measured 2026-10-01: a seat pinned to
+`opencode/mimo-v2.6-flash-free` served `opencode/nemotron-3-ultra-free` on all 7 turns).
+Before accepting a free-seat verdict, run
+`python3 tools/seat-model-evidence.py <sandbox-dir> --expect opencode/<model>` — it reads the
+per-turn provider-response model id from the seat's `<sandbox>.opencode-data/opencode/opencode.db`
+(`session_message` → assistant `data.model`) and writes a sha256-stamped JSON file
+(`<sandbox>.seat-evidence.json`). Exit 0 = every assistant turn was served by the expected model;
+exit 2 = at least one turn was not — reject or re-run the seat; exit 3 = no turn data, the
+verdict is unverifiable. The check is deterministic and reads `credential`/`account`/`kv` never;
+cite the evidence file's sha256 in the DONE note.
+
 **The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
 carries them:
 
