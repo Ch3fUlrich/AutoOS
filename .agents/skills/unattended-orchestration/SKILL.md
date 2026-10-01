@@ -136,6 +136,9 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)
 - R-coord-11: MCP code loads from its cwd checkout: ff it to main, restart the MCP, probe isolated. (why: ff under a running server mixes old and new code; source: SCOPEBUS probes 1-4, 2026-09-29)
 - R-coord-12: Run `tools/prepush.py` before a push; `ready` refuses a sha it never recorded green. (why: three lanes green at home were red in CI; source: CI 36517453134, 36493098467, 36506339556)
+- R-coord-13: L0 and L1 sessions are interactive top-level sessions, never subagent children. (why: unattended parents must be watchable and addressable; source: operator 2026-09-30, ws-omniroute run)
+- R-coord-14: L1 and L2 follow this skill, never fix or research; they spawn L2/L3 sized to complexity. (why: orchestrators that work stop orchestrating; source: operator 2026-09-30)
+- R-coord-15: Never write the gateway data-dir key/config files (~/.omniroute); operator-only. (why: a lane's knob write destroyed the storage key; source: incident 2026-09-30 doc)
 
 ### orch (L2)
 
