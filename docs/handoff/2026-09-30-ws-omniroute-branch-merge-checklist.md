@@ -328,8 +328,10 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
   `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`, `ws-patchlive`) retain only the
   inherited `workstation-omniroute-handoff.md` line; their tips are superseded or already
   ancestors of main, whose tip is clean.
-- Method: `git grep -n -I -i '<user>'`; replacement `(?i)<user>(?!er)` → `<user>` (the `(?!er)`
-  guard preserves `maulser@…`); code paths env-derived. No `<user>er` over-replacement anywhere.
+- Method: tracked files scanned (case-insensitive) for the workstation username; each
+  occurrence replaced with `<user>`. The replacement regex carries a `(?!er)` guard so the git
+  author address (`…er@…`) survives. Code paths were env-derived, not blind-replaced. No
+  `<user>er` over-replacement anywhere.
 
 ## Branch table
 
