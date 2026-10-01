@@ -1025,6 +1025,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             continue
 
         reasons = []
+        # T1-CREDIT-FIX-7 R5: the D-220 loud line says the leg is KEPT, so it
+        # is stashed here and emitted only when the leg survives every other
+        # filter below (a leg then skipped for tool_calls/context/etc. must
+        # not claim it was kept).
+        pending_loud = None
 
         # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
         # reserved for finals. Held per leg, not per route, so a mixed route
@@ -1146,11 +1151,14 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                     # unknown spend the plan says so LOUDLY -- even when the leg
                     # is otherwise unremarkable -- so an operator never mistakes
                     # a fail-open grant for a measured, healthy one.
+                    # T1-CREDIT-FIX-7 R5: stashed, not emitted: the leg may yet
+                    # be skipped below, and a skipped leg must not say 'kept'.
                     loud = ("SPEND UNKNOWN: %s credit leg kept (grant $%.2f, "
                             "fail-open per D-220) - measured spend unavailable"
                             % (provider_id, float(guard.get("cap_usd") or 0.0)))
-                    if loud not in credit_warns:
-                        credit_warns.append(loud)
+                    if guard.get("window_limited"):
+                        loud += " (window: month-to-date only; set credit_started)"
+                    pending_loud = loud
             elif guard.get("state") == "warn" and credit_warns is not None:
                 line = "credit warn %s $%.2f/$%.2f" % (
                     provider_id, float(guard.get("spend_usd") or 0.0),
@@ -1212,6 +1220,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if reasons:
             skipped[leg] = notes + reasons
         else:
+            # T1-CREDIT-FIX-7 R5: the leg survived -- only now may the plan
+            # say LOUDLY that an unknown-spend credit leg was kept.
+            if (pending_loud is not None and credit_warns is not None
+                    and pending_loud not in credit_warns):
+                credit_warns.append(pending_loud)
             legs.append((provider_id, model_id))
             if notes:
                 re_probe_notes[leg] = notes
