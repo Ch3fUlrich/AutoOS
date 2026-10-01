@@ -4682,6 +4682,26 @@ class PaidLastResortTests(unittest.TestCase):
                                      "is healthy"]}, reg)
         self.assertTrue(any("ghost-p/ghost-model" in line for line in lines))
 
+    def test_hold_back_unreadable_tier_recorded_with_last_resort(self):
+        # T0-PAID-5 P3: when the only would-be-free leg's tier lookup raises,
+        # the early return must not leave the paid leg selectable with no
+        # record -- the unreadable leg lands in skipped ('tier unreadable')
+        # and the paid leg carries a last_resort line naming it.
+        import copy
+        reg = copy.deepcopy(self.fixture())
+        kept, skipped = r._hold_back_paid_legs(
+            [("ghost-p", "ghost-model"), ("paid-p", "paid-model")],
+            ["ghost-p/ghost-model", "paid-p/paid-model"], {}, reg)
+        self.assertEqual(kept, [("paid-p", "paid-model")])
+        self.assertIn("ghost-p/ghost-model", skipped)
+        self.assertTrue(any("tier unreadable" in reason
+                            for reason in skipped["ghost-p/ghost-model"]),
+                        skipped["ghost-p/ghost-model"])
+        lines = r._paid_last_resort_lines("paid-p/paid-model", skipped, reg)
+        self.assertTrue(any("last_resort" in line
+                            and "ghost-p/ghost-model" in line
+                            for line in lines), lines)
+
 
 if __name__ == "__main__":
     unittest.main()

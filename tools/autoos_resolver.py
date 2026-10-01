@@ -912,6 +912,7 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
     read an unknown tier as free.
     """
     tiers = []
+    unreadable = set()
     for name in leg_names:
         try:
             tiers.append(leg_tier(name, registry))
@@ -921,7 +922,21 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
             # Q4). The unknown-tier branch below already renders None as
             # "unknown".
             tiers.append(None)
+            unreadable.add(name)
     if not any(tier in _FREEISH_TIERS for tier in tiers):
+        # T0-PAID-5 P3: an unreadable leg is recorded in skipped ('tier
+        # unreadable') instead of staying silently usable -- otherwise the
+        # paid leg stays selectable with no last_resort line and the broken
+        # leg vanishes from the record entirely.
+        if unreadable:
+            kept = []
+            for entry, name in zip(legs, leg_names):
+                if name in unreadable:
+                    skipped[name] = ["tier unreadable: %s has no readable "
+                                     "tier, held as last resort" % name]
+                else:
+                    kept.append(entry)
+            return kept, skipped
         return legs, skipped
     healthy = ", ".join(name for name, tier in zip(leg_names, tiers)
                         if tier in _FREEISH_TIERS)
@@ -2401,7 +2416,9 @@ def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
       otherwise unrecognised -- anything outside _FREEISH_TIERS), every
       skipped free-ish leg gets one `last_resort` line carrying its existing
       skip reasons -- the record of which free legs were down and why the
-      non-free leg was allowed.
+      non-free leg was allowed. A skipped leg whose tier cannot even be read
+      (T0-PAID-5 P3) gets the same line: it was unusable, so the non-free
+      leg was allowed past it.
     """
     lines = []
     for leg, reasons in skipped_legs.items():
@@ -2425,9 +2442,11 @@ def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
         for leg, reasons in skipped_legs.items():
             try:
                 tier = leg_tier(leg, registry)
+                unreadable = False
             except (ValueError, KeyError):
                 tier = None
-            if tier in _FREEISH_TIERS:
+                unreadable = True
+            if tier in _FREEISH_TIERS or unreadable:
                 lines.append("last_resort: %s skipped (%s)"
                              % (leg, "; ".join(reasons)))
     return lines
