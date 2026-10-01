@@ -1,7 +1,7 @@
 {
   "models": [
     {
-      "cache_read_price": 2e-09,
+      "cache_read_price": 1e-08,
       "context": 1048576,
       "default_for": "muse_key",
       "direct": {

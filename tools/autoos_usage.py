@@ -93,10 +93,12 @@ import datetime
 import json
 import math
 import os
+import posixpath
 import re
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -962,6 +964,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         factor = resolver.price_factor(provider, window_source, ts) if ts else 1.0
         # T1-CREDIT-FIX-10 M4 (D-253): a row's `cacheRead` tokens bill at the
         # model's `price_cache_read`, the REST of the input at `price_in`.
+        # Real call-log row has tokens {in 51131, out 3608, cacheRead 23793, ...} and 179.4M cacheRead of 184.4M in total, so `in` INCLUDES cacheRead (bill in-cacheRead at price_in, cacheRead at price_cache_read).
         # The cached count is clamped into [0, in] -- a row that claims more
         # cached tokens than input tokens bills the input as fully cached,
         # never negative.
@@ -1199,7 +1202,9 @@ def load_balance_readings(path):
     lines are skipped (the track record's `load` contract, one home per
     shape -- this one carries provider/remaining/fetched_at). A line keyed
     `fetchedAt` (the gateway's spelling) normalises to `fetched_at` on load,
-    so hand-written seeds and recorded lines dedupe against each other."""
+    so hand-written seeds and recorded lines dedupe against each other.
+    A line whose `remaining` is non-numeric or non-finite is skipped too
+    (counted as malformed, never crashing the overlay)."""
     readings = []
     try:
         fh = open(path, encoding="utf-8")
@@ -1222,6 +1227,11 @@ def load_balance_readings(path):
                 stamped = obj.get("fetchedAt")
             if not isinstance(stamped, str):
                 continue
+            remaining = obj.get("remaining")
+            if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+                continue
+            if not math.isfinite(float(remaining)):
+                continue
             obj = dict(obj)
             obj["fetched_at"] = stamped
             readings.append(obj)
@@ -1237,9 +1247,15 @@ def record_balance_readings(path, readings):
     """
     seen = {(r.get("provider"), r.get("fetched_at"))
             for r in load_balance_readings(path)}
-    fresh = [r for r in (readings or [])
-             if isinstance(r, dict)
-             and (r.get("provider"), r.get("fetched_at")) not in seen]
+    fresh = []
+    for r in (readings or []):
+        if not isinstance(r, dict):
+            continue
+        key = (r.get("provider"), r.get("fetched_at"))
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh.append(r)
     if not fresh:
         return 0
     directory = os.path.dirname(os.path.abspath(path))
@@ -1354,6 +1370,19 @@ def balance_paid_guard(registry, provider, readings, since, now=None):
     return guard
 
 
+def _balance_guard_rank(state):
+    """Worse-wins rank for the ledger/balance merge (T1-CREDIT-FIX-11 R2).
+
+    refuse > warn > ok > unknown (unknown-like states rank lowest, so a
+    measured figure always governs over unmeasured -- the same ordering the
+    call-ledger guards already use where measured spend at/over the cap
+    beats unknown/truncated/unreadable).
+    """
+    order = {"refuse": 4, "warn": 3, "ok": 2, "unknown": 1, "manual": 1,
+             "guard error": 1}
+    return order.get(state, 0)
+
+
 def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
                            env, since, now=None):
     """Overlay the provider-balance paid meter on a guard map.
@@ -1399,7 +1428,45 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
             continue
         balanced = balance_paid_guard(registry, pid, ledger, since, now)
         if balanced is not None:
-            guards[pid] = balanced
+            # T1-CREDIT-FIX-11 R2: the worse of ledger and balance governs
+            # (refuse > warn > ok > unknown), spend is the max, the note
+            # names both sources when they differ -- a flat $0 balance must
+            # never overwrite a $30 ledger refuse with ok/$0.
+            if _balance_guard_rank(balanced.get("state")) >= _balance_guard_rank(guard.get("state")):
+                winner, loser = balanced, guard
+            else:
+                winner, loser = guard, balanced
+            try:
+                spend_ledger = float(guard.get("spend_usd"))
+            except (TypeError, ValueError):
+                spend_ledger = 0.0
+            try:
+                spend_bal = float(balanced.get("spend_usd"))
+            except (TypeError, ValueError):
+                spend_bal = 0.0
+            if not math.isfinite(spend_ledger):
+                spend_ledger = 0.0
+            if not math.isfinite(spend_bal):
+                spend_bal = 0.0
+            spend = max(spend_ledger, spend_bal)
+            note_winner = winner.get("note") or ""
+            note_loser = loser.get("note") or ""
+            if note_winner != note_loser and note_winner and note_loser:
+                note = "%s; %s" % (loser.get("note"), winner.get("note"))
+                # Keep the worse state's note first when the ledger wins.
+                if winner is guard:
+                    note = "%s; %s" % (guard.get("note"), balanced.get("note"))
+            else:
+                note = note_winner or note_loser
+            merged = dict(winner)
+            merged["spend_usd"] = spend
+            merged["spend_unknown"] = winner.get("state") in ("unknown", "guard error")
+            merged["note"] = note
+            try:
+                merged["models_unpriced"] = max(int(guard.get("models_unpriced") or 0), int(balanced.get("models_unpriced") or 0))
+            except (TypeError, ValueError):
+                pass
+            guards[pid] = merged
         elif guard.get("state") in ("ok", "warn", "refuse") \
                 and "(D-240)" not in (guard.get("note") or "") \
                 and "measured via call ledger" not in (guard.get("note") or ""):
@@ -1509,10 +1576,17 @@ def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
     except Exception as exc:  # noqa: BLE001 - total: malformed URL, type only
         raise UsageError("gateway helper cannot parse the request URL (%s)"
                          % type(exc).__name__)
-    path_query = parts.path + (("?" + parts.query) if parts.query else "")
-    if not parts.path.startswith("/api/usage/"):
+    try:
+        decoded = urllib.parse.unquote(parts.path or "")
+        if ".." in decoded.split("/"):
+            raise ValueError("dot-dot path")
+        norm = posixpath.normpath(decoded)
+        if not norm.startswith("/api/usage/"):
+            raise ValueError("non-usage path")
+    except ValueError as exc:
         raise UsageError("gateway helper refuses a non-usage path (%s)"
-                         % type(ValueError).__name__)
+                         % type(exc).__name__)
+    path_query = norm + (("?" + parts.query) if parts.query else "")
     script = ("import { apiFetch } from %s;\n"
               "const r = await apiFetch(%s, { method: 'GET' });\n"
               "const t = await r.text();\n"

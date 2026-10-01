@@ -3639,5 +3639,43 @@ class ComboContractTests(unittest.TestCase):
         self.assertIn("contract PASS", proc.stdout)
 
 
+
+
+class DenyGemini31ProPreviewTests(unittest.TestCase):
+    """T1-CREDIT-FIX-11 R1 (D-255/D-256): gemini-3.1-pro-preview stays as a DENIED registry row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_deny_rule_present_with_d255_reason(self):
+        rules = self.reg["policy"]["leg_rules"]
+        hits = [r for r in rules if "gemini-3.1-pro-preview" in r.get("match", "")]
+        self.assertTrue(hits, "no leg_rule matches gemini-3.1-pro-preview")
+        rule = hits[0]
+        self.assertFalse(rule["allow"])
+        self.assertIn("D-255", rule["reason"])
+
+    def test_legs_denied_in_all_spellings(self):
+        for leg in ("vertex/gemini-3.1-pro-preview", "gemini/gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview", "vertex_ai/gemini-3.1-pro-preview"):
+            self.assertTrue(registry.leg_denied(leg, self.reg), leg)
+
+    def test_price_row_still_readable(self):
+        row = self.reg["models"]["gemini-3.1-pro-preview"]
+        self.assertEqual(row["provider_prices"]["vertex_ai"]["price_in"], 2e-06)
+
+    def test_denied_leg_never_usable_and_pin_fails_closed(self):
+        reg = mutated()
+        reg["routes"]["r-denied-probe"] = {"id": "r-denied-probe", "legs": ["vertex/gemini-3.1-pro-preview"], "class": "test"}
+        # resolve_leg needs provider + model rows; add minimal ones if absent
+        if "vertex" not in reg["providers"]:
+            reg["providers"]["vertex"] = {"id": "vertex", "tier": "paid", "monthly_cap_usd": 250.0}
+        route = reg["routes"]["r-denied-probe"]
+        legs, skipped, _ = resolver.usable_legs(route, {"kind": "implement", "privacy": "public"}, {"need_tokens": 10}, {"opencode": {"installed": True, "signed_in": True, "reason": ""}}, reg, {})
+        self.assertEqual(legs, [])
+        self.assertIn("vertex/gemini-3.1-pro-preview", skipped)
+        self.assertTrue(any("leg_rules" in r for r in skipped["vertex/gemini-3.1-pro-preview"]))
+
+
 if __name__ == "__main__":
     unittest.main()

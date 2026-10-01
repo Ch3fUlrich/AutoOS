@@ -533,5 +533,110 @@ class M4BalanceMeterTests(unittest.TestCase):
         self.assertEqual(guards["deepseek"]["state"], "refuse")
 
 
+
+
+class T1CreditFix11R2OverlayWorseTests(unittest.TestCase):
+    def test_ledger_refuse_survives_flat_balance_ok(self):
+        reg = _reg_paid(cap=25.0)
+        guards = {"deepseek": {"provider": "deepseek", "state": "refuse", "spend_usd": 30.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger $30"}}
+        balanced = {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance $0 [measured via provider balance]"}
+        with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
+                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+        self.assertEqual(out["deepseek"]["state"], "refuse")
+        self.assertEqual(out["deepseek"]["spend_usd"], 30.0)
+        self.assertIn("ledger", out["deepseek"]["note"].lower() if isinstance(out["deepseek"]["note"], str) else "")
+        self.assertIn("balance", out["deepseek"]["note"].lower())
+
+    def test_balance_refuse_beats_ledger_ok(self):
+        reg = _reg_paid(cap=25.0)
+        guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
+        balanced = {"provider": "deepseek", "state": "refuse", "spend_usd": 5.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance exhausted [measured via provider balance]"}
+        with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
+                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+        self.assertEqual(out["deepseek"]["state"], "refuse")
+        self.assertEqual(out["deepseek"]["spend_usd"], 5.0)
+
+    def test_ledger_unknown_yields_to_balance_ok(self):
+        reg = _reg_paid(cap=25.0)
+        guards = {"deepseek": {"provider": "deepseek", "state": "unknown", "spend_usd": 0.0, "spend_unknown": True, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger unknown"}}
+        balanced = {"provider": "deepseek", "state": "ok", "spend_usd": 1.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance ok [measured via provider balance]"}
+        with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
+                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+        self.assertEqual(out["deepseek"]["state"], "ok")
+        self.assertEqual(out["deepseek"]["spend_usd"], 1.0)
+
+
+class T1CreditFix11R3SameBatchDedupeTests(unittest.TestCase):
+    def test_same_batch_duplicates_add_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.jsonl")
+            r1 = {"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}
+            n = usage.record_balance_readings(path, [dict(r1), dict(r1)])
+            self.assertEqual(n, 1)
+            self.assertEqual(len(usage.load_balance_readings(path)), 1)
+
+
+class T1CreditFix11R4HelperDotDotTests(unittest.TestCase):
+    def test_dotdot_path_rejected_without_url_text(self):
+        for url in ("http://127.0.0.1:1/api/usage/../etc/passwd", "http://127.0.0.1:1/api/usage/%2e%2e/x", "http://127.0.0.1:1/api/usage/../api/other"):
+            called = []
+            def _fail(*a, **k):
+                called.append(1)
+                raise AssertionError("subprocess must not run")
+            with self.assertRaises(usage.UsageError) as ctx:
+                usage.helper_fetch(url, None, 5, _run=_fail)
+            msg = str(ctx.exception)
+            self.assertEqual(called, [], url)
+            self.assertIn("(ValueError)", msg, url)
+            self.assertNotIn("127.0.0.1", msg)
+            self.assertNotIn("..", msg)
+            self.assertNotIn("etc", msg)
+
+    def test_non_usage_path_uses_type_name_only(self):
+        called = []
+        def _fail(*a, **k):
+            called.append(1)
+            raise AssertionError("subprocess must not run")
+        with self.assertRaises(usage.UsageError) as ctx:
+            usage.helper_fetch("http://127.0.0.1:1/api/other", None, 5, _run=_fail)
+        self.assertEqual(called, [])
+        self.assertIn("(ValueError)", str(ctx.exception))
+        self.assertNotIn("127.0.0.1", str(ctx.exception))
+
+
+class T1CreditFix11R5PrefixedCachePriceTests(unittest.TestCase):
+    def test_prefixed_rows_carry_10_percent(self):
+        reg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "catalog", "ai-registry.json")))
+        for mid in ("deepseek/deepseek-v4.1-flash", "deepseek-v4-flash", "meta/muse-spark-1.3-contributor", "muse-spark"):
+            row = reg["models"][mid]
+            self.assertIn("price_cache_read", row, mid)
+            self.assertAlmostEqual(row["price_cache_read"], 0.1 * row["price_in"], places=12, msg=mid)
+
+
+class T1CreditFix11R6RemainingValidationTests(unittest.TestCase):
+    def test_bad_remaining_skipped_never_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "b.jsonl")
+            lines = [
+                {"provider": "deepseek", "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0},
+                {"provider": "deepseek", "fetched_at": "2026-10-01T09:00:00Z", "remaining": "oops"},
+                {"provider": "deepseek", "fetched_at": "2026-10-01T09:30:00Z", "remaining": float("inf")},
+                {"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 40.0},
+            ]
+            with open(path, "w", encoding="utf-8") as fh:
+                for o in lines:
+                    fh.write(json.dumps(o, allow_nan=True) + "\n")
+            got = usage.load_balance_readings(path)
+            self.assertEqual(len(got), 2)
+            reg = _reg_paid(cap=25.0)
+            guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
+                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
+            self.assertIn(out["deepseek"]["state"], ("ok", "warn", "refuse"))
+
+
 if __name__ == "__main__":
     unittest.main()
