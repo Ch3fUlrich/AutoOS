@@ -3075,7 +3075,7 @@ def ci_run_status(run_id, runner=None):
     return data.get("conclusion"), head_sha, None
 
 
-def main_ci_status(runner=None):
+def main_ci_status(repo=None, runner=None):
     """``(conclusion, run_id, error)`` — what main's latest completed CI run says.
 
     WHY: main was red on 13 consecutive pushes while takes were merged anyway,
@@ -3091,13 +3091,30 @@ def main_ci_status(runner=None):
     objects; the head row carries the latest completed run on main. Mirrors
     ``ci_run_status``: a non-None ``error`` means the question was never
     answered, which is a different exit code from a run that came back red.
+
+    T0-FREEZE-5 H6: ``repo`` is the lane's repo directory -- the same
+    ``args.repo or os.getcwd()`` every other gate in ``cmd_ready`` reads --
+    and gh runs with cwd=<that dir>. WHY: ``gh run list`` resolves the
+    repository from the PROCESS working directory, so without this the gate
+    evaluated the wrong repo's main CI whenever ``--repo`` named another
+    checkout. A dir that is not a git repo makes gh itself fail, which stays
+    fail-closed (non-None ``error`` -> exit 2). Repo-first/runner-second keeps
+    the pre-H6 ``lambda runner=None`` stubs working: a positional repo binds
+    their single parameter; a positional runner (callable) is still honoured.
+    The runner gains the ``cwd`` kwarg; existing ``def runner(argv, **kw)``
+    fakes accept it untouched.
     """
+    if callable(repo) and runner is None:
+        runner, repo = repo, None
+    if repo is None:
+        repo = os.getcwd()
     runner = runner or subprocess.run
     argv = ["gh", "run", "list", "--branch", "main", "--status", "completed",
             "--limit", "1", "--workflow", "ci.yml", "--event", "push",
             "--json", "databaseId,conclusion,headSha"]
     try:
-        proc = runner(argv, capture_output=True, text=True, timeout=60)
+        proc = runner(argv, capture_output=True, text=True, timeout=60,
+                      cwd=repo)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, None, "%s" % exc
     if proc.returncode != 0:
@@ -3271,7 +3288,10 @@ def cmd_ready(args) -> int:
         fixes_waiver = declared
         fixes_field = ' fixes_main="%s"' % fixes_waiver
     if not fixes_waiver:
-        main_conclusion, main_run_id, main_error = main_ci_status()
+        # T0-FREEZE-5 H6: positional repo binds pre-H6 `lambda runner=None`
+        # stubs; the real function reads it as the gh cwd (see main_ci_status).
+        main_conclusion, main_run_id, main_error = main_ci_status(
+            args.repo or os.getcwd())
         if main_error:
             print("ready: cannot read main CI: %s" % main_error, file=sys.stderr)
             return 2

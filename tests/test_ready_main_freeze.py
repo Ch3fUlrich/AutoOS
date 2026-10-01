@@ -621,5 +621,120 @@ class Freeze4WaiverGateNameTests(FixMainWaiverTests):
         self.assertEqual(inbox, "")
 
 
+class Freeze5RepoScopeTests(MainCiFreezeTests):
+    """T0-FREEZE-5 H6: the main-CI gh read runs in the lane's repo.
+
+    WHY: `gh run list` resolves the repository from the PROCESS working
+    directory, while every git gate in `cmd_ready` uses
+    `args.repo or os.getcwd()` (tools/autoos-agent.py ~3170:
+    `remote_branch_tip` and the D-110 `local_green` read). With `--repo`
+    naming another checkout the sixth gate evaluated the WRONG repo's main
+    CI. The gate takes the same repo directory and runs gh with cwd=<that
+    dir>; an unreadable gh (a dir that is not a git repo included) stays
+    fail-closed (exit 2 at the CLI).
+
+    Fakes extend the injectable-runner contract `MainCiStatusParserTests.parse`
+    uses (tests/test_ready_main_freeze.py ~340: a `def runner(argv, **kw)`
+    fake): the new `cwd` kwarg rides in `kw`, so existing `**kw` fakes keep
+    working. `main_ci_status` is repo-first/runner-second so a positional repo
+    from `cmd_ready` still binds the pre-H6 `lambda runner=None` stubs in
+    `MainCiFreezeTests.run_ready_with_main` (~180).
+    """
+
+    def parse_scoped(self, stdout, repo, rc=0, stderr="", exc=None):
+        """Call the gate with an explicit repo; the fake records gh's cwd."""
+        seen = {}
+
+        def runner(argv, **kw):
+            seen["argv"] = list(argv)
+            seen["kw"] = dict(kw)
+            if exc is not None:
+                raise exc
+            return subprocess.CompletedProcess(["gh"], rc,
+                                               stdout=stdout, stderr=stderr)
+
+        return self.agent.main_ci_status(repo, runner=runner), seen
+
+    def test_explicit_repo_is_gh_cwd(self):
+        (conclusion, run_id, err), seen = self.parse_scoped(
+            json.dumps([{"databaseId": 7, "conclusion": "success",
+                         "headSha": "deadbeef"}]), "/some/dir")
+        self.assertIsNone(err, seen)
+        self.assertEqual((conclusion, run_id), ("success", "7"))
+        self.assertEqual(seen["kw"].get("cwd"), "/some/dir")
+
+    def test_omitted_repo_defaults_to_process_cwd(self):
+        seen = {}
+
+        def runner(argv, **kw):
+            seen["kw"] = dict(kw)
+            return subprocess.CompletedProcess(
+                ["gh"], 0,
+                stdout=json.dumps([{"databaseId": 7,
+                                    "conclusion": "success",
+                                    "headSha": "deadbeef"}]),
+                stderr="")
+
+        (conclusion, _run_id, err) = self.agent.main_ci_status(runner=runner)
+        self.assertIsNone(err, seen)
+        self.assertEqual(conclusion, "success")
+        self.assertEqual(seen["kw"].get("cwd"), os.getcwd())
+
+    def test_ready_with_repo_runs_gh_in_that_repo(self):
+        """End to end: `--repo DIR` reaches gh as cwd=DIR (not the process cwd)."""
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        seen = {}
+        real_run = self.agent.subprocess.run
+
+        def fake_run(argv, **kw):
+            if list(argv[:3]) == ["gh", "run", "list"]:
+                seen["cwd"] = kw.get("cwd")
+                return subprocess.CompletedProcess(
+                    argv, 0,
+                    stdout=json.dumps([{"databaseId": 777,
+                                        "conclusion": "success",
+                                        "headSha": "deadbeef"}]),
+                    stderr="")
+            return real_run(argv, **kw)
+
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent.subprocess, "run", fake_run):
+            rc, _out, _err = self.ready(record, repo, sha, inbox)
+        self.assertEqual(rc, 0, seen)
+        self.assertEqual(seen.get("cwd"), repo)
+
+    def test_gh_failure_in_the_lane_repo_fails_closed_with_exit_2(self):
+        """A gh the gate cannot read -- a dir that is not a git repo included --
+        is exit 2, never an allow (fail closed like every other unreadable gate)."""
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        real_run = self.agent.subprocess.run
+
+        def fake_run(argv, **kw):
+            if list(argv[:3]) == ["gh", "run", "list"]:
+                return subprocess.CompletedProcess(
+                    argv, 1, stdout="",
+                    stderr="none of the git remotes configured")
+            return real_run(argv, **kw)
+
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent.subprocess, "run", fake_run):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.agent.main(
+                    ["ready", record, "--branch", self.BRANCH, "--sha", sha,
+                     "--inbox", inbox, "--repo", repo,
+                     "--registry", self.registry_path])
+        self.assertEqual(rc, 2, out.getvalue() + err.getvalue())
+        self.assertEqual(self.read_inbox(inbox), "")
+
+
 if __name__ == "__main__":
     unittest.main()
