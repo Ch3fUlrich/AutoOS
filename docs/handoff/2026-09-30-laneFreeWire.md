@@ -390,3 +390,18 @@ reproduces on a real review payload. The reviewer was re-routed to
 groq free band (which the single-tool probes passed) but reinforces free-probe's
 multi-turn caveat.
 
+### 10.1 Fix-up review (2026-10-01)
+
+One nonce-gated reviewer on a **free** family reviewed the fix-up commit
+`323b7b0`, quoting `FREEWIRE-NONCE-7Qm4Zt9K` read from this file:
+
+| # | Reviewer route (family) | Verdict | Session |
+|---|---|---|---|
+| 1 | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (NVIDIA Nemotron, **free**) | APPROVED | `ses_f09a363bbffemq42wfRkLut1sN` |
+
+It verified, with its own commands: the worktree path redacted to
+`C:\Users\<user>` with no real-username hit in the two changed files; every
+gemini statement in this lane's docs reading as retention (no stale wording);
+the 8088 / 7187 measurements still in §3; `git show --stat 323b7b0` limited to the
+two handoff files; and a clean `git status`.
+

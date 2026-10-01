@@ -143,6 +143,12 @@ The **nebius removal** (follows in the same wave), and **no gateway restart**.
   as the policy's justification. No combos/registry content changed — the leg
   restoration is `gemini-restore`'s job on the combined lineage.
 
+### Fix-up review
+
+- `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (NVIDIA Nemotron, **free**),
+  session `ses_f09a363bbffemq42wfRkLut1sN`, nonce-gated (quoted
+  `FREEWIRE-NONCE-7Qm4Zt9K` read from the evidence) — **APPROVED** on `323b7b0`.
+
 ### CHANGELOG bullet
 
 - FreeWire fix-up (2026-10-01): redacted the real worktree path in
