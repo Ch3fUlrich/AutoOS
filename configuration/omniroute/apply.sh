@@ -1060,6 +1060,18 @@ echo "Resilience:"
 # resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
 # not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
 # chain hops immediately. No value change needed for this lane.
+# B2-LATENCY 2026-10-01 (t1 22556 ms crawl: gemini 503 -> free-ai 429 ->
+# vertex error -> meta-api 401 before deepseek served): live
+# get-api-resilience shows requestQueue.maxWaitMs 180000 (queue wait, NOT
+# per-leg), providerBreaker.apikey 2/1/30000, oauth 8/5/60000,
+# connectionCooldown apikey base 3000/maxBackoff 5 (oauth 5000/8),
+# waitForCooldown 3 retries/30 s, comboCooldownWait 90 s/5 attempts/300 s budget,
+# providerCooldown DISABLED. No per-leg timeout knob exists in this API surface
+# (no legTimeoutMs); the 30-min hard-down park + 3x429/120 s->300 s cooldown +
+# CHAT_MAX_HEAVY=8 are gateway process env (08:07Z restart), not patchable here.
+# So no wiring change: current == proposed (180000 / 2 / 1 / 30000). The crawl
+# stops by REMOVING dead legs (B2-HF/B2-AGY: huggingface 401 + antigravity
+# rate-limited gone from bands), shortening the chain, not by retuning.
 # Through the CLI, not curl + the client key: /api/resilience is a management
 # route and answers the client key with 403 "Invalid management token"
 # (measured 2026-09-24); the local CLI sends the machine loopback token.
