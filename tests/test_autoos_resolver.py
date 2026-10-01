@@ -2859,7 +2859,9 @@ class ReviewerSelectionTests(unittest.TestCase):
     """Brief REVROUTE (S2) item 2: a review card carrying ``author`` resolves to
     the first entry of ``policy.reviewers`` whose family differs from the
     author's, whose provider/client is available at ``now``, and which privacy
-    allows. Everything the walk rejected is returned with its reason, because a
+    allows -- paid entries LAST (T0-PAID-4 Q1, operator rule D-212/D-219: the
+    walk tries every NON-paid entry first in registry order, then the paid
+    ones, and a paid choice says ``last resort`` in its reason). Everything the walk rejected is returned with its reason, because a
     reviewer list that silently narrows is indistinguishable from a config
     mistake -- and "silently no review" is exactly the failure this brief
     exists to close.
@@ -2930,8 +2932,10 @@ class ReviewerSelectionTests(unittest.TestCase):
     def test_author_spelled_as_a_registry_model_works(self):
         result = self.pick("muse-spark-1.3-contributor")
         self.assertEqual(result["author_family"], "meta")
-        # A meta author cannot be reviewed by the meta reviewer.
-        self.assertEqual(result["reviewer"]["family"], "google")
+        # A meta author cannot be reviewed by the meta reviewer. The free
+        # google entry rides a paid-tier leg in this fixture, so it serves
+        # only as last resort -- the legless free qwen entry reviews.
+        self.assertEqual(result["reviewer"]["family"], "qwen")
 
     def test_author_spelled_as_a_leg_works(self):
         self.assertEqual(self.pick("meta_api/muse-spark-1.3-contributor")
@@ -2974,7 +2978,7 @@ class ReviewerSelectionTests(unittest.TestCase):
         # to read as an independent one.
         result = self.pick("Meta")
         self.assertEqual(result["author_family"], "meta")
-        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertEqual(result["reviewer"]["family"], "qwen")
         self.assertIn("same family as author (meta)", result["skipped"][0]["reasons"][0])
 
     def test_a_reviewer_entry_family_is_compared_without_case(self):
@@ -2982,7 +2986,7 @@ class ReviewerSelectionTests(unittest.TestCase):
         reg["policy"]["reviewers"][0]["family"] = "Meta"
         result = r.reviewer_for("muse-spark-1.3-contributor", reg, self.state(),
                                 self.NOW, risk="normal", privacy="public")
-        self.assertEqual(result["reviewer"]["family"], "google",
+        self.assertEqual(result["reviewer"]["family"], "qwen",
                          "an operator's capitalization is the same family")
 
     def test_an_author_spelled_as_a_model_id_ignores_case(self):
@@ -3026,16 +3030,21 @@ class ReviewerSelectionTests(unittest.TestCase):
     # --- the same-family rule ----------------------------------------------
 
     def test_the_walk_stops_at_the_first_usable_reviewer(self):
-        # The list is an ORDERED preference: once one entry passes, nothing
-        # after it is examined, so a cheap reviewer later never steals a
-        # cheaper-but-already-chosen one and the skipped list stays short.
+        # Two passes, each an ORDERED preference (T0-PAID-4 Q1, D-212/D-219):
+        # every NON-paid entry first in registry order, then the paid ones.
+        # Once one entry passes, nothing after it in its pass is examined.
+        # Here the qwen author fences its own free entry, so the first pass
+        # finds nobody and the paid meta head takes the second pass as last
+        # resort -- the skipped list holds exactly the fenced free entry.
         result = self.pick("qwen")
         self.assertEqual(result["reviewer"]["family"], "meta")
-        self.assertEqual(result["skipped"], [])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["skipped"][0]["family"], "qwen")
+        self.assertIn("last resort", result["reason"])
 
     def test_the_author_family_is_skipped_with_a_reason(self):
         result = self.pick("meta")
-        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertEqual(result["reviewer"]["family"], "qwen")
         first = result["skipped"][0]
         self.assertEqual(first["family"], "meta")
         self.assertIn("same family as author (meta)", first["reasons"][0])
@@ -3163,8 +3172,16 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertTrue(lines, "no explain line for a skipped reviewer")
         self.assertIn("omniroute/spark-1.3-contributor", lines[0])
 
-    def test_explain_is_empty_when_the_head_of_the_list_was_usable(self):
-        self.assertEqual(r.reviewer_explain_lines(self.pick("qwen")), [])
+    def test_explain_names_the_last_resort_when_paid_reviews(self):
+        # T0-PAID-4 Q1: the qwen author fences its own free entry and the
+        # paid-tier google entry reviews as last resort -- the explain block
+        # names the skipped free entry and the reason says paid was last
+        # resort, never a silent paid review.
+        result = self.pick("qwen")
+        lines = r.reviewer_explain_lines(result)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("qwen3.8-flash", lines[0])
+        self.assertIn("last resort", result["reason"])
 
     # --- REVFREE: the free Zen reviewers, on the real registry --------------
 
@@ -3239,11 +3256,15 @@ class PlanReviewCardTests(unittest.TestCase):
                       self.NOW)
 
     def test_a_review_card_with_an_author_carries_the_review_decision(self):
+        # T0-PAID-4 Q1 (D-212/D-219): the paid meta head must not review a
+        # qwen card while a free entry is usable -- the free google reviewer
+        # takes it.
         review = self.plan(author="qwen")["review"]
         self.assertEqual(review["author_family"], "qwen")
-        self.assertEqual(review["reviewer"]["family"], "meta")
-        self.assertEqual(review["reviewer"]["client"], "opencode")
-        self.assertIn("spark-1.3-contributor", review["reviewer"]["model"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual(review["reviewer"]["client"], "gemini")
+        self.assertIn("gemini-3.8-flash", review["reviewer"]["model"])
+        self.assertIsNot(review["reviewer"].get("paid"), True)
         self.assertEqual(review["state"], "resolved")
 
     def test_the_reason_says_who_authored_it(self):
