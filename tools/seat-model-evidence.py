@@ -42,6 +42,10 @@ Usage:
     python3 tools/seat-model-evidence.py <sandbox-dir> \
         --expect <provider/model> --gateway (--run-id <id> | --since <iso> \
         [--until <iso>]) [--key <apiKeyName>]
+    For --gateway the window sources are EXCLUSIVE: --run-id together with
+    --since/--until is a usage error; with --since/--until the tag must come
+    from --session-tag. --key must be non-empty (empty would disable key
+    attribution).
     With --gateway --run-id the window is [record start, record end] padded
     +-5 s (a record without an end time is a REFUSAL, exit 3 — never "until
     now"); rows are attributed by the call-log field `sessionTag`, which must
@@ -60,8 +64,11 @@ source, or a status-200 gateway row that served another model;
 3 the db is unreadable / the seat session has no assistant rows at all / the
 gateway fetch failed (status only is printed) / the run record has no end time
 (unverifiable) / the gateway rows cannot be attributed to this seat — no
-session tag in the record, no `sessionTag` field on any row, or no status-200
-row at all (a window alone is never attribution). JSON goes to --out
+session tag in the record, no `sessionTag` field on any row, no status-200
+row at all (a window alone is never attribution), or a window bound
+(--since/--until or the run record's) that is present but unparseable. An
+attributed row with an unparseable timestamp is a gap: counted in
+`n_unparseable_ts`, warned, and exits 2 (J1). JSON goes to --out
 (default <sandbox>.seat-evidence.json).
 """
 import datetime
@@ -497,9 +504,14 @@ def gateway_evidence(rows, expect, start, end, key, tag, run_id):
         die("cannot attribute: no session tag in the run record "
             "(a window alone is not attribution)")
     start_dt, end_dt = _parse_ts(start), _parse_ts(end)
+    if start and start_dt is None:
+        die("gateway window start bound is unparseable: " + repr(start))
+    if end and end_dt is None:
+        die("gateway window end bound is unparseable: " + repr(end))
     total = 0
     window_rows = 0
     tagged = 0
+    unparseable_rows = 0
     ok_rows = []
     bad_rows = []
     for r in rows:
@@ -508,12 +520,20 @@ def gateway_evidence(rows, expect, start, end, key, tag, run_id):
         total += 1
         ts = _parse_ts(r.get("timestamp"))
         if ts is None:
+            # J1(b): an unparseable timestamp on a row that otherwise
+            # attributes to this seat (key + tag) is a GAP, never a silent
+            # skip; rows failing the key/tag tests stay ignored as before.
+            if key is not None and r.get("apiKeyName") != key:
+                continue
+            if not tag_matches(r.get("sessionTag"), tag, run_id):
+                continue
+            unparseable_rows += 1
             continue
         if start_dt and ts < start_dt:
             continue
         if end_dt and ts > end_dt:
             continue
-        if key and r.get("apiKeyName") != key:
+        if key is not None and r.get("apiKeyName") != key:
             continue
         window_rows += 1
         row_tag = r.get("sessionTag")
@@ -552,6 +572,7 @@ def gateway_evidence(rows, expect, start, end, key, tag, run_id):
         "turns": turns, "cids": cids, "window_rows": window_rows,
         "mismatch": mismatch, "n_rows_total": total, "n_200": len(ok_rows),
         "n_dropped": 0 if mismatch else len(bad_rows),
+        "n_unparseable_ts": unparseable_rows,
         "dropped_reasons": dropped_reasons,
     }
 
@@ -574,6 +595,12 @@ def write_output(doc, args, sandbox):
 def run_gateway(args, sandbox, expect):
     start = args.since
     end = args.until
+    # J1(a): a bound that is present but unparseable is a refusal naming it;
+    # silently dropping the bound would widen the window unnoticed.
+    if start and _parse_ts(start) is None:
+        die(f"unparseable --since value: {start!r}")
+    if end and _parse_ts(end) is None:
+        die(f"unparseable --until value: {end!r}")
     pad = 0
     if args.run_id and not (start or end):
         start, end = read_run_record_window(args.run_id, args.logs_root)
@@ -581,6 +608,12 @@ def run_gateway(args, sandbox, expect):
             die(f"no start time in the run record for {args.run_id}")
         if not end:
             die("run still active or no end time")
+        if _parse_ts(start) is None:
+            die(f"unparseable start in the run record for {args.run_id}: "
+                f"{start!r}")
+        if _parse_ts(end) is None:
+            die(f"unparseable end in the run record for {args.run_id}: "
+                f"{end!r}")
         start = _shift_iso(start, -WINDOW_PAD_SECONDS)
         end = _shift_iso(end, WINDOW_PAD_SECONDS)
         pad = WINDOW_PAD_SECONDS
@@ -602,6 +635,13 @@ def run_gateway(args, sandbox, expect):
         warnings.append("rows served another model")
         print(f"{PROG}: warning: {mismatch} of {len(turns)} attributed "
               "rows served another model", file=sys.stderr)
+    ts_gaps = stats["n_unparseable_ts"]
+    if ts_gaps:
+        warnings.append(f"{ts_gaps} attributed row(s) with an unparseable "
+                        "timestamp — no window placement, evidence is "
+                        "incomplete")
+        print(f"{PROG}: warning: {ts_gaps} attributed row(s) carry an "
+              "unparseable timestamp", file=sys.stderr)
     doc = {
         "kind": "response-side",
         "sandbox": str(sandbox),
@@ -614,19 +654,20 @@ def run_gateway(args, sandbox, expect):
         "n_rows_total": stats["n_rows_total"],
         "n_200": stats["n_200"],
         "n_dropped": stats["n_dropped"],
+        "n_unparseable_ts": ts_gaps,
         "dropped_reasons": stats["dropped_reasons"],
         "turns": turns,
         "turn_count": len(turns),
         "correlation_ids": cids,
         "warnings": warnings,
-        "all_match": mismatch == 0,
+        "all_match": mismatch == 0 and ts_gaps == 0,
         "generated_at": now_iso(),
     }
     if pad:
         print(f"{PROG}: window padded +-{WINDOW_PAD_SECONDS}s around the "
               "run record start/end", file=sys.stderr)
     write_output(doc, args, sandbox)
-    sys.exit(0 if mismatch == 0 else 2)
+    sys.exit(0 if doc["all_match"] else 2)
 
 
 def run_keyless(args, sandbox, base, db, expect):
@@ -715,6 +756,14 @@ def main(argv):
         # The keyless three-way check is meaningless without source (a);
         # refuse in argparse, not after reading the db (D-261 G5).
         ap.error("--run-id is required for the keyless (request-side) mode")
+    if args.gateway and args.run_id and (args.since or args.until):
+        # J2: one way to set the window only; with --since/--until the tag
+        # must come from --session-tag.
+        ap.error("--gateway: --run-id and --since/--until are exclusive — "
+                 "pick one window source")
+    if args.key is not None and not args.key.strip():
+        # J3: an empty --key would disable key attribution.
+        ap.error("empty --key would disable key attribution")
 
     sandbox, base, db = resolve_db(args.sandbox_dir)
     expect = normalise_expect(args.expect)

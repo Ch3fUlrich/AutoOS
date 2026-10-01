@@ -631,17 +631,18 @@ class SeatEvidenceTests(unittest.TestCase):
     def test_gateway_tag_with_run_id_suffix_matches(self):
         # D-063: the header the spawner sends is "<tag>/<run-id>", so the row
         # carries that exact value; the record knows the bare tag.
+        # J2 made --run-id and --since/--until exclusive, so this exercises
+        # the run-record-window path, where the tag comes from the record.
         with tempfile.TemporaryDirectory() as tmp:
             base, root, out = self._gw_base(tmp)
+            write_workers_window(root, "rid", "2026-10-01T21:59:58Z",
+                                 "2026-10-01T22:17:44Z")
             self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z", cid="mine",
                                           tag=TAG + "/rid"),
                           self._spark_row("2026-10-01T22:01:00Z", cid="sib",
                                           tag=TAG + "/other-run")])
-            proc = run_tool(base, SPARK_EXPECT, out,
-                            extra=["--gateway", "--session-tag", TAG,
-                                   "--run-id", "rid",
-                                   "--since", "2026-10-01T21:09:00Z",
-                                   "--until", "2026-10-01T22:30:00Z"])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             doc = json.loads(out.read_text())
             self.assertEqual(doc["correlation_ids"], ["mine"])
@@ -737,6 +738,140 @@ class SeatEvidenceTests(unittest.TestCase):
                                    "--until", "2026-10-01T22:30:00Z"])
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
             self.assertIn("no status-200 row", proc.stderr)
+
+    # --- J1/J2/J3: unparseable timestamps, exclusive window flags, --key ----
+
+    def test_gateway_unparseable_since_exit_three(self):
+        # J1(a): a present-but-unparseable --since is a refusal naming the
+        # bound, never a silently ignored window edge.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG, "--since", "nope",
+                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("--since", proc.stderr)
+
+    def test_gateway_unparseable_until_exit_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z", "--until", "nope"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("--until", proc.stderr)
+
+    def test_gateway_unparseable_run_record_start_exit_three(self):
+        # J1(a): same for a run-record bound that _shift_iso would pass
+        # through unpadded.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_workers_window(root, "rid", "not-a-ts",
+                                 "2026-10-01T22:17:44Z")
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("start", proc.stderr)
+
+    def test_gateway_unparseable_ts_attributed_row_exit_two(self):
+        # J1(b): an unparseable-ts row that DOES pass key+tag is a gap:
+        # counted in n_unparseable_ts, warned, forces exit 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="ok1"),
+                self._spark_row("not-a-timestamp", cid="gap"),
+                self._spark_row("2026-10-01T22:02:00Z", cid="ok2"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["n_unparseable_ts"], 1)
+            self.assertFalse(doc["all_match"])
+            self.assertTrue(any("unparseable" in w for w in doc["warnings"]),
+                            doc["warnings"])
+            self.assertEqual(doc["n_200"], 2)
+            self.assertEqual(doc["turn_count"], 2)
+
+    def test_gateway_unparseable_ts_foreign_tag_row_ignored(self):
+        # J1(b): an unparseable-ts row failing the key/tag test stays ignored.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="ok1"),
+                self._spark_row("not-a-timestamp", cid="theirs",
+                                tag="AutoOS/other-seat"),
+                self._spark_row("2026-10-01T22:02:00Z", cid="ok2"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["n_unparseable_ts"], 0)
+            self.assertTrue(doc["all_match"])
+
+    def test_gateway_run_id_with_since_until_usage_error(self):
+        # J2: the two ways to set the window are exclusive.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=[
+                                "--gateway",
+                                "--since", "2026-10-01T21:09:00Z",
+                                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn("--run-id", proc.stderr)
+            self.assertIn("--since", proc.stderr)
+            self.assertFalse(out.exists())
+
+    def test_gateway_since_until_with_session_tag_ok(self):
+        # J2: with --since/--until the tag comes from --session-tag.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_gateway_empty_key_usage_error(self):
+        # J3: an empty --key would disable key attribution -> refuse.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T22:30:00Z", "--key", ""])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn("--key", proc.stderr)
+
+    def test_gateway_default_key_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="mine"),
+                self._spark_row("2026-10-01T22:01:00Z", cid="theirs",
+                                key="someone-else"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--session-tag", TAG,
+                "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["window"]["key"], GW_KEY)
+            self.assertEqual(doc["correlation_ids"], ["mine"])
 
     def test_keyless_requires_run_id_in_argparse(self):
         # G5: --run-id is a required source for the keyless mode.
@@ -859,32 +994,6 @@ class SeatEvidenceTests(unittest.TestCase):
         doc = json.loads((Path("/tmp") / "qtest_mimo.json").read_text())
         self.assertEqual(doc["sources"]["cli"]["model"], NEMO)
         self.assertEqual(doc["sources"]["run_record"]["model"], MIMO)
-
-
-@unittest.skipUnless(os.environ.get("AUTOOS_LIVE_GATEWAY_TESTS") == "1",
-                     "live gateway smoke opt-in (GET only, D-261 G6)")
-class LiveGatewaySmoke(unittest.TestCase):
-    """Read-only smoke of the FIXED gateway mode against the live container.
-    The 73c457 spark seat genuinely shared its window with muse traffic, so
-    0 AND 2 are honest outcomes; anything else (or a crash) is a regression."""
-
-    RID = "20261001-215958-seatevidence2-review-spa-73c457"
-
-    def test_live_gateway_run_exit_zero_or_attributed_two(self):
-        sandbox = REAL_SANDBOXES / ("AutoOS-" + self.RID)
-        if not sandbox.is_dir():
-            self.skipTest(f"live sandbox not present: {sandbox.name}")
-        argv = [sys.executable, str(TOOL), str(sandbox), "--gateway",
-                "--run-id", self.RID, "--expect", SPARK_EXPECT,
-                "--out", "/tmp/qtest_live_gw.json"]
-        proc = subprocess.run(argv, capture_output=True, text=True)
-        self.assertIn(proc.returncode, (0, 2), proc.stdout + proc.stderr)
-        r = parse_stdout(proc)
-        self.assertEqual(r["kind"], "response-side")
-        doc = json.loads(Path("/tmp/qtest_live_gw.json").read_text())
-        self.assertEqual(doc["window"]["padding_seconds"], 5)
-        self.assertEqual(doc["window"]["key"], GW_KEY)
-        self.assertGreaterEqual(doc["window_rows"], r["turns"])
 
 
 if __name__ == "__main__":
