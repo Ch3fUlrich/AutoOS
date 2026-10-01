@@ -7248,7 +7248,7 @@ Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in 
         $m = Get-AutoOSClientKeyField
         $c = & $inCopy $text 'Get-AutoOSClientKeyField'
         Assert-Equal $m 'omniroute_tilde_host'
-        Assert-Equal (Get-AutoOSHostConfigPath) ($d + '/autoos/host.yml'.Replace('/', [string][IO.Path]::DirectorySeparatorChar)) 'the ~ was not expanded literally'
+        Assert-Equal (Get-AutoOSHostConfigPath) ($d + '/autoos/host.yml') 'the ~ was not expanded literally (the rest of the path stays as written)'
         Assert-Equal $c $m 'the start-stack copy picked another field than the module'
     } finally {
         if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
