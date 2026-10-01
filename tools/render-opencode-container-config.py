@@ -137,14 +137,15 @@ GH_READONLY = {
 FLEET_AGENT_MODELS = {
     "orchestrator": "omniroute/deepseek-v4.1-flash",
     "suborchestrator": "omniroute/deepseek-v4.1-flash",
-    "leaf-implementer": "omniroute/vertex-gemini-3.1-pro-preview",
-    # Operator 2026-09-30: leaves spawn on Vertex. Probed live before pinning:
-    # `vertex/gemini-3.1-pro-preview` and `vertex/gemini-2.5-flash` answer 200,
-    # but `vertex/claude-sonnet-4-5` is 501 ("not implemented, or supported, or
-    # enabled" -- the Vertex project has no Claude entitlement) and
-    # `vertex/DeepSeek-V4-Flash` is 400 (gateway payload bug). Pointing the
-    # reviewer at a dead leg would fail every leaf review, so it defaults to a
-    # different family that is up now; free-first (NVIDIA nemotron).
+    # Operator D-255 (2026-10-01): NEVER a Gemini Pro model; only Gemini
+    # 3.6/3.7/3.8 Flash. leaf-implementer is re-pinned from the old
+    # vertex-gemini-3.1-pro-preview to the Vertex 3.8 Flash leg. The 2026-09-30
+    # probe still stands for the other legs: `vertex/claude-sonnet-4-5` is 501
+    # ("not implemented, or supported, or enabled" -- the Vertex project has no
+    # Claude entitlement) and `vertex/DeepSeek-V4-Flash` is 400 (gateway payload
+    # bug). Pointing the reviewer at a dead leg would fail every leaf review, so
+    # it defaults to a different family that is up now; free-first (NVIDIA nemotron).
+    "leaf-implementer": "omniroute/vertex-gemini-3.8-flash",
     "leaf-reviewer": "omniroute/nemotron-3-ultra-free",
 }
 # Reviewer fallback (paid, funded, 1M, always up): omniroute/deepseek-v4.1-flash.
@@ -152,10 +153,12 @@ FLEET_AGENT_MODELS = {
 # move back to omniroute/vertex-claude-sonnet-4-5.
 DEEPSEEK_VARIANTS = ("low", "high", "max")
 # id -> (gateway modelID, context window). The gateway (7647-model catalogue
-# 2026-09-30) serves a `vertex/` provider; these four are the fleet's picks.
+# 2026-09-30) serves a `vertex/` provider; these are the fleet's picks.
+# D-255 (2026-10-01): the off-list Gemini rows (3.1-pro-preview, 2.5-flash) are
+# dropped; 3.8-flash is added with the registry's advertised window
+# (catalog/ai-registry.json models.gemini-3.8-flash context_advertised 1048576).
 FLEET_VERTEX_MODELS = {
-    "vertex-gemini-3.1-pro-preview": ("vertex/gemini-3.1-pro-preview", 1000000),
-    "vertex-gemini-2.5-flash": ("vertex/gemini-2.5-flash", 1000000),
+    "vertex-gemini-3.8-flash": ("vertex/gemini-3.8-flash", 1048576),
     "vertex-claude-sonnet-4-5": ("vertex/claude-sonnet-4-5", 200000),
     "vertex-deepseek-v4-flash": ("vertex/DeepSeek-V4-Flash", 1000000),
 }
