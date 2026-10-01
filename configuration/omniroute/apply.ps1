@@ -85,6 +85,30 @@ if (-not (Test-Gateway)) {
     if ($DryRun) {
         Write-Host 'Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128).'
     } else {
+        # Sane skip-on-repeated-429 policy (operator 2026-10-01): the gateway reads
+        # these from its own process env at startup (open-sse/services/rotationConfig.ts:84-110;
+        # provider-breaker family at open-sse/config/constants.ts:251-277), so the
+        # launcher that spawns it is the only surface. Rotate a leg only after three
+        # 429s inside a 120s window (the shipped default of 1 hops on the first
+        # 429), then cool the leg for 300s. Respect-set: never clobber a user value.
+        if (-not $env:OMNIROUTE_ROTATION_ENABLED) {
+            $env:OMNIROUTE_ROTATION_ENABLED = 'true'
+        }
+        if (-not $env:OMNIROUTE_ROTATE_ON_429) {
+            $env:OMNIROUTE_ROTATE_ON_429 = 'true'
+        }
+        if (-not $env:OMNIROUTE_ROTATE_429_THRESHOLD) {
+            $env:OMNIROUTE_ROTATE_429_THRESHOLD = '3'
+        }
+        if (-not $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS) {
+            $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS = '120'
+        }
+        if (-not $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS) {
+            $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS = '300'
+        }
+        if (-not $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS) {
+            $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS = '1800000'
+        }
         # Raise the chat admission heavy-in-flight limit from the default of 1.
         # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
         # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom

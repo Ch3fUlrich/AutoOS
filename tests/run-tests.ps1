@@ -9806,6 +9806,42 @@ Test-Case 'omniroute launchers pin the .cmd shim, fail loudly without it, and de
     }
 }
 
+Test-Case 'omniroute gateway launchers default the repeated-429 rotation policy, respect-set and once' {
+    # The gateway reads the rotation and provider-breaker policy from its own
+    # process env at startup (open-sse/services/rotationConfig.ts:84-110 and
+    # open-sse/config/constants.ts:251-277), so only the launcher that spawns it
+    # can supply it. Every gateway-spawn site must default each knob while never
+    # clobbering an operator value, and the assignment must appear exactly once
+    # (a re-run, or a re-apply, cannot accumulate a duplicate line).
+    $policy = [ordered]@{
+        'OMNIROUTE_ROTATION_ENABLED'                     = 'true'
+        'OMNIROUTE_ROTATE_ON_429'                        = 'true'
+        'OMNIROUTE_ROTATE_429_THRESHOLD'                 = '3'
+        'OMNIROUTE_ROTATE_429_WINDOW_SECONDS'            = '120'
+        'OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS'    = '300'
+        'OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS' = '1800000'
+    }
+    foreach ($rel in @('configuration\start-stack.ps1', 'configuration\omniroute\apply.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            Assert-True ($src -match ('if \(-not \$env:{0}\)' -f $name)) "$rel does not respect a user-set $name"
+            $assignment = "`$env:{0} = '{1}'" -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($assignment))).Count 1 "$rel must set $name = $val exactly once"
+        }
+    }
+    foreach ($rel in @('configuration\start-stack.sh', 'configuration\omniroute\apply.sh')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            $exportLine = 'export {0}="${{{0}:-{1}}}"' -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($exportLine))).Count 1 "$rel must export $name (default $val) exactly once"
+        }
+    }
+    Pass
+}
+
 
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''

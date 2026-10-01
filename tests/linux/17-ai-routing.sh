@@ -2523,6 +2523,32 @@ if it "start-stack.sh is valid bash and names the client key"; then
     if (( ok )); then pass; else fail "start script is missing wiring"; fi
 fi
 
+if it "start-stack.sh and apply.sh default the repeated-429 rotation policy, respect-set"; then
+    # The gateway reads the rotation and provider-breaker policy from its own
+    # process env at startup (open-sse/services/rotationConfig.ts:84-110;
+    # provider-breaker family open-sse/config/constants.ts:251-277), and only a
+    # spawned launch inherits them. Each site must default every knob without
+    # clobbering an operator value, exactly once (idempotent - a second run
+    # cannot add a duplicate line).
+    ok=1
+    declare -A policy=(
+        [OMNIROUTE_ROTATION_ENABLED]=true
+        [OMNIROUTE_ROTATE_ON_429]=true
+        [OMNIROUTE_ROTATE_429_THRESHOLD]=3
+        [OMNIROUTE_ROTATE_429_WINDOW_SECONDS]=120
+        [OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS]=300
+        [OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS]=1800000
+    )
+    for f in configuration/start-stack.sh configuration/omniroute/apply.sh; do
+        for name in "${!policy[@]}"; do
+            want="export $name=\"\${$name:-${policy[$name]}}\""
+            n="$(grep -Fc "$want" "$f" || true)"
+            [[ "$n" == 1 ]] || { ok=0; echo "$f: $name default appears $n times, want 1" >&2; }
+        done
+    done
+    if (( ok )); then pass; else fail "429-rotation policy defaults regressed"; fi
+fi
+
 if it "openhands launch is detached, probed and stale-settings safe"; then
     # -it fails without a TTY and foreground never returns; schema_version 6
     # settings 500 the current image. Both fixed 2026-09-21 - pin the shape.
