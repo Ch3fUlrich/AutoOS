@@ -713,6 +713,20 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                                provider=provider)
             state, note = spend_guard(registry, provider, spend["spend_usd"])
             note += _window_suffix(registry, provider, today)
+            unreadable = int(spend.get("rows_unreadable") or 0)
+            if unreadable and state != "refuse":
+                # T1-CREDIT-FIX-8 C3: unreadable rows are not silent $0 --
+                # the grant reads unknown (fail open), naming the COUNT of
+                # unreadable rows (never their contents) beside the readable
+                # figure that still added up. Measured spend already at or
+                # over the hard stop still refuses: it beats unknown.
+                state = "unknown"
+                note = ("credit spend unknown %s: %d unreadable row(s) "
+                        "(readable spend $%.2f) - leg kept (fail open: a "
+                        "spent prepaid grant rejects at the provider and "
+                        "the combo falls through)%s"
+                        % (provider, unreadable, spend["spend_usd"],
+                           _window_suffix(registry, provider, today)))
         except ValueError:
             # Config errors (a grant that cannot state its cap) still raise:
             # the usage report exits 3 on them (pinned by T1-CREDIT-FIX-2
@@ -1096,6 +1110,10 @@ def _token_field_readable(value):
     except (TypeError, ValueError):
         return True  # unparseable keeps the old read-as-0 behaviour
     except OverflowError:
+        return False
+    if n < 0:
+        # T1-CREDIT-FIX-8 C3: a negative count is not a credit -- billed, it
+        # would subtract spend and read a drained grant as funded.
         return False
     return abs(n) <= 2 ** 62
 

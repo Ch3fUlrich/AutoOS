@@ -4581,9 +4581,19 @@ def _paid_guards_measured(registry: dict, rows, since) -> dict:
         spend = usage_mod.paid_spend(rows, prices, registry, since,
                                      provider=pid)
         state, note = usage_mod.spend_guard(registry, pid, spend["spend_usd"])
+        unreadable = int(spend.get("rows_unreadable") or 0)
+        if unreadable and state != "refuse":
+            # T1-CREDIT-FIX-8 C3 (paid half): unreadable rows are not silent
+            # $0 -- the grant reads unknown (kept as last resort per D-212),
+            # naming the COUNT beside the readable figure. Measured spend at
+            # or over the cap still refuses: it beats unknown.
+            state = "unknown"
+            note = ("paid spend unmeasured %s - %d unreadable row(s), "
+                    "readable spend $%.2f - leg kept (last resort, D-212)"
+                    % (pid, unreadable, spend["spend_usd"]))
         out[pid] = {"provider": pid, "state": state,
                     "spend_usd": spend["spend_usd"],
-                    "spend_unknown": False,
+                    "spend_unknown": state == "unknown",
                     "cap_usd": usage_mod.monthly_cap_usd(registry, pid),
                     "warn_usd": usage_mod.spend_warn_usd(registry, pid),
                     "models_unpriced": spend["models_unpriced"],
