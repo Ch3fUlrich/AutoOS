@@ -1917,6 +1917,25 @@ class ReviewerPolicyTests(unittest.TestCase):
         for entry in haiku:
             self.assertIs(entry["first_pass_only"], True, entry["model"])
 
+    def test_a_reviewer_whose_leg_is_paid_tier_is_marked_paid(self):
+        # T0-PAID-4 Q2: the paid flag must agree with the leg's effective
+        # tier (model-level tier else provider tier) -- a reviewers entry
+        # whose leg resolves to tier paid must carry paid: true, or the
+        # last-resort walk misfiles it as free.
+        from autoos_resolver import leg_tier
+        for index, entry in enumerate(self.reviewers):
+            leg = entry.get("leg")
+            if not leg:
+                continue
+            try:
+                tier = leg_tier(leg, self.reg)
+            except (ValueError, KeyError):
+                continue
+            if tier == "paid":
+                self.assertIs(entry.get("paid"), True,
+                              "reviewers[%d] %r rides a paid-tier leg %r "
+                              "but is not marked paid" % (index, entry.get("model"), leg))
+
     def test_sonnet_is_not_a_preference(self):
         # The closer is the resolver's, not the list's: pinning that here so a
         # later "add Sonnet to the reviewers list" edit has to say why.

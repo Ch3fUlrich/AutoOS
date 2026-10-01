@@ -2544,7 +2544,7 @@
         "model": "opencode/deepseek-v4.1-flash",
         "family": "deepseek",
         "leg": "opencode-zen/deepseek-v4.1-flash",
-        "paid": false,
+        "paid": true,
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
       },
       {
