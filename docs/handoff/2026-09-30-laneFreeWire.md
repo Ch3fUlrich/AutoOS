@@ -1,7 +1,7 @@
 # Lane FreeWire — free-leg wiring, gemini exclusion, 429 policy (2026-09-30)
 
 **Lane:** `L1-backlog/ws-freewire-20260930`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-freewire`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-freewire`
 **Base:** combos lineage tip `a975d48` (carries the OVH legs, the vertex leg and the 1M contexts)
 **Date:** 2026-09-30 (gateway measurements 22:42–22:46Z)
 **Writer:** freewire (pinned, critical)
