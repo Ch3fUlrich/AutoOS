@@ -8896,6 +8896,9 @@ print('%s|%s|%s' % (
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
         't2-worker-clean' = '1M'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '1M'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
+        # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
+        't4-researcher' = '128k'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
