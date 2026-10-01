@@ -18641,12 +18641,32 @@ class GeminiAllowListTests(unittest.TestCase):
         self.assertEqual(self.refusal("omniroute/ovh-direct-gpt-oss-120b",
                                       "ovh-direct-gpt-oss-120b"), "")
 
-    def test_naming_a_combo_with_an_off_list_leg_is_refused(self):
-        # t2-worker's registry data still carries deepinfra/google/gemini-3.1-flash-lite
-        # (reported for the orchestrator to remove); naming it explicitly is a
-        # deliberate aim at that route, so D-255 refuses it.
-        self.assertIn("gemini-3.1-flash-lite", self.refusal("omniroute/t2-worker",
-                                                            "t2-worker"))
+    def test_an_explicit_combo_with_some_off_list_legs_is_allowed(self):
+        # RWP2 S1 regression: `--model omniroute/t2-worker` is the same route a
+        # card reaches. t2-worker's registry data still carries one off-list
+        # fall-through leg (deepinfra/google/gemini-3.1-flash-lite) that only
+        # answers when the legs ahead of it are down; refusing an explicit name
+        # over it benched every qwen/gemini spawn that overrides the card.
+        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker"), "")
+
+    def test_a_combo_whose_every_leg_is_off_list_is_refused(self):
+        # The partial case is a leg that rarely answers; this is a route that can
+        # only answer off-list, and it is refused whether the caller or the
+        # router named it.
+        reg = {"routes": {"all-off": {"legs": [
+            "deepinfra/google/gemini-3.1-flash-lite", "vertex/gemini-2.5-pro"]}}}
+        for explicit in (True, False):
+            out = self.agent.gemini_spawn_refusal("omniroute/all-off", "all-off", reg,
+                                                  self.real_cfg(), explicit=explicit)
+            self.assertIn("gemini allow-list", out, explicit)
+            self.assertIn("vertex/gemini-2.5-pro", out, explicit)
+
+    def test_an_explicit_model_id_aimed_at_an_off_list_gemini_is_refused(self):
+        # What the run is aimed at is still refused outright: an explicit model
+        # name that spells an off-list Gemini does not become allowed because it
+        # is not a combo.
+        self.assertIn("gemini allow-list",
+                      self.refusal("omniroute/gemini-2.5-pro", "gemini-2.5-pro"))
 
     def test_a_router_picked_combo_keeps_its_on_list_legs(self):
         # The same route reached through a card: one fall-through leg that only

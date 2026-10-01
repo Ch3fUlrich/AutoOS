@@ -1670,22 +1670,26 @@ def gemini_spawn_refusal(model, combo, registry, cfg=None, explicit=False) -> st
     What the run is *aimed at* is refused outright: the model the argv carries
     (`omniroute/vertex-pro`), the modelID an opencode.jsonc hand entry passes
     through to (`vertex/gemini-3.1-pro-preview` — refused even when no registry
-    row describes it, because the name alone says which model answers), the leg
-    that name resolves to, and the legs of a combo the caller named with
-    `--model`. A combo the *router* picked is a different case: this registry
-    still carries one off-list fall-through leg each in `t2-worker` and
-    `gemini-3.8-flash`, and refusing those would bench every tier-2 spawn over a
-    leg that only answers when the legs ahead of it are down — so it is refused
-    only when every leg is off-list. The off-list data is reported for the
-    orchestrator to remove (the lane's brief assigns registry/combos data to it,
-    not to this writer).
+    row describes it, because the name alone says which model answers), and the
+    leg that name resolves to. A combo is a different case, and `--model` naming
+    one is not an aim at its off-list leg: this registry still carries one
+    off-list fall-through leg each in `t2-worker` and `gemini-3.8-flash`, and
+    refusing those would bench every tier-2 spawn over a leg that only answers
+    when the legs ahead of it are down — so a combo is refused only when EVERY
+    leg is off-list, whether the router picked it or the caller named it
+    (RWP2 S1: the explicit case is what made
+    `ReviewFindingTests.test_gateway_client_model_override_wins_over_the_card`
+    print nothing on the lane). D-255 is therefore enforced at the spawn door
+    for what a run is aimed at; an off-list fall-through leg inside a combo is
+    registry data the operator must remove, and it is reported here for that.
     """
     aimed = [model, combo, hand_entry_model_id(model, cfg),
              hand_entry_leg(model, registry, cfg) if model else ""]
     bad = [str(value) for value in aimed if value and not gemini_model_allowed(value)]
     legs = combo_legs(combo, registry) if combo else []
     off = [leg for leg in legs if not gemini_model_allowed(leg)]
-    if off and (explicit or len(off) == len(legs)):
+    if off and len(off) == len(legs):  # `explicit` no longer switches anything
+
         bad += off
     if not bad:
         return ""
