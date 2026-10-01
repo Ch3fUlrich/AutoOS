@@ -48,7 +48,8 @@
     "antigravity/claude-opus-4-6-thinking, gateway computed_context_length",
     "1048576), t2-worker-clean 128k->1M, t3-driver-clean 128k->1M (both",
     "deepseek/deepseek-flash at 1048576). Combos keeping 128k are honest",
-    "clamps: t1-orchestrator/t2-worker/t3-driver and their free-only twins",
+    "clamps: t2-worker/t3-driver and their free-only twins (t1-orchestrator/",
+    "t1-orchestrator-free-only moved to 1M by MAINPIN below),",
     "fall to scw/nebius/free-ai legs at 128000; t4-rag falls to",
     "cohere/command-r-plus-08-2024 at 128000. Registry context_advertised is",
     "stale for gemini-3.8-flash (131072, live 1048576), command-a-03-2025",
@@ -99,7 +100,27 @@
     "(routes.t1-orchestrator.legs + the dated route $comment) and mirrored here so",
     "the live gateway and the tracked source agree; litellm/config.yaml and",
     "docs/models.md carry the same leg from render. Do not confuse with the",
-    "NEBREMOVAL registry-vs-combos drift above, which is beta's."
+    "NEBREMOVAL registry-vs-combos drift above, which is beta's.",
+    "MAINPIN 2026-10-01: carried main's combos.json pins from 24a98228",
+    "('pin deepseek effort ladder, vertex leaf models, stack no-OOM') so the",
+    "operator's rebase/Take resolves combos.json without losing them. Enumerated",
+    "from that commit: (a) deepseek-v4.1-flash context 1M + leg pin 'deepseek-v4-flash'",
+    "(b) gemini-3.8-flash context 1M; (c) opus-4-6 200k->1M; (d) t1-orchestrator 128k->1M;",
+    "(e) t1-orchestrator-free-only 128k->1M; (f) t2-orchestrator 200k->1M. Of these ours",
+    "already carried (a context), (b), (c), (f) - only (d)+(e) were missing, now applied.",
+    "DECISIONS (recorded, combo-named): (d)/(e) t1-orchestrator/t1-orchestrator-free-only",
+    "context 128k->1M - main's pin, and origin/main e58274a8 itself carries 1M; this",
+    "supersedes the CTXFIX 2026-09-30 honest-clamp note for these two only, with no",
+    "operator directive to keep them clamped, so main wins per L0's rule. (a) deepseek",
+    "leg: kept deepseek/deepseek-flash - main's OWN tip e58274a8 already carries that id",
+    "(the 24a98228 'deepseek-v4-flash' leg pin was superseded inside main by the",
+    "d08f7f2 merge), so applying the literal pin would reverse main; it also matches our",
+    "DS1M operator-session measurement (deepseek-flash = DeepSeek-V4.1-Flash, 1M native).",
+    "(b) kept vertex/gemini-3.8-flash, (c) kept antigravity/claude-opus-4-6-thinking:",
+    "24a98228's pin on these was the CONTEXT (1M, already matched), not the leg; the leg",
+    "changes are this lineage's FREEWIRE/AGYCANON, which the task preserves. No other file",
+    "in this branch's touched set overlaps main 24a98228, so no other pin applies.",
+    "The six render-omniroute drift lines remain the nebius registry-vs-combos ones (beta's)."
   ],
   "retired": [
     "tier1",
@@ -214,7 +235,7 @@
     {
       "name": "t1-orchestrator",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
@@ -226,7 +247,7 @@
     {
       "name": "t1-orchestrator-free-only",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
         "scw/qwen3-235b-a22b-instruct-2507",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
