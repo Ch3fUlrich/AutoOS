@@ -100,6 +100,14 @@
   "local": true
  },
  {
+  "url": "HTTP://LOCALHOST:20128",
+  "local": true
+ },
+ {
+  "url": "Https://127.0.0.1",
+  "local": true
+ },
+ {
   "url": "not-a-url",
   "local": false
  },
@@ -213,6 +221,26 @@
  },
  {
   "url": "http://[::1]:abc",
+  "local": false
+ },
+ {
+  "url": "file://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "ftp://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "ws://localhost:20128",
+  "local": false
+ },
+ {
+  "url": "unix://localhost",
+  "local": false
+ },
+ {
+  "url": "git+ssh://localhost",
   "local": false
  },
  {

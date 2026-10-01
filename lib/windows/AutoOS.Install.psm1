@@ -63,7 +63,8 @@ function Test-AutoOSLocalGateway {
     $sep = $Url.IndexOf('://')
     if ($sep -lt 0) { return $false }
     $scheme = $Url.Substring(0, $sep)
-    if ($scheme -notmatch '^[A-Za-z][A-Za-z0-9+.-]*$') { return $false }
+    # only http and https name a gateway: file://127.0.0.1 and ftp://127.0.0.1 are not one
+    if ($scheme -ne 'http' -and $scheme -ne 'https') { return $false }
     $rest = $Url.Substring($sep + 3)
     $cut = $rest.IndexOfAny([char[]]@('/', '?', '#'))
     if ($cut -ge 0) { $rest = $rest.Substring(0, $cut) }
@@ -102,7 +103,7 @@ function Get-AutoOSHostConfigPath {
         $path = [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG)
         # Expand leading ~ (parity with Python/bash)
         if ($path -like '~*') {
-            $path = $path -replace '^~', $env:USERPROFILE
+            $path = $env:USERPROFILE + $path.Substring(1)  # literal: a $ in the profile path is not a replacement token
         }
         return $path
     }
@@ -131,7 +132,7 @@ function Get-AutoOSHostName {
     if (Test-Path -LiteralPath $hostFile) {
         foreach ($line in (Get-Content -LiteralPath $hostFile -Encoding utf8)) {
             $line = $line.Trim()
-            if ($line -match '^host_name\s*:\s*(.+)$') {
+            if ($line -cmatch '^host_name\s*:\s*(.+)$') {
                 $v = $Matches[1].Trim().Trim('"',"'")
                 if ($v) { return ConvertTo-AutoOSHostName $v }
             }

@@ -6551,12 +6551,18 @@ fi
 if it "gwkey: setup.sh --host-name refuses a value that is not a plain host name (nothing is written)"; then
     d="$(mktemp -d)"
     ok=1
-    for bad in $'a\nb' "has space" "semi;colon" "tab$(printf '\t')x"; do
+    for bad in $'a\nb' $'ok\n' ".hidden" "has space" "semi;colon" "tab$(printf '\t')x"; do
         rm -f "$d/host.yml"
         out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name "$bad" 2>&1)"; rc=$?
         (( rc == 2 )) || { ok=0; echo "rc=$rc for $(printf '%q' "$bad"): $out" >&2; }
         [[ -e "$d/host.yml" ]] && { ok=0; echo "wrote host.yml for $(printf '%q' "$bad")" >&2; }
     done
+    out="$(AUTOOS_HOST_CONFIG="$d/host2.yml" bash "$ROOT/setup.sh" --host-name --dry-run 2>&1)"; rc=$?
+    [[ "$out" == *"would write"* && "$out" != *"host_name: --dry-run"* && ! -e "$d/host2.yml" ]] || { ok=0; echo "a flag was taken as the name or the dry run wrote: rc=$rc $out" >&2; }
+    out="$(AUTOOS_HOST_CONFIG="$d/host3.yml" bash "$ROOT/setup.sh" --host-name _under 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(cat "$d/host3.yml")" == "host_name: _under" ]] || { ok=0; echo "leading underscore refused: rc=$rc $out" >&2; }
+    out="$(AUTOOS_HOST_CONFIG="$d/host4.yml" bash "$ROOT/setup.sh" --host-name ".x" 2>&1)"; rc=$?
+    [[ "$out" == *"may not start with"* ]] || { ok=0; echo "the refusal is not shown through the ui layer: $out" >&2; }
     out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name my-host.lan_1 2>&1)"; rc=$?
     (( rc == 0 )) && [[ "$(cat "$d/host.yml")" == "host_name: my-host.lan_1" ]] || { ok=0; echo "valid name refused: rc=$rc $out" >&2; }
     rm -rf "$d"
@@ -6601,6 +6607,39 @@ if it "gwkey: start-stack.sh resolves the client key once, and refuses to start 
     [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "expected field not named: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "start-stack.sh key resolution"; fi
+fi
+
+# The key block of start-stack.sh, run on its own (the rest starts services). A NON-local URL is left in the
+# environment: the script talks to $GATEWAY (loopback), so the LOCAL field must be used, and the keys file
+# comes from AUTOOS_KEYS_FILE (the checkout has none). Either regression flips the answer.
+if it "gwkey: start-stack.sh takes the key field from its own gateway and honours AUTOOS_KEYS_FILE"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_server: sk-wrong-server-key\nomniroute_testhost: sk-right-local-key\n' >"$d/keys.yml"
+    script="$ROOT/configuration/start-stack.sh"
+    { sed -n '1,/^gateway_ok()/p' "$script" | sed '$d' | sed "s#\${BASH_SOURCE\[0\]}#$script#g"
+      printf 'printf "%%s\\n" "$AUTOOS_OMNIROUTE_KEY"\n'; } >"$d/head.sh"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY; export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/keys.yml" AUTOOS_OMNIROUTE_URL=http://gw.example.com
+              bash "$d/head.sh" 2>/dev/null ) )"
+    ok=1
+    [[ "$out" == "sk-right-local-key" ]] || { ok=0; echo "got [$out]" >&2; }
+    # a whitespace-only key in the environment is no key: the file is read
+    out="$( ( export AUTOOS_OMNIROUTE_KEY="   " AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/keys.yml"
+              bash "$d/head.sh" 2>/dev/null ) )"
+    [[ "$out" == "sk-right-local-key" ]] || { ok=0; echo "whitespace-only env key: got [$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack.sh field/keys-file"; fi
+fi
+
+if it "gwkey: without python3 the classifier says so and is non-local; AUTOOS_ROOT cannot redirect the resolver"; then
+    ok=1
+    out="$( ( . "$ROOT/lib/linux/install.sh"; PATH="$(mktemp -d)"; is_local_gateway http://localhost:20128; echo "rc=$?" ) 2>&1 )"
+    [[ "$out" == *"python3 is required"* && "$out" == *"rc=1"* ]] || { ok=0; echo "no python3: [$out]" >&2; }
+    out="$( ( export AUTOOS_ROOT=/nonexistent/elsewhere; . "$ROOT/lib/linux/install.sh"
+              is_local_gateway http://localhost:20128 && echo local || echo remote ) 2>&1 )"
+    [[ "$out" == "local" ]] || { ok=0; echo "AUTOOS_ROOT redirected the CLI: [$out]" >&2; }
+    if (( ok )); then pass; else fail "python3-missing / AUTOOS_ROOT"; fi
 fi
 
 if it "gwkey: F6 the resolver shows the deprecation line naming old and new field"; then

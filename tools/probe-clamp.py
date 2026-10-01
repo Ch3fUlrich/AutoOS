@@ -126,30 +126,26 @@ def utc_now():
 # ---------------------------------------------------------------------------
 
 def _read_keys_from_file(path):
-    """(value, label) pairs from api-keys.yml, omniroute_server before omniroute.
+    """(value, label) pairs from api-keys.yml: the field the one resolver would pick first, then the
+    other known client-key fields (omniroute_server, omniroute_<host>, legacy omniroute).
 
-    Both fields are returned because the label is a guess about which one is the
-    client key: on the 2026-10-01 workstation gateway the ``omniroute`` field
-    authenticates while ``omniroute_server`` 401s, so the caller must try them
-    rather than trust the first. Values are never printed - only the label.
+    All are returned because the label is a guess about which one is the client key: on the
+    2026-10-01 workstation gateway the ``omniroute`` field authenticates while ``omniroute_server``
+    401s, so the caller must try them rather than trust the first. Values are never printed - only
+    the label.
     """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
-    except OSError:
-        return []
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from autoos_gateway_key import client_key_field, host_name
+    from keys_file import read_keys
+    keys = {k.lower(): v for k, v in read_keys(path).items()}
+    fields = [client_key_field(os.environ), "omniroute_server", "omniroute_" + host_name(os.environ), "omniroute"]
     found = []
     seen = set()
-    for field in ("omniroute_server", "omniroute"):
-        pattern = re.compile(r"^%s\s*:\s*(.+?)\s*$" % field)
-        for line in lines:
-            match = pattern.match(line)
-            if not match:
-                continue
-            value = match.group(1).strip("\"'")
-            if value and not value.startswith("REPLACE_WITH_") and value not in seen:
-                seen.add(value)
-                found.append((value, "api-keys.yml:" + field))
+    for field in fields:
+        value = keys.get(field.lower())
+        if value and value not in seen:
+            seen.add(value)
+            found.append((value, "api-keys.yml:" + field))
     return found
 
 

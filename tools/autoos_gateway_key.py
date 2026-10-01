@@ -50,7 +50,7 @@ def _notice(message: str) -> None:
     print(message, file=sys.stderr)
 
 
-_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
+_GATEWAY_SCHEMES = ("http", "https")
 _ASCII_WS = " " + chr(9) + chr(10) + chr(11) + chr(12) + chr(13)
 
 
@@ -65,7 +65,7 @@ def is_local_gateway(url: Optional[str]) -> bool:
       - unset (exactly empty)                          -> local
       - ASCII whitespace around the URL is trimmed; anything left that is not printable ASCII
         (control characters, spaces inside, non-ASCII) or is a backslash -> NON-local
-      - no `scheme://`                                 -> non-local
+      - the scheme must be http or https (any case); anything else, or none -> non-local
       - the authority ends at the first / ? or #; userinfo is cut at the LAST @
       - a port, when present, is digits only and at most 65535 (an empty port is allowed)
       - local only for the literals 127.0.0.1 and localhost (any case), or a bracketed [::1];
@@ -79,8 +79,8 @@ def is_local_gateway(url: Optional[str]) -> bool:
     if any(not (0x21 <= ord(ch) <= 0x7E) or ch == chr(92) for ch in url):
         return False
     scheme, sep, rest = url.partition("://")
-    if not sep or not _SCHEME_RE.match(scheme):
-        return False
+    if not sep or scheme.lower() not in _GATEWAY_SCHEMES:
+        return False  # only http/https name a gateway: file://127.0.0.1 is not one
     for i, ch in enumerate(rest):
         if ch in "/?#":
             rest = rest[:i]
@@ -214,7 +214,7 @@ def resolve_client_key(
     env = env or os.environ
 
     # 1. Explicit env always wins
-    if env.get("AUTOOS_OMNIROUTE_KEY"):
+    if (env.get("AUTOOS_OMNIROUTE_KEY") or "").strip():  # whitespace-only is unset, as in PowerShell
         return env["AUTOOS_OMNIROUTE_KEY"]
 
     # Determine which field to look for

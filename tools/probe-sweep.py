@@ -362,7 +362,7 @@ def main(argv=None) -> int:
     if not key:
         try:
             from autoos_gateway_key import client_key_field
-            field = client_key_field({**os.environ, "AUTOOS_OMNIROUTE_URL": args.gateway})
+            field = client_key_field(os.environ)
         except Exception:
             field = "omniroute_server` or `omniroute_<host>"
         print("probe-sweep: no OmniRoute client key (export AUTOOS_OMNIROUTE_KEY or add `%s` "

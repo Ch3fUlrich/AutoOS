@@ -7175,7 +7175,7 @@ Test-Case 'gwkey: the shared URL table classifies every row the same way (module
     Assert-True ($wrong.Count -eq 0) ($wrong -join '; ')
 }
 
-Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for word (only the console writer differs)' {
+Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for word' {
     # start-stack.ps1 is standalone (it imports no module), so it holds copies of the gateway-key rule.
     # A copy that drifts picks another key field than apply.ps1 on the same machine: compare the TEXT.
     $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
@@ -7191,10 +7191,43 @@ Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for wor
         $m = & $pick (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') $n
         $c = & $pick (Join-Path $Root 'configuration\start-stack.ps1') $n
         if ($null -eq $m -or $null -eq $c) { $differ += "$n (missing in one file)"; continue }
-        $c = $c.Replace('Write-Host ', 'Write-AutoOSLine ')
         if ($m -cne $c) { $differ += $n }
     }
     Assert-True ($differ.Count -eq 0) ("start-stack.ps1 drifted from the module: " + ($differ -join ', '))
+}
+
+Test-Case 'gwkey: the start-stack.ps1 copy writes its missing-key line validly (no literal -Level) and reads host_name case-sensitively' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Write-AutoOSLine','Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    Assert-Equal $defs.Count $want.Count 'start-stack.ps1 no longer carries every function (the stand-in writer included)'
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    # ErrorActionPreference Stop turns an invalid parameter (Write-Host ... -Level error) into a terminating error
+    $run = { param($text, $keys) $ErrorActionPreference = 'Stop'; . ([scriptblock]::Create($text)); Get-AutoOSClientKey -KeysFile $keys }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; KEY = $env:AUTOOS_OMNIROUTE_KEY; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssl_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $out = (& $run $text (Join-Path $d 'none.yml') 6>&1 | Out-String)
+        Assert-True ($out -match 'No OmniRoute client key') "the missing-key line was not written: $out"
+        Assert-True ($out -notmatch '-Level') "a literal -Level leaked into the console line: $out"
+        # host_name is case-sensitive, like Python and bash: `Host_Name: x` is not the setting
+        [IO.File]::WriteAllText((Join-Path $d 'host.yml'), "Host_Name: wrongcase`n")
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        $field = & { . ([scriptblock]::Create($text)); Get-AutoOSClientKeyField } 6>$null
+        Assert-True ($field -ne 'omniroute_wrongcase') 'host_name matched case-insensitively'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.KEY) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $saved.KEY }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in AUTOOS_HOST_CONFIG like the module' {
@@ -7204,7 +7237,7 @@ Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in 
     $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
     $inCopy = { param($text, $cmd) . ([scriptblock]::Create($text)); & $cmd }
     $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG; HOME_ = $env:USERPROFILE }
-    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssw_' + [Guid]::NewGuid().ToString('N'))
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssw_$1_' + [Guid]::NewGuid().ToString('N'))  # a $ in the profile path must not be read as a replacement token
     $null = New-Item -ItemType Directory -Path (Join-Path $d 'autoos') -Force
     try {
         [IO.File]::WriteAllText((Join-Path $d 'autoos\host.yml'), "host_name: tilde-host`n")
@@ -7215,6 +7248,7 @@ Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in 
         $m = Get-AutoOSClientKeyField
         $c = & $inCopy $text 'Get-AutoOSClientKeyField'
         Assert-Equal $m 'omniroute_tilde_host'
+        Assert-Equal (Get-AutoOSHostConfigPath) ($d + '/autoos/host.yml'.Replace('/', [string][IO.Path]::DirectorySeparatorChar)) 'the ~ was not expanded literally'
         Assert-Equal $c $m 'the start-stack copy picked another field than the module'
     } finally {
         if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }

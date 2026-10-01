@@ -20,6 +20,24 @@ $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
 $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'configuration\api-keys.yml'
 
+function Write-AutoOSLine {
+    # Standalone stand-in for the module's console writer (AutoOS.Ui.psm1): this script imports no
+    # module. Same call shape (-Level). The gateway-key functions below are word for word the
+    # module's, so the copy cannot drift behind a text substitution.
+    param(
+        [Parameter(Position = 0)][string]$Message = '',
+        [ValidateSet('plain', 'info', 'ok', 'warn', 'error', 'step', 'muted', 'head')]
+        [string]$Level = 'plain'
+    )
+    switch ($Level) {
+        'error' { Write-Host $Message -ForegroundColor Red }
+        'warn'  { Write-Host $Message -ForegroundColor Yellow }
+        'ok'    { Write-Host $Message -ForegroundColor Green }
+        'muted' { Write-Host $Message -ForegroundColor DarkGray }
+        default { Write-Host $Message }
+    }
+}
+
 function ConvertFrom-AutoOSKeyValue {
     # Mirrors tools/keys_file.py parse_value: a quoted value is what sits between the quotes,
     # an unquoted one is cut at the first space-or-tab followed by '#', then right-trimmed.
@@ -83,7 +101,7 @@ function Write-AutoOSNoticeOnce {
     if (-not (Get-Variable -Name AutoOSNoticed -Scope Script -ErrorAction SilentlyContinue)) { $script:AutoOSNoticed = @{} }
     if ($script:AutoOSNoticed.ContainsKey($Message)) { return }
     $script:AutoOSNoticed[$Message] = $true
-    Write-Host $Message
+    Write-AutoOSLine $Message
 }
 
 # ─── OmniRoute gateway key resolution (mirrors lib/linux/install.sh) ───
@@ -105,7 +123,8 @@ function Test-AutoOSLocalGateway {
     $sep = $Url.IndexOf('://')
     if ($sep -lt 0) { return $false }
     $scheme = $Url.Substring(0, $sep)
-    if ($scheme -notmatch '^[A-Za-z][A-Za-z0-9+.-]*$') { return $false }
+    # only http and https name a gateway: file://127.0.0.1 and ftp://127.0.0.1 are not one
+    if ($scheme -ne 'http' -and $scheme -ne 'https') { return $false }
     $rest = $Url.Substring($sep + 3)
     $cut = $rest.IndexOfAny([char[]]@('/', '?', '#'))
     if ($cut -ge 0) { $rest = $rest.Substring(0, $cut) }
@@ -144,7 +163,7 @@ function Get-AutoOSHostConfigPath {
         $path = [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG)
         # Expand leading ~ (parity with Python/bash)
         if ($path -like '~*') {
-            $path = $path -replace '^~', $env:USERPROFILE
+            $path = $env:USERPROFILE + $path.Substring(1)  # literal: a $ in the profile path is not a replacement token
         }
         return $path
     }
@@ -173,7 +192,7 @@ function Get-AutoOSHostName {
     if (Test-Path -LiteralPath $hostFile) {
         foreach ($line in (Get-Content -LiteralPath $hostFile -Encoding utf8)) {
             $line = $line.Trim()
-            if ($line -match '^host_name\s*:\s*(.+)$') {
+            if ($line -cmatch '^host_name\s*:\s*(.+)$') {
                 $v = $Matches[1].Trim().Trim('"',"'")
                 if ($v) { return ConvertTo-AutoOSHostName $v }
             }
@@ -218,7 +237,7 @@ function Get-AutoOSClientKey {
     if ($Optional) { return $null }
     $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }
     $hostFile = Get-AutoOSHostConfigPath
-    Write-Host "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname." -Level error
+    Write-AutoOSLine "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname." -Level error
     return $null
 }
 

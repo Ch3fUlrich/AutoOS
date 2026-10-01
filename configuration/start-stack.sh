@@ -15,12 +15,14 @@ APP="${1:-none}"
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/api-keys.yml}"
 # Resolve the client key by the one rule. This script always talks to $GATEWAY, so that URL (not a
 # stale AUTOOS_OMNIROUTE_URL left in the environment) decides local vs non-local.
-if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+_stack_key="${AUTOOS_OMNIROUTE_KEY:-}"  # a whitespace-only value is no key (the resolver and PowerShell agree)
+if [[ -z "${_stack_key//[[:space:]]/}" ]]; then
     # Let stderr through so deprecation warnings and missing-key errors are visible
     AUTOOS_OMNIROUTE_KEY="$(AUTOOS_OMNIROUTE_URL="$GATEWAY" autoos_resolve_client_key "$KEYS_FILE" || true)"
     export AUTOOS_OMNIROUTE_KEY
 fi
-if [[ -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
+_stack_key="${AUTOOS_OMNIROUTE_KEY:-}"
+if [[ -z "${_stack_key//[[:space:]]/}" ]]; then
     # The error message from autoos_resolve_client_key already names the expected field
     exit 1
 fi

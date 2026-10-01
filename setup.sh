@@ -158,9 +158,9 @@ if [[ "${AUTOOS_HOST_NAME_GIVEN:-0}" == 1 ]]; then
         ui_info "host.yml exists at $host_file - skipped (use AUTOOS_HOST_NAME to override at runtime)"
     else
         _host_name_value="${AUTOOS_HOST_NAME_CLI:-}"
-        if [[ -n "$_host_name_value" && ! "$_host_name_value" =~ ^[A-Za-z0-9._-]+$ ]]; then
-            # one line, no spaces or control characters: it becomes a field name and a host.yml value
-            printf 'setup.sh: --host-name takes letters, digits, dot, dash and underscore only\n' >&2
+        if [[ -n "$_host_name_value" && ! "$_host_name_value" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+            # one token, starting with a letter, digit or underscore: it becomes a field name and a host.yml value
+            ui_err "--host-name takes letters, digits, dot, dash and underscore only, and may not start with a dot or a dash"
             exit 2
         fi
         if [[ -z "$_host_name_value" ]]; then

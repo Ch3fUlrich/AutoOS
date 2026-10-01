@@ -560,5 +560,20 @@ class TestRound4fSmallRules(unittest.TestCase):
             self.assertEqual(host_name({"AUTOOS_HOST_CONFIG": str(f)}), "spacey")
 
 
+class TestRound4g(unittest.TestCase):
+    def test_a_whitespace_only_env_key_is_unset_like_in_powershell(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            keys = Path(tmp) / "k.yml"
+            keys.write_text("omniroute_ws: from-file\n", encoding="utf-8")
+            env = {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:20128", "AUTOOS_HOST_NAME": "ws", "AUTOOS_OMNIROUTE_KEY": "   "}
+            self.assertEqual(resolve_client_key(env, keys), "from-file")
+
+    def test_only_http_and_https_name_a_gateway(self):
+        for url in ("file://127.0.0.1", "ftp://127.0.0.1", "ws://localhost:20128", "unix://localhost"):
+            self.assertFalse(is_local_gateway(url), url)
+        for url in ("HTTP://LOCALHOST:20128", "Https://127.0.0.1"):
+            self.assertTrue(is_local_gateway(url), url)
+
+
 if __name__ == "__main__":
     unittest.main()

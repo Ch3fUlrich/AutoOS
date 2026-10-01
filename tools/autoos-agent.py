@@ -2234,7 +2234,7 @@ def client_key(root: str) -> str | None:
     deprecation line. Each checkout's file is tried in key_files() order;
     a missing key raises inside the helper and means "try the next file".
     """
-    if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
+    if (os.environ.get("AUTOOS_OMNIROUTE_KEY") or "").strip():
         return os.environ["AUTOOS_OMNIROUTE_KEY"]
     try:
         from autoos_gateway_key import resolve_client_key
@@ -7928,7 +7928,7 @@ def cmd_run(args, cfg: dict) -> int:
         if not key:
             try:
                 from autoos_gateway_key import client_key_field
-                field = client_key_field({**os.environ, "AUTOOS_OMNIROUTE_URL": GATEWAY})
+                field = client_key_field(os.environ)
             except Exception:
                 field = "omniroute_server` or `omniroute_<host>"
             print("No OmniRoute client key: export AUTOOS_OMNIROUTE_KEY or add `%s` to "

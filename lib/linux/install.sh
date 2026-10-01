@@ -4968,15 +4968,22 @@ autoos_api_keys_conf() {
 }
 
 # ─── OmniRoute gateway key resolution (shared with apply.sh, start-stack.sh) ───
+# The resolver CLI is THIS checkout's tools/autoos_gateway_key.py, found from this file (not from
+# AUTOOS_ROOT, which can name another tree), once, when the file is sourced.
+_AUTOOS_GATEWAY_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/autoos_gateway_key.py"
+
 # is_local_gateway <url>: true (0) when the URL points to loopback. There is ONE classifier,
 # tools/autoos_gateway_key.py (the PowerShell module carries the same rule in its own language);
 # unset or empty is local. Scheme-less values such as 127.0.0.1:20128 are NOT local: say
-# http://127.0.0.1:20128.
+# http://127.0.0.1:20128. Without python3 nothing can be classified: that says so and is non-local.
 is_local_gateway() {
     local url="${1-}"
     [[ -z "$url" ]] && return 0
-    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    python3 "$repo_root/tools/autoos_gateway_key.py" is-local "$url"
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'autoos: python3 is required to classify the gateway URL (treated as non-local)\n' >&2
+        return 1
+    fi
+    python3 "$_AUTOOS_GATEWAY_CLI" is-local "$url"
 }
 
 # _host_config_path: path to the machine-wide host.yml config.
@@ -5062,7 +5069,11 @@ autoos_resolve_client_key() {
     if [[ -z "$keys_file" ]]; then
         keys_file="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
     fi
-    python3 "$repo_root/tools/autoos_gateway_key.py" resolve "$keys_file"
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'autoos: python3 is required to resolve the OmniRoute client key\n' >&2
+        return 1
+    fi
+    python3 "$_AUTOOS_GATEWAY_CLI" resolve "$keys_file"
 }
 
 # graphify_mcp_link_prepare: decide what may sit at ~/.local/bin/graphify-mcp, and

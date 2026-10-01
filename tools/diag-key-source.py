@@ -35,18 +35,12 @@ def main() -> int:
             continue
         val = None
         try:
-            with open(path, encoding="utf-8") as fh:
-                for line in fh:
-                    m = agent.OMNIROUTE_KEY_RE.match(line) if hasattr(
-                        agent, "OMNIROUTE_KEY_RE") else None
-                    if m is None:
-                        import re as _re
-                        m = _re.match(r"^omniroute\s*:\s*(.+?)\s*$", line)
-                    if m:
-                        v = m.group(1).strip("\"'")
-                        val = None if v.startswith("REPLACE_WITH_") else v
-                        break
-        except OSError:
+            # what the one resolver would take from THIS file (the environment key left out)
+            from pathlib import Path
+            from autoos_gateway_key import resolve_client_key
+            env = {k: v for k, v in os.environ.items() if k != "AUTOOS_OMNIROUTE_KEY"}
+            val = resolve_client_key(env, Path(path))
+        except (KeyError, ImportError, OSError):
             val = None
         print("file=%s present=yes size=%d mtime_ns=%d has_key=%s key_len=%d" % (
             path, size, mtime, val is not None, len(val) if val else 0))
