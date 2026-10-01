@@ -46,3 +46,25 @@ Window audit + live NOT_FOUND (huggingface/antigravity/deepinfra/nebius) in evid
 - Reviewer 2: family `opencode/longcat-2.5-preview-free` (meituan, free; response abbreviated `FREE`),
   session `ses_f095dfa30ffe5FiV98f1bC4Stj`, verdict **APPROVE** (nonce echoed `TORDER-NONCE-C493B548`).
 - Rate-limit log: none (`chat_admission_busy`/`Rate limit exceeded` not hit; no backoff needed).
+
+## Batch 2 (2026-10-01)
+
+Evidence: `docs/handoff/2026-10-01-laneTierOrder-batch2.md`.
+Reviewer nonce: **`B2-NONCE-C2A88E01`**.
+
+### CHANGELOG bullet
+
+- `feat(routing): tier order batch 2 — remove dead huggingface/antigravity legs (providers unavailable, hf-glm/hf-qwen/opus to omitted for apply prune), ovh-qwen3.8-27b 256k->128k measured, vertex JSON-credential docs (two live connections noted), latency knobs recorded (breaker is fast-skip, maxWaitMs is queue wait, no per-leg timeout; crawl fixed by dead-leg removal), meta key under meta report-only; re-render all surfaces, contract 23 PASS, DryRun prune would-delete`
+
+### Batch 2 reviews
+
+- Reviewer 1: family `openrouter/nvidia/nemotron-3-super-120b-a12b:free`,
+  session `ses_f0941152effePmOtnf9BwTfA4g`, verdict **APPROVE** (nonce echoed `B2-NONCE-C2A88E01`).
+- Reviewer 2: family `opencode/longcat-2.5-preview-free` (response `FREE`),
+  session `ses_f0941152dffeE6QEehc4GBZr7z`, verdict **APPROVE** (nonce echoed `B2-NONCE-C2A88E01`).
+- Rate-limit log: none.
+
+### Batch 2 commits
+
+`44f21cdb` B2-HF, `aced9915` B2-AGY, `60191348` B2-PRUNE, `ff0c57ee` B2-OVH,
+`42697105` B2-VERTEX, `f99df3c9` B2-LATENCY, `266e16da` B2-RERENDER.
