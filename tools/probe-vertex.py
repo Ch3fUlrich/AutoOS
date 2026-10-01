@@ -12,12 +12,15 @@ transform, so the bug reproduces on any of them.
 AutoOS lane F1-vertex  |  2026-09-30  |  branch L1-backlog/ws-f1-vertex-20260930
 """
 import sys
+import os
 import json
 import time
 import urllib.request
 import urllib.error
 
-GATEWAY = "http://127.0.0.1:20128"
+# V-activate: env-overridable so the probe can target the isolated gateway;
+# the default is unchanged from the committed probe (shared gateway :20128).
+GATEWAY = os.environ.get("AUTOOS_OMNIROUTE_URL", "http://127.0.0.1:20128")
 # PLAIN model names — the omniroute/ prefix is only inside opencode.
 MODELS = ["vertex/gemini-3.8-flash", "gemini/gemini-2.5-flash"]
 
