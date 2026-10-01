@@ -6414,6 +6414,27 @@ if it "gwkey: F2 host.yml with UTF-8 BOM is read"; then
     if (( ok )); then pass; else fail "F2: host.yml with BOM not read correctly"; fi
 fi
 
+# Authority parsing: path, query and fragment never contribute userinfo or a host
+if it "gwkey: an @ or ? or # after the authority does not change the host"; then
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        for u in             "http://evil.example/x@127.0.0.1"             "http://evil.example#@127.0.0.1"             "http://evil.example?x=@127.0.0.1"             "http://localhost."             "http://127.0.0.2"             "http://0.0.0.0"             "http://127.0.0.1/x@y"             "http://localhost?x=1"             "http://127.0.0.1#frag"             "http://127.0.0.1:20128/v1?k=a@b"; do
+            if is_local_gateway "$u"; then printf 'local
+'; else printf 'remote
+'; fi
+        done ) 2>/dev/null )"
+    expected="$(printf 'remote
+remote
+remote
+remote
+remote
+remote
+local
+local
+local
+local')"
+    if [[ "$out" == "$expected" ]]; then pass; else fail "authority parsing wrong: [$out]"; fi
+fi
+
 # F4: URL classification tests
 if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
     d="$(mktemp -d)"

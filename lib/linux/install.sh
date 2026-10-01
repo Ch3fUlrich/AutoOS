@@ -4980,9 +4980,10 @@ is_local_gateway() {
     local host
     # Strip scheme
     host="${url#*://}"
-    # Strip path (everything after first /)
-    host="${host%%/*}"
-    # Strip userinfo: use LAST @ within authority (before first /)
+    # The authority ends at the first / ? or #. Cut there BEFORE looking for userinfo,
+    # or an '@' in the path/query/fragment is mistaken for userinfo.
+    host="${host%%[/?#]*}"
+    # Strip userinfo: use LAST @ within the authority
     # This matches Python's urlparse().hostname and PowerShell's [Uri]::Host
     local at_idx
     at_idx="${host##*@}"

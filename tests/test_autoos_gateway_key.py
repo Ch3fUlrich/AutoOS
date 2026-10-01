@@ -62,6 +62,16 @@ class TestIsLocalGateway(unittest.TestCase):
         # http://a@b@gw.example.com -> host is gw.example.com (non-local)
         self.assertFalse(is_local_gateway("http://a@b@gw.example.com"))
 
+    def test_at_sign_after_the_authority_is_not_userinfo(self):
+        # Same table as the bash and PowerShell tests: path/query/fragment never decide the host.
+        for url in ("http://evil.example/x@127.0.0.1", "http://evil.example#@127.0.0.1",
+                    "http://evil.example?x=@127.0.0.1", "http://localhost.",
+                    "http://127.0.0.2", "http://0.0.0.0"):
+            self.assertFalse(is_local_gateway(url), url)
+        for url in ("http://127.0.0.1/x@y", "http://localhost?x=1", "http://127.0.0.1#frag",
+                    "http://127.0.0.1:20128/v1?k=a@b"):
+            self.assertTrue(is_local_gateway(url), url)
+
     def test_whitespace_trim(self):
         # Leading/trailing whitespace should be trimmed
         self.assertTrue(is_local_gateway("  http://127.0.0.1:20128  "))

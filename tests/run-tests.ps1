@@ -6915,6 +6915,15 @@ Test-Case 'gwkey: explicit URL classification matches WS-OMNIREMOTE table' {
         @{ Url = 'http://server:20128'; Expected = $false; Desc = 'bare hostname -> non-local' }
         @{ Url = 'http://[::2]:20128'; Expected = $false; Desc = 'non-loopback IPv6 -> non-local' }
         @{ Url = 'not-a-url'; Expected = $false; Desc = 'unparseable -> non-local' }
+        @{ Url = 'http://evil.example/x@127.0.0.1'; Expected = $false; Desc = '@ in path -> host is evil.example' }
+        @{ Url = 'http://evil.example#@127.0.0.1'; Expected = $false; Desc = '@ in fragment -> host is evil.example' }
+        @{ Url = 'http://evil.example?x=@127.0.0.1'; Expected = $false; Desc = '@ in query -> host is evil.example' }
+        @{ Url = 'http://localhost.'; Expected = $false; Desc = 'trailing-dot lookalike -> non-local' }
+        @{ Url = 'http://127.0.0.2'; Expected = $false; Desc = '127.0.0.2 -> non-local' }
+        @{ Url = 'http://0.0.0.0'; Expected = $false; Desc = '0.0.0.0 -> non-local' }
+        @{ Url = 'http://127.0.0.1/x@y'; Expected = $true; Desc = '@ in path after a loopback host -> local' }
+        @{ Url = 'http://localhost?x=1'; Expected = $true; Desc = 'query after localhost -> local' }
+        @{ Url = 'http://127.0.0.1#frag'; Expected = $true; Desc = 'fragment after 127.0.0.1 -> local' }
     )
     $failures = @()
     foreach ($tc in $testCases) {
