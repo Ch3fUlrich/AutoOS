@@ -724,5 +724,31 @@ class SeatEvidenceTests(unittest.TestCase):
         self.assertEqual(doc["sources"]["run_record"]["model"], MIMO)
 
 
+@unittest.skipUnless(os.environ.get("AUTOOS_LIVE_GATEWAY_TESTS") == "1",
+                     "live gateway smoke opt-in (GET only, D-261 G6)")
+class LiveGatewaySmoke(unittest.TestCase):
+    """Read-only smoke of the FIXED gateway mode against the live container.
+    The 73c457 spark seat genuinely shared its window with muse traffic, so
+    0 AND 2 are honest outcomes; anything else (or a crash) is a regression."""
+
+    RID = "20261001-215958-seatevidence2-review-spa-73c457"
+
+    def test_live_gateway_run_exit_zero_or_attributed_two(self):
+        sandbox = REAL_SANDBOXES / ("AutoOS-" + self.RID)
+        if not sandbox.is_dir():
+            self.skipTest(f"live sandbox not present: {sandbox.name}")
+        argv = [sys.executable, str(TOOL), str(sandbox), "--gateway",
+                "--run-id", self.RID, "--expect", SPARK_EXPECT,
+                "--out", "/tmp/qtest_live_gw.json"]
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        self.assertIn(proc.returncode, (0, 2), proc.stdout + proc.stderr)
+        r = parse_stdout(proc)
+        self.assertEqual(r["kind"], "response-side")
+        doc = json.loads(Path("/tmp/qtest_live_gw.json").read_text())
+        self.assertEqual(doc["window"]["padding_seconds"], 5)
+        self.assertEqual(doc["window"]["key"], GW_KEY)
+        self.assertGreaterEqual(doc["window_rows"], r["turns"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
