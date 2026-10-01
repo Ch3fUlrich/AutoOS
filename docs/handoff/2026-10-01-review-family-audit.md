@@ -67,7 +67,7 @@
 
 ## Commit
 
-This audit is committed on branch `L1-backlog/ws-revaudit-20260930` at `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-revaudit`.
+This audit is committed on branch `L1-backlog/ws-revaudit-20260930` at `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-revaudit`.
 
 ```bash
 git add docs/handoff/2026-10-01-review-family-audit.md
