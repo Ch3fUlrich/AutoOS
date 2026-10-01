@@ -16230,13 +16230,52 @@ class FreeOnlyComboTests(unittest.TestCase):
         self.assertIn(agent.DEFAULT_FREE_MODEL, " ".join(plan["cmd"]))
 
     def test_free_only_combo_maps_each_paid_twin_and_leaves_the_rest(self):
+        # T0-PAID-3 P2: the expectation is derived, not hand-written. Every
+        # combo in combos.json with a paid leg AND a "<name>-free-only" twin
+        # must map to the twin; a combo with a paid leg but no twin
+        # (t2-orchestrator, t1-orchestrator-paid, *-clean) keeps its paid
+        # label on a free run -- there is no twin to name.
         agent = load_agent()
-        self.assertEqual(agent.free_only_combo("t1-orchestrator"),
-                         "t1-orchestrator-free-only")
-        self.assertEqual(agent.free_only_combo("t2-worker"),
-                         "t2-worker-free-only")
-        self.assertEqual(agent.free_only_combo("t3-driver"),
-                         "t3-driver-free-only")
+        with (ROOT / "configuration" / "omniroute" / "combos.json").open(
+                encoding="utf-8") as fh:
+            combos = json.load(fh)["combos"]
+        with (ROOT / "catalog" / "ai-registry.json").open(
+                encoding="utf-8") as fh:
+            shipped = json.load(fh)
+        names = {c["name"] for c in combos}
+        self.assertTrue(names, "combos.json has no combos")
+
+        def has_paid_leg(combo):
+            for leg in combo["models"]:
+                try:
+                    provider_id, model_id = registry_tool.resolve_leg(
+                        leg, shipped)
+                except ValueError:
+                    continue
+                model = shipped["models"][model_id]
+                tier = model.get(
+                    "tier",
+                    shipped["providers"][provider_id].get("tier"))
+                if tier == "paid":
+                    return True
+            return False
+
+        mapped, kept = [], []
+        for combo in combos:
+            name, twin = combo["name"], combo["name"] + "-free-only"
+            if has_paid_leg(combo) and twin in names:
+                self.assertEqual(agent.free_only_combo(name), twin, name)
+                mapped.append(name)
+            elif twin not in names:
+                self.assertEqual(agent.free_only_combo(name), name, name)
+                if has_paid_leg(combo):
+                    kept.append(name)
+        self.assertEqual(
+            set(mapped),
+            {"t1-orchestrator", "t2-worker", "t3-driver"},
+            "a paid combo grew a free-only twin (or lost one)")
+        for name in ("t2-orchestrator", "t1-orchestrator-paid"):
+            self.assertIn(name, kept, name)
         self.assertEqual(agent.free_only_combo("t2-worker-clean"),
                          "t2-worker-clean")
         self.assertEqual(agent.free_only_combo("t4-rag"), "t4-rag")

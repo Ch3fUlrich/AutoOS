@@ -3417,9 +3417,10 @@ def free_only_combo(combo):
     free — it stays pure, since the MCP `route` tool takes only a card — and
     labelling that run `t1-orchestrator` names a combo with a paid tail the run
     never touches (T0-PAID-2a1). None (a --tier --free run names no combo) and
-    combos without a twin (-clean, t4-rag, resolver ids) pass through: the rule
-    is that a free run is never LABELLED with a paid combo, not that every free
-    run names one.
+    combos without a twin (-clean, t4-rag, resolver ids, and paid combos with
+    no free-only twin such as t2-orchestrator and t1-orchestrator-paid) pass
+    through: the rule is that a free run is labelled with the paid combo's
+    twin whenever a twin exists, not that every free run names one.
     """
     if combo is None:
         return None
