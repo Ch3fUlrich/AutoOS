@@ -1,8 +1,8 @@
 # DONE — ws-merge-map-20260930 (L1 merge-readiness map, read-only analysis)
 
 **Lane:** `L1-backlog/ws-merge-map-20260930`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-mergemap`
-(proved: `git rev-parse --show-toplevel` → `C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-mergemap`)
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-mergemap`
+(proved: `git rev-parse --show-toplevel` → `C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-mergemap`)
 **Date:** 2026-10-01
 **Mode:** analysis only. No merge, rebase, push, checkout of any analysed branch, no gateway action.
 **Base:** `origin/main` = `e58274a8030625c19b739032d37aa82d2ec24a73`.

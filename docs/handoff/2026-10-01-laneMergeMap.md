@@ -5,7 +5,7 @@ read-only analysis).
 **Objective:** let L0 land the 2026-09-30 merge wave with the fewest avoidable conflicts.
 **Method:** `git for-each-ref` + `git diff --name-only <base>..<tip>` + read-only
 `git merge-tree --write-tree` (no merge, no rebase, no checkout of any analysed branch).
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-mergemap`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-mergemap`
 (`git rev-parse --show-toplevel` prints exactly that path).
 
 This document is written from the `origin/main` tip **at analysis time**:
