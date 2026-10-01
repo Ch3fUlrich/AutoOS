@@ -1548,7 +1548,7 @@
     "Qwen3.8-27B": {
       "id": "Qwen3.8-27B",
       "family": "qwen",
-      "context_advertised": 262000,
+      "context_advertised": 128000,
       "context_usable": {
         "source": "default",
         "tokens": 64000
@@ -1560,7 +1560,7 @@
       "price_in": 4.7e-07,
       "price_out": 3.19e-06,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos."
+      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000)."
     },
     "Qwen/Qwen3.8-27B": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false).",
@@ -4355,7 +4355,7 @@
       }
     },
     "ovh-qwen3.8-27b": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3.8-27B (live ovh/Qwen3.8-27B 128000; registry adv 262000 from OVH catalogue page, renders 256k; priced per OVH pricing page, proven). Class credit. opencode/zed only (no openhands_profile, the groq-qwen/hf-glm precedent).",
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3.8-27B (live ovh/Qwen3.8-27B 128000; registry adv 262000 from OVH catalogue page, renders 256k; priced per OVH pricing page, proven). Class credit. opencode/zed only (no openhands_profile, the groq-qwen/hf-glm precedent). B2-OVH 2026-10-01: surfaces 256k->128k to match measured 128000 window; contract live check passes without exception.",
       "class": "credit",
       "id": "ovh-qwen3.8-27b",
       "legs": [
@@ -4368,8 +4368,8 @@
             "opencode",
             "zed"
           ],
-          "context": 262144,
-          "context_declared": "256k",
+          "context": 131072,
+          "context_declared": "128k",
           "display_name": "Qwen3.8-27B via OVH (credit)",
           "output": 32768
         }
