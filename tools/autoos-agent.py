@@ -899,6 +899,9 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
                         ("user.email", WORKER_EMAIL)):
         subprocess.run(["git", "-C", path, "config", "--local", name, value],
                        check=True)
+    if not is_autoos_source(root):
+        # S4: a foreign repo's sandbox is owner-only, like its fleet parents.
+        os.chmod(path, 0o700)
     return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
 

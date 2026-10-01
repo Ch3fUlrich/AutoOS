@@ -18663,6 +18663,17 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
         sb = plan["sandbox"]
         self.assertIn(os.path.join("logs", "sandboxes"), sb["path"])
 
+    def test_non_autoos_sandbox_dir_is_owner_only(self):
+        import stat as _stat
+        root = self._repo("Server")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        with mock.patch.object(self.cli, "ROOT", "/x/AutoOS"):
+            self.cli.isolate_clone(root, dest, "Server/run1")
+        mode = _stat.S_IMODE(os.stat(dest).st_mode)
+        self.assertEqual(mode, 0o700)
+
 
 if __name__ == "__main__":
     unittest.main()
