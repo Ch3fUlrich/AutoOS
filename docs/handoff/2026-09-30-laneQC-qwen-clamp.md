@@ -3,7 +3,7 @@
 Run: `ws-omniroute-20260930` (L0 = workstation-L1-main). Lane: **L2 lane QC v4 ("qwen clamp")**.
 Worktree: `AutoOS-worktrees/AutoOS-ws-qwenclamp`, branch `L1-backlog/ws-qwenclamp-20260930` at `d08f7f2`.
 Gateway: OmniRoute v3.8.50, live `http://127.0.0.1:20128`, log
-`C:\Users\mauls\.omniroute\logs\application\app.log`. All times UTC 2026-09-30. No secret quoted.
+`C:\Users\<user>\.omniroute\logs\application\app.log`. All times UTC 2026-09-30. No secret quoted.
 
 **Files this lane claims** (do not touch without me): `configuration/omniroute/capability-overrides.json`,
 `configuration/omniroute/apply-capability-overrides.ps1`, `configuration/omniroute/patch-gateway-clamp.ps1`,
