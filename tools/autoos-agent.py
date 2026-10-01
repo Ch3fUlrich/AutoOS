@@ -18,7 +18,8 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
      run` waits to read it as extra prompt text and never starts; the child
      always gets /dev/null here.
   4. A worker edits the checkout it runs in. --isolate gives it a private
-     `git clone --local` (from HEAD - uncommitted changes are not in it) on
+     repo built from HEAD (`isolate_clone` materialises the allowed HEAD
+     entries into a fresh `git init` - uncommitted changes are not in it) on
      its own branch, its own opencode data dir, and a deny on every path
      outside the clone (opencode's default there is "ask", which --auto
      approves). NOT a git worktree: opencode resolves a worktree to the main
@@ -243,7 +244,6 @@ import socket
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -428,8 +428,9 @@ def spawn_gate_rules(tier: int) -> list:
 # passes, not the files it searches, so `grep "sk-" .` inside a checkout holding
 # a git-ignored api-keys.yml is unfenceable — the pattern matches nothing. The
 # guarantee instead lives in the directory a worker runs in: an --isolate clone
-# is `git clone --local`, which materialises committed files only, so an ignored
-# secret is never present for the search to walk.
+# materialises HEAD's allowed files into a fresh one-commit repo, so an ignored
+# secret is never present for the search to walk - and neither is any excluded
+# file's blob, in the worktree or in `.git`.
 # KEYDENY3g (L1-routing policy decision): that directory is mandatory for every
 # *spawned* tier. Tier 2 was left in place by KEYDENY3b and the hole it recorded
 # is the one that matters: a t2 running in the caller's checkout greps an ignored
@@ -439,7 +440,7 @@ def spawn_gate_rules(tier: int) -> list:
 ISOLATE_TIERS = (2, 3)
 # A client that cannot run in a clone would have to lose grep/glob for its leaf
 # runs instead (the fence is the only control there). None today: isolation is
-# `git clone --local` plus a cwd, and every client here is a CLI started with one.
+# a fresh repo plus a cwd, and every client here is a CLI started with one.
 NO_ISOLATE_CLIENTS = frozenset()
 # SB-C (SPAWNISO), read by BOTH entry points through `is_write_role`: a card that
 # is not one of these is a run that edits files, and a run that edits files gets no
@@ -616,42 +617,126 @@ def isolate_source(cwd: str | None = None) -> str:
 ISOLATE_EXCLUDED_TOPDIR = "secrets-generated"
 
 # T2-ISOLATE-SECRETS S3: tracked names that look like a plaintext secret.
-_ISOLATE_SECRET_PATTERNS = ("*.key", "*.pem", ".env", ".env.*", "api-keys.yml",
-                            "api_keys.*", "id_rsa*", "*.p12", "credentials*.json")
-_ISOLATE_SECRET_EXEMPT = (".example.", ".sample", ".template")
+# Matching is case-folded (I8), `*.pub` is public by definition, and a
+# template is exempt only by SUFFIX (I7) - never for containing ".example".
+# A credential FILE, not a page that mentions one: a bare `api-keys*` here
+# matched `docs/api-keys.md`, the tracked prose page explaining where each key
+# lives, and every real --isolate spawn from this checkout died on a
+# plaintext-secret refusal. Shapes name extensions a key file actually has.
+_ISOLATE_SECRET_SHAPES = ("*.key", "*.pem", "*.p12", "*.pfx", "*.kdbx",
+                          ".env", ".env.*", "credentials*.json")
+_ISOLATE_SECRET_PATTERNS = _ISOLATE_SECRET_SHAPES + (
+    "api_keys.*", "id_rsa*", "id_ed25519*", "secrets.yml", "secrets.json",
+    "secrets.yaml")
+_ISOLATE_EXEMPT_SUFFIXES = (".example", ".sample", ".template")
 
 
 def _isolate_exempt_name(rel: str) -> bool:
-    base = os.path.basename(rel)
-    if ".example" in base:
+    """True only for a template: the final suffix is .example / .sample /
+    .template, or the word `example` sits in the penultimate position
+    (`.env.example`, `deploy.example.key`, `config.sample.json`).
+
+    I7: the old test was `".example" in base`, so `api.example.com.key` and
+    `certs/www.example.com.pem` - real keys for a host whose name happens to
+    contain ".example" - were exempt and rode into the sandbox.
+    """
+    base = os.path.basename(rel).lower()
+    if base.endswith(_ISOLATE_EXEMPT_SUFFIXES):
         return True
-    return base.endswith(".sample") or base.endswith(".template") or \
-        ".template." in base or ".sample." in base
+    parts = base.split(".")
+    return len(parts) >= 3 and parts[-2] == "example"
 
 
 def _isolate_secret_name(rel: str) -> bool:
+    """Whether a tracked path is named like a plaintext secret.
+
+    I8: the old match was case-sensitive, so `ID_RSA`, `.ENV` and `a/Prod.PEM`
+    passed it - and it flagged `id_rsa.pub`, which is public: a false positive
+    there blocks every sandbox of a repo that ships one.
+    """
     import fnmatch as _fn
     if _isolate_exempt_name(rel):
         return False
-    base = os.path.basename(rel)
-    if base in (".env", "api-keys.yml"):
+    base = os.path.basename(rel).lower()
+    if base.endswith(".pub"):
+        return False
+    posix = rel.replace(os.sep, "/").lower()
+    if base in (".env", "api-keys.yml", "secrets", "secret"):
         return True
     for pat in _ISOLATE_SECRET_PATTERNS:
-        if _fn.fnmatchcase(base, pat) or _fn.fnmatchcase(rel, pat):
+        if _fn.fnmatchcase(base, pat) or _fn.fnmatchcase(posix, pat):
             return True
     return False
+
+
+_ISOLATE_ENC_MARKER = "ENC[AES256_GCM,data:"
+# SOPS dotenv/INI writes its own metadata keys at column 0 beside the values.
+_ISOLATE_SOPS_META = ("sops_version", "sops_lastmodified", "sops_mac",
+                      "sops_key_version", "sops_source_format",
+                      "sops_message_format")
 
 
 def _isolate_blob_encrypted(text: str) -> bool:
-    if "ENC[AES256_GCM," in text:
-        return True
-    for line in text.splitlines():
-        stripped = line.strip().strip("\"'").lower()
-        if stripped.startswith("sops:"):
+    """Whether a secret-named blob is SOPS-encrypted rather than plaintext.
+
+    I9 closed three bypasses: an INDENTED `  sops:` line counted, a bare
+    `sops_` anywhere counted, and `ENC[AES256_GCM,` inside a comment counted.
+    Encrypted is exactly one of: a `sops:` key at COLUMN 0 (YAML); a top-level
+    "sops" key of a JSON document; a dotenv/INI body whose every value is
+    `ENC[AES256_GCM,data:` (SOPS' own column-0 metadata keys allowed beside
+    them). Prose that merely mentions sops is not encryption.
+    """
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            import json as _json
+            loaded = _json.loads(stripped)
+        except Exception:
+            loaded = None
+        if isinstance(loaded, dict) and "sops" in loaded:
             return True
-    if "sops_" in text:
-        return True
-    return False
+        return "ENC[AES256_GCM," in text
+    for line in text.splitlines():
+        if line.startswith("sops:") or line.rstrip() == "sops":
+            return True
+    pairs = []
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        if line[:1] in (" ", "\t"):
+            continue
+        key, eq, value = line.partition("=")
+        if not eq:
+            # No `=` at all: the whole line is the value, which is the shape of
+            # a file that holds one bare ciphertext blob.
+            key, value = "", line
+        pairs.append((key.strip(), value.strip().strip("\"'")))
+    # Every line must be ciphertext (or SOPS' own column-0 metadata beside it),
+    # and at least one line must really be ciphertext - a body of comments that
+    # merely mention the marker is not an encrypted file.
+    marked = [v for k, v in pairs if v.startswith(_ISOLATE_ENC_MARKER)]
+    return bool(marked) and all(
+        v.startswith(_ISOLATE_ENC_MARKER) or k.lower() in _ISOLATE_SOPS_META
+        for k, v in pairs)
+
+
+def _isolate_blob_plain(data: bytes) -> bool:
+    """Whether a secret-named blob's BYTES are plaintext, so the clone refuses.
+
+    I5: the preflight read the blob with text=True, so a binary client.p12
+    raised UnicodeDecodeError whose message echoed the undecodable bytes - the
+    secret value itself - and cmd_run only caught PrivacyRefused, so it surfaced
+    as a traceback. Bytes are read here instead: not valid UTF-8, or holding a
+    NUL, is plaintext unless the SOPS marker is in it. Only the PATH is ever
+    reported, never a value.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return _ISOLATE_ENC_MARKER.encode("utf-8") not in data
+    if "\x00" in text:
+        return _ISOLATE_ENC_MARKER.encode("utf-8") not in data
+    return not _isolate_blob_encrypted(text)
 
 
 def _isolate_agentignore_patterns(root: str) -> list:
@@ -669,80 +754,179 @@ def _isolate_agentignore_patterns(root: str) -> list:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        if stripped.startswith("!"):
+            # I4: negation is not implemented for the sandbox filter, and an
+            # unimplemented rule must fail closed: the line is dropped with a
+            # warning and never read as "include everything".
+            sys.stderr.write("autoos: .agentignore negation '%s' is not "
+                             "supported by the sandbox filter; the line is "
+                             "ignored, the paths stay excluded\\n" % stripped)
+            continue
         out.append(stripped)
     return out
 
 
 def _isolate_pattern_matches(rel: str, pat: str) -> bool:
-    import fnmatch as _fn
+    """Whether one ignore pattern excludes one HEAD path - gitignore semantics.
+
+    I4: the old matcher checked a slash-free pattern against the BASENAME only,
+    so `private` left `private/k.txt` and `deep/private/k2.txt` in the sandbox.
+    Git's rule: a slash-free pattern matches any path COMPONENT at any depth -
+    and because such a component is a directory, everything under it goes too.
+    A pattern holding a leading or middle slash is anchored to the repository
+    root; a trailing `/` means directories only. Negation is NOT implemented:
+    `_isolate_agentignore_patterns` drops a `!` line with a warning, and this
+    returns False for one, so an unimplemented rule can never read as
+    "include everything".
+    """
     posix = rel.replace(os.sep, "/")
     pat = pat.strip()
-    if not pat or pat.startswith("#"):
+    if not pat or pat.startswith("#") or pat.startswith("!"):
         return False
-    if pat.startswith("/"):
-        pat = pat[1:]
-    dir_only = pat.endswith("/")
-    core = pat.rstrip("/")
-    if "/" not in core:
-        if _fn.fnmatchcase(os.path.basename(posix), core):
-            return True
-        if dir_only and (posix == core or posix.startswith(core + "/")):
-            return True
+    core = pat.lstrip("/").rstrip("/")
+    if not core:
         return False
-    if _fn.fnmatchcase(posix, core) or _fn.fnmatchcase(posix, core + "/*"):
+    segs = posix.split("/")
+    # Anchoring is a property of the pattern AS WRITTEN, so it is decided before
+    # the leading slash is stripped: `/rooted.txt` names one file in the root,
+    # `rooted.txt` names that name at any depth. Stripping first and asking
+    # afterwards made every anchored rule a basename rule.
+    anchored = pat.startswith("/") or "/" in pat.rstrip("/")
+    if not anchored:
+        import fnmatch as _fn
+        # A slash-free pattern matches any component: a hit on a component that
+        # is not the last one is a hit on a DIRECTORY, and a directory takes its
+        # contents with it, which is what `private` now does to private/k.txt.
+        return any(_fn.fnmatchcase(seg, core) for seg in segs)
+    return _isolate_seg_match(segs, core.split("/"))
+
+
+def _isolate_seg_match(segs: list, pats: list) -> bool:
+    """Segment-wise match of an anchored pattern: `*` stops at `/`, `**` spans it."""
+    import fnmatch as _fn
+    if not pats:
+        # The pattern is consumed: it named this path exactly, or it named a
+        # directory - path components left below it prove the thing it matched
+        # IS a directory - and then everything under it goes too. Without this
+        # `deep/private` took the file `deep/private` and left its contents.
         return True
-    if dir_only and (posix == core or posix.startswith(core + "/")):
-        return True
-    return False
+    if pats[0] == "**":
+        return any(_isolate_seg_match(segs[i:], pats[1:])
+                   for i in range(len(segs) + 1))
+    if not segs:
+        return False
+    if not _fn.fnmatchcase(segs[0], pats[0]):
+        return False
+    return _isolate_seg_match(segs[1:], pats[1:])
+
+
+def _isolate_cone_allowed(dirs: list, parents: list, head_files: list) -> set:
+    """Cone semantics, reconstructed from the pattern list: every top-level
+    file, each listed directory in full, and the files directly inside each
+    parent of a listed directory (`git sparse-checkout set keep` writes `/*`,
+    `!/*/`, `/keep/`, and for a nested dir also `/nested/`, `!/nested/*/`).
+
+    This is the fallback for a source whose index cannot be asked (a bare or
+    restored checkout); the primary answer is git's own - see
+    `_isolate_sparse_allowed`. Read as plain ignore patterns the cone list
+    allowed NOTHING, the sandbox materialised no file, died on "nothing to
+    commit" and left a bare `.git` behind (I6).
+    """
+    listed = {d.strip("/") for d in dirs if d.strip("/")}
+    # A cone writes `!/X/*/` for every directory X it only has to CROSS to reach
+    # a listed directory: X's own files are kept, X's subdirectories are not
+    # unless one is listed. Read as a plain recursive include, `/nested/` took
+    # `nested/deep/x.txt` with it.
+    crossed = {p.strip("/") for p in parents if p.strip("/").endswith("/*")}
+    crossed = {c[:-2].rstrip("/") for c in crossed}
+    recursive = {d for d in listed if d != "*" and d not in crossed}
+    ancestors = set()
+    for d in recursive:
+        segs = d.split("/")
+        for i in range(1, len(segs)):
+            ancestors.add("/".join(segs[:i]))
+    shallow = crossed | ancestors
+    allowed = set()
+    for rel in head_files:
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        if not parent or parent in shallow:
+            # a top-level file, or a file lying directly inside a directory the
+            # cone only passes through.
+            allowed.add(rel)
+            continue
+        if any(parent == d or parent.startswith(d + "/") for d in recursive):
+            allowed.add(rel)
+    return allowed
 
 
 def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
     """The HEAD files the source's own sparse-checkout allows, or None.
 
     None means the source is not sparse, so every non-excluded HEAD file is
-    allowed. A sparse source lists only its checked-out subset in
-    `.git/info/sparse-checkout` with `core.sparseCheckout` true; honour it by
-    filtering the same way, so the sandbox never materialises what the source
-    itself hides.
+    allowed. A sparse source lists only its checked-out subset with
+    `core.sparseCheckout` true; honour it, so the sandbox never materialises
+    what the source itself hides.
+
+    git has already answered this question - it is written into the index as
+    the skip-worktree bit on every entry - so `git ls-files -v` is asked
+    first: an UPPERCASE status letter means the path is in the checkout, a
+    lowercase one that it is skipped. That is exact for cone AND non-cone
+    mode, where reimplementing the pattern language is not (I6). The pattern
+    reconstruction is the fallback for a checkout whose index says nothing.
     """
     proc = subprocess.run(["git", "-C", root, "config", "--bool",
                            "core.sparseCheckout"],
                           capture_output=True, text=True)
     if proc.stdout.strip() != "true":
         return None
+    head_set = set(head_files)
+    verbose = subprocess.run(["git", "-C", root, "ls-files", "-v"],
+                             capture_output=True, text=True)
+    wanted = set()
+    seen_any = False
+    for line in verbose.stdout.splitlines():
+        flag, _, path = line.partition(" ")
+        if not flag or len(flag) != 1:
+            continue
+        seen_any = True
+        # 'S' is git's own skip-worktree mark: the entry is HEAD's but
+        # deliberately NOT in the checkout. Every other letter (H, or a
+        # lowercase one, which only adds assume-unchanged) means the source
+        # keeps the file.
+        if path in head_set and flag not in ("S", "s"):
+            wanted.add(path)
+    if seen_any:
+        return wanted
+    # No index to ask: read the pattern file and reconstruct the cone.
     gitdir = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
                             capture_output=True, text=True)
     gd = (gitdir.stdout.strip() or ".git")
     if not os.path.isabs(gd):
         gd = os.path.join(root, gd)
-    patterns = []
     try:
         with io.open(os.path.join(gd, "info", "sparse-checkout"),
                      encoding="utf-8") as fh:
-            for line in fh.read().splitlines():
-                stripped = line.strip()
-                if stripped and not stripped.startswith("#"):
-                    patterns.append(stripped)
+            patterns = [ln.strip() for ln in fh.read().splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
     except OSError:
         return None
     if not patterns:
         return None
-    includes = [p for p in patterns if not p.startswith("!")]
-    excludes = [p[1:] for p in patterns if p.startswith("!")]
-    allowed = set()
-    for rel in head_files:
-        if includes and not any(_isolate_pattern_matches(rel, p) for p in includes):
-            continue
-        if any(_isolate_pattern_matches(rel, p) for p in excludes):
-            continue
-        allowed.add(rel)
-    return allowed
+    return _isolate_cone_allowed([p for p in patterns if not p.startswith("!")],
+                                 [p[1:] for p in patterns if p.startswith("!")],
+                                 head_files)
 
 
 def _isolate_path_excluded(rel: str, agentignore: list) -> bool:
+    """Whether a HEAD path stays out of the sandbox.
+
+    I10: the generated-secrets directory was excluded only as a TOP-level name,
+    so `sub/secrets-generated/` and `Secrets-Generated/` were kept. A path
+    component equal to it, case-insensitively, at any depth is excluded - the
+    same directory by another spelling.
+    """
     posix = rel.replace(os.sep, "/")
-    if posix == ISOLATE_EXCLUDED_TOPDIR or \
-            posix.startswith(ISOLATE_EXCLUDED_TOPDIR + "/"):
+    if any(seg.lower() == ISOLATE_EXCLUDED_TOPDIR for seg in posix.split("/")):
         return True
     return any(_isolate_pattern_matches(rel, p) for p in agentignore)
 
@@ -768,26 +952,21 @@ def isolate_preflight_refuse(root: str) -> None:
     """Raise PrivacyRefused when the source HEAD tracks a plaintext secret.
 
     Only files outside the excluded dirs are examined, and only blobs whose
-    name looks secret-shaped are read (via `git cat-file -p`, never the
-    worktree). SOPS-encrypted blobs (`ENC[AES256_GCM,` or a top-level `sops:`
-    key / `sops_` keys, the semantics of scripts/secrets.sh status) and
-    `*.example.*` / `*.sample` / `*.template` fixtures are not secrets. The
-    message names PATHS only, never contents.
+    name looks secret-shaped are read - as BYTES, never the worktree (I5).
+    SOPS-encrypted blobs pass by `_isolate_blob_encrypted`'s rules, templates
+    by `_isolate_exempt_name`. The message names PATHS only, never contents.
     """
     source_sha, allowed, agentignore = _isolate_allowed_files(root)
-    del source_sha
     del agentignore
-    allowed_set = set(allowed)
     bad = []
-    for rel in sorted(allowed_set):
+    for rel in sorted(set(allowed)):
         if not _isolate_secret_name(rel):
             continue
         blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
-                               "HEAD:" + rel],
-                              capture_output=True, text=True)
+                               "HEAD:" + rel], capture_output=True)
         if blob.returncode != 0:
             continue
-        if _isolate_blob_encrypted(blob.stdout):
+        if not _isolate_blob_plain(blob.stdout):
             continue
         bad.append(rel)
     if bad:
@@ -804,8 +983,116 @@ def sandbox_repo_slug(source: str) -> str:
     return slug or "repo"
 
 
+def _isolate_batch_entries(root: str, sha: str, allowed) -> list:
+    """HEAD's `(mode, blob_sha, path)` triples for every allowed path.
+
+    `ls-tree -r -z --full-tree` names the whole tree and the allow filter is
+    then applied to names we already hold (I1). Handed to `git archive` those
+    same names are PATHSPECS, which git interprets: a tracked file literally
+    named `*`, `secrets-*` or `:(glob)**` is a glob that pulls every tracked
+    path - `secrets-generated/` included - past the filter that just dropped
+    it. A gitlink (160000) is skipped: the submodule's objects are not here and
+    an empty directory carries nothing.
+    """
+    listing = subprocess.run(
+        ["git", "-C", root, "ls-tree", "-r", "-z", "--full-tree", sha],
+        capture_output=True, check=True)
+    wanted = set(allowed)
+    entries = []
+    for rec in listing.stdout.split(b"\0"):
+        if not rec:
+            continue
+        meta, sep, name = rec.partition(b"\t")
+        if not sep:
+            continue
+        fields = meta.decode("utf-8", "surrogateescape").split(" ", 2)
+        if len(fields) != 3:
+            continue
+        path = name.decode("utf-8", "surrogateescape")
+        if path in wanted and fields[0] in ("100644", "100755", "120000"):
+            entries.append((fields[0], fields[2], path))
+    return entries
+
+
+def _isolate_batch_blobs(root: str, entries: list) -> dict:
+    """Every requested blob's bytes, from ONE `git cat-file --batch` call.
+
+    The ids go in on stdin and stdin is closed before the stream is read: an
+    interleaved write/read on the same pipe deadlocks, because `--batch`
+    buffers its output until the process ends. One call, no path in the argv
+    (I2 - ~30k paths overflowed ARG_MAX), and the objects are addressed by id,
+    never by name (I1).
+    """
+    if not entries:
+        return {}
+    ids = "\n".join(sha for _m, sha, _p in entries) + "\n"
+    proc = subprocess.run(["git", "-C", root, "cat-file", "--batch"],
+                          input=ids.encode("utf-8"), capture_output=True)
+    if proc.returncode != 0:
+        raise IOError("git cat-file --batch failed: %s"
+                      % proc.stderr.decode("utf-8", "replace").strip()[:200])
+    out = proc.stdout
+    blobs = {}
+    pos = 0
+    for _mode, sha, _path in entries:
+        nl = out.find(b"\n", pos)
+        if nl < 0:
+            break
+        fields = out[pos:nl].decode("utf-8", "replace").split(" ")
+        pos = nl + 1
+        if len(fields) < 3 or "missing" in fields:
+            continue
+        size = int(fields[-1])
+        blobs[sha] = out[pos:pos + size]
+        pos += size + 1                       # skip the record's newline
+    return blobs
+
+
+def _isolate_materialise(root: str, entries: list, dest: str) -> None:
+    """Write the allowed HEAD entries into `dest`, verbatim from the object DB.
+
+    WHY this replaced `git archive HEAD -- <paths>` (the design change the
+    cross-family review asked for; I1 + I2 + I3):
+      * I1 - the path list is read as PATHSPECS, so one tracked file named `*`
+        turns the whole allow list into a glob and re-imports the secrets the
+        filter had just dropped;
+      * I2 - ~30k paths do not fit in an argv: the child dies OSError
+        "Argument list too long" and leaves a half-made directory;
+      * I3 - `git archive` applies .gitattributes export-ignore (the file
+        vanishes) and export-subst (`$Format:%H$` is rewritten), so the sandbox
+        is not HEAD.
+    Blobs come from one `cat-file --batch` addressed by OBJECT ID, so a path
+    never reaches an argv and no name is ever pattern-matched; HEAD arrives
+    verbatim, a symlink is created rather than followed, and the exec bit is
+    carried. A gitlink has no bytes here and is skipped.
+    """
+    blobs = _isolate_batch_blobs(root, entries)
+    for mode, sha, path in entries:
+        data = blobs.get(sha)
+        if data is None:
+            continue
+        full = os.path.join(dest, path.replace("/", os.sep))
+        parent = os.path.dirname(full)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if mode == "120000":
+            if os.path.lexists(full):
+                os.unlink(full)
+            # Never follow the link: create it, pointing where HEAD says.
+            os.symlink(data.decode("utf-8", "surrogateescape"), full)
+            continue
+        with io.open(full, "wb") as fh:
+            fh.write(data)
+        if mode == "100755":
+            os.chmod(full, 0o755)
+
+
 def is_autoos_source(source: str) -> bool:
-    """Whether an --isolate source is this AutoOS checkout (S4)."""
+    """Whether an --isolate source is this AutoOS checkout (S4).
+
+    Compared by abspath, so any OTHER AutoOS worktree counts as foreign and
+    gets the fleet root - intended: it is a different checkout, not this one.
+    """
     try:
         return os.path.abspath(source) == os.path.abspath(ROOT)
     except OSError:
@@ -835,23 +1122,85 @@ def sandbox_branch_for(source: str, run_id: str) -> str:
     return "%s/%s" % (sandbox_repo_slug(source), run_id)
 
 
+def _isolate_build(root: str, path: str, source_sha: str, allowed: list) -> None:
+    """Materialise the allowed HEAD entries and commit them as the base sha.
+
+    Runs inside isolate_clone's cleanup, so a raise at any step of it leaves no
+    sandbox directory at all (I11).
+    """
+    subprocess.run(["git", "init", "-q", path], check=True)
+    _isolate_materialise(root,
+                         _isolate_batch_entries(root, source_sha, allowed), path)
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
+                    "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
+                    "sandbox base (source %s)" % source_sha], check=True)
+    subprocess.run(["git", "-C", path, "config", "--local",
+                    "autoos.sandboxSource", source_sha], check=True)
+
+
+def sandbox_root_prepare(source: str, path: str) -> None:
+    """Refuse first, then create the sandbox's parent (I12, S4).
+
+    cmd_run made `~/fleet/sandboxes/<repo>/` and chmodded the chain BEFORE the
+    plaintext-secret refusal, so a card that was denied still created owner-only
+    directories in the operator's home. A denied card must leave nothing.
+    """
+    isolate_preflight_refuse(source)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if is_autoos_source(source):
+        return
+    # S4: a foreign repo's sandbox lives under ~/fleet/sandboxes with
+    # owner-only access.
+    _fleet = os.path.join(os.path.expanduser("~"), "fleet", "sandboxes")
+    _p = path
+    while _p.startswith(_fleet + os.sep) or _p == _fleet:
+        try:
+            os.chmod(_p, 0o700)
+        except OSError:
+            pass
+        if _p == _fleet:
+            break
+        _p = os.path.dirname(_p)
+
+
+def take_it_hint(sandbox_path: str, branch: str, base_sha: str = "") -> str:
+    """The line that tells the orchestrator how to take the worker's work.
+
+    I13: the old text ended `(then review FETCH_HEAD)` on a base that shares NO
+    history with the source repo, so the commands it implied are wrong -
+    `git merge FETCH_HEAD` dies without --allow-unrelated-histories, and
+    `git diff HEAD FETCH_HEAD` reports every path the sandbox never materialised
+    as a deletion. The work is the RANGE above the base commit, so the hint
+    prints the cherry-pick form and the base sha that range needs.
+    """
+    line = "take it: git fetch %s %s" % (sandbox_path, branch)
+    if base_sha:
+        line += "   (then: git cherry-pick %s..FETCH_HEAD)" % base_sha
+    return line
+
+
 def isolate_clone(root: str, path: str, branch: str) -> str:
     """Create the --isolate sandbox and return its base sha.
 
-    DESIGN (T2-ISOLATE-SECRETS S2) — WHY an archive into a fresh repo instead
-    of a clone: `git clone` copies the source's object DB, so HEAD blobs of
-    excluded paths (`secrets-generated/`, `.agentignore` entries, sparse-hidden
-    files) would still sit inside the sandbox's `.git` even when the worktree
-    hides them, and the full history keeps every old plaintext blob reachable
-    via `git show <old sha>:path`. `git archive HEAD` of the allowed paths
-    into a fresh `git init` with one `sandbox base (source <sha>)` commit
-    carries no history (S1: `rev-list --all` is 1, old blobs are unknown) and
-    no excluded blob anywhere including `.git`, shares no objects with the
-    source (`--no-hardlinks` is moot: there is no clone at all), and cannot
-    inherit the source's refs. The source sha rides in the commit message and
-    in `autoos.sandboxSource`, so provenance survives; the spawner still
-    fetches `git fetch <path> <branch>` from the sandbox path, and the
-    sandbox_* diff helpers keep working with `base` = this single commit.
+    DESIGN (T2-ISOLATE-SECRETS S2, revised after the cross-family review) -
+    WHY HEAD is materialised in Python into a fresh repo instead of cloned: a
+    `git clone` copies the source's object DB, so HEAD blobs of excluded paths
+    (`secrets-generated/`, `.agentignore` entries, sparse-hidden files) would
+    still sit inside the sandbox's `.git` even when the worktree hides them, and
+    the full history keeps every old plaintext blob reachable via
+    `git show <old sha>:path`. So `ls-tree` names the allowed entries, ONE
+    `cat-file --batch` streams their bytes (`_isolate_materialise`; deliberately
+    NOT `git archive`, whose pathspec, ARG_MAX and .gitattributes behaviour are
+    the three defects the review reproduced), and a fresh `git init` takes
+    exactly one `sandbox base (source <sha>)` commit. That carries no history
+    (S1: `rev-list --all` is 1), no excluded blob anywhere including `.git`,
+    shares no objects with the source (`--no-hardlinks` is moot: there is no
+    clone at all) and cannot inherit the source's refs. The source sha rides in
+    the commit message and in `autoos.sandboxSource`, so provenance survives;
+    the orchestrator fetches `git fetch <path> <branch>` and cherry-picks the
+    range above the base (`take_it_hint`), and the sandbox_* diff helpers keep
+    working with `base` = this single commit.
 
     The steps are one function because the containment claim is about the
     directory the worker lands in: the sandbox holds committed allowed files
@@ -864,44 +1213,38 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
     isolate_preflight_refuse(root)
     source_sha, allowed, _agentignore = _isolate_allowed_files(root)
     os.makedirs(path, exist_ok=True)
-    subprocess.run(["git", "init", "-q", path], check=True)
-    if allowed:
-        archive = subprocess.run(["git", "-C", root, "archive", "HEAD", "--",
-                                  *allowed],
-                                 capture_output=True, check=True)
-        # Unpack with the stdlib, not a `tar` child: a tar child would inherit
-        # the caller's whole env past the FF1b audit, and the bytes are our own
-        # `git archive` output — tracked paths only, never absolute — so a
-        # plain extract of this self-generated stream is the whole job.
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tf:
-            tf.extractall(path)
-    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
-    subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
-                    "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
-                    "sandbox base (source %s)" % source_sha], check=True)
-    subprocess.run(["git", "-C", path, "config", "--local",
-                    "autoos.sandboxSource", source_sha], check=True)
-    # The orchestrator still fetches from the sandbox path (unchanged); every
-    # remote's push URL is disabled and a pre-push hook is installed, so an
-    # unplanned `git push` — to origin or to the parent's absolute path the
-    # containment brief names — fails. ACCIDENT GUARD, not containment: see
-    # fence_sandbox_push. The credentials it cannot use are what really
-    # keeps the parent safe (worker_env, FF1b).
-    fence_sandbox_push(path)
-    subprocess.run(["git", "-C", path, "switch", "-q", "-c", branch], check=True)
-    # FF1c: the clone gets its own identity, local to itself. The worker's
-    # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
-    # path), so the operator's `user.name` is gone — and a worker that ends
-    # its brief with `git commit` would die on "Author identity unknown",
-    # leaving the run's work uncommitted. Same author the spawner's own
-    # end-of-run commit signs with.
-    for name, value in (("user.name", "autoos-worker"),
-                        ("user.email", WORKER_EMAIL)):
-        subprocess.run(["git", "-C", path, "config", "--local", name, value],
+    try:
+        _isolate_build(root, path, source_sha, allowed)
+        # The orchestrator still fetches from the sandbox path (unchanged); every
+        # remote's push URL is disabled and a pre-push hook is installed, so an
+        # unplanned `git push` - to origin or to the parent's absolute path the
+        # containment brief names - fails. ACCIDENT GUARD, not containment: see
+        # fence_sandbox_push. The credentials it cannot use are what really
+        # keeps the parent safe (worker_env, FF1b).
+        fence_sandbox_push(path)
+        subprocess.run(["git", "-C", path, "switch", "-q", "-c", branch],
                        check=True)
-    if not is_autoos_source(root):
-        # S4: a foreign repo's sandbox is owner-only, like its fleet parents.
-        os.chmod(path, 0o700)
+        # FF1c: the clone gets its own identity, local to itself. The worker's
+        # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
+        # path), so the operator's `user.name` is gone - and a worker that ends
+        # its brief with `git commit` would die on "Author identity unknown",
+        # leaving the run's work uncommitted. Same author the spawner's own
+        # end-of-run commit signs with.
+        for name, value in (("user.name", "autoos-worker"),
+                            ("user.email", WORKER_EMAIL)):
+            subprocess.run(["git", "-C", path, "config", "--local", name,
+                            value], check=True)
+        if not is_autoos_source(root):
+            # S4: a foreign repo's sandbox is owner-only, like its fleet parents.
+            os.chmod(path, 0o700)
+    except BaseException:
+        # I11: after the directory exists, every later step is inside this
+        # cleanup. A half-made sandbox is still a sandbox a worker can be
+        # launched into with excluded paths already written; a failed build
+        # leaves no directory, then re-raises.
+        if os.path.lexists(path):
+            shutil.rmtree(path, ignore_errors=True)
+        raise
     return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
 
@@ -8245,22 +8588,10 @@ def cmd_run(args, cfg: dict) -> int:
         # not the checkout this script happens to live in (KEYDENY3g item 7).
         source = sb.get("source") or isolate_source()
         parent_snap = parent_snapshot(source)
-        os.makedirs(os.path.dirname(sb["path"]), exist_ok=True)
-        if not is_autoos_source(source):
-            # S4: a foreign repo's sandbox lives under ~/fleet/sandboxes with
-            # owner-only access.
-            _fleet = os.path.join(os.path.expanduser("~"), "fleet",
-                                  "sandboxes")
-            _p = sb["path"]
-            while _p.startswith(_fleet + os.sep) or _p == _fleet:
-                try:
-                    os.chmod(_p, 0o700)
-                except OSError:
-                    pass
-                if _p == _fleet:
-                    break
-                _p = os.path.dirname(_p)
+        # I12: the plaintext-secret refusal runs BEFORE anything is created,
+        # so a denied card leaves no ~/fleet directory in the operator's home.
         try:
+            sandbox_root_prepare(source, sb["path"])
             isolate_clone(source, sb["path"], sb["branch"])
         except PrivacyRefused as exc:
             return refuse(str(exc))
@@ -8680,7 +9011,7 @@ def cmd_run(args, cfg: dict) -> int:
                   "allow_mode_only=True)." % redact_output(mode_flip))
         else:
             print("review:  git -C %s diff" % q)
-            print("take it: git fetch %s %s   (then review FETCH_HEAD)" % (q, sb["branch"]))
+            print(take_it_hint(q, sb["branch"], sb.get("base", "")))
             for ln in off_ref:
                 ref, _, rest = ln.partition(" ")
                 if ref.startswith("refs/heads/"):

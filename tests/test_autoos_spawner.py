@@ -10503,8 +10503,9 @@ class LeafIsolationMandatoryTests(unittest.TestCase):
         self.assertIsNone(plan["sandbox"])
 
     def test_every_client_that_can_be_a_leaf_can_isolate(self):
-        # Isolation is `git clone --local` plus the cwd the child is started in,
-        # so any CLI the spawner can run headlessly can be isolated. A client
+        # Isolation is a fresh one-commit repo of HEAD plus the cwd the child
+        # is started in, so any CLI the spawner can run headlessly can be
+        # isolated. A client
         # that could not would have to lose grep/glob for its leaf runs instead
         # (the brief's fallback), so pin that none is exempt — and if a future
         # client is added that cannot run headless from a cwd, this is where the
@@ -18429,6 +18430,46 @@ class WinshimMcpJobTests(unittest.TestCase):
         self.assertEqual(mcp_server.status(run_id)["state"], "failed")
 
 
+def _t2_repo(git, files, dirpath):
+    """A throwaway fixture repo: `git init` in `dirpath` and commit `files`.
+
+    `files` maps a tracked path to text, bytes, ("symlink", target) or
+    ("exec", text) - everything FAKE content, nothing real. Returns dirpath.
+    """
+    subprocess.run(git + ["init", "-q", dirpath], check=True)
+    for rel, val in files.items():
+        full = os.path.join(dirpath, rel.replace("/", os.sep))
+        parent = os.path.dirname(full)
+        if parent and not os.path.isdir(parent):
+            os.makedirs(parent, exist_ok=True)
+        if isinstance(val, tuple):
+            if val[0] == "symlink":
+                os.symlink(val[1], full)
+                continue
+            if val[0] == "exec":
+                with io.open(full, "w", encoding="utf-8") as fh:
+                    fh.write(val[1])
+                os.chmod(full, 0o755)
+                continue
+        if isinstance(val, bytes):
+            with io.open(full, "wb") as fh:
+                fh.write(val)
+        else:
+            with io.open(full, "w", encoding="utf-8") as fh:
+                fh.write(val)
+    subprocess.run(git + ["-C", dirpath, "add", "-A"], check=True)
+    subprocess.run(git + ["-C", dirpath, "commit", "-q", "-m", "head"],
+                   check=True)
+    return dirpath
+
+
+def _t2_tree(cli, dest):
+    """Every tracked path of the sandbox, so an exclusion is checked in .git too."""
+    return sorted(p for p in subprocess.run(
+        ["git", "-C", dest, "ls-tree", "-r", "--name-only", "HEAD"],
+        capture_output=True, text=True, check=True).stdout.split("\n") if p)
+
+
 class T2IsolateSecretsS1HistoryTests(unittest.TestCase):
     """S1: the sandbox clone carries one commit and no old plaintext blob."""
 
@@ -18483,6 +18524,39 @@ class T2IsolateSecretsS1HistoryTests(unittest.TestCase):
         self.assertEqual(hits.strip(), "")
 
 
+    def test_take_it_hint_names_the_cherry_pick_range(self):
+        # I13: the printed take-it line said `git fetch <sandbox> <branch>
+        # (then review FETCH_HEAD)` after a base that shares NO history with
+        # the source, so the follow-ups it implied - `git merge FETCH_HEAD`
+        # needs --allow-unrelated-histories, `git diff HEAD FETCH_HEAD` reads
+        # every excluded path as a deletion - are wrong. The hint now names the
+        # cherry-pick range and prints the base sha.
+        root = _t2_repo(self.git, {"keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                             capture_output=True, text=True,
+                             check=True).stdout.strip()
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        base = self.cli.isolate_clone(root, dest, "agent/t2i13")
+        hint = self.cli.take_it_hint(dest, "agent/t2i13", base)
+        self.assertIn("git fetch %s agent/t2i13" % dest, hint)
+        self.assertIn("git cherry-pick %s..FETCH_HEAD" % base, hint)
+        self.assertNotIn("then review FETCH_HEAD", hint)
+        self.assertNotIn("git merge FETCH_HEAD", hint)
+        self.assertNotIn("git diff HEAD FETCH_HEAD", hint)
+        self.assertIn(sha, subprocess.run(
+            ["git", "-C", dest, "log", "-1", "--format=%s"],
+            capture_output=True, text=True, check=True).stdout)
+        # cmd_run prints the helper, and the literal it replaced is gone: the
+        # sandbox's own hint was the only place that text was produced.
+        with io.open(str(AGENT), encoding="utf-8") as fh:
+            src = fh.read().splitlines()
+        self.assertIn("print(take_it_hint(", "\n".join(src))
+        # the only remaining mention of FETCH_HEAD in the file is prose.
+        self.assertEqual([ln for ln in src
+                          if "print(" in ln and "FETCH_HEAD" in ln], [])
+
+
 class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
     """S2: secrets-generated/ and .agentignore paths are absent incl. .git."""
 
@@ -18535,6 +18609,207 @@ class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
             self.assertEqual(hits.strip(), "", needle)
 
 
+    def test_tracked_file_named_star_is_not_a_glob_pathspec(self):
+        # I1: the allow list was passed to `git archive` as pathspecs, so a
+        # tracked file whose NAME is `*` (or `secrets-*`, `:(glob)**`) is read
+        # as a glob and drags the whole repo - secrets-generated/ included -
+        # into the sandbox, past the filter that just excluded it.
+        root = _t2_repo(self.git, {"*": "literal-name\n",
+                                   "secrets-*": "literal-glob\n",
+                                   "secrets-generated/s.txt": "FAKE-GEN\n",
+                                   "keep.txt": "keep\n"},
+                        tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i1")
+        for needle in ("FAKE-GEN",):
+            hits = subprocess.run(["grep", "-r", needle, dest],
+                                  capture_output=True, text=True).stdout
+            self.assertEqual(hits.strip(), "", needle)
+        tree = _t2_tree(self.cli, dest)
+        self.assertIn("*", tree)
+        self.assertNotIn("secrets-generated/s.txt", tree)
+        self.assertEqual([p for p in tree if "generated" in p], [])
+
+    def test_no_file_path_reaches_an_argv(self):
+        # I2: ~30k tracked paths as pathspecs blow past ARG_MAX - the clone
+        # dies OSError: Argument list too long with a half-made directory
+        # left. 5000 files stand in for the count; the assertion is
+        # structural: no argv of a child process may carry a file path.
+        files = {"pkg/f%05d.txt" % i: "x\n" for i in range(5000)}
+        files["keep.txt"] = "keep\n"
+        root = _t2_repo(self.git, files, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        argvs = []
+        real_run, real_popen = subprocess.run, subprocess.Popen
+
+        def spy_run(cmd, *a, **k):
+            argvs.append(list(cmd))
+            return real_run(cmd, *a, **k)
+
+        def spy_popen(cmd, *a, **k):
+            argvs.append(list(cmd))
+            return real_popen(cmd, *a, **k)
+
+        with mock.patch.object(subprocess, "run", spy_run):
+            with mock.patch.object(subprocess, "Popen", spy_popen):
+                self.cli.isolate_clone(root, dest, "agent/t2i2")
+        self.assertTrue(argvs)
+        for cmd in argvs:
+            self.assertLess(len(cmd), 40, cmd[:6])
+            self.assertNotIn("pkg/f00000.txt", cmd, cmd[:6])
+            self.assertNotIn("--", cmd, cmd[:6])
+        self.assertEqual(len(_t2_tree(self.cli, dest)), 5001)
+
+    def test_gitattributes_export_rules_survive_verbatim(self):
+        # I3: `git archive` applies .gitattributes export-ignore (the file is
+        # dropped from the stream) and export-subst ($Format:%H$ is
+        # rewritten). The sandbox is a HEAD materialisation, so both must
+        # arrive verbatim.
+        root = _t2_repo(self.git, {
+            ".gitattributes": "drop-me.txt export-ignore\n"
+                              "subst.txt export-subst\n",
+            "drop-me.txt": "FAKE-ATTR\n",
+            "subst.txt": "commit $Format:%H$\n",
+            "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i3")
+        with io.open(os.path.join(dest, "drop-me.txt"),
+                     encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "FAKE-ATTR\n")
+        with io.open(os.path.join(dest, "subst.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "commit $Format:%H$\n")
+
+    def test_agentignore_patterns_follow_gitignore_semantics(self):
+        # I4: a slash-free pattern was matched against the BASENAME only, so
+        # `private` left private/k.txt and deep/private/k2.txt in the sandbox.
+        # Gitignore semantics: a slash-free pattern matches any path COMPONENT
+        # at any depth; a pattern holding a slash (or a leading /) is anchored
+        # to the root; a trailing / means directories.
+        cases = (
+            ("private", ("private/k.txt", "deep/private/k2.txt", "private"),
+             ("privatee.txt", "keep.txt", "deepprivate/k.txt")),
+            ("deep/private", ("deep/private/k.txt",),
+             ("private/k.txt", "keep.txt")),
+            ("/rooted.txt", ("rooted.txt",), ("sub/rooted.txt", "keep.txt")),
+            ("secret.d/", ("secret.d/k.txt", "deep/secret.d/k2.txt"),
+             ("secret.d.txt", "keep.txt")),
+            ("*.priv", ("a.priv", "sub/b.priv"), ("a.priv.txt", "keep.txt")),
+            ("notes/*.md", ("notes/x.md",),
+             ("notes/x.txt", "sub/notes/y.md", "keep.txt")),
+        )
+        for pat, gone, stay in cases:
+            with self.subTest(pat=pat):
+                files = {}
+                for rel in list(gone) + list(stay):
+                    # `private` names the DIRECTORY of private/k.txt, so it is
+                    # a directory in the fixture too, not a second file.
+                    if rel == "private" or rel.endswith("/private"):
+                        files[rel + "/.keep"] = "d\n"
+                    else:
+                        files[rel] = "content\n"
+                files[".agentignore"] = pat + "\n"
+                root = _t2_repo(self.git, files, tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, root, True)
+                dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+                self.cli.isolate_clone(root, dest, "agent/t2i4")
+                tree = _t2_tree(self.cli, dest)
+                for rel in gone:
+                    if rel == "private":
+                        self.assertNotIn("private/.keep", tree)
+                    else:
+                        self.assertNotIn(rel, tree)
+                for rel in stay:
+                    self.assertIn(rel, tree)
+
+    def test_cone_sparse_source_keeps_top_files_and_listed_dirs(self):
+        # I6: cone-mode patterns (/* !/*/ /keep/) allowed nothing through the
+        # old filter, so the sandbox came back "nothing to commit" with a bare
+        # .git left behind. Cone semantics: every top-level file, each listed
+        # dir recursively, plus files directly inside a listed dir's parents.
+        root = _t2_repo(self.git, {
+            "top.txt": "t\n", "keep/a.txt": "k\n",
+            "keep/sub/a2.txt": "k2\n", "drop/c.txt": "d\n",
+            "nested/d.txt": "n\n", "nested/keep/b.txt": "b\n",
+            "nested/deep/x.txt": "x\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(["git", "-C", root, "sparse-checkout", "set", "--cone",
+                        "keep", "nested/keep"], check=True)
+        self.assertEqual("true", subprocess.run(
+            ["git", "-C", root, "config", "--bool", "core.sparseCheckoutCone"],
+            capture_output=True, text=True, check=True).stdout.strip())
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i6cone")
+        self.assertEqual(_t2_tree(self.cli, dest),
+                         ["keep/a.txt", "keep/sub/a2.txt", "nested/d.txt",
+                          "nested/keep/b.txt", "top.txt"])
+
+    def test_noncone_sparse_source_keeps_pattern_filtering(self):
+        # I6/I14: a NON-cone sparse checkout keeps the pattern-filter
+        # behaviour (this is the "sparse filter disabled" mutant guard: without
+        # the filter pkg/secret.txt would ride along).
+        root = _t2_repo(self.git, {"top.txt": "t\n", "src/a.txt": "a\n",
+                                   "pkg/secret.txt": "s\n"},
+                        tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(["git", "-C", root, "sparse-checkout", "set",
+                        "--no-cone", "/top.txt", "/src/a.txt"], check=True)
+        # --no-cone writes the key explicitly on some git versions and leaves
+        # it unset on others; what the test depends on is that it is not cone.
+        self.assertNotEqual("true", subprocess.run(
+            ["git", "-C", root, "config", "--bool", "core.sparseCheckoutCone"],
+            capture_output=True, text=True).stdout.strip())
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i6nc")
+        self.assertEqual(_t2_tree(self.cli, dest), ["src/a.txt", "top.txt"])
+
+    def test_generated_secrets_dir_is_excluded_at_any_depth_and_case(self):
+        # I10: only the TOP-level secrets-generated/ was excluded, so
+        # sub/secrets-generated/ and Secrets-Generated/ stayed in the sandbox.
+        root = _t2_repo(self.git, {
+            "secrets-generated/top.txt": "FAKE-GEN\n",
+            "sub/secrets-generated/k.txt": "FAKE-GEN\n",
+            "Secrets-Generated/case.txt": "FAKE-GEN\n",
+            "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i10")
+        self.assertEqual(_t2_tree(self.cli, dest), ["keep.txt"])
+        hits = subprocess.run(["grep", "-r", "FAKE-GEN", dest],
+                              capture_output=True, text=True).stdout
+        self.assertEqual(hits.strip(), "")
+
+    def test_a_failed_build_leaves_no_sandbox_dir(self):
+        # I11: everything after os.makedirs had to run under a cleanup that
+        # removes the destination on ANY exception, or a half-made sandbox -
+        # with allowed and excluded paths both already written - survives.
+        root = _t2_repo(self.git, {"keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        with mock.patch.object(self.cli, "_isolate_materialise",
+                               side_effect=RuntimeError("forced mid-build")):
+            with self.assertRaises(RuntimeError):
+                self.cli.isolate_clone(root, dest, "agent/t2i11")
+        self.assertFalse(os.path.lexists(dest))
+
+    def test_symlink_and_exec_bit_are_materialised(self):
+        root = _t2_repo(self.git, {"target.txt": "t\n",
+                                    "link.txt": ("symlink", "target.txt"),
+                                    "run.sh": ("exec", "#!/bin/sh\n"),
+                                    "keep.txt": "keep\n"},
+                        tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2sym")
+        link = os.path.join(dest, "link.txt")
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.readlink(link), "target.txt")
+        self.assertTrue(os.stat(os.path.join(dest, "run.sh")).st_mode & 0o111)
+        self.assertIn("link.txt", _t2_tree(self.cli, dest))
+
+
 class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
     """S3: tracked plaintext-secret names refuse before any sandbox exists."""
 
@@ -18579,6 +18854,139 @@ class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
         dest = os.path.join(tmp, "sandbox")
         self.cli.isolate_clone(root, dest, "agent/t2s3enc")
         self.assertTrue(os.path.isdir(dest))
+
+    def test_example_template_is_exempt(self):
+        root = self._root_with("api-keys.example.yml", "api-keys: FAKE\n")
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        dest = os.path.join(tmp, "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2s3ex")
+        self.assertTrue(os.path.isdir(dest))
+
+
+    def test_binary_plaintext_secret_refuses_naming_path_only(self):
+        # I5: `git cat-file -p` ran with text=True, so a binary client.p12
+        # raised UnicodeDecodeError and the traceback echoed the bytes it
+        # could not decode - the secret value itself. cmd_run only caught
+        # PrivacyRefused, so nothing turned it into a clean refusal.
+        blob = b"\x00\x01PK\x03\x04" + b"\xc3\xfa" * 64 + b"\xff\xfe"
+        root = _t2_repo(self.git, {"client.p12": blob, "keep.txt": "keep\n"},
+                        tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        with self.assertRaises(self.cli.PrivacyRefused) as ctx:
+            self.cli.isolate_clone(root, dest, "agent/t2i5")
+        msg = str(ctx.exception)
+        self.assertIn("client.p12", msg)
+        self.assertNotIn("PK", msg)
+        self.assertNotIn("\xc3", msg)
+        self.assertNotIn("Traceback", msg)
+        self.assertNotIn("UnicodeDecodeError", msg)
+        self.assertFalse(os.path.lexists(dest))
+
+    def test_binary_sops_marker_still_counts_as_encrypted(self):
+        root = _t2_repo(self.git, {
+            "keystore.p12": b"\x00\x01ENC[AES256_GCM,data:fake,iv:x]\xff",
+            "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2i5b")
+        self.assertTrue(os.path.isdir(dest))
+
+    def test_example_template_is_exempt_but_a_real_key_is_not(self):
+        # I14/I7: the old fixture name (api-keys.example.yml) matched no secret
+        # pattern at all, so the test could not fail. Assert BOTH directions:
+        # a template passes the preflight, the same name without .example is a
+        # plaintext secret and refuses.
+        good = _t2_repo(self.git, {"api-keys.example.yml": "api-keys: FAKE\n",
+                                   "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, good, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(good, dest, "agent/t2i7ok")
+        self.assertTrue(os.path.isdir(good))
+        bad = _t2_repo(self.git, {"api-keys.yml": "api-keys: FAKE\n",
+                                  "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, bad, True)
+        dest2 = os.path.join(tempfile.mkdtemp(), "sandbox")
+        with self.assertRaises(self.cli.PrivacyRefused) as ctx:
+            self.cli.isolate_clone(bad, dest2, "agent/t2i7bad")
+        self.assertIn("api-keys.yml", str(ctx.exception))
+
+    def test_domain_lookalike_key_is_not_exempt(self):
+        # I7: `".example" in base` exempted any name CONTAINING .example, so a
+        # real key for a host named api.example.com was waved through.
+        for rel in ("api.example.com.key", "certs/www.example.com.pem"):
+            with self.subTest(rel=rel):
+                self.assertFalse(self.cli._isolate_exempt_name(rel), rel)
+                self.assertTrue(self.cli._isolate_secret_name(rel), rel)
+                root = _t2_repo(self.git, {rel: "FAKE-KEY\n",
+                                           "keep.txt": "keep\n"},
+                                tempfile.mkdtemp())
+                self.addCleanup(shutil.rmtree, root, True)
+                dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+                with self.assertRaises(self.cli.PrivacyRefused):
+                    self.cli.isolate_clone(root, dest, "agent/t2i7")
+
+    def test_a_doc_page_about_keys_is_not_a_key_file(self):
+        # The pattern list once held a bare `api-keys*`, which matched
+        # `docs/api-keys.md` - this repository's own tracked prose page about
+        # where keys live. Every real --isolate spawn from the AutoOS checkout
+        # then died on a plaintext-secret refusal, so the false positive is the
+        # defect this test guards.
+        rel = "docs/api-keys.md"
+        self.assertFalse(self.cli._isolate_secret_name(rel), rel)
+        root = _t2_repo(self.git, {rel: "# API keys\n\nprose only\n",
+                                   "keep.txt": "keep\n"}, tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.cli.isolate_clone(root, dest, "agent/t2doc")
+        self.assertTrue(os.path.isfile(os.path.join(dest, rel)))
+
+    def test_template_shapes_are_exempt(self):
+        for rel in (".env.example", "deploy.example.key", "x.sample",
+                    "x.template", "a/b/cert.example.pem"):
+            with self.subTest(rel=rel):
+                self.assertTrue(self.cli._isolate_exempt_name(rel), rel)
+                self.assertFalse(self.cli._isolate_secret_name(rel), rel)
+
+    def test_secret_name_match_is_case_insensitive(self):
+        # I8: matching was case-sensitive, so ID_RSA, .ENV and a/Prod.PEM
+        # reached the sandbox unrefused.
+        for rel in ("ID_RSA", ".ENV", "a/Prod.PEM", "API-KEYS.YML",
+                    "CLIENT.P12", "Credentials.JSON", "id_rsa"):
+            with self.subTest(rel=rel):
+                self.assertTrue(self.cli._isolate_secret_name(rel), rel)
+
+    def test_public_key_is_not_a_secret(self):
+        # I8: id_rsa.pub is public - matching it is a false positive that
+        # blocks every sandbox of a repo that ships one.
+        for rel in ("id_rsa.pub", "prod.pub", "a/id_rsa.PUB"):
+            with self.subTest(rel=rel):
+                self.assertFalse(self.cli._isolate_secret_name(rel), rel)
+
+    def test_sops_bypasses_are_not_encrypted(self):
+        # I9: three bypasses all read as "encrypted" before: an INDENTED
+        # sops: line, a bare `sops_` substring anywhere, and the ENC marker
+        # inside a comment.
+        self.assertFalse(self.cli._isolate_blob_encrypted(
+            "key: FAKE\n  sops: x\n"))
+        self.assertFalse(self.cli._isolate_blob_encrypted(
+            "password: FAKE\nsops_not_really = 1\n"))
+        self.assertFalse(self.cli._isolate_blob_encrypted(
+            "# ENC[AES256_GCM,data:fake]\npassword: FAKE\n"))
+
+    def test_real_sops_shapes_are_encrypted(self):
+        self.assertTrue(self.cli._isolate_blob_encrypted(
+            "api_key: ENC[AES256_GCM,data:fake]\n"
+            "mac: ENC[AES256_GCM,data:x]\nsops:\n  mac: ENC[AES256_GCM,d]\n"
+            "  version: \"3.8.1\"\n"))
+        self.assertTrue(self.cli._isolate_blob_encrypted(
+            '{"a": "ENC[AES256_GCM,data:fake]", "sops": {"v": "3.8.1"}}'))
+        self.assertTrue(self.cli._isolate_blob_encrypted(
+            "TOKEN=ENC[AES256_GCM,data:fake]\n"
+            "sops_version=3.8.1\nsops_lastmodified=2026-01-01\n"))
+        self.assertFalse(self.cli._isolate_blob_encrypted(
+            "TOKEN=PLAINTEXT\nsops_version=3.8.1\n"))
 
     def test_example_template_is_exempt(self):
         root = self._root_with("api-keys.example.yml", "api-keys: FAKE\n")
@@ -18673,6 +19081,30 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
             self.cli.isolate_clone(root, dest, "Server/run1")
         mode = _stat.S_IMODE(os.stat(dest).st_mode)
         self.assertEqual(mode, 0o700)
+
+    def test_refused_card_creates_no_fleet_directory(self):
+        # I12: cmd_run made ~/fleet/sandboxes/<repo>/ and chmodded it BEFORE
+        # the preflight refusal, so a card that was denied still wrote outside
+        # the checkout. The sandbox-root setup must run the refusal first.
+        base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        os.makedirs(home)
+        root = _t2_repo(self.git, {"deploy.key": "FAKE-PLAINTEXT\n",
+                                   "keep.txt": "keep\n"},
+                        os.path.join(base, "srv"))
+        dest = os.path.join(home, "fleet", "sandboxes", "srv", "run-1")
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            with mock.patch.object(self.cli, "ROOT", os.path.join(base, "AutoOS")):
+                with self.assertRaises(self.cli.PrivacyRefused):
+                    self.cli.sandbox_root_prepare(root, dest)
+        self.assertFalse(os.path.lexists(os.path.join(home, "fleet")))
+        # cmd_run takes that helper, in place of its own makedirs/chmod block.
+        with io.open(str(AGENT), encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("sandbox_root_prepare(", src)
+        self.assertLess(src.index("sandbox_root_prepare(source"),
+                        src.index("def isolate_clone("))
 
 
 if __name__ == "__main__":
