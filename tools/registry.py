@@ -2916,7 +2916,7 @@ def _check_monthly_caps(registry) -> list:
     return problems
 
 
-def _check_credit_guards(registry) -> list:
+def _check_credit_guards(registry, today=None) -> list:
     """Every `credit`-tier provider carries a complete spend guard (brief FREEKEYS-1,
     D-132/D-141): `credit_usd` is the operator's grant, `monthly_cap_usd` equals it (a
     caller REFUSES at 100 % of the grant) and `monthly_warn_fraction` is a fraction in
@@ -3010,6 +3010,15 @@ def _check_credit_guards(registry) -> list:
     # grant instead of month-to-date. Absent is fine (the window stays
     # month-to-date, loudly); present must be a real calendar date, not in the
     # future -- a grant that starts tomorrow has no measured spend yet.
+    # T1-CREDIT-FIX-8 C5: `today` is injectable (a date or datetime) so tests
+    # pin the future rule without a clock; without it the wall clock is read.
+    if today is None:
+        ref_today = datetime.now(timezone.utc).date()
+    elif isinstance(today, datetime):
+        ref_today = (today.astimezone(timezone.utc).date()
+                     if today.tzinfo is not None else today.date())
+    else:
+        ref_today = today
     for provider_id, provider in sorted(_section(registry, "providers").items()):
         if not isinstance(provider, dict) or "credit_started" not in provider:
             continue
@@ -3025,7 +3034,7 @@ def _check_credit_guards(registry) -> list:
                             "calendar date YYYY-MM-DD, got %r"
                             % (provider_id, raw))
             continue
-        if parsed > datetime.now(timezone.utc).date():
+        if parsed > ref_today:
             problems.append("providers.%s: credit_started %r is in the future - "
                             "a grant that starts tomorrow has no measured "
                             "spend yet" % (provider_id, raw))
@@ -3183,7 +3192,7 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
-def check_registry(registry) -> list:
+def check_registry(registry, today=None) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
     problems.extend(_check_legs(registry))
@@ -3198,7 +3207,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_provider_prices(registry))
-    problems.extend(_check_credit_guards(registry))
+    problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_claude_budget(registry))
