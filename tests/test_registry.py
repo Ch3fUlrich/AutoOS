@@ -2854,7 +2854,7 @@ class ClaudeBudgetPolicyTests(unittest.TestCase):
 
     def test_the_shipped_value_is_the_operators_decision(self):
         entry = load_registry()["policy"]["claude_budget"]
-        self.assertEqual(entry["mode"], "budget")
+        self.assertEqual(entry["mode"], "normal")
         self.assertEqual(entry["weekly_share_left"], 0.9)
         self.assertEqual(entry["budget_below"], 0.25)
         self.assertIn("D-102", entry["source"])
@@ -2864,8 +2864,8 @@ class ClaudeBudgetPolicyTests(unittest.TestCase):
     def test_the_shipped_registry_stays_clean(self):
         self.assertEqual(registry.check_registry(load_registry()), [])
 
-    def test_the_shipped_registry_is_budget_mode_on(self):
-        self.assertTrue(self.on(load_registry()))
+    def test_the_shipped_registry_is_budget_mode_off(self):
+        self.assertFalse(self.on(load_registry()))
 
     # --- the ON/OFF rule --------------------------------------------------
 
