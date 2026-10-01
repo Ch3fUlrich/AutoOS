@@ -3790,6 +3790,68 @@ class CreditPrivacyEvidenceGateTests(unittest.TestCase):
         problems = registry._check_privacy_evidence(reg)
         self.assertTrue([p for p in problems if "providers.vertex_ai" in p], problems)
 
+    def test_a_model_tier_override_to_credit_on_a_paid_provider_is_not_private_safe(self):
+        # F1 (T1-CLEAN-4 rework): the gate read the EFFECTIVE tier (model
+        # override included) but the evidence predicate read only the provider's
+        # own tier, so this leg was clean at the gate and invisible to
+        # check_registry - one rule, two readings.
+        reg = mutated()
+        self.assertEqual(reg["providers"]["deepseek"]["tier"], "paid")
+        reg["models"]["deepseek-flash"]["tier"] = "credit"
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.deepseek" in p], problems)
+
+    def test_a_paid_override_on_a_credit_provider_still_demands_the_block(self):
+        # F1, the symmetric leg: the credit requirement follows the leg's
+        # effective tier AND the provider's tier - either one being credit
+        # demands the cited block, so an override cannot escape it by spelling
+        # itself paid.
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_a_paid_override_on_a_cited_credit_provider_is_private_safe(self):
+        # and the rule stays consistent in the passing direction: a credit
+        # provider with complete evidence is clean whichever tier the leg runs
+        # under.
+        reg = mutated()
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertTrue(safe, reason)
+        self.assertEqual(registry._check_privacy_evidence(reg), [])
+
+    def test_an_empty_quote_fails_the_credit_gate_not_just_the_check(self):
+        # F6: the K2 gate tests only mutated the evidence url, so the other
+        # evidence defects were untested at gate level.
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["quote"] = "   "
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_non_iso_accessed_date_fails_the_credit_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["accessed"] = "1 Oct 2026"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_block_that_disagrees_with_the_provider_flag_fails_the_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["trains_on_prompts"] = True
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
     def test_the_committed_registry_needs_no_credit_privacy_fix(self):
         self.assertEqual(registry._check_privacy_evidence(load_registry()), [])
 

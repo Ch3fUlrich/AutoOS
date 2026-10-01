@@ -629,11 +629,14 @@ def private_safe(provider_id, model_id, registry) -> tuple:
         return False, "effective tier %r is not paid, subscription or credit" % (effective_tier,)
     if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
         return False, "trains on prompts"
-    if effective_tier == "credit":
-        # L1-CLEAN-4 K2 (2026-10-01): the credit half of the admission is the
-        # CITED block, not the bare flag - the same predicate check_registry
-        # reports with, so a leg is never clean here and a defect there.
-        problems = _privacy_block_problems(provider_id, provider)
+    if _cited_privacy_block_required(provider, effective_tier):
+        # L1-CLEAN-4 K2 (2026-10-01), one predicate per rework F1: the credit
+        # half of the admission is the CITED block, not the bare flag - the same
+        # predicate check_registry reports with (see
+        # ``_cited_privacy_block_required``), so a leg is never clean here and a
+        # defect there.
+        problems = _privacy_block_problems(provider_id, provider,
+                                           effective_tier=effective_tier)
         if problems:
             return False, ("credit tier without cited privacy evidence (%s)"
                            % problems[0].split("privacy evidence: ", 1)[-1])
@@ -706,29 +709,54 @@ def privacy_exemption_lines(registry) -> list:
     return lines
 
 
-def _privacy_block_problems(provider_id: str, provider: dict) -> list:
+def _cited_privacy_block_required(provider: dict, effective_tier=None) -> bool:
+    """The ONE predicate for "must this leg carry a cited ``privacy`` block?"
+    (T1-CLEAN-4 rework F1, 2026-10-01): `private_safe()` and
+    `_privacy_block_problems()` both ask it, so the gate and the report can
+    never read the credit rule differently across the tier-override axis.
+
+    A credit grant is the case that needs the citation, and `credit` can arrive
+    from either side of the override, so BOTH tiers are consulted: the
+    provider's own ``tier`` and the leg's EFFECTIVE tier
+    (``models.<id>.tier`` when present, else the provider's). **Either one
+    being credit demands the block** — that is the fail-closed choice, and it
+    is the rule both directions follow: a model-level ``tier: "credit"``
+    override onto a paid provider cannot borrow that provider's silence, and a
+    ``tier: "paid"`` override onto a credit provider cannot escape the citation
+    that provider's grant rests on. The requirement only ever widens with the
+    override; it never narrows. `effective_tier=None` (a provider-level row read
+    on its own, e.g. by the provider walk in `_check_privacy_evidence`) means
+    the provider's tier decides.
+    """
+    return "credit" in (provider.get("tier"), effective_tier)
+
+
+def _privacy_block_problems(provider_id: str, provider: dict,
+                            effective_tier=None) -> list:
     """Rule 3b defects for ONE `providers.<id>` row, as ``"privacy evidence: ..."``
     lines (T1-CLEAN-4 K2, 2026-10-01).
 
     This is the single reading of "a cited no-training block", shared by
     `_check_privacy_evidence()` (which reports every defect) and
     `private_safe()` (which gates a `credit` leg), so the report and the gate can
-    never disagree about what counts as evidence. Two shapes are problems:
+    never disagree about what counts as evidence. Which legs are asked for one
+    at all is `_cited_privacy_block_required()`'s single predicate, fed the same
+    `effective_tier` here and there (rework F1). Two shapes are problems:
 
       - a present block that is not an object, disagrees with the provider's own
         ``trains_on_prompts``, or (for a no-training claim) carries no evidence,
         or an evidence row without an https ``url``, a non-empty ``quote`` and an
         ISO ``accessed`` date;
-      - a ``credit`` provider that asserts ``trains_on_prompts: false`` with NO
-        block at all — the schema and `private_safe()`'s docstring both say a
-        credit leg is admitted *because* its grant cites its terms, and until
-        this fix nothing enforced it.
+      - a credit leg — by its own tier or its provider's — that asserts
+        ``trains_on_prompts: false`` with NO block at all: the schema and
+        `private_safe()`'s docstring both say a credit leg is admitted *because*
+        its grant cites its terms, and until K2 nothing enforced it.
 
     A row that is neither (no block, no credit grant) returns ``[]``.
     """
     problems = []
     if "privacy" not in provider:
-        if (provider.get("tier") == "credit"
+        if (_cited_privacy_block_required(provider, effective_tier)
                 and provider.get("trains_on_prompts") is False):
             problems.append(
                 "privacy evidence: providers.%s is tier credit with "
@@ -785,13 +813,43 @@ def _check_privacy_evidence(registry) -> list:
     each row an https url, a non-empty quote and an ISO accessed date, and
     privacy.trains_on_prompts must equal the provider-level flag exactly. An
     inconsistent or unevidenced block is the defect (the registry's version of
-    "never guess false to make a row look clean", spec 3.1)."""
+    "never guess false to make a row look clean", spec 3.1).
+
+    A provider row is read on its own tier, then every leg the routes carry is
+    re-read with its EFFECTIVE tier, so a model-level ``tier`` override that
+    makes a leg credit on a provider whose own row asks for nothing is reported
+    too (rework F1 — the same predicate `private_safe()` gates on)."""
     problems = []
-    for provider_id, provider in sorted(_section(registry, "providers").items()):
+    providers = _section(registry, "providers")
+    for provider_id, provider in sorted(providers.items()):
         if not isinstance(provider, dict):
             continue
         problems.extend(_privacy_block_problems(provider_id, provider))
-    return problems
+
+    models = _section(registry, "models")
+    seen_legs = set()
+    for route in _section(registry, "routes").values():
+        if not isinstance(route, dict):
+            continue
+        for leg in dict.fromkeys((route.get("legs") or [])
+                                 + list((route.get("unavailable_legs") or {}))):
+            try:
+                provider_id, model_id = resolve_leg(leg, registry)
+            except ValueError:
+                continue  # rule 1 already reports an unresolved leg
+            if (provider_id, model_id) in seen_legs:
+                continue
+            seen_legs.add((provider_id, model_id))
+            provider = providers.get(provider_id)
+            model = models.get(model_id)
+            if not isinstance(provider, dict) or not isinstance(model, dict):
+                continue
+            effective_tier = model.get("tier", provider.get("tier"))
+            if effective_tier == provider.get("tier"):
+                continue  # the provider walk above already read this row
+            problems.extend(_privacy_block_problems(provider_id, provider,
+                                                    effective_tier=effective_tier))
+    return list(dict.fromkeys(problems))
 
 
 # ===========================================================================
