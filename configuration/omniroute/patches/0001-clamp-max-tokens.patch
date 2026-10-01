@@ -1,0 +1,36 @@
+--- a/dist/open-sse/mcp-server/server.js
++++ b/dist/open-sse/mcp-server/server.js
+@@
+ function resolveReasoningBufferedMaxTokens(modelStr, currentMaxTokens, options = {}) {
+   if (options.enabled === false) return null;
+   const current = toPositiveInteger(currentMaxTokens);
+   if (current === null) return null;
+-  const capabilities = getResolvedModelCapabilities(modelStr);
+-  if (capabilities.supportsThinking !== true) return null;
+   const maxOutputTokens = toPositiveInteger(getExplicitModelOutputCap(modelStr));
+   if (maxOutputTokens === null) return null;
+   if (current > maxOutputTokens) return maxOutputTokens;
+   if (current < REASONING_BUFFER_MIN_TRIGGER) return current;
+   return current;
+ }
+@@
+ async function executeModelUnit(args) {
+   if (args.isModelAvailable) {
+     const available = await args.isModelAvailable(args.unit.modelStr, args.unit);
+     if (!available) return errorResponse(503, `Model ${args.unit.modelStr} is unavailable`);
+   }
++  {
++    // AutoOS clamp: never forward max_tokens above the model's explicit output cap
++    // (capability override max_output_tokens / registry maxOutputTokens). Per-model:
++    // a model with no cap still clamps to nothing.
++    const clampedMaxTokens = resolveReasoningBufferedMaxTokens(args.unit.modelStr, args.body && args.body.max_tokens);
++    if (clampedMaxTokens !== null && args.body && typeof args.body === "object" && clampedMaxTokens !== args.body.max_tokens) {
++      args.body = { ...args.body, max_tokens: clampedMaxTokens };
++    }
++  }
+   return args.handleSingleModel(args.body, args.unit.modelStr, {
+     ...args.unit,
+     effectiveComboStrategy: args.effectiveComboStrategy,
+     failoverBeforeRetry: args.failoverBeforeRetry
+   });
+ }
