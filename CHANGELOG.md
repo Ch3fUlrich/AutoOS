@@ -4,10 +4,31 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- REVIEWGATE-2FAM (2026-09-30, operator): `review-status`/`ready` now count SEATS — a ready record needs at least two `kind=cross-family` entries, each READY, from distinct registry families, none the author's; the detail names missing/duplicated seats, an optional `family=` token is cross-checked against the registry, every counted seat prints as `seat N: <model> (<family>) verdict=<v>`, and more than 3 seats is a non-blocking note (no cap). One seat + the Sonnet final no longer reads as reviewed.
 - DS1M follow-up (2026-09-30): `openhands/profiles/deepseek-flash.json` re-pinned to the catalog numbers — `max_input_tokens` 1048576, `max_output_tokens` 393216 (was the stale 131072/32768). The vendored-template gate was red on it: `python tests/check-vendored.py` and `tests/linux/04-registry-models.sh` ("the vendored openhands profiles match the catalog snapshot").
 - AGYCANON (2026-09-30, operator): antigravity renders canonically again — the live `/v1/models` was re-measured and lists 19 canonical `antigravity/*` rows and zero `agy/*` (both spellings route; canonical wins), so `providers.antigravity.model_prefix` is retired `"agy"` → `null` and `render_omniroute()` emits the registry spelling unchanged. The mechanism stays live for providers that genuinely diverge (`scaleway` → `scw`), and `GATEWAY_ONLY` keeps dropping both spellings for combos rendered before this change. Re-rendered: `configuration/omniroute/combos.json` (4 combos: `opus-4-6`, `t2-orchestrator`, `t2-worker`, `t2-worker-free-only`); schema description + `gateway_ref()` docstring updated. Gates, red-first: `GatewayRefTests` in `tests/test_registry.py` + `tests/test_registry_render.py` (retired-prefix + still-applied-prefix cases), `tests/linux/17-ai-routing.sh` `known_drops` respelled. Verified: `test_registry.py` 300 OK, `test_registry_render.py` 160 OK, `check-vendored.py` OK, all 5 `render --check` OK, `sync-router-tiers --check` OK, `registry.py check`/`validate` OK, `audit-router.py --offline` no drift.
 - DS1M (2026-09-30, operator): `deepseek-v4.1-flash` is a 1M-context route again — the vendor Models & Pricing page (https://api-docs.deepseek.com/quick_start/pricing) states MODEL `deepseek-flash` = VERSION DeepSeek-V4.1-Flash with CONTEXT LENGTH 1M and MAX OUTPUT 384K, and OpenRouter's live catalog agrees (`deepseek/deepseek-v4.1-flash` context_length 1048576). `models.deepseek-flash` + both v4.1 spellings corrected 131072/65536/32768 → 1048576/524288/393216 (usable stays at the 50% default until probe-recall measures it); `routes.deepseek-v4.1-flash` declares `1M` so `clamp_route_context` keeps the promise. Re-rendered: `combos.json`, `ide-models.json`, `tier-profiles.json`, `docs/models.md` table, `opencode.jsonc` (via sync-ide-models). Gate: `DeepSeekFlashContext1MTests` (red-first, 3 tests) + re-pinned `legacy-models.golden.json` and the ps1 combos-context pin. Live gateway applied: 15 combos, native `deepseek/deepseek-flash` leg serving. Known gap exposed by the apply: `meta-api` is not a gateway provider type (`providers add meta-api` → Invalid provider), so the spark legs have no live connection — see the handoff.
 - CAO removal (2026-09-29, operator): CAO is deprecated — the batch runner is the only lane. Deleted the `cao/` package (18 modules), `tests/cao/` (21 files), `infra/mcp-servers/cao-setup/` (12 files) and `references/cao-runbook.md`; cut the `## CAO quickstart` section from the skill; dropped the `cao` block from `handoff.config.example.json`; de-CAOed the skill description, Files table, R-coord-09, `l3-routing.md`, `main-orchestrator.md`, `rule-map.md`, `trust_worktree.py`, `pytest.ini`, `repository-index/SKILL.md` and `AGENTS.md`. Gate: `tests/test_no_cao.py` (red-first, 4 passed).
+
+### Changed — the review gate counts two cross-family seats (REVIEWGATE-2FAM, 2026-09-30)
+
+One `AutoOS-Review: kind=cross-family` entry was enough for `review_status()` — and therefore for
+`review-status` and `ready` — so one reviewer plus the Sonnet final read as "reviewed", and two
+spellings of one family would have read as two seats once the floor rose. The gate now counts
+SEATS: an entry counts only when it names a registry-known reviewer and author, the two families
+differ, any `family=` the entry declares matches the registry (a mismatch names both sides and
+refuses the seat), and the verdict is READY. **Two counted seats from distinct families** are
+required, with no cap: past three seats the operator's 2-3 guidance prints as a note, never a
+refusal. The detail names exactly what is missing or duplicated ("2 cross-family seats required;
+have 1", "reviewers X and Y are the same family (qwen)"), and the report prints every counted seat
+as `seat N: <model> (<family>) verdict=<v>`. `REVIEW_ENTRY_FIELDS` gains the optional `family=`
+token; the hint and `run`'s paste-ready `record-line:` example show it. The Sonnet final check and
+the exit codes are unchanged.
+
+- **Tests**: `tests/test_autoos_spawner.py` `ReviewStatusTests` (red first: 33 tests, 4F+11E before
+  the implementation) and `ReviewStatusTests`+`ReadyCommandTests` (63 OK after); full file 1153
+  tests, 64F+2E — the identical failure set at base `e58274a` (1148 tests, 64F+2E); lane-only
+  failures none.
 
 ### Fixed — the spawned worker resolves the gateway too, not the clone's loopback (GWLOOPBACK-2, 2026-09-30)
 
