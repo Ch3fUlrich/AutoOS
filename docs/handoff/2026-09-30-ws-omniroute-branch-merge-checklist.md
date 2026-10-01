@@ -2,11 +2,13 @@
 
 **Draft for L0/operator — L0 consolidates the authoritative list (D5).**
 
-**Writer:** L2 t2-worker (ws-merge-checklist, run ws-omniroute-20260930, under L1-beta)
-**Base:** `d08f7f2` (local main). **⚠ origin/main is at `6ec0605`, 76 commits
-ahead** — branches will need rebase before merge; re-verify conflicts post-rebase.
-(Verified by t3-reviewer cross-family review.)
-**Date:** 2026-09-30
+**Writer:** L2 t2-worker (ws-merge-checklist, run ws-omniroute-20260930, under L1-beta); refreshed by L1-beta.
+**Base:** `d08f7f2` (stale local main). **⚠ `origin/main` is now `eae75811`; local
+`main` is 86 commits behind** (`git rev-list --count main..origin/main` = 86). The
+earlier "`6ec0605`, 76 ahead" figure is stale (see Refresh 2026-10-01 (b)). Branches
+need rebase/merge against `eae75811` before merge; re-verify conflicts post-rebase.
+(First revision verified by t3-reviewer cross-family review.)
+**Date:** 2026-09-30 (refreshed 2026-10-01)
 **Method:** `git for-each-ref`, `git log --oneline`, `git diff --stat`, `git status
 --short`, `git branch --contains` — no full diffs (token discipline). Every SHA
 verified by this session; none copied from the brief unverified.
@@ -35,7 +37,209 @@ deferred). All 18 branch SHAs verified against git by the reviewer.
 - **GEMINI POLICY REVERSED (operator, 2026-10-01):** gemini is BACK in the combos (alpha restoring the legs). FREEWIRE had removed `gemini/*` from every combo; that is superseded. The repeated-429 backoff policy `51fd01d2` (3×429/120s → 300s leg cooldown; 30-min hard-down park) governs gemini usage and is the reason keeping it is safe — so wording that says "gemini excluded" is stale wherever it appears (including this doc's earlier note). Ignore any "gemini removed" statement when planning merges.
 - **Nebius removal DONE:** `L1-backlog/ws-nebiuswave2-20260930` @ `7eaf91a` — `providers.nebius` + 6 `nebius/` legs + 1 `policy.reviewers` entry removed on the FREEWIRE base; surfaces re-rendered; consumers fixed (`tests/test_autoos_resolver.py`, `tests/linux/34-ai-services.sh`). L1-verified gates: `test_registry.py` 300 → 1 failure (the pre-existing `test_a_credit_leg_is_last_and_gated_until_priced`, present at base `2ff537a`); `test_registry_render.py` OK; `check`/`validate` ok (32 routes / 80 models / 33 providers). Reviews: Cohere PASS, Longcat PASS, Mimo PASS, Poolside FAIL (real `34-ai-services` regression — fixed). **Merge AFTER `ws-freewire`.** Superseded — do not merge: `ws-nebiuswave` `f08c974` (stale base), `ws-nebius2` `172a92b` (pre-FREEWIRE).
 - **Must-not-lose fix RESOLVED:** the `158818e` gemini-3.8-flash context fix (131072→1048576) is already in FREEWIRE's ancestry (`2ff537a`) — no separate carry needed.
-- **Base warning stands:** everything here is based on `d08f7f2`; `origin/main` is `6ec0605` (76 ahead) — rebase + re-verify conflicts before merge.
+- **Base warning (SUPERSEDED by Refresh (b) below):** the "`6ec0605`, 76 ahead" figure is stale; `origin/main` is now `eae75811`.
+
+---
+
+## Refresh 2026-10-01 (b) — base `origin/main` = `eae75811` (L0-directed re-measure)
+
+**Why:** `origin/main` moved again → `eae75811` ("Take L1-backlog/redclear f93aee3:
+wrapped skill rules + documented opencode mem_limit exemption"). All SHAs re-measured
+this session with the **merge-base-safe three-dot form** `git diff --stat
+origin/main...<branch>` (never two-dot). Branch list: `git branch --list
+'L1-backlog/*'` = **59 branches**, none landed in `origin/main` yet
+(`git rev-list --count <branch>..origin/main` ≠ 0 for all).
+
+**Base warning (updated).** Local `main` = `08bd972f`, now **86 commits behind**
+`origin/main` (`main..origin/main` = 86; `d08f7f2..origin/main` = 86 too). **Rebase
+target = `eae75811`**, never the stale local `main` — its `combos.json` lacks main's
+`24a98228` pins (combos-pins F4).
+
+**What main changed since `d08f7f2` (the common base): 53 files.** Only **8** overlap
+any `L1-backlog/*` branch:
+
+| main-changed file (since d08f7f2) | our branches that also touch it |
+|---|---|
+| `configuration/omniroute/combos.json` | whole combos lineage + ws-ovh, ws-ovh-finish, ws-researcher, ws-nebius (C1/C2) |
+| `tests/test_autoos_spawner.py` | combos lineage (C4) |
+| `.agents/skills/unattended-orchestration/SKILL.md` | **ws-incident only** (C6 — now a real conflict) |
+| `CHANGELOG.md` | ws-applyjson, ws-changelog, ws-nebiuswave2, ws-providers-rescue (C8) |
+| `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` | ws-gw-admission, ws-hygiene-main, ws-p0-admission-fix, ws-records (C9) |
+| `docs/models-proposed.md` | ws-sweep (C10) |
+| `tools/autoos-agent.py` | ws-remote (C11) |
+| `.gitignore` | ws-fixes (C12) |
+
+`catalog/ai-registry.json` is **untouched on main** since `d08f7f2` → the registry
+branches (ws-providers-rescue, ws-nebius*, ws-nebiuswave2) do **not** conflict with
+main on the registry; they only conflict with each other.
+
+### C6 (rewritten) — `SKILL.md`: **CONFLICT — rule-id collision at `R-coord-12`**
+
+The earlier C6 ("uncommitted main-checkout change") is **superseded**. Measured this
+session on `eae75811`:
+
+- ws-incident (base `d08f7f2`) adds **three** lines after `R-coord-11`, before the
+  blank line + `### orch (L2)`: `R-coord-12` (interactive top-level sessions),
+  `R-coord-13` (L1/L2 follow the skill), `R-coord-14` (never write `~/.omniroute`).
+- `origin/main` **already inserts a different `R-coord-12`** at the **same base
+  position** — the PREPUSH rule (`Run tools/prepush.py before a push`), taken from
+  `L1-routing/PREPUSH` via `0d0da8d9`.
+- A diff3-style overlap check (base `d08f7f2`, sides `eae75811` and ws-incident)
+  shows **both sides insert at base line 109** → **textual conflict**, plus a
+  **semantic collision**: two different rules both numbered `R-coord-12`.
+
+**Does redclear (f93aee3) itself break it?** No — redclear only rewraps router
+(`R-router-04..11`), orch (`R-orch-20..28`) and heartbeat (`R-heartbeat-01..05`) and
+edits the "one rule per line" prose; it does **not** touch the coord section. The
+collision is with main's **PREPUSH `R-coord-12`** (`0d0da8d9`), which rides the same
+region. **Net: the R-coord-14 addition does NOT apply cleanly on `eae75811`.**
+
+**Resolution (operator):** rebase ws-incident onto `eae75811` and **renumber** its
+new rules to the next free ids after main's `R-coord-12` → `R-coord-13`/`14`/`15`
+(keep main's PREPUSH rule as `R-coord-12`). `tools/skill-rules.py check` asserts
+uniqueness, so the renumber is mandatory, not cosmetic.
+
+### C8 — `CHANGELOG.md` (3-way, low risk)
+
+`origin/main` rewrote CHANGELOG since `d08f7f2`; four branches add `## [Unreleased]`
+bullets (ws-applyjson `6a4c2c0`, ws-changelog `49697ffa`, ws-nebiuswave2 `2aceb008`,
+ws-providers-rescue `2ffad433`). All are additive bullets → likely auto-mergeable, but
+**one branch must own the `[Unreleased]` section**; merge the others into it in order.
+
+### C9–C12 — single-file, low risk
+
+- C9 `docs/handoff/2026-09-30-workstation-omniroute-handoff.md`: main redacted it
+  (`1ddcff16`); ws-gw-admission/ws-hygiene-main/ws-p0/ws-records carry the same edit or
+  a superset → take the **redacted** version; re-apply each lane's additive content.
+- C10 `docs/models-proposed.md`: ws-sweep appends a proposal section → additive.
+- C11 `tools/autoos-agent.py`: ws-remote (`266677ca`) is a merge of `origin/main
+  67f875d`; re-verify against `eae75811`.
+- C12 `.gitignore`: ws-fixes adds scratch ignores → additive.
+
+### Pre-flight gate — alpha's combo-contract lane (IN FLIGHT) — BLOCKS the combos wave
+
+**Do not merge any combos-lineage branch until alpha's tier-order live-apply lane
+lands and the combo-contract gates are green.** Rationale (operator urgent
+2026-10-01): alpha is re-ordering every tier to `trial → free → credits → paid` with
+**DeepSeek last**, adding Vertex legs to t1/t2/t3 and four single-provider credit
+combos (`ovh-qwen3.8-27b`, `ovh-gpt-oss-120b`, `ovh-qwen3-coder-30b`,
+`vertex-gemini-3.8-flash`), then doing a live apply + simulate proof. That work
+rewrites the **same `combos.json`** our lineage carries. Pre-flight requirements
+before the combos wave merges:
+
+1. alpha's live apply landed; gateway restarted; a probe log line names the serving
+   leg (OVH/Vertex) — beta's review seat captures it.
+2. `test_every_agentic_route_has_two_distinct_usable_providers` and
+   `test_every_agentic_route_has_three_usable_legs` **green**.
+3. `python tools/registry.py check` + `validate` and `tests/test_registry_render.py`
+   green (render matches the committed `combos.json`).
+
+Until then the combos lineage is **HOLD**, not ready.
+
+### Canonical combos-lineage topology (re-measured ancestry)
+
+Single spine plus parallel tips (each `→` = ancestor-of).
+
+```
+89a9024 (ws-ovh) → 2ff537a (freewire) → 92a98af4 (nebius2-combos, alpha)
+                                          → f2d8d607 (invariant-fix)
+                                          → 2fdf6a7c/ba0c707f (combos-pins)
+                                          → { 8a862361 (combos-pins docs tip)
+                                              e3436a4d (gemini-restore = tier-order) }
+parallel off 2ff537a:
+  efb50ed9 (freewire review doc)      2aceb008 (nebiuswave2 = beta registry nebius removal)
+  73ebf4ad (freereads)  af20a69 (revaudit)  1d9e00db (revround)
+parallel off f2d8d607:
+  49697ffa (changelog)
+```
+
+- `ws-tier-order-20261001` and `ws-gemini-restore-20260930` are the **same commit
+  `e3436a4d`** (alias — merge once).
+- `ws-nebius-20260930` and `ws-ovh-finish-20260930` are the **same commit
+  `a975d48b`** (alias).
+- `ws-nebiuswave2` (beta, `ai-registry.json`) and `ws-nebius2-combos` (alpha,
+  `combos.json`) are **parallel** nebius removals off `2ff537a` — the "split" — and
+  must land as **ONE wave**.
+- `combos-pins` (`8a862361`) and `gemini-restore` (`e3436a4d`) **diverge** after
+  `ba0c707f`; the gemini `combos.json` fix must be applied on top of the pins doc tip
+  (or vice-versa) — `combos.json` is resolved once, at the very end.
+
+### Branch table — all 59 `L1-backlog/*` branches (three-dot vs `eae75811`)
+
+`ov` = files that also changed on `origin/main` since `d08f7f2` (conflict candidates).
+
+| Branch | Head | 3-dot files | ov | Status |
+|---|---|---|---|---|
+| ws-ovh-20260930 | `89a9024b` | 11 | combos | **canonical** (spine head 1; OVH credit tier) |
+| ws-ovh-finish-20260930 | `a975d48b` | 15 | combos | **canonical** (OVH pass; carries `158818e` context fix). alias of ws-nebius |
+| ws-freewire-20260930 | `efb50ed9` | 22 | combos, spawner | **canonical** (wiring wave; review doc tip) |
+| ws-nebius2-combos-20260930 | `92a98af4` | 24 | combos, spawner | **canonical** (alpha combos nebius removal) |
+| ws-nebiuswave2-20260930 | `2aceb008` | 24 | combos, spawner, CHANGELOG | **canonical** (beta registry nebius removal — land with nebius2-combos as ONE wave) |
+| ws-invariant-fix-20260930 | `f2d8d607` | 26 | combos, spawner | **canonical** |
+| ws-combos-pins-20260930 | `8a862361` | 28 | combos, spawner | **canonical** (pins carried) |
+| ws-gemini-restore-20260930 | `e3436a4d` | 28 | combos, spawner | **canonical tip** (gemini reversal) |
+| ws-tier-order-20261001 | `e3436a4d` | 28 | combos, spawner | **alias of gemini-restore** (merge once) |
+| ws-resilience-env-20260930 | `afdcb11b` | 14 | — | **canonical** (429 policy; needs gateway restart to load) |
+| ws-admission-fix-20260930 | `5e977087` | 6 | — | **ready** |
+| ws-applyjson-20260930 | `6a4c2c00` | 9 | CHANGELOG | **ready** |
+| ws-suite-fix-20260930 | `96e5a53b` | 4 | — | **ready** |
+| ws-p0-admission-fix-20260930 | `90cd6987` | 8 | handoff | **ready** |
+| ws-remote-20260930 | `266677ca` | 20 | autoos-agent.py | **ready** (P2 remote fallback) |
+| ws-fixes-20260930 | `9cb8055b` | 21 | .gitignore | **ready** |
+| ws-gw-admission-20260930 | `1bb1175a` | 5 | handoff | **ready** |
+| ws-f1-vertex-20260930 | `9c444e40` | 13 | — | **HOLD — review FAIL** (`1d9e00db`: backup overwrite, rule 5; fix-worker needed) |
+| ws-verify-activate-20260930 | `c2316180` | 15 | — | **ready** (live-probe GO for :20128 restart) |
+| ws-qwenclamp-20260930 | `e4bb58b0` | 6 | — | **ready** |
+| ws-researcher-20260930 | `c60a6c8e` | 11 | combos | **ready** (proposal only) |
+| ws-sweep-20260930 | `98e30efe` | 4 | models-proposed | **ready** (docs + probe) |
+| ws-leghealth2-20260930 | `1ad452b6` | 3 | — | **ready** (supersedes ws-leghealth) |
+| ws-dl-timeout-20260930 | `83aca3f0` | 9 | — | **ready** + **history-scrub flag** (`2964c8ea` blob) |
+| ws-clamp-probe-20260930 | `82fe5b72` | 3 | — | **ready** |
+| ws-records-20260930 | `2f66f3c6` | 2 | handoff | **ready** (docs; redaction `2f66f3c6`) |
+| ws-changelog-20260930 | `49697ffa` | 29 | combos, spawner, CHANGELOG | **ready** (docs/changelog rider) |
+| ws-revaudit-20260930 | `af20a695` | 23 | combos, spawner | **ready** (docs rider) |
+| ws-freereads-20260930 | `73ebf4ad` | 23 | combos, spawner | **ready** (docs rider) |
+| ws-revround-20260930 | `1d9e00db` | 23 | combos, spawner | **ready** (docs rider; holds the patch-fix FAIL verdict) |
+| ws-merge-map-20260930 | `9e9c39b7` | 2 | — | **ready** (docs) |
+| ws-failures-doc-20260930 | `741b5cca` | 2 | — | **ready** (docs) |
+| ws-hygiene-main-20260930 | `4ba83ed0` | 1 | handoff | **ready** (docs redaction) |
+| ws-review-20260930 | `8b2a28c1` | 2 | — | **ready** (docs redaction) |
+| ws-sweep-review-20260930 | `800ff37b` | 2 | — | **ready** (docs) |
+| ws-suite-diag-20260930 | `a400898f` | 2 | — | **ready** (docs) |
+| ws-patchr1-20260930 | `70b1a863` | 3 | — | **ready** (pre-restart GO) |
+| ws-patchbackups-3-20260930 | `9e643e30` | 2 | — | **ready** (certified pristine backups) |
+| ws-patchbackups-2-20260930 | `5c67a970` | 2 | — | **reference** (STOP — tarball not proven pristine) |
+| ws-designmemo-20260930 | `a02578da` | 1 | — | **ready** (docs proposal) |
+| ws-incident-20260930 | `f85e47ea` | 4 | SKILL.md | **HOLD — CONFLICT** (C6: renumber R-coord-12/13/14) |
+| ws-main-breach-20260930 | `08bd972f` | 3 | — | **do-not-merge** (breach preserved; operator resets main) |
+| ws-combos-20260930 | `a5bcb69b` | 5 | combos | **do-not-merge** (subsumed by ws-ovh) |
+| ws-leghealth-20260930 | `37ae3e61` | 1 | — | **do-not-merge** (superseded by ws-leghealth2) |
+| ws-providers-20260930 | `d08f7f23` | 0 | — | **do-not-merge** (dead + dirty) |
+| ws-nebius-20260930 | `a975d48b` | 15 | combos | **do-not-merge** (alias of ws-ovh-finish) |
+| ws-nebius-combos-20260930 | `c455e8ae` | 24 | combos, spawner | **do-not-merge** (superseded duplicate) |
+| ws-nebius2-20260930 | `172a92bb` | 2 | — | **do-not-merge** (pre-FREEWIRE) |
+| ws-nebiuswave-20260930 | `f08c9740` | 17 | combos | **do-not-merge** (stale base) |
+| ws-resilience-env2-20260930 | `488264c1` | 11 | — | **do-not-merge** (superseded duplicate; merge ws-resilience-env) |
+| ws-gw-vertex-20260930 | `d08f7f23` | 0 | — | **no commits** |
+| ws-ovh-review-2-20260930 | `d08f7f23` | 0 | — | **no commits** |
+| ws-patchlive-20260930 | `e58274a8` | 0 | — | **no commits** |
+| ws-patchbackups-20260930 | `d08f7f23` | 0 | — | **no commits** |
+| ws-omniroute-20260930 | `d08f7f23` | 0 | — | **no branch commits** (run session) |
+
+### Canonical merge order (refreshed — rationale only, no execution)
+
+1. **Docs/no-config (any order):** ws-merge-map, ws-designmemo, ws-leghealth2,
+   ws-sweep, ws-failures-doc, ws-hygiene-main, ws-review, ws-sweep-review,
+   ws-suite-diag, ws-patchr1, ws-patchbackups-3, ws-records.
+2. **ws-incident — only after the R-coord-12 renumber (C6).**
+3. **Config, isolated:** ws-gw-admission → ws-fixes → ws-qwenclamp → ws-clamp-probe
+   → ws-resilience-env (restart); then admission-fix → applyjson → suite-fix →
+   p0-admission-fix → remote → verify-activate.
+4. **ws-f1-vertex — HOLD** until the backup-overwrite fix lands and re-reviews.
+5. **Registry (no main conflict):** ws-providers-rescue → ws-ovh → ws-ovh-finish.
+6. **Combos + nebius wave — LAST, only after the pre-flight gate above:** spine
+   `89a9024 → 2ff537a → 92a98af4` **with** `nebiuswave2 2aceb008` as ONE wave →
+   `f2d8d607` → `ba0c707f/8a862361` + `e3436a4d` → resolve `combos.json` once.
 
 ## Branch table
 
