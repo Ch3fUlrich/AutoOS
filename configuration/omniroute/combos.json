@@ -121,7 +121,8 @@
     "changes are this lineage's FREEWIRE/AGYCANON, which the task preserves. No other file",
     "in this branch's touched set overlaps main 24a98228, so no other pin applies.",
     "The six render-omniroute drift lines remain the nebius registry-vs-combos ones (beta's).",
-    "GEMRESTORE 2026-10-01: operator reversal - gemini exclusion is CANCELLED. gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park). Restored gemini/gemini-3.8-flash to its pre-freewire (a975d48) head positions: gemini-3.8-flash combo pos0 head with vertex/gemini-3.8-flash second (VTXLEG order kept), t1-orchestrator pos0, t1-orchestrator-free-only pos0, t2-worker pos0 (ahead of antigravity/gemini-3.7-flash-high), t2-worker-free-only pos0 (ahead of antigravity/gemini-3.7-flash-medium). t3-driver and t3-driver-free-only carried no gemini/* leg pre-freewire, so unchanged. Kept: 10 proven free legs + allow-rules, NEBREMOVAL (no nebius leg re-added), T1SECOND groq/qwen/qwen3.8-27b leg, OVH legs, 1M contexts, and main 24a98228 pins (d/e 1M kept; deepseek-flash kept over v4-flash per MAINPIN D2; vertex second kept). DECISIONS: where the restore would displace a free leg, the gemini head was PREPENDED (pos0) and every free leg kept in order - no free leg displaced. Registry flag (L1-beta, do NOT edit here): routes.gemini-3.8-flash.legs lacks gemini/gemini-3.8-flash (currently vertex-only render); routes.t1-orchestrator, t1-orchestrator-free-only, t2-worker, t2-worker-free-only lack the gemini head; providers.google_ai_studio stays available:false with the FREEWIRE unavailable_until until beta re-opens it under the backoff policy. Until then render omniroute --check gains the gemini combo diff on top of the six nebius ones."
+    "GEMRESTORE 2026-10-01: operator reversal - gemini exclusion is CANCELLED. gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park). Restored gemini/gemini-3.8-flash to its pre-freewire (a975d48) head positions: gemini-3.8-flash combo pos0 head with vertex/gemini-3.8-flash second (VTXLEG order kept), t1-orchestrator pos0, t1-orchestrator-free-only pos0, t2-worker pos0 (ahead of antigravity/gemini-3.7-flash-high), t2-worker-free-only pos0 (ahead of antigravity/gemini-3.7-flash-medium). t3-driver and t3-driver-free-only carried no gemini/* leg pre-freewire, so unchanged. Kept: 10 proven free legs + allow-rules, NEBREMOVAL (no nebius leg re-added), T1SECOND groq/qwen/qwen3.8-27b leg, OVH legs, 1M contexts, and main 24a98228 pins (d/e 1M kept; deepseek-flash kept over v4-flash per MAINPIN D2; vertex second kept). DECISIONS: where the restore would displace a free leg, the gemini head was PREPENDED (pos0) and every free leg kept in order - no free leg displaced. Registry flag (L1-beta, do NOT edit here): routes.gemini-3.8-flash.legs lacks gemini/gemini-3.8-flash (currently vertex-only render); routes.t1-orchestrator, t1-orchestrator-free-only, t2-worker, t2-worker-free-only lack the gemini head; providers.google_ai_studio stays available:false with the FREEWIRE unavailable_until until beta re-opens it under the backoff policy. Until then render omniroute --check gains the gemini combo diff on top of the six nebius ones.",
+    "TORDER 2026-10-01: t1 1M-only (>=600k gate, D-TORDER-1b), t2/t3 trial->free->credits->paid deepseek LAST, gemini head restored + output 65536/usable 1048576, providers.google_ai_studio re-opened with 3x429/120s->300s cooldown +30min park (gateway 08:07Z ACTIVE), 4 credit singles (ovh-qwen3.8-27b, ovh-gpt-oss-120b, ovh-qwen3-coder-30b, vertex-gemini-3.8-flash), nebius removed (6 legs), openrouter NO credits -> :free only (7 paid legs dropped, t1-clean kept declared+gated so stays omitted), combos regenerated from render (fixpoint)."
   ],
   "retired": [
     "tier1",
@@ -227,6 +228,30 @@
       ]
     },
     {
+      "name": "ovh-gpt-oss-120b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/gpt-oss-120b"
+      ]
+    },
+    {
+      "name": "ovh-qwen3-coder-30b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/Qwen3-Coder-30B-A3B-Instruct"
+      ]
+    },
+    {
+      "name": "ovh-qwen3.8-27b",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "ovh/Qwen3.8-27B"
+      ]
+    },
+    {
       "name": "spark-1.3-contributor",
       "strategy": "priority",
       "context": "1M",
@@ -240,9 +265,8 @@
       "context": "1M",
       "models": [
         "gemini/gemini-3.8-flash",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "groq/qwen/qwen3.8-27b",
+        "free-ai/google/gemini-3.8-flash",
+        "vertex/gemini-3.8-flash",
         "meta-api/muse-spark-1.3-contributor",
         "deepseek/deepseek-flash"
       ]
@@ -253,11 +277,7 @@
       "context": "1M",
       "models": [
         "gemini/gemini-3.8-flash",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/zai-org/GLM-5.2",
-        "groq/qwen/qwen3.8-27b",
-        "scw/mistral-small-3.2-24b-instruct-2506"
+        "free-ai/google/gemini-3.8-flash"
       ]
     },
     {
@@ -284,24 +304,25 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-high",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/zai-org/GLM-5.2",
         "groq/qwen/qwen3.8-27b",
-        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
         "openrouter/qwen/qwen3.8-27b:free",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b",
+        "scw/qwen3-235b-a22b-instruct-2507",
+        "scw/mistral-small-3.2-24b-instruct-2506",
+        "antigravity/gemini-3.7-flash-high",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
-        "deepseek/deepseek-flash",
+        "vertex/gemini-3.8-flash",
         "meta-api/muse-spark-1.3-contributor",
-        "free-ai/qwen7b"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -318,19 +339,19 @@
       "context": "128k",
       "models": [
         "gemini/gemini-3.8-flash",
-        "antigravity/gemini-3.7-flash-medium",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/zai-org/GLM-5.2",
         "groq/qwen/qwen3.8-27b",
-        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
-        "scw/qwen3-235b-a22b-instruct-2507",
         "groq/openai/gpt-oss-120b",
-        "scw/mistral-small-3.2-24b-instruct-2506",
         "openrouter/qwen/qwen3.8-27b:free",
-        "free-ai/qwen7b"
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b",
+        "scw/qwen3-235b-a22b-instruct-2507",
+        "scw/mistral-small-3.2-24b-instruct-2506",
+        "antigravity/gemini-3.7-flash-medium"
       ]
     },
     {
@@ -338,23 +359,26 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/zai-org/GLM-5.2",
+        "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
-        "openrouter/poolside/laguna-s-2.1:free",
+        "huggingface/zai-org/GLM-5.2",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
         "openrouter/qwen/qwen3.8-27b:free",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b",
+        "scw/mistral-small-3.2-24b-instruct-2506",
+        "scw/qwen3-235b-a22b-instruct-2507",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3-Coder-30B-A3B-Instruct",
         "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "mistral/mistral-code-latest",
-        "deepseek/deepseek-flash",
-        "meta-api/muse-spark-1.3-contributor"
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -370,16 +394,19 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "gemini/gemini-3.8-flash",
+        "groq/qwen/qwen3.8-27b",
         "huggingface/zai-org/GLM-5.2",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/qwen/qwen3.8-27b",
         "huggingface/Qwen/Qwen3.8-27B",
         "openrouter/poolside/laguna-s-2.1:free",
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "scw/qwen3-235b-a22b-instruct-2507",
+        "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
         "openrouter/qwen/qwen3.8-27b:free",
-        "free-ai/qwen7b"
+        "free-ai/qwen7b",
+        "scw/mistral-small-3.2-24b-instruct-2506",
+        "scw/qwen3-235b-a22b-instruct-2507"
       ]
     },
     {
@@ -389,6 +416,14 @@
       "models": [
         "cohere/command-a-03-2025",
         "cohere/command-r-plus-08-2024"
+      ]
+    },
+    {
+      "name": "vertex-gemini-3.8-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
       ]
     }
   ]
