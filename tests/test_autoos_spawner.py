@@ -18622,5 +18622,56 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
 
 
 
+class GeminiSideModelPinTests(unittest.TestCase):
+    """D8 (gemini-cli seat, 2026-10-01): an internal side call went to
+    openrouter/google/gemini-3-flash-preview and answered HTTP 402 — a leg this
+    lane never routed. gemini-cli re-resolves its model inside the process
+    (next-speaker, routing, a retry) and with nothing pinned it falls to its own
+    `auto` default, which its bundled docs say is gemini-3-pro-preview /
+    gemini-3-flash-preview. The argv `--model` only answers the one request the
+    run was asked to make, so the pin goes in the child env (`GEMINI_MODEL`,
+    precedence 2 in the installed bundle's docs/cli/model-routing.md)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def pin(self, name, model):
+        return clients.gemini_side_model_env(name, model)
+
+    def test_only_gemini_is_pinned_and_only_with_a_model(self):
+        self.assertEqual(self.pin("gemini", "vertex-3.8-flash"),
+                         {"GEMINI_MODEL": "vertex-3.8-flash"})
+        for name in ("qwen", "opencode", "codex"):
+            self.assertEqual(self.pin(name, "vertex-3.8-flash"), {}, name)
+        self.assertEqual(self.pin("gemini", None), {})
+        self.assertEqual(self.pin("gemini", ""), {})
+
+    def test_the_pin_name_is_on_the_plan_passlist(self):
+        # worker_env refuses a plan env entry that is not passed, loudly — a pin
+        # off the passlist is a pin that never reaches the child.
+        self.assertTrue(self.agent._plan_env_passed("GEMINI_MODEL"))
+
+    def generated_env(self, client):
+        r = run_agent("run", "--client", client, "--model", "omniroute/vertex-3.8-flash",
+                      "--dry-run", "--card", "role=implement", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_a_gemini_spawn_hands_the_child_the_pinned_model(self):
+        out = self.generated_env("gemini")
+        self.assertIn("GEMINI_MODEL", out, out)
+        argv = [line for line in out.splitlines() if line.startswith("would run: omniroute")]
+        self.assertTrue(argv, out)
+        # worker_env is what builds the child environment: the pin must survive it,
+        # with the very value the argv carries, so an internal call names no other leg.
+        flag = argv[0].split("--model", 1)[1].split()[0]
+        child = self.agent.worker_env({"env": self.pin("gemini", flag), "cwd": "."},
+                                      None, base={})
+        self.assertEqual(child.get("GEMINI_MODEL"), flag, out)
+
+    def test_a_qwen_spawn_gets_no_gemini_pin(self):
+        self.assertNotIn("GEMINI_MODEL", self.generated_env("qwen"))
+
+
 if __name__ == "__main__":
     unittest.main()

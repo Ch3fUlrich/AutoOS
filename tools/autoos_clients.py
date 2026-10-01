@@ -323,7 +323,34 @@ def leaf_deny_argv(client: "Client") -> list:
 # So qwen rows stay untagged; docs/routing.md says so too.
 CODEX_PROVIDER_TABLE = "model_providers.omniroute"
 GEMINI_CUSTOM_HEADERS_ENV = "GEMINI_CLI_CUSTOM_HEADERS"
+GEMINI_MODEL_ENV = "GEMINI_MODEL"
 HEADER_CLIENTS = ("gemini", "codex")  # gateway clients that can carry a header
+
+
+def gemini_side_model_env(client_name: str, model: str | None) -> dict:
+    """The child-env pin that stops gemini-cli answering on an unrouted leg (D8).
+
+    gemini-cli resolves its model by precedence (measured in the installed
+    bundle's `docs/cli/model-routing.md`): the `--model` flag, then `GEMINI_MODEL`,
+    then `model.name` in settings.json, then a local Gemma router, then the default
+    — which is **`auto`**, and the CLI's own `docs/cli/model.md` says Auto resolves
+    to `gemini-3-pro-preview` / `gemini-3-flash-preview` (and 2.5-pro/2.5-flash).
+    The argv flag is precedence 1 and so covers the one request this run was asked
+    to make; a call the CLI makes *inside* the process — next-speaker, routing,
+    a retry — re-resolves it and with no pin falls to that `auto` default. Live
+    (2026-10-01, gemini-cli seat): an internal side call went to
+    `openrouter/google/gemini-3-flash-preview` and came back HTTP 402 — a leg this
+    lane never routed, never priced and never agreed to spend on.
+
+    Pinning `GEMINI_MODEL` to the very value the argv carries puts precedence 2
+    behind precedence 1, so an internal call can only re-resolve to the same
+    gateway leg the resolver already picked, and never to `auto`. Empty for every
+    other client (their CLI reads no such variable) and for a run with no model
+    named, where there is nothing to pin.
+    """
+    if client_name != "gemini" or not model:
+        return {}
+    return {GEMINI_MODEL_ENV: str(model)}
 
 
 def gateway_header_args(client: Client, headers: dict | None) -> list:

@@ -725,7 +725,10 @@ WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
 # nobody decided the child should have.
 WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
                             "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
-                            clients.GEMINI_CUSTOM_HEADERS_ENV)
+                            clients.GEMINI_CUSTOM_HEADERS_ENV,
+                            # D8: the pin that keeps a gemini-cli internal call on
+                            # the leg this run routed instead of its `auto` default.
+                            clients.GEMINI_MODEL_ENV)
 WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
@@ -3749,6 +3752,12 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # was routed to, which is the same kind of claim.
         model_source = WRITER_SOURCE_PIN if args.model else WRITER_SOURCE_ASSUMED
         model = model or (route["combo"] if client.gateway else PLAN_MODEL_UNNAMED)
+    # D8: gemini-cli re-resolves its model inside the process (next-speaker,
+    # routing, a retry) and with no pin falls to its `auto` default, which its own
+    # docs say is gemini-3-pro-preview / gemini-3-flash-preview — a leg this lane
+    # never routed (measured 402 side call, 2026-10-01). Pin GEMINI_MODEL to the
+    # value the argv carries so an internal call can only name the same leg.
+    env.update(clients.gemini_side_model_env(client.name, model))
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
