@@ -19531,9 +19531,35 @@ class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
                     hits.append(full)          # unreadable counts as a hit
         return hits
 
+    def _escaping_links(self, path):
+        """Every symlink under `path` — file OR directory — that leaves it (R9).
+
+        The byte scan cannot express this: `os.walk` without `followlinks`
+        treats a directory link as a directory and never opens it, so a
+        regressed validator that recreated an escaping directory symlink would
+        pass assertion (1) while a worker read straight out of the sandbox.
+        Dangling links count too (`islink` is lexical), and the boundary is the
+        REALPATH of the box, so a /tmp symlink on the way in does not trip it.
+        """
+        real_box = os.path.realpath(path)
+        hits = []
+        for dirpath, dirnames, filenames in os.walk(path):
+            for name in dirnames + filenames:
+                full = os.path.join(dirpath, name)
+                if not os.path.islink(full):
+                    continue
+                real = os.path.realpath(full)
+                if real != real_box and not real.startswith(real_box + os.sep):
+                    hits.append(full)
+        return sorted(hits)
+
     def _assert_sandbox_is_clean(self, dest, source_paths):
         # (1) no canary byte anywhere in the sandbox, .git included.
         self.assertEqual(self._bytes_hits(dest, self.canary), [])
+        # (1b) R9: nothing in the sandbox is a link — file or directory — that
+        # leads out of it. A byte scan alone cannot see an escaping directory
+        # link, so a validator that regressed into creating one still passed.
+        self.assertEqual(self._escaping_links(dest), [])
         # (2) the sandbox's own git common dir is inside the sandbox.
         common = subprocess.run(
             ["git", "-C", dest, "rev-parse", "--path-format=absolute",
@@ -19611,6 +19637,48 @@ class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
         self.assertTrue(re.fullmatch(r"[0-9a-f]{40}", got), got)
         self.assertNotIn(os.sep, got)
         self.assertNotEqual(base, sha)          # the base is the sandbox commit
+
+    def test_r9_negative_control_the_scan_reports_an_escaping_directory_link(self):
+        """R9: the canary scan must see a DIRECTORY link that leaves the box.
+
+        `_bytes_hits` walks with `os.walk(path)` and no `followlinks`, so it only
+        ever reads regular files: a regressed validator that recreated an
+        escaping directory symlink would still pass assertion (1) — the sandbox
+        would be readable through the link while the scan reported nothing.
+        This control builds such a sandbox BY HAND, outside any clone, so the
+        scan's blindness (and then its fix) is observable, not assumed.
+        """
+        box = os.path.join(tempfile.mkdtemp(dir=self.tmp), "sandbox")
+        outside = os.path.join(tempfile.mkdtemp(dir=self.tmp), "outside")
+        os.makedirs(os.path.join(outside, "configuration"))
+        with io.open(os.path.join(outside, "configuration", "api-keys.yml"),
+                     "w", encoding="utf-8") as fh:
+            fh.write("omniroute: %s\n" % self.canary)
+        os.makedirs(os.path.join(box, "keep"))
+        os.symlink(os.path.join(outside, "configuration"),
+                   os.path.join(box, "leak_dir"))
+        # the byte scan alone is blind to it: os.walk lists a directory link as
+        # a directory and never opens it, so no canary byte is ever read
+        self.assertEqual(self._bytes_hits(box, self.canary), [])
+        # a file link IS read through by the scan — the containment check must
+        # report both shapes, files and directories
+        os.symlink(os.path.join(outside, "configuration", "api-keys.yml"),
+                   os.path.join(box, "leak_file"))
+        # the containment scan reports the directory link (and the file one)
+        hits = self._escaping_links(box)
+        self.assertIn(os.path.join(box, "leak_dir"), hits)
+        self.assertIn(os.path.join(box, "leak_file"), hits)
+        # and a benign in-tree link is NOT reported
+        with io.open(os.path.join(box, "keep", "one.txt"), "w",
+                     encoding="utf-8") as fh:
+            fh.write("keep\n")
+        os.symlink(os.path.join("..", "keep", "one.txt"),
+                   os.path.join(box, "keep", "in_tree"))
+        self.assertNotIn(os.path.join(box, "keep", "in_tree"),
+                         self._escaping_links(box))
+        # the assertion used by every real sandbox now fails on this box
+        with self.assertRaises(AssertionError):
+            self._assert_sandbox_is_clean(box, [])
 
 
 if __name__ == "__main__":
