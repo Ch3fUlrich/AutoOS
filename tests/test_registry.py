@@ -1918,10 +1918,14 @@ class ReviewerPolicyTests(unittest.TestCase):
             self.assertIs(entry["first_pass_only"], True, entry["model"])
 
     def test_a_reviewer_whose_leg_is_paid_tier_is_marked_paid(self):
-        # T0-PAID-4 Q2: the paid flag must agree with the leg's effective
-        # tier (model-level tier else provider tier) -- a reviewers entry
-        # whose leg resolves to tier paid must carry paid: true, or the
-        # last-resort walk misfiles it as free.
+        # T0-PAID-4 Q2, extended T0-PAID-5 P5: the paid flag must agree with
+        # the leg's effective tier (model-level tier else provider tier)
+        # BOTH ways -- a reviewers entry whose leg resolves to tier paid
+        # must carry paid: true (or the last-resort walk misfiles it as
+        # free), and a paid: true entry with a leg must ride a paid-tier
+        # leg (or the flag gates nothing). An unresolvable reviewer leg
+        # fails the test instead of being skipped: a registry oddity must
+        # read as unknown in the resolver, never hide in validation.
         from autoos_resolver import leg_tier
         for index, entry in enumerate(self.reviewers):
             leg = entry.get("leg")
@@ -1929,12 +1933,18 @@ class ReviewerPolicyTests(unittest.TestCase):
                 continue
             try:
                 tier = leg_tier(leg, self.reg)
-            except (ValueError, KeyError):
-                continue
+            except (ValueError, KeyError) as exc:
+                self.fail("reviewers[%d] %r has an unresolvable leg %r "
+                          "(%s)" % (index, entry.get("model"), leg, exc))
             if tier == "paid":
                 self.assertIs(entry.get("paid"), True,
                               "reviewers[%d] %r rides a paid-tier leg %r "
                               "but is not marked paid" % (index, entry.get("model"), leg))
+            if entry.get("paid") is True:
+                self.assertEqual(tier, "paid",
+                                 "reviewers[%d] %r is marked paid but rides "
+                                 "a %s-tier leg %r"
+                                 % (index, entry.get("model"), tier, leg))
 
     def test_sonnet_is_not_a_preference(self):
         # The closer is the resolver's, not the list's: pinning that here so a
