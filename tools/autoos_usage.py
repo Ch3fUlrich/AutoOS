@@ -614,7 +614,8 @@ def _unmeasured_guard(registry, provider, note):
             "note": note}
 
 
-def credit_guards(registry, rows, since=None, failure=None, today=None):
+def credit_guards(registry, rows, since=None, failure=None, today=None,
+                complete=True):
     """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
 
     Field semantics (T1-CREDIT-FIX): `credit_usd` is the trial grant TOTAL in
@@ -727,6 +728,18 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                         "the combo falls through)%s"
                         % (provider, unreadable, spend["spend_usd"],
                            _window_suffix(registry, provider, today)))
+            if not complete and state != "refuse":
+                # T1-CREDIT-FIX-9 T1: a fetch cut at the page cap is not a
+                # measurement -- the September $300 row behind the cap reads
+                # as ok/$0 without this. Measured spend already at or over
+                # the hard stop still refuses: it beats unknown.
+                state = "unknown"
+                note = ("credit spend unknown %s: fetch truncated at page "
+                        "cap (readable spend $%.2f) - leg kept (fail open: "
+                        "a spent prepaid grant rejects at the provider and "
+                        "the combo falls through)%s"
+                        % (provider, spend["spend_usd"],
+                           _window_suffix(registry, provider, today)))
         except ValueError:
             # Config errors (a grant that cannot state its cap) still raise:
             # the usage report exits 3 on them (pinned by T1-CREDIT-FIX-2
@@ -785,7 +798,12 @@ def fetch_cutoff(registry, now=None):
     for provider in credit_guard_providers(registry or {}):
         try:
             started = credit_started_date(registry, provider, now)
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
+            # T1-CREDIT-FIX-9 T8: a malformed credit_started is not fetchable
+            # depth -- the grant stays month-to-date (window_limited, loud
+            # suffix) instead of silently dropping the date. Only the
+            # expected parse/shape errors are caught; anything else
+            # propagates.
             continue
         if started is None:
             continue
@@ -871,7 +889,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         ts = row_timestamp(r)
         if ts is not None and ts < since:
             continue
-        tokens = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
+        tokens = r.get("tokens") if isinstance(r, dict) else None
         # T1-CREDIT-FIX-7 R4: a row with present-but-unmeasurable token
         # fields degrades only itself -- skipped and counted, never billed
         # as $0 and never aborting the whole guard map.
@@ -1088,8 +1106,12 @@ def _readable_tokens(tokens):
     a $0 row: `paid_spend` skips it and counts it as unreadable instead of
     billing a drained grant as untouched money. Missing/None/unparseable
     fields keep the old read-as-0 behaviour and stay counted."""
-    if not isinstance(tokens, dict):
+    if tokens is None:
         return 0, 0, True
+    if not isinstance(tokens, dict):
+        # T1-CREDIT-FIX-9 T3: a present-but-non-dict `tokens` (a list, a
+        # string) is unmeasured, never a $0 row.
+        return 0, 0, False
     tin = tokens.get("in")
     tout = tokens.get("out")
     if not _token_field_readable(tin) or not _token_field_readable(tout):
@@ -1105,12 +1127,21 @@ def _token_field_readable(value):
         return True
     if isinstance(value, float) and not math.isfinite(value):
         return False
+    if isinstance(value, (list, tuple, dict, set)):
+        # T1-CREDIT-FIX-9 T3: a list is not a count -- unreadable, never $0.
+        return False
     try:
         n = int(value)
-    except (TypeError, ValueError):
-        return True  # unparseable keeps the old read-as-0 behaviour
     except OverflowError:
         return False
+    except (TypeError, ValueError):
+        # T1-CREDIT-FIX-9 T3: a string that int() cannot parse ('1e30',
+        # 'inf', 'nan', 'abc') is unmeasured, never $0; numeric strings
+        # that int() parses ('123') stay readable. Non-string
+        # unparseables keep the old read-as-0 behaviour.
+        if isinstance(value, str):
+            return False
+        return True
     if n < 0:
         # T1-CREDIT-FIX-8 C3: a negative count is not a credit -- billed, it
         # would subtract spend and read a drained grant as funded.
@@ -1234,10 +1265,21 @@ def render_credit_guards(guards):
             lines.append("credit WARN %s $%.2f of a $%.2f grant (warn line $%.2f)"
                          % (provider, guard["spend_usd"], guard["cap_usd"],
                             guard["warn_usd"]))
+            # T1-CREDIT-FIX-9 T2: a window-limited warn grant names its
+            # month-to-date limit beside the figure.
+            if guard.get("window_limited"):
+                lines.append("%s credit spend measured month-to-date only "
+                             "(set credit_started)" % provider)
         elif guard.get("state") == "refuse":
             lines.append("credit EXHAUSTED %s $%.2f of a $%.2f cap - its legs are "
                          "dropped by the resolver until the month rolls over"
                          % (provider, guard["spend_usd"], guard["cap_usd"]))
+        elif guard.get("state") == "ok":
+            # T1-CREDIT-FIX-9 T2: an ok grant prints nothing by default, but
+            # a window-limited one must still name its month-to-date limit.
+            if guard.get("window_limited"):
+                lines.append("%s credit spend measured month-to-date only "
+                             "(set credit_started)" % provider)
         if guard.get("models_unpriced"):
             lines.append("credit UNPRICED %s: %d model(s) billed with no price on "
                          "file - the guard cannot see this spend"
@@ -1254,6 +1296,11 @@ def render_spend_text(spend):
     if spend["models_unpriced"]:
         lines.append("  %d model(s) had no price on file and count as 0"
                      % spend["models_unpriced"])
+    if int(spend.get("rows_unreadable") or 0) > 0:
+        # T1-CREDIT-FIX-9 T4: unreadable rows are skipped spend, never $0 --
+        # name the count beside the readable figure.
+        lines.append("  %d unreadable row(s) skipped"
+                     % int(spend.get("rows_unreadable") or 0))
     if spend["balance_usd"] is not None:
         lines.append("  balance: $%.2f (measured by the caller); warns below $%.2f"
                      % (spend["balance_usd"], spend["balance_threshold_usd"]))
@@ -1466,7 +1513,8 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     guards = None
     if guarded:
         try:
-            guards = credit_guards(registry, rows, spend_cutoff, today=now)
+            guards = credit_guards(registry, rows, spend_cutoff, today=now,
+                                   complete=not truncated)
         except Exception as e:
             # A grant that cannot state its own cap (ValueError) must read as
             # unmeasured, never as a traceback: the documented exit code is 3.

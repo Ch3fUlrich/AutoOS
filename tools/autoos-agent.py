@@ -4569,7 +4569,7 @@ def _paid_guards_unreadable(registry: dict, why: str) -> dict:
     return out
 
 
-def _paid_guards_measured(registry: dict, rows, since) -> dict:
+def _paid_guards_measured(registry: dict, rows, since, complete=True) -> dict:
     """`{provider id: guard}` for paid rows from recorded usage rows.
 
     Raises on malformed input like `credit_guards` does -- the caller folds
@@ -4591,6 +4591,14 @@ def _paid_guards_measured(registry: dict, rows, since) -> dict:
             note = ("paid spend unmeasured %s - %d unreadable row(s), "
                     "readable spend $%.2f - leg kept (last resort, D-212)"
                     % (pid, unreadable, spend["spend_usd"]))
+        if not complete and state != "refuse":
+            # T1-CREDIT-FIX-9 T1: a fetch cut at the page cap is not a
+            # measurement -- kept per D-212 with the note; measured spend
+            # already at or over the cap still refuses.
+            state = "unknown"
+            note = ("paid spend unmeasured %s: fetch truncated at page cap "
+                    "(readable spend $%.2f) - leg kept (last resort, D-212)"
+                    % (pid, spend["spend_usd"]))
         out[pid] = {"provider": pid, "state": state,
                     "spend_usd": spend["spend_usd"],
                     "spend_unknown": state == "unknown",
@@ -4673,10 +4681,12 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     by type (T1-CREDIT-FIX-2): `UsageError` (gateway refusal/unreachable),
     `OSError` (missing key file), `ValueError` (unreadable ledger, a grant with
     no cap -- JSON decode errors land here too) map to the `unknown` fallback
-    (fail open for credit, held for paid). An UNFORESEEN bug type
+    (fail open for credit, kept for paid as last resort per D-212). An
+    UNFORESEEN bug type
     (`TypeError`/`AttributeError`/...) is never folded into `unknown` -- which
     would read as a gateway outage -- but lands as its own `guard error` state
-    (kept for credit, held for paid, type name only in the note), so the bug
+    (kept for credit, kept for paid as last resort per D-212, type name only
+    in the note), so the bug
     stays visible. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
     both, so Ctrl-C still works.
 
@@ -4701,21 +4711,27 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     fetch = fetch or usage_mod.urllib_fetch
     try:
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
-        rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
-        guards = usage_mod.credit_guards(registry, rows, cutoff, today=now)
-        guards.update(_paid_guards_measured(registry, rows, cutoff))
+        rows, _pages, truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
+        guards = usage_mod.credit_guards(registry, rows, cutoff, today=now,
+                                         complete=not truncated)
+        guards.update(_paid_guards_measured(registry, rows, cutoff,
+                                            complete=not truncated))
     except (usage_mod.UsageError, OSError, ValueError) as exc:
         # Every failure mode the read predicts (gateway refusal/unreachable,
         # missing key, unreadable ledger, a grant that cannot state its cap):
-        # `unknown` (fail open for credit, held for paid), never a traceback.
+        # `unknown` (fail open for credit, kept for paid as last resort per
+        # D-212; a local paid cap follows in CREDIT-10 per D-240), never a
+        # traceback.
         # ValueError already covers JSON decode errors: fetch_window rewraps
         # bad pages as UsageError, and JSONDecodeError subclasses ValueError.
         guards = _credit_guards_unreadable(registry, usage_mod.spend_failure_note(exc))
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
-        # surface as its own `guard error` state -- kept for credit, held for
-        # paid, explain line carries the TYPE NAME only -- never silently
-        # `unknown` (which would read as a gateway outage) or `ok`.
+        # surface as its own `guard error` state -- kept for credit, kept for
+        # paid as last resort per D-212 (a local paid cap follows in
+        # CREDIT-10 per D-240), explain line carries the TYPE NAME only --
+        # never silently `unknown` (which would read as a gateway outage) or
+        # `ok`.
         guards = _credit_guard_error(registry, type(exc).__name__)
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards

@@ -553,5 +553,418 @@ class C5MutantKillers(unittest.TestCase):
                          "past credit_started must pass, got %r" % (problems,))
 
 
+# --- T1-CREDIT-FIX-9 -----------------------------------------------------
+# T1: a fetch cut at the page cap must not read as measured ok. T2: a
+# window-limited ok/warn grant names its month-to-date limit on surviving
+# legs. T3: unparseable/list/non-dict tokens are unreadable. T4: the paid
+# block names unreadable rows. T5: paid mutants. T7: every kept-claiming
+# line is survivor-only. T8: malformed credit_started stays loud.
+
+def _t9_ds_reg():
+    reg = _reg()
+    reg["models"]["deepseek-chat"] = {
+        "id": "deepseek-chat", "price_in": 1e-06, "price_out": 2e-06,
+        "tool_calls": "unproven",
+        "context_usable": {"tokens": 100000, "source": "default"}}
+    reg["models"]["ds-proven"] = {
+        "id": "ds-proven", "price_in": 1e-06, "price_out": 2e-06,
+        "tool_calls": "proven",
+        "context_usable": {"tokens": 100000, "source": "default"}}
+    return reg
+
+
+def _ds_row(rid, tokens, ts="2026-10-05T10:00:00Z", provider="deepseek",
+            model="deepseek-chat"):
+    return {"id": rid, "provider": provider, "model": model,
+            "tokens": tokens, "timestamp": ts, "status": 200}
+
+
+def _tiny_vertex_row(rid, ts="2026-10-05T10:00:00Z"):
+    return {"id": rid, "provider": "vertex",
+            "model": "vertex/gemini-3.8-flash",
+            "tokens": {"in": 100, "out": 0},
+            "timestamp": ts, "status": 200}
+
+
+class T1TruncatedFetchUnknown(unittest.TestCase):
+    def test_credit_truncated_is_unknown(self):
+        guards = usage.credit_guards(
+            _reg(), [_tiny_vertex_row("t1")], SINCE_MONTH,
+            today=NOW.date(), complete=False)
+        guard = guards["vertex_ai"]
+        self.assertEqual(guard["state"], "unknown",
+                         "truncated fetch must read unknown, got %r" % (guard,))
+        self.assertTrue(guard["spend_unknown"])
+        self.assertIn("fetch truncated at page cap", guard["note"])
+
+    def test_credit_truncated_refuse_beats_unknown(self):
+        big = {"in": 80_000_000, "out": 24_000_000}
+        rows = [_row("vertex_ai", "vertex/gemini-3.8-flash", tokens=dict(big))]
+        guards = usage.credit_guards(
+            _reg(), rows, SINCE_MONTH, today=NOW.date(), complete=False)
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse",
+                         "measured spend over stop still refuses: %r"
+                         % (guards["vertex_ai"],))
+
+    def test_plan_truncated_credit_is_unknown(self):
+        agent = _agent_mod()
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+        tiny = [_tiny_vertex_row("t%d" % i) for i in range(3)]
+
+        def fetch(url, headers, timeout):
+            return 200, json.dumps(tiny).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _keyed_env(tmp)
+            with unittest.mock.patch.object(
+                    usage, "fetch_window",
+                    return_value=(tiny, 20, True)):
+                guards = agent.plan_credit_guards(
+                    _reg(), now=NOW, fetch=fetch, env=env)
+        guard = guards["vertex_ai"]
+        self.assertEqual(guard["state"], "unknown",
+                         "plan must thread truncated -> unknown, got %r"
+                         % (guard,))
+        self.assertIn("fetch truncated at page cap", guard["note"])
+
+    def test_plan_truncated_paid_is_unknown_kept(self):
+        agent = _agent_mod()
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+        reg = _t9_ds_reg()
+        tiny = [_ds_row("p1", {"in": 100, "out": 100})]
+
+        def fetch(url, headers, timeout):
+            return 200, json.dumps(tiny).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _keyed_env(tmp)
+            with unittest.mock.patch.object(
+                    usage, "fetch_window",
+                    return_value=(tiny, 20, True)):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=fetch, env=env)
+        guard = guards["deepseek"]
+        self.assertEqual(guard["state"], "unknown",
+                         "truncated paid fetch must read unknown, got %r"
+                         % (guard,))
+        self.assertIn("fetch truncated at page cap", guard["note"])
+
+    def test_cli_truncated_credit_is_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reg_path = os.path.join(tmp, "registry.json")
+            with open(reg_path, "w", encoding="utf-8") as fh:
+                json.dump(_reg(), fh)
+            env = _keyed_env(tmp)
+            tiny = [_tiny_vertex_row("c%d" % i) for i in range(3)]
+
+            def fetch(url, headers, timeout):
+                return 200, json.dumps(tiny).encode("utf-8")
+
+            buf = io.StringIO()
+            with unittest.mock.patch.object(
+                    usage, "fetch_window",
+                    return_value=(tiny, 20, True)):
+                with contextlib.redirect_stdout(buf):
+                    rc = usage.main(
+                        ["--since", "2026-10-01T00:00:00Z", "--json",
+                         "--cost", "--registry", reg_path,
+                         "--spend-since", "2026-10-01T00:00:00Z"],
+                        fetch=fetch, env=env, now=NOW)
+        self.assertEqual(rc, 0)
+        guard = json.loads(buf.getvalue())["credit_guards"]["vertex_ai"]
+        self.assertEqual(guard["state"], "unknown",
+                         "CLI must thread truncated -> unknown, got %r"
+                         % (guard,))
+        self.assertIn("fetch truncated at page cap", guard["note"])
+
+
+class T2WindowLimitedCaveat(unittest.TestCase):
+    def _shipped_vertex(self):
+        with open(_ROOT / "catalog" / "ai-registry.json",
+                  encoding="utf-8") as fh:
+            reg = json.load(fh)
+        for rid, route in (reg.get("routes") or {}).items():
+            legs = route.get("legs") or []
+            if any(leg.split("/")[0] in ("vertex", "vertex_ai")
+                   for leg in legs):
+                return reg, rid, route
+        self.fail("shipped registry must carry a vertex leg")
+
+    def test_shipped_registry_has_no_credit_started(self):
+        with open(_ROOT / "catalog" / "ai-registry.json",
+                  encoding="utf-8") as fh:
+            reg = json.load(fh)
+        for pid, entry in (reg.get("providers") or {}).items():
+            if isinstance(entry, dict) and entry.get("tier") == "credit":
+                self.assertIsNone(entry.get("credit_started"),
+                                  "%s must carry no credit_started" % pid)
+
+    def test_ok_survivor_names_month_to_date(self):
+        reg, rid, route = self._shipped_vertex()
+        guards = usage.credit_guards(reg, [], SINCE_MONTH,
+                                     today=NOW.date())
+        warns = []
+        kept, skipped, _notes = r.usable_legs(
+            route, {"kind": "review", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards, credit_warns=warns)
+        kept_ids = [k if isinstance(k, str) else k[0] for k in kept]
+        self.assertTrue(
+            any(str(x).split("/")[0] in ("vertex", "vertex_ai")
+                for x in kept_ids),
+            "precondition: review must keep a vertex leg: %r" % (kept,))
+        self.assertTrue(
+            any("credit spend measured month-to-date only" in w
+                and "vertex" in w for w in warns),
+            "ok window-limited survivor must name the limit: %r" % (warns,))
+
+    def test_ok_skipped_leg_names_no_caveat(self):
+        reg, rid, route = self._shipped_vertex()
+        guards = usage.credit_guards(reg, [], SINCE_MONTH,
+                                     today=NOW.date())
+        warns = []
+        kept, skipped, _notes = r.usable_legs(
+            route, {"kind": "implement", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards, credit_warns=warns)
+        vertex_skipped = [leg for leg in skipped
+                          if str(leg).split("/")[0] in ("vertex", "vertex_ai")]
+        self.assertTrue(vertex_skipped,
+                        "precondition: implement must skip a vertex leg")
+        self.assertFalse(
+            any("month-to-date only" in w and "vertex" in w for w in warns),
+            "skipped leg must not claim a caveat: %r" % (warns,))
+
+    def test_report_ok_names_month_to_date(self):
+        guards = usage.credit_guards(_reg(), [], SINCE_MONTH,
+                                     today=NOW.date())
+        self.assertEqual(guards["vertex_ai"]["state"], "ok")
+        lines = usage.render_credit_guards(guards)
+        self.assertTrue(
+            any("vertex_ai" in line and "month-to-date only" in line
+                for line in lines),
+            "report ok window-limited grant must name the limit: %r"
+            % (lines,))
+
+
+class T3TokenFieldReadable(unittest.TestCase):
+    def test_unparseable_strings_are_unreadable(self):
+        for value in ("1e30", "inf", "nan", "abc"):
+            with self.subTest(value=value):
+                self.assertFalse(usage._token_field_readable(value),
+                                 "%r must be unreadable" % (value,))
+
+    def test_numeric_string_stays_readable(self):
+        self.assertTrue(usage._token_field_readable("123"))
+
+    def test_list_is_unreadable(self):
+        self.assertFalse(usage._token_field_readable([1]))
+
+    def test_non_dict_tokens_is_unreadable(self):
+        tin, tout, readable = usage._readable_tokens([1, 2])
+        self.assertFalse(readable)
+        tin, tout, readable = usage._readable_tokens("abc")
+        self.assertFalse(readable)
+
+    def test_string_tokens_make_guard_unknown(self):
+        row = {"id": "bad-str", "provider": "vertex_ai",
+               "model": "vertex/gemini-3.8-flash",
+               "tokens": {"in": "inf", "out": 0},
+               "timestamp": "2026-10-05T10:00:00Z", "status": 200}
+        guards = usage.credit_guards(_reg(), [row], SINCE_MONTH,
+                                     today=NOW.date())
+        self.assertEqual(guards["vertex_ai"]["state"], "unknown")
+        self.assertIn("1 unreadable", guards["vertex_ai"]["note"])
+
+
+class T4PaidUnreadableLine(unittest.TestCase):
+    def test_unreadable_rows_named(self):
+        spend = {"since": "2026-10-01T00:00:00Z", "calls": 1,
+                 "tokens_in": 1, "tokens_out": 1, "spend_usd": 0.0,
+                 "threshold_usd": 20.0, "balance_usd": None,
+                 "balance_threshold_usd": 5.0, "models_unpriced": 0,
+                 "rows_unreadable": 2, "price_source": "t",
+                 "complete": True, "warnings": []}
+        lines = usage.render_spend_text(spend)
+        self.assertTrue(any("2 unreadable row(s) skipped" in line
+                            for line in lines),
+                        "paid block must name unreadable rows: %r" % (lines,))
+
+    def test_zero_unreadable_prints_no_line(self):
+        spend = {"since": "2026-10-01T00:00:00Z", "calls": 1,
+                 "tokens_in": 1, "tokens_out": 1, "spend_usd": 0.0,
+                 "threshold_usd": 20.0, "balance_usd": None,
+                 "balance_threshold_usd": 5.0, "models_unpriced": 0,
+                 "rows_unreadable": 0, "price_source": "t",
+                 "complete": True, "warnings": []}
+        lines = usage.render_spend_text(spend)
+        self.assertFalse(any("unreadable" in line for line in lines))
+
+
+class T5PaidMutants(unittest.TestCase):
+    def test_paid_unreadable_is_unknown_kept(self):
+        agent = _agent_mod()
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+        reg = _t9_ds_reg()
+        rows = [_ds_row("inf-ds", {"in": float("inf"), "out": 0})]
+
+        def fetch(url, headers, timeout):
+            return 200, json.dumps(rows).encode("utf-8")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _keyed_env(tmp)
+            guards = agent.plan_credit_guards(
+                reg, now=NOW, fetch=fetch, env=env)
+        guard = guards["deepseek"]
+        self.assertEqual(guard["state"], "unknown",
+                         "inf-token paid row must read unknown: %r" % (guard,))
+        self.assertTrue(guard["spend_unknown"])
+        self.assertIn("1 unreadable", guard["note"])
+
+    def test_paid_stays_month_to_date(self):
+        reg = _t9_ds_reg()
+        reg["providers"]["vertex_ai"]["credit_started"] = "2026-09-01"
+        sept = _ds_row("sept-ds", {"in": 100_000_000, "out": 100_000_000},
+                       ts="2026-09-15T10:00:00Z")
+        octo = _ds_row("oct-ds", {"in": 100, "out": 100},
+                       ts="2026-10-05T10:00:00Z")
+        spend = usage.paid_spend([sept, octo], usage.prices_from_registry(reg),
+                                 reg, SINCE_MONTH, provider="deepseek")
+        self.assertLess(spend["spend_usd"], 1.0,
+                        "September $300 must not bill October: %r" % (spend,))
+        vsept = {"id": "v-sept", "provider": "vertex",
+                 "model": "vertex/gemini-3.8-flash",
+                 "tokens": {"in": 80_000_000, "out": 24_000_000},
+                 "timestamp": "2026-09-15T10:00:00Z", "status": 200}
+        guards = usage.credit_guards(
+            reg, [vsept, sept, octo], SINCE_MONTH, today=NOW.date())
+        self.assertEqual(guards["vertex_ai"]["state"], "refuse",
+                         "vertex must still see September: %r"
+                         % (guards["vertex_ai"],))
+
+    def test_future_credit_started_reads_absent(self):
+        reg = {"providers": {
+            "p": {"id": "p", "tier": "credit", "credit_usd": 10.0,
+                  "monthly_cap_usd": 10.0, "monthly_warn_fraction": 0.8,
+                  "credit_started": "2026-10-02"}}}
+        self.assertIsNone(usage.credit_started_date(
+            reg, "p", today=datetime.date(2026, 10, 1)))
+        self.assertTrue(usage.credit_window_limited(
+            reg, "p", today=datetime.date(2026, 10, 1)))
+
+
+class T7KeptLinesOnlyForSurvivors(unittest.TestCase):
+    def _synth(self, state, note=None):
+        reg = _t9_ds_reg()
+        reg["providers"]["vertex_ai"]["monthly_cap_usd"] = 250.0
+        reg["models"]["v-proven"] = {
+            "id": "v-proven", "tool_calls": "unproven",
+            "context_usable": {"tokens": 100000, "source": "default"},
+            "provider_prices": {
+                "vertex_ai": {"price_in": 1.5e-06, "price_out": 7.5e-06,
+                              "price_source": "https://example.invalid",
+                              "price_as_of": "2026-10-01"}}}
+        route = {"legs": ["vertex_ai/v-proven", "deepseek/ds-proven"]}
+        guards = {
+            "vertex_ai": {"provider": "vertex_ai", "state": state,
+                          "spend_usd": 0.0, "spend_unknown": True,
+                          "cap_usd": 250.0, "warn_usd": 200.0,
+                          "models_unpriced": 0,
+                          "window_limited": False,
+                          "note": note or "test note"},
+            "deepseek": {"provider": "deepseek", "state": "unknown",
+                         "spend_usd": 0.0, "spend_unknown": True,
+                         "cap_usd": 25.0, "warn_usd": 20.0,
+                         "models_unpriced": 0,
+                         "note": "paid spend unmeasured deepseek - leg kept "
+                                 "(last resort, D-212)"},
+        }
+        return reg, route, guards
+
+    def _run(self, reg, route, guards, kind):
+        warns = []
+        kept, skipped, _notes = r.usable_legs(
+            route, {"kind": kind, "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards, credit_warns=warns)
+        return kept, skipped, warns
+
+    def test_no_guard_line_survivor_only(self):
+        reg = _t9_ds_reg()
+        reg["models"]["v-unproven"] = {
+            "id": "v-unproven", "tool_calls": "unproven",
+            "context_usable": {"tokens": 100000, "source": "default"},
+            "provider_prices": {
+                "vertex_ai": {"price_in": 1.5e-06, "price_out": 7.5e-06,
+                              "price_source": "https://example.invalid",
+                              "price_as_of": "2026-10-01"}}}
+        route = {"legs": ["vertex_ai/v-unproven"]}
+        _k, skipped, warns = self._run(reg, route, {}, "implement")
+        self.assertTrue(any("tool_calls" in reason
+                            for leg in skipped for reason in skipped[leg]))
+        self.assertFalse(any("leg kept" in w for w in warns),
+                         "skipped no-guard leg must not say kept: %r" % (warns,))
+        _k2, _s2, warns2 = self._run(reg, route, {}, "review")
+        self.assertTrue(any("leg kept" in w and "vertex_ai" in w
+                            for w in warns2),
+                        "surviving no-guard leg must name it: %r" % (warns2,))
+
+    def test_unrecognised_line_survivor_only(self):
+        reg, route, guards = self._synth("bogus", "bogus note")
+        guards["vertex_ai"]["spend_unknown"] = False
+        _k, skipped, warns = self._run(reg, route, guards, "implement")
+        self.assertTrue(skipped)
+        self.assertFalse(any("leg kept" in w and "vertex" in w.lower()
+                             for w in warns),
+                         "skipped bogus-state leg must not say kept: %r"
+                         % (warns,))
+        _k2, _s2, warns2 = self._run(reg, route, guards, "review")
+        self.assertTrue(any("leg kept" in w for w in warns2),
+                        "surviving bogus-state leg must name it: %r" % (warns2,))
+
+    def test_paid_kept_line_survivor_only(self):
+        reg = _t9_ds_reg()
+        reg["models"]["ds-unproven"] = {
+            "id": "ds-unproven", "price_in": 1e-06, "price_out": 2e-06,
+            "tool_calls": "unproven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        route = {"legs": ["deepseek/ds-unproven"]}
+        guards = {"deepseek": {
+            "provider": "deepseek", "state": "unknown", "spend_usd": 0.0,
+            "spend_unknown": True, "cap_usd": 25.0, "warn_usd": 20.0,
+            "models_unpriced": 0,
+            "note": "paid spend unmeasured deepseek - leg kept "
+                    "(last resort, D-212)"}}
+        _k, skipped, warns = self._run(reg, route, guards, "implement")
+        self.assertTrue(skipped)
+        self.assertFalse(any("leg kept" in w for w in warns),
+                         "skipped paid leg must not say kept: %r" % (warns,))
+        _k2, _s2, warns2 = self._run(reg, route, guards, "review")
+        self.assertTrue(any("leg kept" in w and "deepseek" in w
+                            for w in warns2),
+                        "surviving paid leg must name it: %r" % (warns2,))
+
+
+class T8FetchCutoffMalformed(unittest.TestCase):
+    def test_malformed_started_stays_month_start_and_loud(self):
+        for bad in ("not-a-date", "2026-13-45", 12345, ""):
+            with self.subTest(bad=bad):
+                reg = _reg()
+                reg["providers"]["vertex_ai"]["credit_started"] = bad
+                self.assertEqual(usage.fetch_cutoff(reg, NOW), SINCE_MONTH)
+                self.assertTrue(usage.credit_window_limited(
+                    reg, "vertex_ai", today=NOW.date()))
+                guards = usage.credit_guards(reg, [], SINCE_MONTH,
+                                             today=NOW.date())
+                self.assertIn("month-to-date",
+                              guards["vertex_ai"]["note"])
+
+
 if __name__ == "__main__":
     unittest.main()

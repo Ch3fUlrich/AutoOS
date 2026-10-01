@@ -1035,9 +1035,13 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # is stashed here and emitted only when the leg survives every other
         # filter below (a leg then skipped for tool_calls/context/etc. must
         # not claim it was kept). T1-CREDIT-FIX-8 C4: the quiet unknown line
-        # says KEPT too, so it is stashed the same way.
+        # says KEPT too, so it is stashed the same way. T1-CREDIT-FIX-9 T7:
+        # EVERY kept-claiming line is stashed the same way (no-guard,
+        # unrecognised, paid last-resort) plus the T2 month-to-date caveat
+        # for window-limited ok/warn survivors.
         pending_loud = None
         pending_unknown = None
+        pending_extra = []
 
         # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
         # reserved for finals. Held per leg, not per route, so a mixed route
@@ -1125,11 +1129,12 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                     # No entry at all: the plan never consulted the guard for
                     # this grant (a wiring defect), not "the gateway gave no
                     # figure". Kept (fail open), but named as its own gap.
+                    # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not
+                    # say 'kept'.
                     line = ("credit no guard for %s - guard map has no entry, "
                             "spend unmeasured, leg kept (fail open)"
                             % provider_id)
-                    if line not in credit_warns:
-                        credit_warns.append(line)
+                    pending_extra.append(line)
             elif guard.get("state") == "refuse":
                 # T1-CREDIT-FIX-5 M5b: `refuse` is checked BEFORE the unknown
                 # branch -- a guard that is both drained and `spend_unknown`
@@ -1184,6 +1189,12 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 # carries and however many routes were filtered to get here.
                 if line not in credit_warns:
                     credit_warns.append(line)
+                # T1-CREDIT-FIX-9 T2: a window-limited warn survivor names its
+                # month-to-date limit -- stashed, survivor-only like C4.
+                if guard.get("window_limited"):
+                    pending_extra.append(
+                        "%s credit spend measured month-to-date only "
+                        "(set credit_started)" % provider_id)
             elif guard.get("state") == "manual" and credit_warns is not None:
                 # T1-CREDIT-FIX-5 M1: a dated manual reading is not measured
                 # spend. The leg is kept, but the plan names the figure so it
@@ -1192,14 +1203,23 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                                                   guard.get("note") or "manual figure"))
                 if line not in credit_warns:
                     credit_warns.append(line)
+            elif guard.get("state") == "ok":
+                # T1-CREDIT-FIX-9 T2: a window-limited ok grant prints no
+                # warn/refuse line, so its month-to-date limit would be
+                # silent -- stash one caveat line for survivors only.
+                if guard.get("window_limited") and credit_warns is not None:
+                    pending_extra.append(
+                        "%s credit spend measured month-to-date only "
+                        "(set credit_started)" % provider_id)
             elif guard.get("state") != "ok" and credit_warns is not None:
                 # M5b: an unrecognised (or None) guard state is never silent --
                 # it is a data bug, named, while the leg stays fail-open.
+                # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not say
+                # 'kept'.
                 line = ("credit guard %s: unrecognised state %r - spend "
                         "unmeasured, leg kept (fail open)"
                         % (provider_id, guard.get("state")))
-                if line not in credit_warns:
-                    credit_warns.append(line)
+                pending_extra.append(line)
         elif registry["providers"][provider_id].get("tier") == "paid" and \
                 _paid_cap_usd(registry, provider_id) is not None:
             # T1-CREDIT-FIX-3 (D-212): paid legs are STANDING LAST-RESORT legs.
@@ -1224,10 +1244,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             elif guard.get("spend_unknown") or guard.get("state") in (
                     "unknown", "guard error"):
                 # Unmeasurable spend: leg kept (last resort), add visible warning
+                # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not say
+                # 'kept'.
                 if credit_warns is not None:
                     line = "paid spend unmeasured %s - leg kept (last resort, D-212)" % provider_id
-                    if line not in credit_warns:
-                        credit_warns.append(line)
+                    pending_extra.append(line)
             # spend_unknown / unknown / guard error -> leg KEPT (last resort)
             # No reason added means the leg passes through to legs.append()
 
@@ -1241,13 +1262,18 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             # say LOUDLY that an unknown-spend credit leg was kept.
             # T1-CREDIT-FIX-8 C4: the stashed quiet unknown line is emitted
             # here too, for the same reason -- before the loud line, as
-            # before.
+            # before. T1-CREDIT-FIX-9 T7: every other stashed kept-claiming
+            # line (and the T2 month-to-date caveat) is emitted here too.
             if (pending_unknown is not None and credit_warns is not None
                     and pending_unknown not in credit_warns):
                 credit_warns.append(pending_unknown)
             if (pending_loud is not None and credit_warns is not None
                     and pending_loud not in credit_warns):
                 credit_warns.append(pending_loud)
+            if credit_warns is not None:
+                for stashed in pending_extra:
+                    if stashed not in credit_warns:
+                        credit_warns.append(stashed)
             legs.append((provider_id, model_id))
             if notes:
                 re_probe_notes[leg] = notes
