@@ -2186,9 +2186,11 @@ def _reviewer_is_paid(entry, registry):
     Operator rule D-212/D-219: paid legs are LAST-RESORT, used only when no
     free/trial/credit leg serves. An entry is paid when it says so
     (``paid: true``) or when its leg's effective tier (``leg_tier``: the
-    model-level tier, else the provider's) is ``paid``. A leg whose tier
-    cannot be read counts as non-paid here -- the explicit flag decides,
-    and the walk's own rejection reasons still report the broken leg.
+    model-level tier, else the provider's) is ``paid``. Fail closed, the
+    same way ``_hold_back_paid_legs`` does: a leg whose tier cannot be
+    read (unresolvable, or ``leg_tier`` None) counts as paid here, so it
+    walks in the LAST pass with the last-resort reason instead of winning
+    ahead of a free entry.
     """
     if entry.get("paid"):
         return True
@@ -2196,9 +2198,10 @@ def _reviewer_is_paid(entry, registry):
     if not leg:
         return False
     try:
-        return leg_tier(leg, registry) == _PAID_TIER
+        tier = leg_tier(leg, registry)
     except (ValueError, KeyError):
-        return False
+        return True
+    return tier is None or tier == _PAID_TIER
 
 
 def reviewer_for(author, registry, client_state, now=None, risk="normal",

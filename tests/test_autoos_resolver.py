@@ -4421,6 +4421,28 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertEqual(got["reviewer"]["model"], "free-model")
         self.assertNotIn("last resort", got["reason"])
 
+    def test_reviewer_unknown_tier_entry_waits_behind_a_free_entry(self):
+        # T0-PAID-5 P2 (fail closed): a reviewer entry whose leg's tier
+        # cannot be read (its provider carries no tier) walks in the LAST
+        # pass, so a free entry listed behind it still wins.
+        providers = {"tierless-p": {"id": "tierless-p",
+                                    "trains_on_prompts": False}}
+        models = {"tierless-model": {"id": "tierless-model",
+                                     "family": "mystfam"},
+                  "author-model": {"id": "author-model",
+                                   "family": "otherfam"}}
+        reviewers = [
+            {"client": "opencode", "family": "mystfam",
+             "leg": "tierless-p/tierless-model", "model": "tierless-model"},
+            {"client": "opencode", "family": "freefam",
+             "leg": "free-p/free-model", "model": "free-model"}]
+        reg = self.fixture(policy_reviewers=reviewers,
+                           extra_models=models, extra_providers=providers)
+        got = r.reviewer_for("author-model", reg, self.state(), self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertEqual(got["reviewer"]["model"], "free-model")
+        self.assertNotIn("last resort", got["reason"])
+
     def test_reviewer_all_free_skipped_paid_allowed_as_last_resort(self):
         # T0-PAID-4 Q1: when every free entry is skipped (same family here),
         # the paid entry is chosen and the reason says it was last resort.
