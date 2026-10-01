@@ -200,8 +200,10 @@ COMMENT_KEYS = ("$comment", "comment")
 DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source",
                     # the schema's price_source asks for a DATED attribution by
                     # name ("gateway /v1/models 2026-09-28"); rule 5 must not
-                    # fight rule-for-field honesty (SB-C2 item 4)
-                    "price_source")
+                    # fight rule-for-field honesty (SB-C2 item 4). price_as_of
+                    # is the machine-readable sibling (T1-CREDIT-FIX-6): a bare
+                    # YYYY-MM-DD the validator itself checks, not prose.
+                    "price_source", "price_as_of")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -416,6 +418,45 @@ def resolve_leg(leg, registry) -> tuple:
     if model_id not in _section(registry, "models"):
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return provider_id, model_id
+
+
+def leg_price(model_id, provider_id, registry):
+    """(price_in, price_out) USD per token for one provider/model leg, or None.
+
+    T1-CREDIT-FIX-6 (D-220): a model id can be served at two prices at once --
+    ``gemini-3.8-flash`` is free through AI-Studio (model-level price 0) and
+    billed through Vertex AI (a $250 credit grant). The model-level row must
+    stay 0 (pricing it would bill the free leg), so the paid provider's price
+    lives per provider in ``models.<id>.provider_prices.<provider_id>`` and
+    this is the one place that reads it: the provider-scoped entry wins when
+    present and positive, else the model-level ``price_in``/``price_out``.
+    Anything unparseable or non-positive reads as unpriced (None) -- the
+    validator refuses such rows loudly, and the runtime degrades to the same
+    gap instead of billing a made-up number.
+    """
+    models = (registry or {}).get("models")
+    model = models.get(model_id) if isinstance(models, dict) else None
+    if not isinstance(model, dict):
+        return None
+    if provider_id:
+        scoped = model.get("provider_prices")
+        entry = scoped.get(provider_id) if isinstance(scoped, dict) else None
+        if isinstance(entry, dict):
+            try:
+                price_in = float(entry.get("price_in"))
+                price_out = float(entry.get("price_out"))
+            except (TypeError, ValueError):
+                price_in = price_out = 0.0
+            if price_in > 0.0 and price_out > 0.0:
+                return (price_in, price_out)
+    try:
+        price_in = float(model.get("price_in"))
+        price_out = float(model.get("price_out"))
+    except (TypeError, ValueError):
+        return None
+    if price_in > 0.0 and price_out > 0.0:
+        return (price_in, price_out)
+    return None
 
 
 def gateway_ref(leg, registry) -> str:
@@ -3062,6 +3103,62 @@ def _check_model_prefix(registry) -> list:
     return problems
 
 
+def _check_provider_prices(registry) -> list:
+    """models.<id>.provider_prices, when present, prices one provider's leg of
+    a model the model-level row cannot price (T1-CREDIT-FIX-6, D-220): the
+    entry is a non-empty object keyed by provider id, each value carrying a
+    positive price_in/price_out, a non-empty price_source and a real calendar
+    price_as_of date (YYYY-MM-DD). A zero price is rejected, not defaulted --
+    it is the exact state the resolver refuses the leg for.
+    """
+    problems = []
+    providers = _section(registry, "providers")
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict) or "provider_prices" not in model:
+            continue
+        label = "models.%s.provider_prices" % model_id
+        scoped = model["provider_prices"]
+        if not isinstance(scoped, dict) or not scoped:
+            problems.append("%s must be a non-empty object" % label)
+            continue
+        for provider_id, entry in sorted(scoped.items()):
+            entry_label = "%s.%s" % (label, provider_id)
+            if provider_id not in providers:
+                problems.append("%s: unknown provider %r"
+                                % (label, provider_id))
+            if not isinstance(entry, dict):
+                problems.append("%s must be an object" % entry_label)
+                continue
+            for key in ("price_in", "price_out"):
+                value = entry.get(key)
+                if isinstance(value, bool):
+                    problems.append("%s.%s must be a number > 0, got %r"
+                                    % (entry_label, key, value))
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    number = 0.0
+                if not number > 0.0:
+                    problems.append("%s.%s must be a number > 0, got %r"
+                                    % (entry_label, key, value))
+            source = entry.get("price_source")
+            if not isinstance(source, str) or not source.strip():
+                problems.append("%s.price_source must be a non-empty string"
+                                % entry_label)
+            as_of = entry.get("price_as_of")
+            if not isinstance(as_of, str) or not DATE_RE.fullmatch(as_of):
+                problems.append("%s.price_as_of must be YYYY-MM-DD, got %r"
+                                % (entry_label, as_of))
+                continue
+            try:
+                datetime.strptime(as_of, "%Y-%m-%d")
+            except ValueError:
+                problems.append("%s.price_as_of must be YYYY-MM-DD, got %r"
+                                % (entry_label, as_of))
+    return problems
+
+
 def check_registry(registry) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -3076,6 +3173,7 @@ def check_registry(registry) -> list:
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
+    problems.extend(_check_provider_prices(registry))
     problems.extend(_check_credit_guards(registry))
     problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))

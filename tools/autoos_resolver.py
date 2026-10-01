@@ -25,7 +25,7 @@ from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is o
                       _parse_until, leg_denied, leg_rule_for,
                       plan_dead_reasons, claude_budget as claude_budget_of,
                       context_label_to_tokens, gateway_legs,
-                      leg_advertised_context)
+                      leg_advertised_context, leg_price)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -851,7 +851,7 @@ def _claude_budget_removed(removed) -> bool:
                for reasons in removed.values() for reason in reasons)
 
 
-def credit_leg_priced(model_id, registry) -> bool:
+def credit_leg_priced(model_id, registry, provider_id=None) -> bool:
     """True when the registry carries a real price for `model_id`.
 
     ``0`` is not a price (brief FREEKEYS-1b item 3 / rev-freekeys1 finding 3): a row
@@ -859,11 +859,17 @@ def credit_leg_priced(model_id, registry) -> bool:
     finite grant reads as untouched money while it drains. `prices_from_registry`
     drops those rows from its table for the same reason, so the ledger and this
     filter never disagree about what counts as priced.
+
+    T1-CREDIT-FIX-6 (D-220): `provider_id` names the leg's own provider, so a
+    model id served free by one provider and billed by another (gemini-3.8-flash:
+    free through AI-Studio, billed through Vertex AI) reads the provider-scoped
+    `provider_prices` entry via `registry.leg_price`. Without it the shared row
+    decides, exactly as before -- a bare model name with no provider on file
+    stays unpriced rather than borrowing another provider's price.
     """
-    model = registry["models"].get(model_id) or {}
     try:
-        return float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
-    except (TypeError, ValueError):
+        return leg_price(model_id, provider_id, registry) is not None
+    except Exception:
         return False
 
 
@@ -1098,7 +1104,7 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # read as an untouched allowance while it drains), and a measured
         # spend at the cap refuses it.
         if registry["providers"][provider_id].get("tier") == "credit":
-            if not credit_leg_priced(model_id, registry):
+            if not credit_leg_priced(model_id, registry, provider_id):
                 reasons.append("credit leg unpriced %s" % model_id)
             guard = (credit_guards or {}).get(provider_id) or {}
             if not guard:

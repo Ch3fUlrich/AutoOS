@@ -247,6 +247,21 @@
           "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1b, 2026-09-28): where `price_in`/`price_out` came from, dated (`gateway /v1/models 2026-09-28`, `vendor pricing page <url> <date>`). A `tier: credit` provider's leg is refused by the resolver while its price is 0 or absent (an uncostable grant bills $0 and would drain invisibly), so this is the field that turns a dropped leg back on - record the source, not just the number."
         },
         "price_cache_read": { "type": "number", "minimum": 0 },
+        "provider_prices": {
+          "type": "object",
+          "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX-6, D-220, 2026-10-01): per-provider leg prices for a model id served at two prices at once (gemini-3.8-flash is free through AI-Studio and billed through Vertex AI). The shared price_in/price_out row must stay 0 so the free leg bills $0; each provider id here carries its own positive price_in/price_out with a non-empty price_source and a YYYY-MM-DD price_as_of, enforced by registry.py check.",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["price_in", "price_out", "price_source", "price_as_of"],
+            "additionalProperties": false,
+            "properties": {
+              "price_in": { "type": "number", "exclusiveMinimum": 0 },
+              "price_out": { "type": "number", "exclusiveMinimum": 0 },
+              "price_source": { "type": "string", "minLength": 1 },
+              "price_as_of": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+            }
+          }
+        },
         "paid_price_in": {
           "type": "number",
           "minimum": 0,

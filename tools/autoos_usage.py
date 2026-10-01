@@ -199,6 +199,14 @@ def prices_from_registry(registry):
     table that reads those as $0/token reports a draining $10 grant as untouched
     money. Dropping them here makes the same model count as `models_unpriced`,
     which is the gap `autoos_resolver.credit_leg_priced` refuses a credit leg on.
+
+    T1-CREDIT-FIX-6 (D-220): a model id served at two prices at once also lands
+    here once per provider spelling -- `models.<id>.provider_prices.<provider>`
+    is emitted under both `<provider>/<model>` and, when the provider declares
+    one, `<omniroute_id>/<model>` (the spelling call-log rows carry), so an
+    exact `price_for` hit bills the provider's own price. The bare model id
+    stays absent (its row is 0), so the free provider's rows keep counting as
+    unpriced instead of borrowing the paid provider's price.
     """
     prices = {}
     for model_id, model in (registry.get("models") or {}).items():
@@ -211,6 +219,25 @@ def prices_from_registry(registry):
             continue
         if price_in > 0.0 and price_out > 0.0:
             prices[model_id] = (price_in, price_out)
+        scoped = model.get("provider_prices")
+        if not isinstance(scoped, dict):
+            continue
+        for provider_id, entry in scoped.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                scoped_in = float(entry.get("price_in"))
+                scoped_out = float(entry.get("price_out"))
+            except (TypeError, ValueError):
+                continue
+            if not (scoped_in > 0.0 and scoped_out > 0.0):
+                continue
+            pair = (scoped_in, scoped_out)
+            prices["%s/%s" % (provider_id, model_id)] = pair
+            provider = (registry.get("providers") or {}).get(provider_id)
+            alias = provider.get("omniroute_id") if isinstance(provider, dict) else None
+            if alias and alias != provider_id:
+                prices["%s/%s" % (alias, model_id)] = pair
     return prices
 
 
@@ -234,7 +261,7 @@ def read_registry(path=None):
     return registry if isinstance(registry, dict) else {}
 
 
-def price_for(model, prices):
+def price_for(model, prices, provider=None, registry=None):
     """The (price_in, price_out) row for a call-log model, or None.
 
     The gateway reports its own spelling - prefixed with the connection, e.g.
@@ -242,6 +269,13 @@ def price_for(model, prices):
     id, so an exact-only lookup would price every real call as free. The exact
     string is tried first because a registry id may legitimately contain a slash
     (groq spells gpt-oss-120b as openai/gpt-oss-120b, cerebras does not).
+
+    T1-CREDIT-FIX-6 (D-220): when the table misses and the caller names the
+    row's `provider` with its `registry`, the provider-scoped
+    `provider_prices` entry is tried last -- a bare model spelling under a
+    billed provider (a vertex_ai row carrying just `gemini-3.8-flash`) prices
+    at the provider's price instead of reading as free. The table still wins
+    on any hit, so callers without a registry see exactly the old behavior.
     """
     if not model or not prices:
         return None
@@ -251,6 +285,17 @@ def price_for(model, prices):
         tail = model.rsplit("/", 1)[1]
         if tail in prices:
             return prices[tail]
+    if provider and isinstance(registry, dict):
+        models = registry.get("models") or {}
+        model_id = None
+        if model in models:
+            model_id = model
+        elif "/" in model and model.rsplit("/", 1)[1] in models:
+            model_id = model.rsplit("/", 1)[1]
+        if model_id is not None:
+            pair = resolver.leg_price(model_id, provider, registry)
+            if pair is not None:
+                return pair
     return None
 
 
@@ -584,7 +629,8 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         calls += 1
         tokens_in += tin
         tokens_out += tout
-        pair = price_for(r.get("model"), prices)
+        pair = price_for(r.get("model"), prices, provider=provider,
+                         registry=registry)
         if not pair:
             if r.get("model"):
                 unpriced.add(r.get("model"))

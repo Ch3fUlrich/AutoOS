@@ -431,7 +431,15 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "provider_prices": {
+        "vertex_ai": {
+          "price_in": 1.5e-06,
+          "price_out": 7.5e-06,
+          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (list price from 2027-01-01; intro $0.75/$3.75 through 2026-12-31 via 50% credits back)",
+          "price_as_of": "2026-10-01"
+        }
+      }
     },
     "glm-4.5-air": {
       "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",

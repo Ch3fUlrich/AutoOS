@@ -91,7 +91,7 @@ class C1UnexpectedBugIsAGuardError(unittest.TestCase):
         agent.CREDIT_GUARD_CACHE.clear()
         self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
         self.keydir = tempfile.mkdtemp(prefix="t1c2-")
-        self.addCleanup(shutil.rmtree, self.keydir, True)
+        self.addCleanup(shutil.rmtree, self.keydir, ignore_errors=True)
         with open(os.path.join(self.keydir, "manage.key"), "w") as fh:
             fh.write("x")
 
@@ -181,7 +181,7 @@ class C4PaidLastResort(unittest.TestCase):
         agent.CREDIT_GUARD_CACHE.clear()
         self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
         self.keydir = tempfile.mkdtemp(prefix="t1c2-paid-")
-        self.addCleanup(shutil.rmtree, self.keydir, True)
+        self.addCleanup(shutil.rmtree, self.keydir, ignore_errors=True)
         with open(os.path.join(self.keydir, "manage.key"), "w") as fh:
             fh.write("x")
 

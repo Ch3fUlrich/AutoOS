@@ -2777,8 +2777,16 @@ class MetaApiResolverTests(unittest.TestCase):
         self.assertIn(("meta_api", "muse-spark-1.3-contributor"), legs)
         head = [leg for leg in legs if leg[0] == "meta_api"][0]
         self.assertGreater(legs.index(head), 0, legs)
-        for leg in legs[:legs.index(head)]:
-            self.assertEqual(self.registry["providers"][leg[0]]["tier"], "free", leg)
+        # T1-CREDIT-FIX-6 (D-220): the vertex leg of gemini-3.8-flash is
+        # priced per provider now, so it correctly survives ahead of the paid
+        # leg -- the band order is free -> credit -> paid, and the old
+        # free-only assertion held only while the leg was wrongly skipped as
+        # unpriced.
+        band = {"free": 0, "credit": 1, "paid": 2, "subscription": 2}
+        ahead = [band[self.registry["providers"][leg[0]]["tier"]]
+                 for leg in legs[:legs.index(head)]]
+        self.assertEqual(ahead, sorted(ahead), legs)
+        self.assertTrue(all(rank < band["paid"] for rank in ahead), legs)
         for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             paid, _s, _n = r.usable_legs(
                 self.registry["routes"][paid_route], card,
