@@ -71,6 +71,9 @@ table (verified independently by the reviewer's own `--no-open --port 20128` swe
   backup, operator `THRESHOLD=7` kept, second run skips.
 - `apply.ps1 -DryRun` → `Gateway OK on http://127.0.0.1:20128`, EXIT=0, no spawn.
 - ScriptAnalyzer: no new finding vs base (only the pre-existing `Write-Host` etc. baseline).
+- Full Windows suite: **not completed** on this host (30-minute background timeout, 2525
+  lines); its partial failures were four cases outside this lane's surface
+  (registry / combos / agent-harness). The focused cases above are the task's required gate.
 - No gateway restart (forbidden). `chat_admission_busy` / `Rate limit exceeded` observed: 0;
   backoffs: 0. Lane death: never.
 

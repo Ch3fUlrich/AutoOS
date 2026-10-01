@@ -327,6 +327,18 @@ pre-existing `STORAGE_ENCRYPTION_KEY` alone, and a second run prints
 `tests/linux/34-ai-services.sh` case (`--filter 'register-autostart'` → `passed 11 failed 0`,
 which includes the pre-existing REQUIRE_API_KEY and same-second-backup cases).
 
+### 6.10 Full Windows suite (not completed on this host)
+
+The full `pwsh tests\run-tests.ps1` exceeded the 30-minute background timeout after 2525
+output lines (no summary line reached). Its partial output carried four failures, all
+**outside this lane's changed surface** (registry / combos / agent-harness):
+`registry: no generated file drifts`, `autoos-agent spawner unit tests: card routing,
+clients, depth`, `agent harness: the generator's unit tests pass`,
+`combos.json is valid, named and provider/model shaped`. This lane's diff touches only
+launcher scripts, their tests and docs; the lane's own cases pass under the focused filters
+above (and its case runs near the end of the suite, past the cut). Recorded honestly rather
+than claimed green.
+
 ---
 
 ## 7. Review (item 5)
