@@ -4632,14 +4632,19 @@ class CreditGuardLegFilterTests(unittest.TestCase):
         kept, skipped, _notes = self.legs(guards, warns)
         self.assertIn(("morph", "morph-priced"), kept)
         self.assertNotIn("morph/morph-priced", skipped)
-        self.assertEqual(warns, ["credit warn morph $8.00/$10.00"])
+        self.assertEqual(warns, ["credit warn morph $8.00/$10.00",
+                                "morph credit spend measured month-to-date only "
+                                "(set credit_started)"])
 
     def test_below_the_warn_line_nothing_is_said_and_nothing_is_dropped(self):
         warns = []
         guards = self.guards(1_000_000, 1_000_000)  # $2 of $10
         kept, _skipped, _notes = self.legs(guards, warns)
         self.assertIn(("morph", "morph-priced"), kept)
-        self.assertEqual(warns, [])
+        # T1-CREDIT-FIX-9 T2: a window-limited ok grant still prints its
+        # month-to-date caveat, so the plan never reads windowed spend as a total.
+        self.assertEqual(warns, ["morph credit spend measured month-to-date only "
+                                "(set credit_started)"])
 
     # --- fail closed when there is no price on file -------------------------
 
