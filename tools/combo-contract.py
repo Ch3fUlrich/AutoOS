@@ -38,6 +38,7 @@ Stdlib only.
 from __future__ import annotations
 import json
 import pathlib
+import subprocess
 import sys
 import urllib.request
 
@@ -172,10 +173,21 @@ def main():
     live_note = "SKIP (no key/gateway)"
     try:
         keys_path = ROOT / "configuration" / "api-keys.yml"
-        # main checkout key fallback (read-only, never printed)
-        main_keys = pathlib.Path(r"C:\Users\mauls\Documents\Code\AutoOS\configuration\api-keys.yml")
+        # Main-checkout key fallback (read-only, never printed): resolve the
+        # shared git dir and take its parent - portable (no user path), and
+        # exact even when this script runs from a linked worktree.
+        main_keys = None
+        try:
+            common = subprocess.run(
+                ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                cwd=ROOT, capture_output=True, text=True, timeout=10, check=True,
+            ).stdout.strip()
+            if common:
+                main_keys = pathlib.Path(common).resolve().parent / "configuration" / "api-keys.yml"
+        except (OSError, subprocess.SubprocessError):
+            pass
         key = None
-        for kp in (keys_path, main_keys):
+        for kp in (p for p in (keys_path, main_keys) if p is not None):
             try:
                 for line in kp.read_text(encoding="utf-8", errors="replace").splitlines():
                     t = line.strip()

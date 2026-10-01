@@ -1,7 +1,7 @@
 # Lane Tier Order (TORDER) — 2026-10-01 — evidence
 
 Branch `L1-backlog/ws-tier-order-20261001`, base `e3436a4d`.
-Worktree `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-tier-order` ONLY.
+Worktree `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-tier-order` ONLY.
 No live apply (`-DryRun` only). Every claim = command + exact output (below).
 
 Reviewer nonce (reviewers must echo): **TORDER-NONCE-C493B548**

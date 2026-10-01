@@ -1,7 +1,7 @@
 # Lane GeminiRestore — cancel the gemini exclusion, restore pre-freewire heads (2026-10-01)
 
 **Lane:** `L1-backlog/ws-gemini-restore-20260930`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore`
 **Base:** `ba0c707f` (combos-pins tip: freewire + nebius removal + T1SECOND + MAINPIN 24a98228 pins)
 **Writer:** gemini-restore (public-only lane: repo/config state only, no private data, no key values)
 **Date:** 2026-10-01
@@ -17,10 +17,10 @@
 
 ## 0. Cwd guard (first action, quoted)
 
-- `git worktree add -b L1-backlog/ws-gemini-restore-20260930 C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore ba0c707f` → `HEAD is now at ba0c707f doc(handoff): MAINPIN evidence + DONE note (combos.json carries main 24a98228 pins)` (exit 0)
-- `git rev-parse --show-toplevel` (from the new worktree) → `C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-geminirestore`
+- `git worktree add -b L1-backlog/ws-gemini-restore-20260930 C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore ba0c707f` → `HEAD is now at ba0c707f doc(handoff): MAINPIN evidence + DONE note (combos.json carries main 24a98228 pins)` (exit 0)
+- `git rev-parse --show-toplevel` (from the new worktree) → `C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-geminirestore`
 - `git rev-parse HEAD` → `ba0c707f1255d6c551fbb1a07722171e6fb534e4`
-- Never worked or committed in `C:\Users\mauls\Documents\Code\AutoOS` (main). No push/merge/rebase/checkout used.
+- Never worked or committed in `C:\Users\<user>\Documents\Code\AutoOS` (main). No push/merge/rebase/checkout used.
 
 ## 1. Pre-freewire gemini positions (source: `git show a975d48:configuration/omniroute/combos.json`)
 

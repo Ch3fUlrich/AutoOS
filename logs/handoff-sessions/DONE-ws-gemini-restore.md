@@ -1,7 +1,7 @@
 # DONE — L1-backlog/ws-gemini-restore-20260930 (gemini exclusion cancelled, heads restored)
 
 **Branch:** `L1-backlog/ws-gemini-restore-20260930`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore` (proved: `git rev-parse --show-toplevel` = that path)
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-geminirestore` (proved: `git rev-parse --show-toplevel` = that path)
 **Base:** `ba0c707f` (combos-pins tip + main `24a98228` pins)
 **Date:** 2026-10-01
 **Evidence:** `docs/handoff/2026-10-01-laneGeminiRestore.md` (nonce `GEMRESTORE-NONCE-4Xk9Qm2Z`, position table, decisions, quoted verification, registry flags, wording spots, reviews)
