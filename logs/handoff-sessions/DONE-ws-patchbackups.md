@@ -13,7 +13,7 @@ vertex patch sets, sourced from the published `omniroute@3.8.50` npm tarball
 content was modified; no gateway restarted; no other worktree touched.
 
 Backups: `<file>.autoos-backup-pristine-3.8.50-20260930-215549` next to each live file under
-`C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute`.
+`C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute`.
 
 All hashes/find-strings were taken by **streaming members straight out of the .tgz**
 (`tar -xOf` → in-memory SHA256), because the host deleted files from Temp extractions
