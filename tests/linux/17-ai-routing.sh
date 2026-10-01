@@ -2411,8 +2411,10 @@ def litellm_model(ref):
     prov, model = ref.split("/", 1)
     prov = namespace.get(prov, prov)
     return "%s/%s" % (transport.get(prov, prov), model)
-known_drops = {"agy/gemini-3.7-flash-medium",
-               "agy/claude-opus-4-6-thinking"}
+# AGYCANON 2026-09-30: renders emit the canonical antigravity/* ids again (the
+# live catalog no longer lists agy/*), so the drops are spelled canonically.
+known_drops = {"antigravity/gemini-3.7-flash-medium",
+               "antigravity/claude-opus-4-6-thinking"}
 text = io.open("configuration/litellm/config.yaml", encoding="utf-8").read()
 problems = []
 free_only = sorted(n for n in combos if n.endswith("-free-only"))
@@ -2453,8 +2455,8 @@ fi
 if it "opencode repo config pins omniroute with litellm fallback"; then
     report="$(python3 - <<'PY'
 import json, re, io
-text = io.open("opencode.jsonc", encoding="utf-8").read()
-text = re.sub(r"(?m)^\s*//.*$", "", text)
+raw = io.open("opencode.jsonc", encoding="utf-8").read()
+text = re.sub(r"(?m)^\s*//.*$", "", raw)
 oc = json.loads(text)
 h = json.load(io.open("catalog/agent-harness.json", encoding="utf-8"))
 ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
@@ -2462,10 +2464,23 @@ p = oc["providers"]
 # The omniroute model list is the managed block rendered from
 # catalog/ide-models.json, so the expectation is derived from that file: which
 # tiers opencode may see follows provider servability and needs no re-pin when
-# a provider flips (lesson PROVPIN 2026-09-27).
+# a provider flips (lesson PROVPIN 2026-09-27). The models map ALSO carries
+# hand entries (direct-provider passthrough, kept outside the AUTOOS-MANAGED
+# region - the file's own comment and tools/sync-ide-models.py's docstring say
+# so), so only the generated region is compared: hand entries are deliberate
+# repo content, not drift.
 offered = sorted(m["id"] for m in ide
                  if "opencode" in ((m.get("surfaces") or {}).get("omniroute") or []))
-got = sorted(p["omniroute"]["models"].keys())
+lines = raw.splitlines()
+start = end = None
+for i, line in enumerate(lines):
+    if start is None and "AUTOOS-MANAGED-START omniroute" in line:
+        start = i
+    elif start is not None and "AUTOOS-MANAGED-END omniroute" in line:
+        end = i
+        break
+region = "{" + "\n".join(lines[start + 1:end]) + "}"
+got = sorted(json.loads(re.sub(r"(?m)^\s*//.*$", "", region)).keys())
 pins = sorted(
     "pin-ok" if h["mcp_servers"][name]["package"] in " ".join(spec.get("command", []))
     else "MISSING:" + name
@@ -2506,6 +2521,41 @@ if it "start-stack.sh is valid bash and names the client key"; then
     grep -q 'host.docker.internal' configuration/start-stack.sh || ok=0
     grep -q 'opencode-serve' configuration/start-stack.sh || ok=0
     if (( ok )); then pass; else fail "start script is missing wiring"; fi
+fi
+
+if it "start-stack.sh and apply.sh default the repeated-429 rotation policy, respect-set"; then
+    # The gateway reads the rotation and provider-breaker policy from its own
+    # process env at startup (open-sse/services/rotationConfig.ts:84-110;
+    # provider-breaker family open-sse/config/constants.ts:251-277), and only a
+    # spawned launch inherits them. Each site must default every knob without
+    # clobbering an operator value, exactly once (idempotent - a second run
+    # cannot add a duplicate line).
+    ok=1
+    declare -A policy=(
+        [OMNIROUTE_ROTATION_ENABLED]=true
+        [OMNIROUTE_ROTATE_ON_429]=true
+        [OMNIROUTE_ROTATE_429_THRESHOLD]=3
+        [OMNIROUTE_ROTATE_429_WINDOW_SECONDS]=120
+        [OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS]=300
+        [OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS]=1800000
+    )
+    for f in configuration/start-stack.sh configuration/omniroute/apply.sh \
+             configuration/autostart/Start-AutoOSStack.sh; do
+        for name in "${!policy[@]}"; do
+            want="export $name=\"\${$name:-${policy[$name]}}\""
+            n="$(grep -Fc "$want" "$f" || true)"
+            [[ "$n" == 1 ]] || { ok=0; echo "$f: $name default appears $n times, want 1" >&2; }
+        done
+    done
+    # The systemd unit (autoos-omniroute.service) takes its env from
+    # ~/.omniroute/.env, which register-autostart.sh writes; it must name every
+    # policy key (and it is the surface for the unit, not a unit Environment=).
+    for name in "${!policy[@]}"; do
+        want="$name=${policy[$name]}"
+        grep -qF "$want" configuration/autostart/register-autostart.sh \
+            || { ok=0; echo "register-autostart.sh does not default $want" >&2; }
+    done
+    if (( ok )); then pass; else fail "429-rotation policy defaults regressed"; fi
 fi
 
 if it "openhands launch is detached, probed and stale-settings safe"; then
@@ -2579,5 +2629,9 @@ if it "no committed secrets in router files"; then    # Report file:line only - 
         configuration/openhands/config.toml 2>/dev/null | cut -d: -f1,2 || true)"
     # .env.example is the sanctioned placeholder pattern; only real-looking keys fail.
     if [[ -z "$hits" ]]; then pass; else fail "credential-shaped value at: $hits"; fi
+fi
+
+if it "combo-contract gate passes (TORDER fail-closed)"; then
+    out="$(python3 tools/combo-contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 

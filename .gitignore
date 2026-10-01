@@ -16,6 +16,12 @@ scripts/public-scrub/patterns.private.txt
 # otherwise reach into infra/mcp-servers/.
 # backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
 configuration/api-keys.yml.*
+# GCP Vertex service-account JSONs (real credentials). The file the operator
+# drops in to authenticate `vertex` is a secret even though its name does not
+# read like one: on 2026-10-01 it sat in the tree untracked-but-UNIGNORED,
+# one `git add -A` away from a public commit.
+configuration/vertex-credentials-*.json
+configuration/*-credentials*.json
 
 # ─── Downloaded installers and vendor binaries ──────────────────────────────
 installs/
@@ -52,6 +58,12 @@ autoos.config.json.*.tmp
 .serena/
 graphify-out/
 .playwright-mcp/
+# ORCH-A1 launch profiles: the tracked `<role>.settings.example.json`
+# templates render to git-ignored runtime `<role>.settings.json` files at
+# install / first launch (spec Q3). `*.settings.example.json` does not match
+# `*.settings.json`, so one line ignores the runtime without touching the
+# templates (which `!*.example.json` above already re-includes).
+configuration/launch-profiles/*.settings.json
 # CAO run state: verdicts, quota records, captured agent output, phase leases.
 # Untracked is not enough — the next `git add -A` after a run sweeps it in.
 output/cao/
@@ -86,3 +98,10 @@ desktop.ini
 # pipeline and not reviewed as installers. Keep local until one is promoted
 # into the catalog with tests.
 additional_Features/
+
+# Node/npm scratch (omniroute patch verification — not part of AutoOS)
+node_modules/
+/package.json
+/package-lock.json
+/tools/test-reason-fix.mjs
+/tools/start-isolated-gateway.ps1

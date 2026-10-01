@@ -434,7 +434,7 @@ class ReadFileTests(unittest.TestCase):
 
     def write(self, text, name="card.md"):
         path = os.path.join(self.tmp, name)
-        with io.open(path, "w", encoding="utf-8") as fh:
+        with io.open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return path
 
@@ -480,7 +480,7 @@ class CliTests(unittest.TestCase):
 
     def write(self, text, name="card.md"):
         path = os.path.join(self.tmp, name)
-        with io.open(path, "w", encoding="utf-8") as fh:
+        with io.open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return path
 

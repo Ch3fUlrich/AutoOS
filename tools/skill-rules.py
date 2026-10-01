@@ -5,10 +5,12 @@ Usage:
   skill-rules.py check [FILE...]
   skill-rules.py list [--topic TOPIC] [FILE...]
 
-A rule is one line: `R-<topic>-<nn>: <imperative>. (why: <=12 words; source: <test or
-measurement>)` (spec 2026-09-25-routing-v2 section 8.1, D20). check exits 1 on a duplicate
-id, a missing or empty source, a why over 12 words, a line over 200 characters, a
-near-duplicate imperative (difflib ratio >= 0.85), a missing file or a file without rules.
+A rule starts on one line: `R-<topic>-<nn>: <imperative>. (why: <=12 words; source: <test
+or measurement>)` (spec 2026-09-25-routing-v2 section 8.1, D20); a rule that grew past 200
+characters wraps onto continuation lines indented two spaces (REDCLEAR 2026-09-30) and the
+checks run on the joined rule. check exits 1 on a duplicate id, a missing or empty source, a
+why over 12 words, a physical line over 200 characters, a near-duplicate imperative
+(difflib ratio >= 0.85), a missing file or a file without rules.
 """
 import argparse
 import sys
@@ -20,6 +22,34 @@ RULE_REGEX = re.compile(r"^(?:-\s+)?(R-[a-z]+-\d{2}):\s+(.+)$")
 # Greedy why, source without ";": the split is at the LAST "; source:".
 TAIL_REGEX = re.compile(r"\s*\(why:\s*(.+)\s*;\s*source:\s*([^;]*?)\s*\)\s*$")
 MALFORMED_REGEX = re.compile(r"^(?:-\s+)?(R-\S*?):")
+
+# A long rule wraps: continuation lines are indented two spaces and belong to the
+# rule above (REDCLEAR 2026-09-30 - the measured rules grew past one 200-char
+# line). The semantic checks run on the joined rule; the 200-char cap stays and
+# applies to every physical line of it.
+CONTINUATION_INDENT = "  "
+
+
+def iter_rule_blocks(lines):
+    """Yield (first line number, physical lines) for every rule in `lines`."""
+    block = None
+    for lineno, line in enumerate(lines, start=1):
+        if block and line.startswith(CONTINUATION_INDENT) and line.strip():
+            block[1].append(line)
+            continue
+        if block:
+            yield block
+            block = None
+        if RULE_REGEX.match(line):
+            block = (lineno, [line])
+    if block:
+        yield block
+
+
+def rule_text(lines):
+    """The logical rule: its physical lines joined into one line."""
+    return " ".join(part.strip() for part in lines)
+
 
 def parse_rule(line):
     m = RULE_REGEX.match(line)
@@ -48,38 +78,42 @@ def check_files(files):
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
         file_rule_count = 0
-        for idx, line in enumerate(lines, start=1):
-            parsed = parse_rule(line)
-            if not parsed:
-                bad = MALFORMED_REGEX.match(line)
-                if bad:
-                    problems.append((f, idx, bad.group(1), "malformed id (want R-<topic>-<nn>)"))
-                continue
-            rule_id, imp, why, source = parsed
+        consumed = set()
+        for lineno, parts in iter_rule_blocks(lines):
+            consumed.update(range(lineno, lineno + len(parts)))
+            rule_id, imp, why, source = parse_rule(rule_text(parts))
             file_rule_count += 1
             total_rules += 1
-            rule_entries.append((f, idx, rule_id, imp))
+            rule_entries.append((f, lineno, rule_id, imp))
             # duplicate id detection
             if rule_id in id_locations:
-                problems.append((f, idx, rule_id, "duplicate id"))
+                problems.append((f, lineno, rule_id, "duplicate id"))
             else:
-                id_locations[rule_id] = (f, idx)
+                id_locations[rule_id] = (f, lineno)
             # missing tail
             if why is None or source is None:
-                problems.append((f, idx, rule_id, "missing tail"))
+                problems.append((f, lineno, rule_id, "missing tail"))
                 continue
             if not imp.strip():
-                problems.append((f, idx, rule_id, "empty imperative"))
+                problems.append((f, lineno, rule_id, "empty imperative"))
             # empty source
             if source.strip() == "":
-                problems.append((f, idx, rule_id, "empty source"))
+                problems.append((f, lineno, rule_id, "empty source"))
             # why too long (>12 words)
             if len(why.split()) > 12:
-                problems.append((f, idx, rule_id, "why too long"))
-            # line too long (>200 chars without leading '- ')
-            stripped = line.lstrip('- ').strip('\n')
-            if len(stripped) > 200:
-                problems.append((f, idx, rule_id, "line too long"))
+                problems.append((f, lineno, rule_id, "why too long"))
+            # line too long (>200 chars without leading '- '): every physical
+            # line of the rule, wrapped continuations included
+            for offset, part in enumerate(parts):
+                stripped = part.lstrip('- ').strip('\n')
+                if len(stripped) > 200:
+                    problems.append((f, lineno + offset, rule_id, "line too long"))
+        for lineno, line in enumerate(lines, start=1):
+            if lineno in consumed or parse_rule(line):
+                continue
+            bad = MALFORMED_REGEX.match(line)
+            if bad:
+                problems.append((f, lineno, bad.group(1), "malformed id (want R-<topic>-<nn>)"))
         if file_rule_count == 0:
             problems.append((f, 0, "", "no rules found"))
     # near-duplicate detection
@@ -99,8 +133,9 @@ def list_rules(files, topic=None):
         if not path.is_file():
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
-        for line in lines:
-            parsed = parse_rule(line)
+        for _lineno, parts in iter_rule_blocks(lines):
+            text = rule_text(parts)
+            parsed = parse_rule(text)
             if not parsed:
                 continue
             rule_id, imp, why, source = parsed
@@ -109,7 +144,7 @@ def list_rules(files, topic=None):
                 m = re.match(r"R-([a-z]+)-\d{2}", rule_id)
                 if not m or m.group(1) != topic:
                     continue
-            out_lines.append(line)
+            out_lines.append(text)
     return out_lines
 
 # R-worker-11 (D-146, SB-C item 2; tightened by SB-C2 item 2): who is asking

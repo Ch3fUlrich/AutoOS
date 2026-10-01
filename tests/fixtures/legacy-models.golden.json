@@ -20,7 +20,7 @@
     },
     {
       "cache_read_price": 6e-09,
-      "context": 131072,
+      "context": 1048576,
       "direct": {
         "base_url": "https://api.deepseek.com",
         "model": "deepseek/deepseek-flash",
@@ -30,7 +30,7 @@
       "id": "deepseek-flash",
       "input_price": 3e-07,
       "name": "deepseek-flash",
-      "output": 32768,
+      "output": 393216,
       "output_price": 1.2e-06,
       "reasoning": true
     },

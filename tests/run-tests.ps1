@@ -310,6 +310,7 @@ Test-Case 'registry: no generated file drifts' {
     # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
     # only semantically (regenerate: python3 tools/registry.py render ide
     # --out catalog/ide-models.json).
+    # TORDER 2026-10-01: combo-contract gate (fail-closed) runs here too.
     if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
@@ -317,6 +318,8 @@ Test-Case 'registry: no generated file drifts' {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
             Assert-True ($rc -eq 0) "render $t drift: $out"
         }
+        $out = & python3 (Join-Path $Root 'tools\combo-contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
@@ -2393,21 +2396,43 @@ function Start-AutoOSTestHttpServer {
     # inside a background job: the first version launched python via
     # Start-Process and never got a port back on the windows-latest CI
     # runner. No python, no HttpListener URL ACL, nothing to install.
-    # Returns @{ Job; Port }; the caller must Stop-AutoOSTestHttpServer it.
-    param([Parameter(Mandatory)][string]$Directory)
+    # Returns @{ Job; Port; StopFile }; the caller must Stop-AutoOSTestHttpServer it.
+    # -Hang makes every accepted request stall forever: the connection is
+    # accepted and the request read, then nothing is ever sent until teardown.
+    # That is the stalled-mirror shape the download timeout exists for.
+    param([Parameter(Mandatory)][string]$Directory, [switch]$Hang)
+    # Read the switch into a plain boolean in THIS scope: the job below reaches
+    # it with $using:, so the parameter is genuinely used here even though the
+    # job scriptblock is where the value is consumed.
+    $hangRequested = [bool]$Hang
     $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
+    $stopFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
     $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
         param($dir, $portFile)
         $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
         $listener.Start()
         [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
-        while ($true) {
+        # AcceptTcpClient() blocks in native code and is not interruptible, so
+        # Remove-Job -Force on a job parked in it waits the full 120 s job
+        # stop/close timeout (found 2026-10-01). Poll a stop-file instead and
+        # leave the accept loop cooperatively: Stop-AutoOSTestHttpServer writes
+        # it, the job exits on its own, and Remove-Job returns at once.
+        while (-not (Test-Path -LiteralPath $using:stopFile)) {
+            if (-not $listener.Pending()) { Start-Sleep -Milliseconds 25; continue }
             $client = $listener.AcceptTcpClient()
             try {
                 $stream = $client.GetStream()
                 $reader = [IO.StreamReader]::new($stream)
                 $request = $reader.ReadLine()
                 while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                if ($using:hangRequested) {
+                    # Hold the socket open, answer nothing, and leave only when
+                    # teardown writes the stop-file (the cooperative stop the
+                    # 2026-10-01 harness fix requires: an uninterruptible job
+                    # makes Remove-Job -Force wait the full 120 s).
+                    while (-not (Test-Path -LiteralPath $using:stopFile)) { Start-Sleep -Milliseconds 50 }
+                    continue
+                }
                 $status = '404 Not Found'; $body = [byte[]]::new(0)
                 if ($request -match '^GET\s+(\S+)') {
                     $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
@@ -2428,6 +2453,7 @@ function Start-AutoOSTestHttpServer {
                 $client.Close()
             }
         }
+        $listener.Stop()
     }
     $port = $null
     for ($i = 0; $i -lt 100; $i++) {
@@ -2440,15 +2466,118 @@ function Start-AutoOSTestHttpServer {
     Remove-Item -LiteralPath $portFile -Force -ErrorAction SilentlyContinue
     if (-not $port) {
         $why = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+        # Release the job the same cooperative way, or this error path pays the
+        # same 120 s stop timeout it is reporting on.
+        Set-Content -LiteralPath $stopFile -Value 'stop' -ErrorAction SilentlyContinue
         Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
         throw "test http server did not report a port (job state $($job.State)) $why"
     }
-    @{ Job = $job; Port = $port }
+    @{ Job = $job; Port = $port; StopFile = $stopFile }
 }
 
 function Stop-AutoOSTestHttpServer {
     param($Server)
-    if ($Server -and $Server.Job) { Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue }
+    if ($Server -and $Server.Job) {
+        # Ask the job to leave its accept loop before forcing it. Without this
+        # it is parked in AcceptTcpClient() (native, uninterruptible) and
+        # Remove-Job -Force waits the full 120 s job stop/close timeout. The
+        # written stop-file makes the job exit on its own, so removal is
+        # immediate (measured 0.02 s, 2026-10-01).
+        if ($Server.StopFile) { Set-Content -LiteralPath $Server.StopFile -Value 'stop' -ErrorAction SilentlyContinue }
+        Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue
+        if ($Server.StopFile) { Remove-Item -LiteralPath $Server.StopFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'test http server: Stop-AutoOSTestHttpServer returns promptly, never the 120 s job stop timeout' {
+    # Regression for the harness teardown bug (2026-10-01): the fixture used to
+    # block in AcceptTcpClient(), which Remove-Job -Force cannot interrupt, so
+    # every one of the 13 server-starting cases stalled ~120 s on teardown.
+    # 15 s is a generous bound: the bug is 120 s, the fix is well under 1 s.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        [IO.File]::WriteAllText((Join-Path $tmp 'ping.txt'), 'pong')
+        # One real request proves the poll loop actually serves, not just exits.
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/ping.txt" -UseBasicParsing -TimeoutSec 5
+        # The fixture sends no Content-Type, so .Content is a byte[] not text.
+        $served = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
+        Assert-True ($served -eq 'pong') "the poll loop did not serve a request: [$served]"
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Stop-AutoOSTestHttpServer $srv
+        $sw.Stop()
+        $srv = $null   # already stopped; the finally must not stop it twice
+        Assert-True ($sw.Elapsed.TotalSeconds -lt 15) ("teardown took {0:N1}s, expected < 15s" -f $sw.Elapsed.TotalSeconds)
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a stalled endpoint fails within the wall-clock bound instead of hanging (timeout)' {
+    # 2026-10-01 defect, failing-first: Get-AutoOSRawDownload shelled out to
+    # curl / Invoke-WebRequest with no time bound, so a mirror that accepted
+    # the connection and then sent nothing pinned the provision forever. The
+    # bound is injectable through AUTOOS_DOWNLOAD_TIMEOUT_SEC exactly so this
+    # is provable without waiting an hour: with a 2 s ceiling the fetch must
+    # fail fast, with a transport-failure message, and leave no .part behind.
+    # Against the pre-fix code this test has no bound to honour and hangs.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_stall_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp -Hang
+    $prev = $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC
+    $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = '2'
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/stall.bin" -Destination $out | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        $sw.Stop()
+        # Two-sided window: >= 1 s proves the stall actually happened (a
+        # connection-refused or DNS failure returns in well under a second and
+        # would otherwise satisfy the assertion without exercising the bound);
+        # < 30 s is generous for the injected 2 s bound plus curl's bounded
+        # retries, where the unfixed behaviour is unbounded.
+        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -ge 1 -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
+            ("threw={0} elapsed={1:N1}s part={2} msg=[{3}]" -f $threw, $sw.Elapsed.TotalSeconds, (Test-Path -LiteralPath "$out.part"), $msg)
+    } finally {
+        if ($null -eq $prev) { Remove-Item Env:\AUTOOS_DOWNLOAD_TIMEOUT_SEC -ErrorAction SilentlyContinue } else { $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = $prev }
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'every production network fetch in lib\windows carries a wall-clock bound' {
+    # The same 2026-10-01 defect class, enforced structurally so a NEW unbounded
+    # call site fails here instead of hanging a real provision: every shipped
+    # Invoke-WebRequest/Invoke-RestMethod invocation needs -TimeoutSec, and every
+    # direct curl invocation needs --max-time. Comment lines are skipped; only
+    # invocation lines are judged.
+    #
+    # It is a tripwire, not a proof: it matches '-Uri' on the same line as the
+    # verb, so a splatted, aliased (iwr/irm) or line-continued invocation, or a
+    # bare 'curl'/'--output', would slip past. That is the deliberate trade for
+    # a zero-dependency, readable guard; the behavioural stall test above is
+    # what actually exercises the bound.
+    $dir = Join-Path $Root 'lib\windows'
+    $bad = @()
+    foreach ($file in Get-ChildItem -Path $dir -Filter '*.psm1') {
+        $n = 0
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            $n++
+            $code = $line.Trim()
+            if ($code.StartsWith('#')) { continue }
+            if ($code -match 'Invoke-WebRequest\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-WebRequest without -TimeoutSec"
+            } elseif ($code -match 'Invoke-RestMethod\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-RestMethod without -TimeoutSec"
+            } elseif ($code -match '(&\s*\$curl\.Source|curl\.exe).*?-o\s' -and $code -notmatch '--max-time') {
+                $bad += "$($file.Name):$n curl without --max-time"
+            }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ($bad -join '; ')
 }
 
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
@@ -7175,7 +7304,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
         Assert-Equal $t1.Count 1
         Assert-Equal $t1[0].max_tokens 128000
-        Assert-Equal $t1[0].reasoning_effort $null
+        Assert-Equal ($null -eq $t1[0].PSObject.Properties['reasoning_effort']) $true 'xhigh must be dropped for gemini, not forwarded'
         $bypass = $s.agent.profiles.bypass
         Assert-Equal $bypass.name 'bypass'
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
@@ -7785,14 +7914,27 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     # so the expectation is derived from that file: which tiers opencode may see
     # follows provider servability and needs no re-pin when a provider flips
     # (lesson PROVPIN 2026-09-27). The default model and gateway URL above stay
-    # pinned - human-chosen client settings.
+    # pinned - human-chosen client settings. The models map ALSO carries hand
+    # entries (direct-provider passthrough, kept outside the AUTOOS-MANAGED
+    # region - the file's own comment and tools/sync-ide-models.py's docstring
+    # say so), so this compares the generated region only; hand entries are
+    # deliberate repo content, not drift.
     $ideModels = @(Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
     $offered = @($ideModels | Where-Object {
         $surf = $_.PSObject.Properties['surfaces']
         $omni = if ($surf) { $surf.Value.PSObject.Properties['omniroute'] } else { $null }
         [bool]($omni -and (@($omni.Value) -contains 'opencode'))
     } | ForEach-Object { $_.id } | Sort-Object) -join ','
-    Assert-Equal (@($oc.providers.omniroute.models.PSObject.Properties.Name | Sort-Object) -join ',') $offered
+    $lines = $raw -split "`r?`n"
+    $managedStart = -1; $managedEnd = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($managedStart -lt 0 -and $lines[$i] -match 'AUTOOS-MANAGED-START omniroute') { $managedStart = $i }
+        elseif ($managedStart -ge 0 -and $lines[$i] -match 'AUTOOS-MANAGED-END omniroute') { $managedEnd = $i; break }
+    }
+    Assert-True ($managedStart -ge 0 -and $managedEnd -gt $managedStart) 'the omniroute managed region is missing'
+    $managedText = '{' + (($lines[($managedStart + 1)..($managedEnd - 1)]) -join "`n") + '}'
+    $managed = $managedText -replace '(?m)^\s*//.*$', '' | ConvertFrom-Json
+    Assert-Equal (@($managed.PSObject.Properties.Name | Sort-Object) -join ',') $offered
     Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
     Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
     # Every repo MCP command carries the harness pin: a floating spec changes
@@ -9131,23 +9273,32 @@ print('%s|%s|%s' % (
         Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
     }
     $contexts = @{
-        # PROVFIX3 finding 1: a combo may only promise what its smallest
-        # servable leg takes. Both t1 free-bearing tiers fall through to gemini
-        # (131,072), so they render 128k; the two 1M-only tiers keep 1M.
-        't1-orchestrator' = '128k'
-        't1-orchestrator-free-only' = '128k'
+        # TORDER 2026-10-01 (D-TORDER-1b, CTXFIX, MAINPIN): t1 1M-only (>=600k,
+        # all 1048576, renders 1M); gemini 1M (live 1048576); opus/t2-orchestrator
+        # 1M (antigravity opus 1048576, CTXFIX); t2/t3-clean 1M (deepseek 1M,
+        # CTXFIX); t2/t3 full + free-only 128k clamp (sub-1M allowed, do not raise).
+        't1-orchestrator' = '1M'
+        't1-orchestrator-free-only' = '1M'
         't1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
-        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '200k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
-        'gemini-3.8-flash' = '128k'; 'opus-4-6' = '200k'
-        # DSBACK 2026-09-28: servable again (routes.deepseek-v4.1-flash declares 128k).
-        'deepseek-v4.1-flash' = '128k'
+        't2-worker-clean' = '1M'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '1M'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
+        # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
+        # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
+        # out, so the 128k clamp was stale data (models.deepseek-flash).
+        'deepseek-v4.1-flash' = '1M'
+        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
+        'or-nemotron-3-super-free' = '256k'; 'or-qwen3.8-27b-free' = '256k'
+        'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
+        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'; 'ovh-qwen3-coder-30b' = '128k'
+        'vertex-gemini-3.8-flash' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
         foreach ($m in $c.models) {
-            Assert-True ($m -match '^[A-Za-z0-9@._/-]+$') "$($c.name): bad ref '$m'"
+            Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
         Assert-Equal $c.context $contexts[$c.name]
     }
@@ -9181,7 +9332,9 @@ print('%s|%s|%s' % (
     }
     # *-free-only = zero paid/keyed legs: only free pools may appear (the
     # zen contributor-free promo counts as free; other opencode-zen legs bill).
-    $paidRe = 'cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
+    # TORDER-OR: openrouter :free ids are $0 free (model tier override) and ARE
+    # allowed in free-only; paid openrouter (no :free suffix) is banned.
+    $paidRe = 'cheaperinference|openrouter/(?!.*:free$)|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-free-only' })) {
         $paid = @($c.models | Where-Object { $_ -match $paidRe })
         Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
@@ -9637,6 +9790,22 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     }
 }
 
+# apply.ps1's registry parse spans three functions after the case-collision fix
+# (FREEWIRE 2026-09-30): dot-sourcing only Get-AutoOSProviderMap leaves it
+# calling an undefined ConvertFrom-AutoOSRegistryJson. Return the whole set, so
+# every test that runs the map function gets a loadable body. Optional consumers
+# (Get-AutoOSProviderDataJson) come along only when present.
+function Get-AutoOSRegistryFunctionSource {
+    param([System.Management.Automation.Language.ScriptBlockAst]$Ast)
+    $texts = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson',
+            'Get-AutoOSProviderMap', 'Get-AutoOSProviderDataJson')) {
+        $d = $Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    return ($texts -join "`n")
+}
+
 Test-Case 'provider data JSON survives both PowerShell generations' {
     # 5.1 strips inner double quotes marshalling to a native exe, pwsh 7
     # passes them through: one literal cannot serve both (groq/cerebras
@@ -9653,7 +9822,7 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
         $n.Name -eq 'Get-AutoOSProviderDataJson' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
     Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     # Task A5e: catalog/providers.json is deleted; the real call site now
     # points at catalog/ai-registry.json, so this test does too - it exercises
     # the exact call apply.ps1 itself makes.
@@ -9731,7 +9900,7 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
     $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_a5a_' + [Guid]::NewGuid().ToString('N') + '.json')
     @'
 {
@@ -9798,7 +9967,7 @@ Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml nam
     $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     $dir = [IO.Path]::GetTempPath()
 
     $clash = Join-Path $dir ('aos_dupkey_' + [Guid]::NewGuid().ToString('N') + '.json')
@@ -9834,6 +10003,60 @@ Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml nam
         Assert-True (-not $registry.Map.Contains('meta_api')) 'a phantom meta_api key must not be offered'
     } finally {
         Remove-Item -LiteralPath $clash, $shared -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Get-AutoOSProviderMap tolerates registry keys differing only by case' {
+    # FREEWIRE finding (2026-09-30, pre-existing at the baseline): the registry
+    # may carry two keys differing only by casing - model ids are vendor
+    # spellings (`Qwen/Qwen3.8-27B` beside `qwen/qwen3.8-27b`). ConvertFrom-Json
+    # maps JSON objects to a case-INSENSITIVE PSObject, so the pair throws
+    # DuplicateKeysInJsonString on Windows PowerShell 5.1 ("keys with different
+    # casing" on pwsh). The throw happened inside Get-AutoOSProviderMap, so the
+    # whole run's provider registration was silently skipped while connections
+    # and combos still applied. This fixture is the guard; it touches no live
+    # registry, so an operator edit cannot make it flaky. Before the fix the
+    # test dot-sources only Get-AutoOSProviderMap, hits the raw ConvertFrom-Json
+    # path and fails with the duplicate-key error - exactly the defect.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $defs = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson', 'Get-AutoOSProviderMap')) {
+        $d = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    . ([scriptblock]::Create(($defs -join "`n")))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_dupcase_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "models": {
+    "Qwen/Qwen3.8-27B": {"id": "Qwen/Qwen3.8-27B"},
+    "qwen/qwen3.8-27b": {"id": "qwen/qwen3.8-27b"}
+  },
+  "providers": {
+    "groq": {"omniroute_id": "groq"}
+  },
+  "routes": {
+    "r": {"legs": ["groq/qwen/qwen3.8-27b"]}
+  }
+}
+'@ | Set-Content -LiteralPath $fixture -Encoding utf8
+    try {
+        $registry = Get-AutoOSProviderMap $fixture
+        Assert-Equal $registry.Map['groq'] 'groq'
+        Assert-True ($registry.Skipped -notcontains 'groq') 'groq (has a live leg) was wrongly skipped'
+        # Case-sensitivity at the parse: the exact-case key keeps its spelling
+        # and the later case-only duplicate does not replace it. PSObject names
+        # are case-insensitive by construction, so first-wins is the documented
+        # policy - the colliding section (models) is not read by the launcher.
+        $doc = ConvertFrom-AutoOSRegistryJson -Text (Get-Content -LiteralPath $fixture -Raw -Encoding utf8)
+        $modelNames = @($doc.models.PSObject.Properties.Name)
+        Assert-True ($modelNames -ccontains 'Qwen/Qwen3.8-27B') "exact-case model key lost: $($modelNames -join ',')"
+        Assert-True ($modelNames -cnotcontains 'qwen/qwen3.8-27b') "case-only duplicate replaced the first key: $($modelNames -join ',')"
+    } finally {
+        Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
     }
 }
 
@@ -10146,6 +10369,72 @@ Test-Case 'canvas verdict keeps the current docker path' {
     Assert-True ($ver -match 'Agent Canvas') 'no canvas verdict in verification.md'
     Assert-True ($toml -match 'agent-canvas') 'config.toml must record the canvas decision'
     Assert-True ($ps1 -match 'docker\.openhands\.dev/openhands/openhands:latest') 'docker path must stay intact'
+}
+
+Test-Case 'omniroute launchers pin the .cmd shim, fail loudly without it, and default chat admission without clobbering' {
+    # A bare Start-Process -FilePath 'omniroute' resolves to the npm .ps1 shim
+    # (ExternalScript), which Start-Process cannot launch as a Win32 app: the
+    # gateway silently never starts. Every gateway-spawn site must pin the .cmd
+    # shim - resolved via PATH with an %APPDATA%\npm fallback, never a hardcoded
+    # user path - and fail loudly when it is missing, and must apply the chat
+    # admission default only when the operator has not already set one. The
+    # logon resume helper (configuration\autostart\Start-AutoOSStack.ps1) carries
+    # the same bare-shim class; it was missed by the original handoff and is
+    # covered here too, so a third site cannot drift back to the bare name.
+    foreach ($rel in @('configuration\omniroute\apply.ps1', 'configuration\start-stack.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        # (a) resolves the .cmd shim, not the bare ExternalScript name.
+        Assert-True ($src -notmatch "Start-Process\s+-FilePath\s+'omniroute'") "$rel still starts the bare 'omniroute' name"
+        Assert-True ($src -match 'Get-Command omniroute\.cmd') "$rel does not resolve omniroute.cmd via PATH"
+        Assert-True ($src -match 'if \(-not \$omnirouteCmd\) \{ \$omnirouteCmd = Join-Path \$env:APPDATA') "$rel lacks the %APPDATA%\npm fallback"
+        Assert-True ($src -match 'Start-Process -FilePath \$omnirouteCmd') "$rel does not start the resolved .cmd shim"
+        Assert-True ($src -notmatch 'C:\\Users\\[A-Za-z]') "$rel carries a hardcoded user path"
+        # (b) a missing shim is a loud failure, not a silent wait for a gateway
+        # that never starts.
+        Assert-True ($src -match 'if \(-not \(Test-Path -LiteralPath \$omnirouteCmd\)\) \{') "$rel does not check that the shim exists"
+        Assert-True ($src -match '(?s)Test-Path -LiteralPath \$omnirouteCmd.{0,200}?exit 1') "$rel does not exit when the shim is missing"
+        # (c) the chat admission default is respect-set and appears exactly once
+        # (idempotent - a second run cannot add a duplicate assignment).
+        Assert-True ($src -match 'if \(-not \$env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT\) \{') "$rel does not respect a user-set admission limit"
+        Assert-Equal @([regex]::Matches($src, "OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'")).Count 1 "$rel must set the admission default exactly once"
+    }
+}
+
+Test-Case 'omniroute gateway launchers default the repeated-429 rotation policy, respect-set and once' {
+    # The gateway reads the rotation and provider-breaker policy from its own
+    # process env at startup (open-sse/services/rotationConfig.ts:84-110 and
+    # open-sse/config/constants.ts:251-277), so only the launcher that spawns it
+    # can supply it. Every gateway-spawn site must default each knob while never
+    # clobbering an operator value, and the assignment must appear exactly once
+    # (a re-run, or a re-apply, cannot accumulate a duplicate line).
+    $policy = [ordered]@{
+        'OMNIROUTE_ROTATION_ENABLED'                     = 'true'
+        'OMNIROUTE_ROTATE_ON_429'                        = 'true'
+        'OMNIROUTE_ROTATE_429_THRESHOLD'                 = '3'
+        'OMNIROUTE_ROTATE_429_WINDOW_SECONDS'            = '120'
+        'OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS'    = '300'
+        'OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS' = '1800000'
+    }
+    foreach ($rel in @('configuration\start-stack.ps1', 'configuration\omniroute\apply.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            Assert-True ($src -match ('if \(-not \$env:{0}\)' -f $name)) "$rel does not respect a user-set $name"
+            $assignment = "`$env:{0} = '{1}'" -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($assignment))).Count 1 "$rel must set $name = $val exactly once"
+        }
+    }
+    foreach ($rel in @('configuration\start-stack.sh', 'configuration\omniroute\apply.sh')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            $exportLine = 'export {0}="${{{0}:-{1}}}"' -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($exportLine))).Count 1 "$rel must export $name (default $val) exactly once"
+        }
+    }
+    Pass
 }
 
 

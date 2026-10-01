@@ -44,10 +44,21 @@ This file is part of the ``unattended-orchestration`` skill and carries no
 repository-specific knowledge; reference it from ``postWorktree`` as
 ``'{{skillDir}}/trust_worktree.py'``.
 
+The last step is not a trust step: ``install_prepush_hook`` drops a small
+``pre-push`` shim into the worktree's hooks dir so the lane cannot push a branch it
+never tested (operator D-154 — three lanes were green at home and red in CI). All of
+the deciding lives in the repository's own ``tools/prepush.py``; the shim only finds
+and runs it, and a hook that was already there is kept verbatim as
+``pre-push.autoos-chained`` and exec'd after the gate passes rather than overwritten.
+It is a separate function and a separate ``--hook-only`` flag because rule D-111 says
+nothing in that path may write ``~/.claude.json`` — with ``--hook-only`` the script
+never reads it either.
+
 Usage::
 
     python trust_worktree.py <worktree> [--repo <main checkout>] [--mcpjson NAME ...]
     python trust_worktree.py <worktree> --lane-mcp [--no-private-serena]
+    python trust_worktree.py <worktree> --hook-only   # the gate, nothing else
     python trust_worktree.py <worktree> --check      # report, change nothing
 """
 
@@ -57,6 +68,7 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import date
@@ -315,6 +327,148 @@ def configure_omnigraph_env(worktree: Path, repo: Path, check: bool = False) -> 
         return f"created {env_file} with OMNIGRAPH_GRAPH_ID={repo_folder}"
 
 
+#: The gate's hook. Its content is a shim: every decision lives in the
+#: repository's own ``tools/prepush.py``, so a lane cannot be green because the
+#: installer was clever.
+HOOK_NAME = "pre-push"
+HOOK_MARKER = "autoos-prepush-gate"
+CHAINED_NAME = "pre-push.autoos-chained"
+GATE_TOOL = Path("tools") / "prepush.py"
+
+#: The checkout's ``tools/`` — where the gate this skill installs lives, and where
+#: the one copy of the git helper is. ``.agents/skills/<skill>/`` is three levels
+#: deep, so the file's own path is the only portable way to find it.
+REPO_TOOLS = Path(__file__).resolve().parents[3] / "tools"
+
+
+def gate_git():
+    """The gate's ``run git, hand back stdout or None`` — imported lazily.
+
+    NB6: this helper had a second copy here, and the two drift exactly where it
+    costs something. The one caller is ``hooks_dir``, which asks git *where its
+    hooks are*; a stale copy of the answer installs the gate into a directory no
+    push ever reads, and the lane believes it is gated (NB1).
+
+    Lazily, and only from the step that needs it, because the skill file is
+    portable: a repository without ``tools/prepush.py`` must still get its
+    worktree trusted, and must still hear "nothing installed" rather than an
+    ImportError.
+    """
+    if str(REPO_TOOLS) not in sys.path:
+        sys.path.insert(0, str(REPO_TOOLS))
+    from prepush import _git
+    return _git
+
+
+def hooks_dir(worktree: Path) -> Path | None:
+    """The hooks dir git actually reads for this checkout.
+
+    ``--git-path hooks`` resolves through the *common* dir, which is what git uses
+    for hooks too — so a linked worktree shares the parent's hooks, and asking for
+    a path git itself would look at is the only way to install something it runs.
+    It also honours ``core.hooksPath``, which is why the answer comes from git and
+    not from ``<git-dir>/hooks``.
+    """
+    raw = gate_git()(worktree, "rev-parse", "--git-path", "hooks")
+    if not raw:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else (worktree / path)
+
+
+def hook_text() -> str:
+    """The shim: run the gate, then exec the chained hook if there is one.
+
+    A missing gate is a refusal, not a pass (NB2): a lane that lost
+    ``tools/prepush.py`` — rebased onto a base without it, checked out an older
+    branch — would otherwise push exactly the untested sha the gate exists to stop.
+    The chained hook is what runs *after* the gate passes, so it is not exec'd here.
+    An orchestrator that means to step over the gate does it with the logged
+    override (``AUTOOS_PREPUSH_OVERRIDE``), which leaves a record ``--check-ready``
+    refuses to call ready.
+    """
+    return (
+        "#!/bin/sh\n"
+        "# %s — installed by .agents/skills/unattended-orchestration/"
+        "trust_worktree.py\n"
+        "# (operator D-154). All logic is in tools/prepush.py; this shim only\n"
+        "# finds it, runs it, and hands over to a hook that was here first.\n"
+        "root=$(git rev-parse --show-toplevel) || exit 1\n"
+        'gate="$root/tools/prepush.py"\n'
+        'if [ ! -f "$gate" ]; then\n'
+        '    echo "pre-push gate: no $gate -- nothing was checked, refusing" >&2\n'
+        '    echo "pre-push gate: to step over the gate deliberately, run it with" >&2\n'
+        '    echo "  AUTOOS_PREPUSH_OVERRIDE=<reason>, which leaves a record." >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        'if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; else py=python3; fi\n'
+        '"$py" "$gate" || exit 1\n'
+        'chained="$(dirname "$0")/%s"\n'
+        '[ -x "$chained" ] && exec "$chained" "$@"\n'
+        "exit 0\n" % (HOOK_MARKER, CHAINED_NAME)
+    )
+
+
+def install_prepush_hook(worktree: Path, check: bool = False) -> str:
+    """Give this checkout the pre-push gate: idempotent, and it never overwrites.
+
+    WHY A WORKTREE NEEDS THIS
+    -------------------------
+    A lane pushes a branch it tested on its own host, and three of them went red in
+    CI while green at home (operator order D-154: "make sure it works BEFORE you
+    push"). The gate that stops that is ``tools/prepush.py``; the runner that
+    creates the worktree is the only place that can install it, because nothing
+    afterwards is guaranteed to remember.
+
+    THE TWO RULES IT IS WRITTEN TO
+    ------------------------------
+    * **Chain, never overwrite.** A ``pre-push`` hook that exists and is not ours is
+      kept verbatim as ``pre-push.autoos-chained``, and our shim execs it after the
+      gate passes. A lane's own check silently deleted by an installer is worse than
+      no installer (AGENTS.md: read the existing value, merge, write back).
+    * **Touch nothing else.** This step never reads or writes ``~/.claude.json``
+      (rule D-111), so it is callable on its own with ``--hook-only`` and a
+      repository with no Claude trust entry still gets its gate.
+
+    A repository without ``tools/prepush.py`` gets no hook and a line saying so: an
+    installer that quietly installs nothing is how a gate goes missing. That check
+    comes *first* because the git helper is the gate's own (NB6) — asking where the
+    hooks are before there is anything to install would import a module the
+    repository may not have.
+    """
+    gate = worktree / GATE_TOOL
+    if not gate.is_file():
+        return (f"pre-push gate: no {GATE_TOOL.as_posix()} in {worktree} -- "
+                f"nothing installed (the repository has no gate to install)")
+    hooks = hooks_dir(worktree)
+    if hooks is None:
+        return f"pre-push gate: {worktree} is not a git checkout -- nothing installed"
+    hook = hooks / HOOK_NAME
+    chained = hooks / CHAINED_NAME
+    text = hook_text()
+    existing = (hook.read_text(encoding="utf-8", errors="replace")
+                if hook.is_file() else "")
+    if existing == text:
+        return f"pre-push gate: skipped, {hook} is already installed"
+    foreign = bool(existing) and HOOK_MARKER not in existing
+    if check:
+        return ("pre-push gate: WOULD chain the existing %s to %s and install"
+                % (hook.name, CHAINED_NAME) if foreign
+                else "pre-push gate: WOULD install %s" % hook)
+    hooks.mkdir(parents=True, exist_ok=True)
+    if foreign:
+        shutil.copy2(hook, chained)
+        chained.chmod(chained.stat().st_mode | 0o111)
+    hook.write_text(text, encoding="utf-8", newline="\n")
+    hook.chmod(hook.stat().st_mode | 0o111)
+    if foreign:
+        return ("pre-push gate: installed %s (the previous hook is kept as %s and "
+                "runs after the gate passes)" % (hook, CHAINED_NAME))
+    if existing:
+        return f"pre-push gate: refreshed {hook}"
+    return f"pre-push gate: installed {hook}"
+
+
 def trust_agy(worktree: Path, repo: Path, check: bool = False) -> str:
     """Copy the repo's .gemini config into the worktree, if it has one.
 
@@ -326,15 +480,14 @@ def trust_agy(worktree: Path, repo: Path, check: bool = False) -> str:
 
     The name is kept for symmetry with trust_claude/trust_grok, but the honest
     description is "copy config". A headless agy worker's trust prompt is
-    handled reactively instead, by cao/watchdog.py, which recognises that exact
-    wording and answers it. If a future agy version grows a persistable trust
+    answered at runtime by the runner's watchdog, not here. If a future agy version grows a persistable trust
     store, pre-approving here is strictly better than answering later.
     """
     src = repo / ".gemini"
     dst = worktree / ".gemini"
     if not src.is_dir():
         return ("AGY: no .gemini directory in repo to copy (note: agy's trust "
-                "dialog is answered at runtime by cao/watchdog.py, not here)")
+                "dialog is answered at runtime by the runner watchdog, not here)")
     if check:
         return f"AGY: WOULD copy {src} to {dst}"
     if not dst.exists():
@@ -393,12 +546,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-private-serena", action="store_true",
                     help="with --lane-mcp, omit the per-worktree Serena server")
     ap.add_argument("--check", action="store_true", help="report, change nothing")
+    ap.add_argument("--hook-only", action="store_true",
+                    help="install the pre-push gate (tools/prepush.py) and NOTHING "
+                         "else: the trust step writes ~/.claude.json, and rule D-111 "
+                         "keeps this step clear of it")
     args = ap.parse_args(argv)
 
     worktree = args.worktree.resolve()
     if not worktree.is_dir():
         print(f"not a directory: {worktree}", file=sys.stderr)
         return 2
+    if args.hook_only:
+        # No --repo, no config read: the gate needs the worktree and nothing else.
+        print(install_prepush_hook(worktree, check=args.check))
+        return 0
     repo = args.repo.resolve() if args.repo else _main_checkout(worktree)
     if repo is None:
         print("could not determine the main checkout; pass --repo", file=sys.stderr)
@@ -431,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         print(configure_omnigraph_env(worktree, repo, check=args.check))
     else:
         print(f"OMNIGRAPH_GRAPH_ID: not written (--no-env); {worktree}\\.env left alone")
+    print(install_prepush_hook(worktree, check=args.check))
     return 0
 
 

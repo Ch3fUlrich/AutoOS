@@ -2,7 +2,7 @@
 
 **Status: PROPOSED (2026-09-18), awaiting the operator's approval.**
 - Until then, L1/L2 apply it **by hand** when they pick an L3.
-- The code change it describes (a scorer that generates `cao.routing` ladders) is not built yet.
+- The code change it describes (a scorer that generates routing ladders) is not built yet.
 - The operator's fixed rules come first and are not re-weighed by any score: the resolver's leg
   order (`python3 tools/autoos-agent.py route --explain`, R-coord-03) and the cross-family review
   rule R-orch-13 (the 2026-09-18 "DeepSeek first" order was superseded on 2026-09-25).
@@ -10,7 +10,7 @@
 Evidence: three research passes on 2026-09-18:
 - the OpenRouter models API, 445 entries, measured;
 - this host's GPU/RAM and `ollama list`, measured;
-- a code survey of `cao/`.
+- a code survey of the routing code.
 
 Labels: **M** measured, **S** sourced, **I** inferred.
 
@@ -191,7 +191,7 @@ the rest. Keep private-repo lanes on private-safe models, whatever the gate woul
 
 ## 6. Building it (after approval)
 
-- **Data ladder, rung 1:** `cao/route_score.py`, pure: `build_ladder(card, catalogue, state) ->
+- **Data ladder, rung 1:** pure scorer `build_ladder(card, catalogue, state) ->
   list[Candidate]`, tested against a **fixture catalogue** with known expected ladders. Include
   one test per parameter above, plus the three operator rules as tests that no weight can
   break.

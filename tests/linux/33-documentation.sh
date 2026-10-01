@@ -599,6 +599,14 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# gwloopback (2026-09-30): how tools/autoos-agent.py picks the gateway - the
+# AUTOOS_OMNIROUTE_URL override (tried alone, never rescued), the docker DNS
+# name with loopback as fallback, the I/O-free import, and gateway_up() as the
+# pre-check that rebinds GATEWAY. Probes are injected; no gateway is contacted.
+if it "gateway selection: override, docker DNS, loopback fallback, gateway_up pre-check (unit tests)"; then
+    out="$(python3 tests/test_gateway_selection.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # RESTART spec §0/§2 (lane R1): the shared inbox reader (tools/autoos_inbox.py),
 # the `inbox` verb and the explicit verb->handler dispatch table. Fixtures are
 # temp files; nothing is spawned and no inbox outside the sandbox is read.
@@ -696,6 +704,25 @@ if it "registry: no generated file drifts"; then
     rm -f "$tmp_ide"
 fi
 
+# ORCH-A1 phase 1: role launch profiles are rendered from the harness
+# fences (tools/launch_profiles.py render --check) and the rendered matchers
+# pass the profile-shape, secret-scope and always-deny contradiction tables.
+if it "launch profiles: rendered from the harness fences, scope tables green (ORCH-A1 phase 1)"; then
+    rc=0
+    tests="$(python3 tests/test_launch_profiles.py 2>&1)" || rc=$?
+    check="$(python3 tools/launch_profiles.py render --check 2>&1)" || rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s\n%s\n' "$tests" "$check" | tail -n 20)"; fi
+fi
+
+# ORCH-A1 phase 1 round 13 (routing-00 D-159): every push and dispatch
+# spelling lives in tests/fixtures/push-corpus.json and is decided against the
+# same rendered profiles - the real-git premise tests run git in a temporary
+# directory only.
+if it "push corpus: every push spelling decides as the fixture says (ORCH-A1 round 13)"; then
+    out="$(python3 tests/test_push_corpus.py 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "$(printf '%s\n' "$out" | tail -n 20)"; fi
+fi
+
 # tools/probe-toolcalls.py: tool-calling probe writes the overlay (routing v2 spec 3.1, 5.3, 10).
 if it "probe-toolcalls: tool-calling probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_toolcalls.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
@@ -714,6 +741,20 @@ fi
 # tools/autoos_report.py: BRIEF/REPORT protocol parser (routing v2 spec 5.7, 8.2).
 if it "autoos_report: BRIEF/REPORT protocol parser (unit tests)"; then
     out="$(python3 tests/test_autoos_report.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# MEMSPEC P1 (docs/plans/2026-09-28-memory-facade-spec.md §4, §11): the typed
+# memory facade MCP - five methods, write rules, write receipts. All state is a
+# temp copy of the R0 fixture; nothing real is read or written.
+if it "memory facade: five methods, write rules and receipts (unit tests)"; then
+    out="$(python3 tests/test_memory_facade_mcp.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# MEMSPEC P1 (docs/plans/2026-09-28-memory-facade-spec.md §5): every facade
+# write appends the schema: 2 envelope agreed in the fleet console spec §4.3.
+# Temp store + temp events file; nothing real is read or written.
+if it "memory facade: schema 2 write events (unit tests)"; then
+    out="$(python3 tests/test_memory_events.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # tools/probe-effort.py: effort-ladder probe writes the overlay (routing v2 spec 5.5, 10).
@@ -740,6 +781,22 @@ if it "orchestration skill rules pass skill-rules check"; then out="$(python3 to
 # shell and Pester cases naming a flipped id, and CI went red twice).
 if it "affected-tests: registry ids reach every shell, Pester and pytest case naming them (unit tests)"; then
     out="$(python3 tests/test_affected_tests.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/prepush.py: the pre-push gate — the ancestor check, CI's plan check, the run
+# list derived from the changed files, CI's git env, the green/override records and
+# `--check-ready` (operator D-154). CI 36529545083 shard b is why this line exists: the
+# file was added and never wired, so nothing ran it until tests/test_suite_wiring.py
+# refused the un-wired file.
+if it "prepush: the gate refuses a push whose tests were never run (unit tests)"; then
+    out="$(python3 tests/test_prepush.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tests/test_no_cao.py: the no-CAO gate (operator removal lane 2026-09-29) — no CAO
+# path, skill section or example-config block may ship; the file shipped unwired,
+# so the gate existed but nothing ran it until tests/test_suite_wiring.py refused it.
+if it "no-cao: no CAO path, section, or config ships (unit tests)"; then
+    out="$(python3 tests/test_no_cao.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then

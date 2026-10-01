@@ -38,6 +38,7 @@ import autoos_clients as clients  # noqa: E402
 import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
+import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
 
 
 def load_agent():
@@ -459,7 +460,10 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_claude_is_headless_print_on_its_own_login(self):
         r = plan_of("--client", "claude", "t", env=claude_env())
-        self.assertIn("would run: claude -p --permission-mode acceptEdits t", r.stdout)
+        # FAMILYFENCE-b: the run is handed the session id whose transcript the
+        # spawner will read afterwards, so the line is no longer a fixed string.
+        self.assertRegex(r.stdout, r"would run: claude -p --permission-mode acceptEdits "
+                         r"--session-id [0-9a-f]{8}-[0-9a-f-]+ t")
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", r.stdout)
 
     def test_claude_joinable_is_a_background_remote_control_session(self):
@@ -3408,6 +3412,108 @@ class SessionTagTests(unittest.TestCase):
                           "t", env=clean_env(AUTOOS_SESSION_TAG="lane/one"))
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("session-tag: lane/one\n", r.stdout, client)
+
+
+class WorkerGatewayOverlayTests(unittest.TestCase):
+    """GWLOOPBACK-2: the worker's own overlay names the gateway this process
+    resolved to.
+
+    The isolated worker's opencode reads the sandbox clone's `opencode.jsonc`,
+    whose omniroute provider pins `http://127.0.0.1:20128/v1` - refused
+    in-container, so every in-container gateway-path worker died on its first
+    model call (0 of 58 records; the memspec P1 review seat 1R). opencode
+    merges `OPENCODE_CONFIG_CONTENT` last (v2.0.19 `Config.load` appends the
+    content source after the discovered files; measured 2026-09-30 - the same
+    clone, same env: `opencode run --standalone` fails ConnectionRefused
+    without the stamp and reaches the gateway with it). The stamp is the
+    child's copy: no file on disk is rewritten, and a host resolves loopback,
+    so a host-side spawn's provider block is what it was."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cli = load_agent()
+
+    def _plan(self, overlay):
+        return {"cwd": "/tmp/sandbox", "env": {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(overlay)}}
+
+    def _env_overlay(self, env):
+        return json.loads(env["OPENCODE_CONFIG_CONTENT"])
+
+    def _stamped(self, plan):
+        with mock.patch.object(self.cli, "GATEWAY", self.cli.GATEWAY_DOCKER):
+            return self.cli.worker_env(plan, None, base={})
+
+    def test_worker_env_stamps_the_resolved_gateway_into_the_overlay(self):
+        plan = self._plan({"providers": {"omniroute": {}}})
+        prov = self._env_overlay(self._stamped(plan))["providers"]["omniroute"]
+        self.assertEqual(prov["settings"]["baseURL"], "http://omniroute:20128/v1")
+
+    def test_the_stamp_merges_into_the_provider_block_never_replaces_it(self):
+        plan = self._plan({"providers": {"omniroute": {
+            "headers": {"X-AutoOS-Run-Id": "r"}}}})
+        overlay = self._env_overlay(self._stamped(plan))
+        self.assertEqual(overlay["providers"]["omniroute"]["headers"],
+                         {"X-AutoOS-Run-Id": "r"})
+
+    def test_the_host_resolution_spells_what_the_file_already_says(self):
+        plan = self._plan({"providers": {"omniroute": {}}})
+        with mock.patch.object(self.cli, "GATEWAY", self.cli.GATEWAY_FALLBACK):
+            env = self.cli.worker_env(plan, None, base={})
+        self.assertEqual(
+            self._env_overlay(env)["providers"]["omniroute"]["settings"]["baseURL"],
+            "http://127.0.0.1:20128/v1")
+
+    def test_a_free_overlay_has_no_gateway_provider_to_stamp(self):
+        # --free runs carry only a model (free_overlay) and never probe the
+        # gateway; nothing may appear in their document.
+        doc = {"model": "opencode/muse-spark-1.3-contributor-free"}
+        self.assertEqual(self._env_overlay(self._stamped(self._plan(doc))), doc)
+
+    def test_a_document_without_the_omniroute_provider_is_left_alone(self):
+        doc = {"providers": {"openrouter": {"settings": {"baseURL": "http://x/v1"}}}}
+        self.assertEqual(self._env_overlay(self._stamped(self._plan(doc))), doc)
+
+    def test_a_malformed_overlay_is_passed_through_untouched(self):
+        env = self.cli.worker_env(
+            {"cwd": "/tmp/sandbox", "env": {"OPENCODE_CONFIG_CONTENT": "{not json"}},
+            None, base={})
+        self.assertEqual(env["OPENCODE_CONFIG_CONTENT"], "{not json")
+
+    def test_the_plan_keeps_the_overlay_build_plan_made(self):
+        # The stamp is the child's copy; the plan (pricing, the record) keeps
+        # what build_plan emitted.
+        plan = self._plan({"providers": {"omniroute": {}}})
+        before = plan["env"]["OPENCODE_CONFIG_CONTENT"]
+        self._stamped(plan)
+        self.assertEqual(plan["env"]["OPENCODE_CONFIG_CONTENT"], before)
+
+    def test_the_checkout_config_is_never_rewritten(self):
+        text = ('{"providers": {"omniroute": {"settings": '
+                '{"baseURL": "http://127.0.0.1:20128/v1"}}}}\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "opencode.jsonc"
+            cfg.write_text(text)
+            env = self._stamped({"cwd": tmp, "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
+                {"providers": {"omniroute": {}}})}})
+            self.assertIn("omniroute:20128", env["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(cfg.read_text(), text)
+
+    def test_the_planned_overlay_reaches_the_child_stamped(self):
+        # The whole emit path, not the helper: build_plan emits the overlay
+        # and worker_env hands the child the stamped copy of it.
+        args = argparse.Namespace(
+            client="opencode", tier=2, card=None, task="do the thing",
+            free=False, free_model=self.cli.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, joinable=False, model=None,
+            clean=False, allow_training=False, max_depth=None, lean=False,
+            title="T")
+        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        plan = self.cli.build_plan(args, cfg)
+        prov = self._env_overlay(self._stamped(plan))["providers"]["omniroute"]
+        self.assertEqual(prov["settings"]["baseURL"], "http://omniroute:20128/v1")
+        self.assertIn("x-omniroute-session-id", prov["headers"])
 
 
 class HeadlessRefusalTests(unittest.TestCase):
@@ -6367,7 +6473,7 @@ class IsolateContainmentTests(unittest.TestCase):
                 self.assertIn("worker-new.txt", files)
 
 
-def _fallthrough_registry(route_ids, policy=None, legs=None):
+def _fallthrough_registry(route_ids, policy=None, legs=None, families=None):
     """A registry whose routes are exactly `route_ids`, plus the clients the
     capability gate reads and an optional `policy` section (SPAWNFREE: the
     ordered free-model list a --free fallthrough reads from here). The resolver
@@ -6378,14 +6484,21 @@ def _fallthrough_registry(route_ids, policy=None, legs=None):
     spawner reads the provider that took a stop off the route's own legs, so a
     test about "the next leg on a DIFFERENT provider" needs legs to name one.
     The providers/models sections it derives are the minimum `resolve_leg`
-    accepts."""
+    accepts.
+
+    `families` (FAMILYFENCE) is {model_id: family}, declared on the same derived
+    `models` rows — a family the fence can only read from the registry, never
+    guess from the name."""
     legs = legs or {}
+    families = families or {}
     providers, models = {}, {}
     for leg_list in legs.values():
         for leg in leg_list:
             pid, _, mid = leg.partition("/")
             providers.setdefault(pid, {"id": pid})
             models.setdefault(mid, {"id": mid, "provider_id": pid})
+    for model_id, family in families.items():
+        models.setdefault(model_id, {"id": model_id})["family"] = family
     return {
         "clients": {
             "opencode": {"capabilities": {"shell": True, "write": True}},
@@ -6433,7 +6546,7 @@ def _cap_routes(cap):
 
 def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=None,
                      stop_tail=None, env_over=None, legs=None, stop_rc=0,
-                     worker=None, select_combo=None):
+                     worker=None, select_combo=None, families=None, prepare=None):
     """Run cmd_run with the resolver and the client replaced by fakes; the
     sandbox is a real temp clone so WIP commits and re-runs are real.
 
@@ -6460,6 +6573,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
     `worker` replaces the fake client's "writes attemptN.txt" step (SB-B
     MODEFLIP: a worker that only flips file modes). `select_combo` replaces the
     v1 card's route, so a write-role card can be routed to tier 1.
+    `families` (FAMILYFENCE) declares registry families for the models the test
+    names. `prepare` (FAMILYFENCE) is called as ``prepare(statedir, root)`` after
+    every mock is in place and before `cmd_run`, so a test can write real files
+    into the run's own throwaway state dir — the runner-private kill record the
+    fence reads, for instance — through the production path rather than a stub.
     """
     agent = case.agent
     root = _init_git_root()
@@ -6522,7 +6640,10 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         client="opencode", tier=None, card="kind=implement", task="edit README.md",
         free=False, free_model=agent.DEFAULT_FREE_MODEL, isolate=True, auto=True,
         joinable=False, model=None, clean=False, allow_training=False,
-        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
+        max_depth=None, lean=False, title=None, dry_run=False, no_defer=False,
+        # FAMILYFENCE: the fence's three inputs, unset by default — the same
+        # defaults the CLI's argparse gives them.
+        not_family=None, review_of=None, no_fallthrough=False)
     args.__dict__.update(args_over or {})
     env = dict(os.environ)
     env.update(env_over or {})
@@ -6543,7 +6664,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         with mock.patch.dict(os.environ, env, clear=True):
             with mock.patch.object(agent, "load_registry",
                                    lambda path: _fallthrough_registry(route_ids, policy,
-                                                                      legs)):
+                                                                      legs, families)):
                 with mock.patch.object(agent, "route_plan_for", _fallthrough_plan), \
                         mock.patch.object(agent, "build_plan", marking_build_plan), \
                         mock.patch.object(agent, "gateway_up", lambda: True), \
@@ -6562,6 +6683,8 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
                                                 return_value="/usr/bin/opencode"):
                                     with contextlib.redirect_stdout(out), \
                                             contextlib.redirect_stderr(err):
+                                        if prepare is not None:
+                                            prepare(statedir, root)
                                         rc = agent.cmd_run(args, cfg)
     finally:
         os.chdir(old_cwd)  # before any cleanup tries to remove the temp root
@@ -8635,6 +8758,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
                     "exceeded for metric: generate_content_free_tier_requests, "
                     "limit: 20, model: gemini-3.8-flash "
                     "Please retry in 59.250991496s.")
+    # FREEWIRE 2026-09-30: the gemini head left t2-worker (and providers.
+    # google_ai_studio is now unavailable), so the t2-worker attribution tests
+    # below name a model t2-worker still serves from exactly ONE provider -
+    # scaleway's mistral-small grant.
+    SCW_COOLDOWN = ("Error: [429] All credentials for model "
+                    "mistral-small-3.2-24b-instruct-2506 are cooling down "
+                    "(reset after 37s)")
+    SCW_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
+                 "exceeded for metric: generate_content_free_tier_requests, "
+                 "limit: 20, model: mistral-small-3.2-24b-instruct-2506 "
+                 "Please retry in 59.250991496s.")
 
     def setUp(self):
         self.agent = load_agent()
@@ -8701,39 +8835,43 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # --- 3: the provider benched is the provider that served ------------------
 
     def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
-        # 'gemini' is google_ai_studio's omniroute_id and how the route declares
-        # the leg; 'opencode-zen' is zen's. A raw prefix lookup finds neither.
+        # 'vertex' is vertex_ai's omniroute_id and how a route declares the leg;
+        # 'opencode-zen' is zen's. A raw prefix lookup finds neither. FREEWIRE
+        # 2026-09-30: the gemini/google_ai_studio example was replaced because
+        # google_ai_studio is now provider-unavailable (so its leg attributes to
+        # no live provider at all).
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
-                self.registry, ["gemini/gemini-3.8-flash"]),
-            "google_ai_studio")
+                self.registry, ["vertex/gemini-3.8-flash"]),
+            "vertex_ai")
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
                 self.registry, ["opencode-zen/deepseek-v4.1-flash"]),
             "zen")
 
-    def test_a_t2_worker_gemini_cooldown_benches_google_ai_studio(self):
-        # The measured wrong answer was antigravity (the next live leg of
-        # t2-worker); mistral is what a t2-worker-clean stop benched.
+    def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
+        # FREEWIRE 2026-09-30: the model t2-worker names from one provider is now
+        # scaleway's mistral-small grant (the gemini head was removed). The
+        # measured wrong answer was antigravity (the next live leg of t2-worker).
         recorded = self.agent.record_reset_stop(
-            self.GEMINI_COOLDOWN, "t2-worker", self.registry,
+            self.SCW_COOLDOWN, "t2-worker", self.registry,
             now=self.NOW, path=self.state_path)
-        self.assertEqual(recorded, ("google_ai_studio", "2026-09-28T12:00:37Z"))
-        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"],
+        self.assertEqual(recorded, ("scaleway", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["scaleway"],
                          "the cooldown benches the provider that served the model "
                          "the line names, and nobody else")
         self.assertNotIn("antigravity", self.state()["providers"])
-        self.assertNotIn("mistral", self.state()["providers"])
+        self.assertNotIn("google_ai_studio", self.state()["providers"])
 
-    def test_a_t2_worker_free_only_gemini_cooldown_benches_google_ai_studio(self):
+    def test_a_t2_worker_free_only_model_named_cooldown_benches_its_provider(self):
         self.assertEqual(
-            self.agent.record_reset_stop(self.GOOGLE_RETRY, "t2-worker-free-only",
+            self.agent.record_reset_stop(self.SCW_RETRY, "t2-worker-free-only",
                                          self.registry, now=self.NOW,
                                          path=self.state_path),
-            ("google_ai_studio", "2026-09-28T12:00:59Z"))
-        self.assertEqual(list(self.state()["providers"]), ["google_ai_studio"])
+            ("scaleway", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["scaleway"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # t2-worker-clean has no gemini leg; naming a model the route does not
@@ -8832,14 +8970,15 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
-        # this file in and skips the leg.
-        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "t2-worker",
+        # this file in and skips the leg. FREEWIRE 2026-09-30: the recorded line
+        # names scaleway's mistral-small leg (the gemini head left t2-worker).
+        self.agent.record_reset_stop(self.SCW_COOLDOWN, "t2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=1))
-        cooled = merged["providers"]["google_ai_studio"]
+        cooled = merged["providers"]["scaleway"]
         self.assertIs(cooled["available"], False)
         self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
         self.assertTrue(self.agent.unavailable_now(cooled,
@@ -8848,7 +8987,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=60))
         self.assertFalse(
-            self.agent.unavailable_now(expired["providers"]["google_ai_studio"],
+            self.agent.unavailable_now(expired["providers"]["scaleway"],
                                        self.NOW + datetime.timedelta(seconds=60)),
             "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
 
@@ -8920,17 +9059,24 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
 
 CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                      "reviewer=omniroute/muse verdict=PASS")
+# REVGATE2F (operator 2026-09-30): a ready record needs TWO cross-family seats
+# from two different families -- one line is no longer a review, so the ready
+# fixtures below carry a second seat. gem-flash is the fixture's other family
+# (google) and is not the qwen author.
+CROSS_FAMILY_LINE_2 = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                       "reviewer=gem-flash verdict=PASS")
 FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
 
 
 class ReviewStatusTests(unittest.TestCase):
     """REVROUTE (S2) item 5: a lane is not ready because the orchestrator says so.
 
-    A lane record must carry two review entries before it can be called ready --
-    one cross-family review (a reviewer whose model FAMILY differs from the
-    author's, the rule items 1-2 made data) and the Sonnet final check (the
-    operator's unchanged decision). This reads the record, not a person's
-    summary of it, and says which of the two is missing and why.
+    A lane record must carry its reviews before it can be called ready -- at
+    least two cross-family seats from DISTINCT families (each a reviewer whose
+    model FAMILY differs from the author's, the rule items 1-2 made data;
+    REVGATE2F raised the floor) and the Sonnet final check (the operator's
+    unchanged decision). This reads the record, not a person's summary of it,
+    and says which requirement is missing and why.
     """
 
     def setUp(self):
@@ -8969,17 +9115,78 @@ class ReviewStatusTests(unittest.TestCase):
 
     # --- what counts -------------------------------------------------------
 
-    def test_a_record_with_both_entries_is_ready(self):
+    def test_a_record_with_two_family_seats_and_the_final_is_ready(self):
         # Prose around the entries is the norm: a record is a markdown report,
-        # and an entry may sit in a bullet or under a heading.
-        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n"
-                             % (CROSS_FAMILY_LINE, FINAL_LINE))
+        # and an entry may sit in a bullet or under a heading. REVGATE2F: the
+        # ready floor is TWO cross-family seats from distinct families.
+        report = self.status("# Lane x\n\n- %s\n\nSome prose.\n\n%s\n%s\n"
+                             % (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE))
         self.assertTrue(report["ready"], report)
         self.assertTrue(report["cross_family"]["ok"])
         self.assertTrue(report["final"]["ok"])
+        self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
+
+    def test_a_single_cross_family_seat_is_no_longer_a_review(self):
+        # REVGATE2F: the gate used to pass on the FIRST valid cross-family
+        # entry, so one seat plus the final read as reviewed. The floor is two
+        # seats from two different families.
+        report = self.status(CROSS_FAMILY_LINE + "\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("2 cross-family seats required; have 1",
+                      report["cross_family"]["detail"])
+
+    def test_two_seats_from_the_same_family_are_one_review_not_two(self):
+        # The duplicate the floor exists for: two spellings, one family.
+        # muse-contrib is the same meta family as omniroute/muse.
+        report = self.status(CROSS_FAMILY_LINE + "\n"
+                             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=muse-contrib verdict=PASS\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("reviewers omniroute/muse and muse-contrib are the same family (meta)",
+                      report["cross_family"]["detail"])
+        self.assertIn("2 cross-family seats required; have 1",
+                      report["cross_family"]["detail"])
+
+    def test_a_declared_family_that_disagrees_with_the_registry_is_refused(self):
+        # The optional family= is a cross-check, not a claim: when present it
+        # must match the registry-derived family, and the mismatch names both.
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse family=qwen verdict=PASS\n"
+                             + CROSS_FAMILY_LINE_2 + "\n" + FINAL_LINE)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("declares family=qwen but the registry says meta",
+                      report["cross_family"]["detail"])
+
+    def test_a_declared_family_that_agrees_is_still_a_seat(self):
+        # The registry's own capitalization is the same family (REVFIX S2).
+        report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse family=Meta verdict=PASS\n"
+                             + CROSS_FAMILY_LINE_2 + "\n" + FINAL_LINE)
+        self.assertTrue(report["ready"], report)
+
+    def test_more_than_three_seats_is_a_note_never_a_failure(self):
+        # The operator's guidance is 2-3 seats; the gate enforces the floor of
+        # two and prints a non-blocking note past three -- never a refusal.
+        real = self.real_registry()
+        report = self.agent.review_status(
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=qwen3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "reviewer=opencode/longcat-2.5-preview-free verdict=PASS\n"
+            + FINAL_LINE, real)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["cross_family"]["families"],
+                         ["meta", "google", "qwen", "meituan"])
+        self.assertIn("no cap", report["cross_family"]["detail"])
 
     def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
-        report = self.status(CROSS_FAMILY_LINE)
+        # Both seats present (the REVGATE2F floor), the final missing.
+        report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2)
         self.assertFalse(report["ready"])
         self.assertTrue(report["cross_family"]["ok"])
         self.assertFalse(report["final"]["ok"])
@@ -9000,7 +9207,8 @@ class ReviewStatusTests(unittest.TestCase):
         # substring of either.
         for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
             with self.subTest(reviewer=spelling):
-                report = self.status(CROSS_FAMILY_LINE + "\nAutoOS-Review: "
+                report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2
+                                     + "\nAutoOS-Review: "
                                      "kind=final reviewer=%s verdict=READY" % spelling)
                 self.assertTrue(report["ready"], report)
 
@@ -9073,18 +9281,23 @@ class ReviewStatusTests(unittest.TestCase):
     def test_an_author_spelled_as_a_reviewer_model_uses_that_family(self):
         # The record quotes what the client was run with, not a registry id:
         # "omniroute/spark-1.3-contributor" is the operator's reviewer spelling
-        # whose family the registry states.
+        # whose family the registry states. REVGATE2F: the second seat (a
+        # different family than the author's meta) makes the record ready.
         report = self.status("AutoOS-Review: kind=cross-family "
                              "author=omniroute/muse reviewer=gem-flash verdict=PASS\n"
+                             "AutoOS-Review: kind=cross-family "
+                             "author=omniroute/muse reviewer=qwen3.8-flash verdict=PASS\n"
                              + FINAL_LINE)
         self.assertTrue(report["ready"], report)
-        self.assertEqual(report["cross_family"]["family"], "google")
+        self.assertEqual(report["cross_family"]["families"], ["google", "qwen"])
 
     def test_a_bare_family_name_the_registry_knows_is_still_a_family(self):
         # Fail-closed on the unknown must not break the ordinary shorthand:
         # "qwen" is a family the fixture's reviewers declare, so it resolves.
         report = self.status("AutoOS-Review: kind=cross-family author=qwen "
-                             "reviewer=omniroute/muse verdict=PASS\n" + FINAL_LINE)
+                             "reviewer=omniroute/muse verdict=PASS\n"
+                             "AutoOS-Review: kind=cross-family author=qwen "
+                             "reviewer=gem-flash verdict=PASS\n" + FINAL_LINE)
         self.assertTrue(report["ready"], report)
 
     def test_a_non_ready_verdict_names_itself_rather_than_reading_missing(self):
@@ -9109,8 +9322,10 @@ class ReviewStatusTests(unittest.TestCase):
                 report = self.status(
                     "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                     "reviewer=omniroute/muse verdict=%s\n"
+                    "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                    "reviewer=gem-flash verdict=%s\n"
                     "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
-                    % (verdict, verdict))
+                    % (verdict, verdict, verdict))
                 self.assertTrue(report["ready"], report)
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=SHIP\n"
@@ -9125,7 +9340,9 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
                          "anthropic")
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                             "reviewer=claude-haiku-4-5 verdict=ship\n" + FINAL_LINE)
+                             "reviewer=claude-haiku-4-5 verdict=ship\n"
+                             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                             "reviewer=omniroute/muse verdict=ship\n" + FINAL_LINE)
         self.assertTrue(report["ready"], report)
         # An id whose name the list does not carry stays unknown: a reviewer
         # nobody can place is not an independent review (fail closed).
@@ -9151,10 +9368,14 @@ class ReviewStatusTests(unittest.TestCase):
     # --- the command's contract -------------------------------------------
 
     def test_the_command_exits_0_on_a_ready_record(self):
-        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, FINAL_LINE)
+        path = self.write_record("# Lane x", CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
+                                 FINAL_LINE)
         rc, out, _ = self.cmd(path)
         self.assertEqual(rc, 0)
         self.assertIn("ready", out)
+        # REVGATE2F: every counted seat prints as model (family) + verdict.
+        self.assertIn("seat 1: omniroute/muse (meta) verdict=PASS", out)
+        self.assertIn("seat 2: gem-flash (google) verdict=PASS", out)
 
     def test_the_command_exits_1_and_names_the_missing_review(self):
         path = self.write_record("# Lane x", FINAL_LINE)
@@ -9176,9 +9397,11 @@ class ReviewStatusTests(unittest.TestCase):
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
             "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "reviewer=opencode/nemotron-3-ultra-free verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
-        self.assertEqual(report["cross_family"]["family"], "meta")
+        self.assertEqual(report["cross_family"]["families"], ["meta", "nvidia"])
         # Haiku is the fallback first pass: it counts as a cross-family reviewer
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
@@ -9189,6 +9412,8 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertTrue(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+            "reviewer=gemini-3.8-flash verdict=ship\n"
             "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
@@ -9203,6 +9428,8 @@ class ReviewStatusTests(unittest.TestCase):
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=Meta "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=Meta "
+            "reviewer=qwen3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
         # The self-review that used to pass: Meta's own model, Meta's reviewer.
@@ -9232,9 +9459,12 @@ class ReviewStatusTests(unittest.TestCase):
                 # and complete: family != qwen, and the Sonnet final stands.
                 report = self.agent.review_status(
                     ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                     "reviewer=%s verdict=PASS\n" % spelling) + FINAL_LINE, real)
+                     "reviewer=%s verdict=PASS\n" % spelling)
+                    + "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                      "reviewer=opencode/muse-spark-1.3-contributor-free verdict=PASS\n"
+                    + FINAL_LINE, real)
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
-                self.assertEqual(report["cross_family"]["family"], family)
+                self.assertEqual(report["cross_family"]["families"], [family, "meta"])
 
     # The models an orchestrator session actually runs, spelled as its own client
     # reports them. They are authors, never routes: no provider serves them here,
@@ -9264,9 +9494,11 @@ class ReviewStatusTests(unittest.TestCase):
                 report = self.agent.review_status(
                     ("AutoOS-Review: kind=cross-family author=%s "
                      "reviewer=omniroute/spark-1.3-contributor verdict=ship\n" % author)
+                    + "AutoOS-Review: kind=cross-family author=%s "
+                      "reviewer=gemini-3.8-flash verdict=ship\n" % author
                     + FINAL_LINE, real)
                 self.assertTrue(report["ready"], report["cross_family"]["detail"])
-                self.assertEqual(report["cross_family"]["family"], "meta")
+                self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
 
     def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
         # Known is not routable, and this pins the difference: a route leg whose
@@ -9303,9 +9535,10 @@ class ReadyCommandTests(unittest.TestCase):
     Until now an orchestrator appended `ready <branch> <sha>` to autoos-L1-main's
     inbox by hand, after recalling that the record had both reviews and that the
     sha was pushed — and L1-main refused one that lacked reviews (inbox
-    00:31:52Z). `ready` makes the claim itself, and only when the two facts that
-    justify it hold: `review_status` says the record carries both reviews, and
-    `origin/<branch>` actually points at the sha.
+    00:31:52Z). `ready` makes the claim itself, and only when the facts that
+    justify it hold: `review_status` says the record carries both reviews,
+    `origin/<branch>` points at the sha, the named CI run is green at it, and —
+    since D-110 — the pre-push gate recorded a green run for that exact sha.
 
     Real temp git repos (a bare `origin` plus a clone, as the --isolate
     containment tests use) and the real parser / main entry: this is a CLI
@@ -9322,6 +9555,21 @@ class ReadyCommandTests(unittest.TestCase):
         self.addCleanup(os.unlink, self.registry_path)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self.registry, fh)
+        # D-154: the gate's records live in the runner-private store, not in the
+        # worktree — so a fixture stages them by moving the state root into a
+        # temp dir (the same redirect the spawner's own tests use), never by
+        # writing into the clone it controls.
+        self._old_state = os.environ.get("AUTOOS_STATE_DIR")
+        self.store_dir = tempfile.mkdtemp()
+        os.environ["AUTOOS_STATE_DIR"] = self.store_dir
+        self.addCleanup(shutil.rmtree, self.store_dir, True)
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self._old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self._old_state
 
     def write_record(self, *lines):
         fd, path = tempfile.mkstemp(suffix=".md")
@@ -9345,11 +9593,18 @@ class ReadyCommandTests(unittest.TestCase):
         with io.open(path, encoding="utf-8") as fh:
             return fh.read()
 
-    def make_repo(self, push=True):
+    def make_repo(self, push=True, green=True):
         """A bare `origin` plus a clone with one commit on BRANCH.
 
         Returns (repo_dir, sha). With push=False the branch exists only locally,
-        which is exactly the state `ready` must refuse as "not pushed".
+        which is exactly the state `ready` must refuse as "not pushed". With
+        green=False no pre-push record is written, the state a lane is in when it
+        pushed with `git push --no-verify` — which D-110 refuses.
+
+        The green record is staged through the gate's own
+        ``green_record``/``write_store_record``, not hand-formatted here: a
+        fixture that invented the shape would keep passing after the real
+        format changed and stop testing anything.
         """
         base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, base, True)
@@ -9371,6 +9626,13 @@ class ReadyCommandTests(unittest.TestCase):
         if push:
             subprocess.run(git + ["-C", repo, "push", "-q", "origin",
                                   "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        if green:
+            tree = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD^{tree}"],
+                                  check=True, capture_output=True,
+                                  text=True).stdout.strip()
+            prepush_tool.write_store_record(prepush_tool.green_record(
+                sha, tree, [{"command": "pytest -q staged", "ok": True,
+                             "passed": 1}]))
         return repo, sha
 
     def ready(self, record, repo, sha, inbox, extra=()):
@@ -9384,7 +9646,7 @@ class ReadyCommandTests(unittest.TestCase):
             rc = self.agent.main(argv)
         return rc, out.getvalue(), err.getvalue()
 
-    READY_RECORD = (CROSS_FAMILY_LINE, FINAL_LINE)
+    READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
     NOT_PUSHED_SHA = "0" * 40
 
     # --- the review gate ----------------------------------------------------
@@ -9436,7 +9698,7 @@ class ReadyCommandTests(unittest.TestCase):
                 repo, sha = self.make_repo()
                 inbox = self.make_inbox("")
                 rc, out, _ = self.ready(
-                    self.write_record(CROSS_FAMILY_LINE,
+                    self.write_record(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
                                       "AutoOS-Review: kind=final reviewer=%s "
                                       "verdict=READY" % spelling),
                     repo, sha, inbox)
@@ -9507,7 +9769,8 @@ class ReadyCommandTests(unittest.TestCase):
             r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) ready %s %s reviews: "
             r"(.+) \| (.+)$" % (re.escape(self.BRANCH), sha), lines[1])
         self.assertIsNotNone(match, lines[1])
-        self.assertEqual(match.group(2), "qwen3.8-flash reviewed by omniroute/muse (meta)")
+        self.assertEqual(match.group(2), "2 cross-family seats: "
+                                          "omniroute/muse (meta), gem-flash (google)")
         self.assertEqual(match.group(3), "sonnet verdict READY")
         self.assertIn(lines[1], out)
 
@@ -9647,6 +9910,117 @@ class ReadyCommandTests(unittest.TestCase):
             lambda sha, run_id: ("success", sha, None), push=False)
         self.assertEqual(rc, 1, out + err)
         self.assertEqual(inbox, "")
+
+    # --- the pre-push record gate (D-110, operator D-154) --------------------
+    # The other gates prove the lane was reviewed and shipped. None of them proves
+    # it was TESTED, and `git push --no-verify` is outside every hook's reach, so
+    # the gate's own record is the fact that closes the shape the three measured
+    # CI reds all had: green at home, red in CI.
+
+    def test_a_lane_with_no_gate_record_is_refused_and_nothing_is_appended(self):
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertIn(sha[:12], out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_forged_worktree_log_line_does_not_carry_ready(self):
+        # D-154 item 4 through the production reader: the log inside the
+        # checkout is the worker's file. It may carry the exact line the old
+        # gate wrote, and `ready` still refuses — the certificate is only what
+        # the runner-private store holds.
+        repo, sha = self.make_repo(green=False)
+        prepush_tool.record(repo, prepush_tool.green_line(sha, ["pytest -q staged"]))
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_an_override_record_is_not_green(self):
+        # The lane stepped over the gate; a ready claim must not inherit that, or
+        # the override would be the ordinary path.
+        repo, sha = self.make_repo(green=False)
+        tree = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD^{tree}"], check=True,
+            capture_output=True, text=True).stdout.strip()
+        prepush_tool.write_store_record(
+            prepush_tool.override_record(sha, tree, "the operator said so"))
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_gate_record_for_another_sha_does_not_carry_this_one(self):
+        # The record names the commit it ran on. A lane that amended after a green
+        # run is untested at the sha it is declaring, exactly the SCOPECLI shape.
+        repo, _sha = self.make_repo(green=True)
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        with open(os.path.join(repo, "later.txt"), "w", encoding="utf-8") as fh:
+            fh.write("amended after the gate ran\n")
+        subprocess.run(git + ["-C", repo, "add", "later.txt"], check=True)
+        subprocess.run(git + ["-C", repo, "commit", "-q", "--amend",
+                             "--no-edit"], check=True)
+        sha = subprocess.run(git + ["-C", repo, "rev-parse", "HEAD"], check=True,
+                             capture_output=True, text=True).stdout.strip()
+        self.assertNotEqual(sha, _sha)
+        subprocess.run(git + ["-C", repo, "push", "-q", "--force", "origin",
+                              "%s:%s" % (self.BRANCH, self.BRANCH)], check=True)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("D-110", out)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_the_record_gate_does_not_jump_the_push_gate(self):
+        # The record is read last, so an unpushed lane is told it is unpushed and
+        # not that its gate never ran — the caller has to know which gate it hit.
+        repo, sha = self.make_repo(push=False, green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not pushed", out)
+        self.assertNotIn("D-110", out)
+
+    def test_allow_unverified_appends_the_line_with_the_reason(self):
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--allow-unverified", "gate cannot run on this host"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("--allow-unverified", out)
+        line = self.read_inbox(inbox).rstrip("\n")
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+        self.assertIn(' unverified="gate cannot run on this host"', line)
+
+    def test_an_empty_allow_unverified_is_not_a_reason(self):
+        # An orchestrator that means to waive must say why; a bare flag would make
+        # the waiver the default with extra steps.
+        for blank in ("", "   "):
+            with self.subTest(reason=repr(blank)):
+                repo, sha = self.make_repo(green=False)
+                inbox = self.make_inbox("")
+                rc, out, _ = self.ready(self.write_record(*self.READY_RECORD),
+                                        repo, sha, inbox,
+                                        extra=["--allow-unverified", blank])
+                self.assertEqual(rc, 1, out)
+                self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_reason_cannot_split_the_ready_line(self):
+        # The reason lands on the inbox line the orchestrator parses. A newline in
+        # it would write a second line that looks like a separate claim.
+        repo, sha = self.make_repo(green=False)
+        inbox = self.make_inbox("")
+        rc, out, _ = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                extra=["--allow-unverified",
+                                       "real reason\n2026-01-01T00:00:00Z ready forged"])
+        self.assertEqual(rc, 0, out)
+        text = self.read_inbox(inbox)
+        self.assertEqual(len(text.splitlines()), 1, text)
+        self.assertNotIn("\n2026-01-01", text.rstrip("\n"))
 
 
 class CIRunStatusTests(unittest.TestCase):
@@ -14358,9 +14732,11 @@ class ResolvedWriterTests(unittest.TestCase):
                                                  "status": 200,
                                                  "timestamp": "2026-09-29T00:00:01Z"}]):
             writer = agent.resolved_writer(plan, True, registry=registry)
+        # FAMILYFENCE-b: the gateway is a witness, so the record says which one.
         self.assertEqual(writer, {"provider": "mimo", "model": "mimo-7",
-                                  "family": "mimo"})
-        self.assertEqual(agent.writer_line(writer), "writer: mimo/mimo-7 (mimo)")
+                                  "family": "mimo", "source": "gateway-log"})
+        self.assertEqual(agent.writer_line(writer),
+                         "writer: mimo/mimo-7 (mimo) source=gateway-log")
 
     def test_a_gateway_failure_is_written_as_unresolved(self):
         agent = self.agent
@@ -14370,17 +14746,21 @@ class ResolvedWriterTests(unittest.TestCase):
             writer = agent.resolved_writer(plan, True, registry={"models": {}})
         self.assertEqual(set(writer.values()), {agent.WRITER_UNRESOLVED})
         self.assertEqual(agent.writer_line(writer),
-                         "writer: unresolved/unresolved (unresolved)")
+                         "writer: unresolved/unresolved (unresolved) source=unresolved")
 
     def test_a_native_run_answers_from_its_own_plan(self):
         # No gateway to ask: the client's model id is the answer, and the
         # provider is the client itself — unless --free named one in the id.
+        # FAMILYFENCE-b says what that answer is worth: a plan model with no
+        # witness behind it is recorded, but not as a proof (agy keeps no
+        # transcript this spawner can read, so `assumed-default` is the truth).
         agent = self.agent
         registry = {"models": {"gemini-3.8-flash": {"family": "gemini"}}}
         native = agent.resolved_writer({"client": "agy", "model": "gemini-3.8-flash"},
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
-                                  "family": "gemini"})
+                                  "family": "gemini", "source": "assumed-default"})
+        self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
                                      False, registry={"models": {}})
         self.assertEqual((free["provider"], free["model"]), ("jetski", "jetski-9"))
@@ -14435,6 +14815,1574 @@ class ResolvedWriterTests(unittest.TestCase):
         self.assertEqual(st["writer"], {"provider": "mimo", "model": "mimo-7",
                                        "family": "mimo"}, st)
 
+
+# FAMILYFENCE: the shape that broke D-115 in the field (measured 2026-09-29). An
+# ORCH-A1 writer resolved to a NVIDIA nemotron; both cross-family reviews it asked
+# for (mimo, muse) hit their rate limits and SB-B's fallthrough walked the ordered
+# free chain with no family exclusion, landed on nemotron again, and reported a
+# same-family read as an independent review. The three spellings below are the
+# measured chain, in the measured order.
+FENCE_CHAIN = ["opencode/mimo-v2.6-flash-free",
+               "opencode/muse-spark-1.3-contributor-free",
+               "opencode/nemotron-3-ultra-free"]
+FENCE_FAMILIES = {"mimo-v2.6-flash-free": "mimo",
+                  "muse-spark-1.3-contributor-free": "meta",
+                  "nemotron-3-ultra-free": "nvidia"}
+FENCE_WRITER_RUN = "20260929-000000-writer-f00001"
+
+
+@unittest.skipIf(os.name == "nt", "the runner-private kill record the fence reads "
+                                  "is POSIX-only (write_kill_record is a no-op on nt)")
+class FamilyFenceFreeChainTests(unittest.TestCase):
+    """FAMILYFENCE item 1 on the --free leg, where the whole chain is the
+    spawner's own choice: a fenced family is removed from the initial model AND
+    from every fallthrough candidate, a candidate the registry cannot place is
+    not safe for a review, and a plan with nothing outside the fence left exits
+    its own code rather than serving the run on the writer's own model."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, stops, over=None, policy=None, families=None, prepare=None):
+        args_over = {"free": True, "free_model": FENCE_CHAIN[0], "isolate": True,
+                     "card": "kind=review"}
+        args_over.update(over or {})
+        return _fallthrough_run(
+            self, ["r-free"], stops, args_over=args_over,
+            policy=policy if policy is not None
+            else {"free_client_models": {"opencode": FENCE_CHAIN}},
+            families=families if families is not None else FENCE_FAMILIES,
+            prepare=prepare)
+
+    @staticmethod
+    def _writer_record(statedir, root, family="nvidia"):
+        """The writer's own runner-private record, written through the real store
+        (the fence reads a family from there and nowhere else)."""
+        agent = load_agent()
+        assert agent.kill_store_dir() == os.path.join(statedir, "kill"), \
+            "prepare() must run inside the test's own AUTOOS_STATE_DIR"
+        agent.write_kill_record(FENCE_WRITER_RUN, {
+            "mode": "write",
+            "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                       "family": family}})
+
+    def test_the_measured_case_a_fenced_family_never_serves_the_fallthrough(self):
+        rc, out, err, calls, _ = self._run(
+            stops=2, over={"review_of": FENCE_WRITER_RUN},
+            prepare=lambda s, r: self._writer_record(s, r))
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2],
+                         "the two un-fenced models ran; nemotron never launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_the_fence_removes_the_head_too_and_says_what_it_pinned_instead(self):
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"not_family": ["mimo"]})
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[1]],
+                         "the given free model is inside the fence, so the next one runs")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("family fence", out + err)
+
+    def test_a_candidate_of_an_unknown_family_is_not_safe_for_a_review(self):
+        # `ghost` has no registry row at all, so nothing can say which family it
+        # is — and an unknown reviewer is exactly the invented name D-115 refuses.
+        # The fence is active (a family is named), so a review walks past it.
+        chain = ["opencode/ghost-1"] + FENCE_CHAIN
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"free_model": "opencode/ghost-1", "not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[0]], out + err)
+        self.assertIn("opencode/ghost-1 is inside the fence", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_fenced_model_next_in_line_is_walked_past_on_the_real_re_plan(self):
+        # N1, asserted on what the run DOES rather than on a keyword argument of a
+        # spy: the rate limit lands on mimo, the fenced family is the NEXT spelling
+        # in the ordered chain, and an un-fenced one sits behind it. The re-plan
+        # serves the run on that one — the fenced model is never launched, and the
+        # review is not refused for a chain that still has a legal leg left.
+        chain = ["opencode/mimo-v2.6-flash-free",
+                 "opencode/nemotron-3-ultra-free",
+                 "opencode/muse-spark-1.3-contributor-free"]
+        rc, out, err, calls, _ = self._run(
+            stops=1, over={"not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], [chain[0], chain[2]],
+                         "the fenced middle of the chain never served the re-plan")
+        self.assertNotIn("nemotron", " ".join(" ".join(cmd) for cmd in calls["cmds"]),
+                         out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_role_run_keeps_an_unknown_family_candidate(self):
+        # The fence excludes FAMILIES. It is the review role that additionally
+        # refuses what it cannot place — a writer is not graded on independence.
+        chain = ["opencode/ghost-1"] + FENCE_CHAIN
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"card": "kind=implement", "free_model": "opencode/ghost-1",
+                           "not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": chain}})
+        self.assertEqual(calls["free_models"], ["opencode/ghost-1"], out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_chain_spent_of_its_own_is_still_exit_8(self):
+        # The fence is not an excuse to relabel an ordinary exhaustion: with only
+        # the two un-fenced models listed, the run gives up exactly as it did
+        # before, having never been offered a fenced one.
+        rc, out, err, calls, _ = self._run(
+            stops=9, over={"not_family": ["nvidia"]},
+            policy={"free_client_models": {"opencode": FENCE_CHAIN[:2]}})
+        self.assertEqual(rc, 8, out + err)
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2], out + err)
+        self.assertNotIn("FAMILYFENCE", out + err)
+
+    def test_an_explicit_model_of_the_excluded_family_is_refused_before_launch(self):
+        rc, out, err, calls, _ = self._run(
+            stops=0, over={"free": False, "free_model": None, "isolate": False,
+                           "model": "opencode/nemotron-3-ultra-free",
+                           "not_family": ["nvidia"]})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_a_review_without_a_known_writer_family_says_it_is_not_enforced(self):
+        rc, out, err, calls, _ = self._run(stops=0)
+        self.assertIn("review without a known writer family - cross-family not "
+                      "enforced", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_review_with_a_named_family_does_not_warn_about_the_writer(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"not_family": ["nvidia"]})
+        self.assertNotIn("cross-family not enforced", err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_run_neither_warns_nor_fences_nothing(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"card": "kind=implement"})
+        self.assertNotIn("cross-family not enforced", err)
+        self.assertEqual(calls["free_models"], [FENCE_CHAIN[0]], out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_the_writer_family_is_read_from_the_record_and_never_from_job_json(self):
+        # job.json lives in the writer's own task directory, so a run can rewrite
+        # it; the kill record is the runner's. The forged row claims the writer was
+        # a mimo, which would fence off the two honest reviewers and leave the run
+        # on nemotron — the exact bug. The record's nvidia is what binds.
+        def forge(statedir, root):
+            self._writer_record(statedir, root)
+            path = os.path.join(statedir, "agents", FENCE_WRITER_RUN)
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "job.json"), "w", encoding="utf-8") as fh:
+                json.dump({"id": FENCE_WRITER_RUN, "request": {}, "task": "t",
+                           "writer": {"provider": "mimo", "model": "mimo-v2.6",
+                                      "family": "mimo"}}, fh)
+        rc, out, err, calls, _ = self._run(stops=2, over={"review_of": FENCE_WRITER_RUN},
+                                          prepare=forge)
+        self.assertEqual(calls["free_models"], FENCE_CHAIN[:2], out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unreadable_review_of_is_refused_rather_than_run_unfenced(self):
+        rc, out, err, calls, _ = self._run(stops=0, over={"review_of": "../etc"})
+        self.assertEqual(calls["n"], 0, "a run id that is not a run id is refused")
+        self.assertEqual(rc, 2, out + err)
+
+
+@unittest.skipIf(os.name == "nt", "the runner-private kill record the fence reads "
+                                  "is POSIX-only (write_kill_record is a no-op on nt)")
+class FamilyFenceUnreadableWriterTests(unittest.TestCase):
+    """FAMILYFENCE-4: `--review-of` is a request the fence must ANSWER, not a hint it
+    may note. A writer family this checkout's record store cannot name excludes
+    nothing, and the review went on UNFENCED with a warning beside it. Measured live
+    on a dry run of `--review-of 20260929-063303-familyfence-3-fix-round-3a237a` (a
+    Qwen writer, whose record sat in the spawning checkout's store) from a checkout
+    that did not hold it: it planned `t3-driver`, qwen legs and all, and printed
+    `review without a known writer family - cross-family not enforced`."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(self._restore)
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _restore(self):
+        for name, value in self.old.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _env(self, **extra):
+        # clean_env drops the ambient AUTOOS_AGENT_* keys, so the subprocess sees
+        # exactly this test's store.
+        return clean_env(AUTOOS_STATE_DIR=self.tmp, **extra)
+
+    def _plan(self, *over):
+        return plan_of("--client", "opencode", "--card",
+                       "role=review,complexity=standard", "--isolate", "--lean",
+                       "--review-of", FENCE_WRITER_RUN, *over, "PONG",
+                       env=self._env())
+
+    def _record(self, writer):
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            self.assertTrue(self.agent.write_kill_record(
+                FENCE_WRITER_RUN, {"mode": "write", "writer": writer}))
+
+    def test_a_review_of_a_run_this_store_has_no_record_for_is_refused(self):
+        r = self._plan()
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertIn(FENCE_WRITER_RUN, combined, "the id it could not resolve")
+        self.assertIn(os.path.join(self.tmp, "kill"), combined,
+                      "the refusal has to name the store it searched")
+        self.assertIn("--not-family", combined, "one of the two ways out")
+        self.assertIn("checkout", combined, "the other way out: spawn where the writer ran")
+        self.assertNotIn("would run", combined, "nothing is planned, let alone launched")
+        self.assertNotIn("cross-family not enforced", combined,
+                         "a warning is not an answer to a fence that was asked for")
+
+    def test_a_record_whose_writer_never_resolved_is_refused_too(self):
+        # The other half of "cannot be read": the record is there and says nothing.
+        # `unresolved` is what a run that never got a witness writes, and fencing it
+        # off would exclude a family that is not a family.
+        self._record({"provider": self.agent.WRITER_UNRESOLVED,
+                      "model": self.agent.WRITER_UNRESOLVED,
+                      "family": self.agent.WRITER_UNRESOLVED,
+                      "source": self.agent.WRITER_UNRESOLVED})
+        r = self._plan()
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertNotIn("would run", combined)
+
+    def test_a_named_family_does_not_release_a_review_of_an_unknown_writer(self):
+        # `--not-family nvidia` is a second fence, not evidence about the writer.
+        # Honouring it here would let the run read as fenced while the family the
+        # caller actually asked about stayed unnamed.
+        r = self._plan("--not-family", "nvidia")
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertNotIn("would run", combined)
+        # FAMILYFENCE-5 item 2: the way out has to be a way out. Naming a family
+        # while keeping --review-of does not clear this refusal — it re-fires, and
+        # the only two moves that work are the checkout the writer ran in, and
+        # dropping --review-of.
+        self.assertIn("drop --review-of", combined, combined)
+
+    def test_a_readable_record_fences_the_writers_family_and_refuses_nothing(self):
+        self._record({"provider": "qoder", "model": "Qwen3.8-Flash",
+                      "family": "qwen", "source": "client-reported"})
+        args = argparse.Namespace(not_family=None, review_of=FENCE_WRITER_RUN,
+                                  card="kind=review", tier=None)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            fence = self.agent.family_fence(args)
+        self.assertEqual(fence["families"], ["qwen"], fence)
+        self.assertIsNone(fence.get("refusal"),
+                          "a fence built from a real family refuses nothing")
+        self.assertFalse(fence["warn_no_writer"], fence)
+
+    def test_the_mcp_spawn_surfaces_the_refusal_as_its_error(self):
+        # MCP `spawn(review_of=...)` preflights through the CLI's own dry run, so the
+        # same refusal reaches the orchestrator as the error string — a spawn that
+        # started an unfenced review would look like a completed one.
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                "card": {"role": "review"},
+                                "review_of": FENCE_WRITER_RUN})
+        self.assertIn("error", out, out)
+        self.assertIn("--not-family", out["error"])
+        self.assertIn(os.path.join(self.tmp, "kill"), out["error"],
+                      "the store the spawn searched is the spawn's own, named in the "
+                      "error: %s" % out["error"])
+
+
+class FamilyFenceRouteTests(unittest.TestCase):
+    """FAMILYFENCE item 1 on the gateway leg: a route whose registry legs carry a
+    fenced family is dropped from the plan, so neither the first route nor a
+    fallthrough re-plan can serve a fenced run."""
+
+    LEGS = {"r-nvidia": ["nvidia/nemotron-3-ultra"],
+            "r-mimo": ["mimo/mimo-7"]}
+    FAMILIES = {"nemotron-3-ultra": "nvidia", "mimo-7": "mimo"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, route_ids, stops, over=None, legs=None, families=None):
+        # A v2 card is the resolver-routed path, and the resolver is what picks
+        # among the registry's route ids; a v1 card names one combo outright.
+        return _fallthrough_run(
+            self, route_ids, stops,
+            args_over=dict({"card": "kind=review"}, **(over or {})),
+            legs=legs if legs is not None else self.LEGS,
+            families=families if families is not None else self.FAMILIES)
+
+    def test_a_route_whose_leg_is_fenced_is_not_routed_to(self):
+        rc, out, err, calls, _ = self._run(["r-nvidia", "r-mimo"], 0,
+                                          over={"not_family": ["nvidia"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-mimo", out)
+        self.assertNotIn("route: r-nvidia", out)
+
+    def test_a_plan_whose_only_route_is_fenced_exits_no_other_family(self):
+        rc, out, err, calls, _ = self._run(["r-nvidia"], 0,
+                                          over={"not_family": ["nvidia"]})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+
+    def test_a_review_drops_a_route_the_registry_cannot_place(self):
+        # r-ghost's leg has no models row, so its family is unknown — and an
+        # unknown reviewer is exactly the invented name D-115 refuses.
+        rc, out, err, calls, _ = self._run(
+            ["r-ghost", "r-mimo"], 0, over={"not_family": ["nvidia"]},
+            legs={"r-ghost": ["ghost/ghost-1"], "r-mimo": ["mimo/mimo-7"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-mimo", out)
+
+    def test_a_write_route_run_keeps_an_unplaceable_leg(self):
+        rc, out, err, calls, _ = self._run(
+            ["r-ghost", "r-mimo"], 0,
+            over={"not_family": ["nvidia"],
+                  "card": "kind=implement"})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: r-ghost", out)
+
+
+class FamilyFenceReviewerOverrideTests(unittest.TestCase):
+    """FAMILYFENCE-5 item 1 (cross-family review, Muse): the reviewer override is a
+    MODEL CHOICE made after the fence had already been consulted, so an authored
+    review card could be handed a `policy.reviewers` spelling inside the fenced
+    family and the plan said nothing — only the post-run backstop noticed, after the
+    same-family review had already run.
+
+    Reachable whenever the card's `author` is not `--review-of`'s writer: the
+    reviewer walk is cross-family to the AUTHOR, the fence is built from the WRITER,
+    and neither one sees the other. Same fixture as the reviewer gate (the reviewers
+    list has to exist for the override to fire at all)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
+        self.agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
+        self.agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
+        self.agent.PROVIDER_STATE_PATH = os.path.join(tmp, "provider-state.json")
+        self.agent.DEFAULT_ORCHESTRATOR_MODEL = "orch"
+        self.registry = _reviewer_registry()
+        patch = mock.patch.object(self.agent, "load_registry", lambda path: self.registry)
+        patch.start()
+        self.addCleanup(patch.stop)
+        state = mock.patch.object(
+            self.agent.measure_mod, "client_state",
+            lambda *a, **k: {name: {"installed": True, "signed_in": True, "reason": ""}
+                             for name in ("opencode", "gemini", "qoder", "claude")})
+        state.start()
+        self.addCleanup(state.stop)
+
+    def cfg(self):
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap", "muse"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def args(self, **overrides):
+        ns = argparse.Namespace(
+            tier=None, card="kind=review,author=qwen,paths=tools/registry.py",
+            allow_training=False, client="opencode", joinable=False, max_depth=None,
+            clean=False, model=None, free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
+            isolate=False, auto=True, lean=False, title=None, dry_run=True, task="x",
+            no_defer=False, not_family=None, review_of=None, no_fallthrough=False)
+        for key, value in overrides.items():
+            setattr(ns, key, value)
+        return ns
+
+    def plan(self, **overrides):
+        """The run's own plan, built the way `cmd_run` builds it: the fence is
+        settled first and handed to build_plan, never re-derived after the route."""
+        args = self.args(**overrides)
+        fence = self.agent.family_fence(args)
+        return self.agent.build_plan(args, self.cfg(), fence=fence)
+
+    def run_cmd_run(self, **overrides):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(self.args(**overrides), self.cfg())
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_an_authored_v2_review_whose_reviewer_is_fenced_is_refused_at_plan(self):
+        # Muse (family meta) is what this fixture's reviewer list picks for a qwen
+        # author; fencing meta off has to stop the plan, not the report.
+        with self.assertRaises(self.agent.FamilyFenceRefused):
+            self.plan(card="kind=review,author=qwen,paths=tools/registry.py",
+                      not_family=["meta"])
+
+    def test_an_authored_v1_review_whose_reviewer_is_fenced_is_refused_at_plan(self):
+        # The v1 branch of resolve_route_unchecked has the same walk and the same
+        # missing check; a v1 card is `role=`, and the resolver never sees it.
+        with self.assertRaises(self.agent.FamilyFenceRefused):
+            self.plan(card="role=review,author=qwen", not_family=["meta"])
+
+    def test_the_fenced_reviewer_run_is_refused_before_it_is_announced(self):
+        # What the CLI answers: the fence's own exit code, and no plan line at all.
+        rc, out, err = self.run_cmd_run(not_family=["meta"])
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family meta left - refusing (FAMILYFENCE)",
+                      err)
+        self.assertNotIn("reviewer: ", out, "the review is never announced as running")
+        self.assertNotIn("would run", out + err, "nothing is planned, let alone launched")
+
+    def test_a_reviewer_outside_the_fence_still_serves_the_review(self):
+        # The other half: the fence rules the writer's family, and the reviewer the
+        # list picked is elsewhere — the override must not become a refusal.
+        route = self.plan(not_family=["anthropic"])["route"]
+        self.assertEqual(route["combo"], "muse", route)
+        self.assertEqual(route["model"], "omniroute/muse", route)
+
+
+class FamilyFenceServingModelTests(unittest.TestCase):
+    """FAMILYFENCE-3 B1: when --free (or an own-account --model pin) already
+    decided the model that serves the run, the fence is judged on THAT model —
+    the gateway combo the run never serves must not refuse it.
+
+    Measured 2026-09-29 in a live smoke from this branch: a --free review with
+    `--not-family qwen` exited 12 although the free head (muse, family meta) is
+    outside that fence, because t1/t2/t3 each carry one qwen leg and the combo
+    leg check fenced the run that no combo serves."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _dry(self, *argv, tmp=None):
+        env = clean_env(AUTOOS_STATE_DIR=tmp or tempfile.mkdtemp())
+        if not tmp:
+            self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        return run_agent("run", *argv, "PONG", env=env)
+
+    def _free_review(self, *not_families, tmp=None):
+        argv = ["--client", "opencode", "--card", "role=review,complexity=trivial",
+                "--free", "--isolate", "--lean", "--dry-run"]
+        for fam in not_families:
+            argv += ["--not-family", fam]
+        return self._dry(*argv, tmp=tmp)
+
+    def test_a_free_review_outside_the_fence_is_not_refused_by_combo_legs(self):
+        # The live smoke case: the free head muse (meta) sits outside the qwen
+        # fence while every gateway combo carries a qwen leg.
+        r = self._free_review("qwen")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("FAMILYFENCE", r.stdout + r.stderr)
+        self.assertIn("--model opencode/muse-spark-1.3-contributor-free", r.stdout)
+
+    def test_a_free_run_walked_onto_the_next_chain_model_is_not_refused_either(self):
+        # The second smoke case: the head muse is inside the meta fence, the run
+        # announces the walk onto nemotron (nvidia) — and must then RUN, not
+        # exit 12 on combos no model of this run ever comes from.
+        r = self._free_review("meta")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("this run starts on opencode/nemotron-3-ultra-free", r.stderr)
+        self.assertIn("--model opencode/nemotron-3-ultra-free", r.stdout)
+
+    def test_a_fence_covering_the_whole_free_chain_is_still_refused(self):
+        # The bypass is about the COMBO legs, not about the fence: the serving
+        # model is still judged, and a chain with nothing outside the fence left
+        # exits its own code.
+        r = self._free_review("meta", "nvidia", "xiaomi")
+        self.assertEqual(r.returncode, self.agent.EXIT_NO_OTHER_FAMILY,
+                         r.stdout + r.stderr)
+        self.assertIn("refusing (FAMILYFENCE)", r.stderr)
+
+    def test_an_own_account_pin_outside_the_fence_serves_despite_fenced_combos(self):
+        # The pin half: a qoder --model the registry can place outside the fence
+        # decides the serving model, so the combo leg list — which never serves
+        # this run — fences nothing about it.
+        r = self._dry("--client", "qoder", "--card", "role=review", "--isolate",
+                      "--model", "opencode/nemotron-3-ultra-free",
+                      "--not-family", "qwen", "--dry-run")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("FAMILYFENCE", r.stdout + r.stderr)
+        self.assertIn("--model opencode/nemotron-3-ultra-free", r.stdout)
+
+    def test_a_fenced_combo_refusal_names_the_way_out(self):
+        # A gateway-combo run (no --free, no own-account pin) keeps its refusal —
+        # and the message now names how to get an un-fenced serving model.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["nvidia"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family nvidia left - refusing (FAMILYFENCE)",
+                      err)
+        self.assertIn("use --free or pin --model outside family nvidia", err)
+
+
+class FamilyFenceUnknownNameTests(unittest.TestCase):
+    """FAMILYFENCE-3 B2: a `--not-family` naming no family the registry carries
+    (e.g. "mimo" while the registry says the model's family is "xiaomi") excluded
+    nothing at all, and the run planned and launched as if it were fenced. The
+    name is refused (rc 2) with the known families named, before any leg choice."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def test_an_unknown_not_family_is_refused_naming_the_known_families(self):
+        env = clean_env(AUTOOS_STATE_DIR=tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        r = run_agent("run", "--client", "opencode",
+                      "--card", "role=review,complexity=trivial",
+                      "--free", "--isolate", "--lean",
+                      "--not-family", "mimo", "--dry-run", "PONG", env=env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        combined = r.stdout + r.stderr
+        self.assertIn("mimo", combined)
+        self.assertIn("xiaomi", combined)
+        self.assertNotIn("would run", combined)
+
+    def test_an_unknown_name_refuses_before_anything_launches(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["ghostfam"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("ghostfam", err)
+        self.assertIn("nvidia", err)
+
+    def test_a_name_the_registry_carries_still_costs_the_run_its_fence(self):
+        # The regression half: a KNOWN name keeps the fence's own exit code — the
+        # check is about the name, never about weakening the fence.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["NVIDIA"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_a_blank_not_family_is_refused_rather_than_fence_nothing(self):
+        # FAMILYFENCE-5 item 4: `fence_family_names` drops a blank before the B2
+        # name check can call it unknown, so `--not-family ""` planned and launched
+        # as an UNFENCED run that read as fenced. MCP `spawn` already rejects a
+        # blank; the CLI is the same fence and must answer it the same way.
+        env = clean_env(AUTOOS_STATE_DIR=tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, env["AUTOOS_STATE_DIR"], True)
+        env.pop("AUTOOS_TASK_DIR", None)
+        r = run_agent("run", "--client", "opencode",
+                      "--card", "role=review,complexity=trivial",
+                      "--isolate", "--lean",
+                      "--not-family", "", "--dry-run", "PONG", env=env)
+        combined = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, combined)
+        self.assertIn("--not-family", combined)
+        self.assertNotIn("would run", combined, "a blank fences nothing, so nothing runs")
+
+    def test_a_blank_value_hides_no_family_from_the_name_check(self):
+        # A blank is a broken invocation, not a value to evaluate: it is refused
+        # before the names beside it are judged, so one flag never answers as rc 2
+        # and another as the fence's own code depending on what rode with it.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-nvidia"], 0,
+            args_over={"card": "kind=review", "not_family": ["", "nvidia"]},
+            legs={"r-nvidia": ["nvidia/nemotron-3-ultra"]},
+            families={"nemotron-3-ultra": "nvidia"})
+        self.assertEqual(calls["n"], 0, "nothing was launched")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("--not-family", err)
+
+
+class FamilyFenceStringNameTests(unittest.TestCase):
+    """FAMILYFENCE-3 N2: `not_family` reaching the fence as a BARE STRING — an API
+    caller or the MCP spawn tool, not the CLI's `append` list — was iterated
+    char-by-char, so "mimo" fenced the families "m", "i" and "o" (nothing) and the
+    real family stayed unfenced while the run read as guarded."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_a_bare_string_names_one_family_and_not_its_characters(self):
+        self.assertEqual(self.agent.fence_family_names("Mimo"), ["mimo"])
+        self.assertEqual(self.agent.fence_family_names(["mimo", "META"]),
+                         ["mimo", "meta"])
+
+    def test_family_fence_from_a_bare_string_excludes_that_one_family(self):
+        args = argparse.Namespace(not_family="nvidia", review_of=None,
+                                  card="kind=review", tier=None)
+        fence = self.agent.family_fence(args)
+        self.assertEqual(fence["families"], ["nvidia"],
+                         "one name typed as a string is one family, not four letters")
+
+
+class NoFallthroughTests(unittest.TestCase):
+    """FAMILYFENCE item 3: `--no-fallthrough` pins the run to the model it was
+    planned on. An orchestrator that wants a verdict from one named model would
+    otherwise get one from whichever model survived the rate limits — and nothing
+    in the report says which."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def test_a_pinned_run_ends_on_its_stop_rc_with_one_attempt(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=9, stop_rc=1,
+            args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 1, "the pinned model is the only attempt")
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("no-fallthrough", err)
+        self.assertNotIn("falling through to", out + err)
+
+    def test_a_pinned_run_without_a_stop_completes_normally(self):
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0, args_over={"no_fallthrough": True})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 1)
+
+    def test_a_run_without_the_flag_still_falls_through(self):
+        rc, out, err, calls, _ = _fallthrough_run(self, ["r-free", "r-cheap"], stops=1,
+                                                  legs={"r-cheap": ["mimo/mimo-7"]})
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["n"], 2, "the default is unchanged")
+
+
+class CrossFamilyReportTests(unittest.TestCase):
+    """FAMILYFENCE item 4: the report header has to SAY whose family read the
+    diff, and a same-family verdict may not leave as rc 0. The gateway is the only
+    witness of who served a run — OmniRoute can fall through to a leg inside a
+    combo the spawner's plan never showed, which is why this check runs after the
+    run and not only before it."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, served, over=None, stops=0):
+        agent = self.agent
+
+        def read_kill_record(run_id):
+            # The writer's record holds the family the fence is built from; this
+            # run has a record of its own (mode only), so the writer line is still
+            # written back where a canceller can read it.
+            if run_id == FENCE_WRITER_RUN:
+                return {"mode": "write",
+                        "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                                   "family": "nvidia"}}
+            return {"mode": "write"}
+
+        with mock.patch.object(agent, "gateway_writer", lambda session, **kw: served), \
+                mock.patch.object(agent, "read_kill_record", read_kill_record):
+            return _fallthrough_run(
+                self, ["r-free"], stops,
+                args_over=dict({"card": "kind=review", "review_of": FENCE_WRITER_RUN,
+                                "isolate": False}, **(over or {})),
+                families={"mimo-7": "mimo", "nemotron-3-ultra": "nvidia"})
+
+    def test_a_cross_family_review_says_so(self):
+        rc, out, err, calls, _ = self._run(("mimo", "mimo-7"))
+        self.assertIn("family: writer=nvidia reviewer=mimo CROSS-FAMILY: yes",
+                      out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_same_family_verdict_exits_no_other_family(self):
+        # The plan was fenced and clean; the gateway answered with the writer's own
+        # family anyway. rc 0 here is a same-family verdict passing as independent.
+        rc, out, err, calls, _ = self._run(("nvidia", "nemotron-3-ultra"))
+        self.assertIn("family: writer=nvidia reviewer=nvidia CROSS-FAMILY: NO",
+                      out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unresolved_reviewer_is_reported_as_unknown_and_costs_nothing(self):
+        rc, out, err, calls, _ = self._run(None)
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_write_run_prints_no_family_line(self):
+        rc, out, err, calls, _ = self._run(("mimo", "mimo-7"),
+                                          over={"card": "kind=implement"})
+        self.assertNotIn("CROSS-FAMILY", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+
+class FamilyFenceMcpPlumbingTests(unittest.TestCase):
+    """FAMILYFENCE: a spawn that cannot pass the fence down cannot enforce it, so
+    the three new fields have to reach the argv the runner starts the CLI with."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def wait_done(self, run_id, secs=60):
+        deadline = time.time() + secs
+        while time.time() < deadline:
+            st = mcp_server.status(run_id)
+            if st["state"] not in ("submitted", "working"):
+                return st
+            time.sleep(0.1)
+        self.fail("run %s never finished" % run_id)
+
+    def test_the_fence_fields_reach_the_cli_argv(self):
+        argv, _ = mcp_server.build_argv({
+            "task": "t", "card": {"role": "review"}, "not_family": ["nvidia", "meta"],
+            "review_of": FENCE_WRITER_RUN, "no_fallthrough": True})
+        self.assertEqual([a for a in argv if a == "--not-family"], ["--not-family"] * 2)
+        self.assertIn("nvidia", argv)
+        self.assertIn("meta", argv)
+        self.assertEqual(argv[argv.index("--review-of") + 1], FENCE_WRITER_RUN)
+        self.assertIn("--no-fallthrough", argv)
+
+    def test_the_fence_flags_are_absent_when_nothing_was_asked(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "tier": 2})
+        for flag in ("--not-family", "--review-of", "--no-fallthrough"):
+            self.assertNotIn(flag, argv)
+
+    def test_an_unusable_not_family_is_refused_rather_than_stringified(self):
+        # A dict would reach the CLI as one flag per KEY, and an int would reach
+        # it as the argv builder's own TypeError — both read as a spawn that
+        # fenced something.
+        for bad in ({"nvidia": True}, 7, [["nvidia"]]):
+            with self.subTest(bad=bad):
+                out = mcp_server.spawn({"task": "t", "cwd": str(ROOT),
+                                        "not_family": bad})
+                self.assertIn("not_family", out["error"])
+
+    def test_a_real_spawn_carries_the_fence_to_the_cli(self):
+        """No mock on the launch: the runner is really started (dry run), so an
+        argv that dropped a flag shows up as the CLI's own answer instead of as a
+        passing assertion about a list this process built for itself."""
+        out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                "card": {"role": "review"}, "not_family": ["nvidia"]})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(mcp_server.state_root(), out["id"],
+                                                 "job.json"))
+        self.assertIn("--not-family", job["argv"])
+        self.assertIn("nvidia", job["argv"])
+        st = self.wait_done(out["id"])
+        self.assertEqual(st["state"], "completed",
+                         mcp_server.result(out["id"]).get("text"))
+
+
+class FamilyFenceRecordTests(unittest.TestCase):
+    """FAMILYFENCE, the two places a new exit code has to land the same moment it
+    is added: the docstring table every caller reads (R-orch-11) and the track
+    record's failure class, which a validator rejects silently if it is missing
+    (REVFIX)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def test_the_exit_code_table_names_the_no_other_family_code(self):
+        doc = self.agent.__doc__
+        self.assertEqual(self.agent.EXIT_NO_OTHER_FAMILY, 12)
+        self.assertIn("12 = a run whose every remaining model and route sits inside",
+                      doc)
+        self.assertIn("NO-OTHER-FAMILY", doc)
+
+    def test_a_fence_refusal_is_recorded_as_a_refusal_not_a_route_failure(self):
+        # rc 6's class already means "the run refused, the route was never given a
+        # chance", and p_success ignores it (spec 5.7). rc 12 is the same story with
+        # a different cause — and a record the validator rejects would be dropped.
+        cli = self.agent
+        plan = {"route": {"combo": "t3-driver", "class": "cheap", "review": True},
+                "client": "opencode", "free": False}
+        tracked = cli.track_entry(plan, cli.EXIT_NO_OTHER_FAMILY, 1.0)
+        self.assertIsNotNone(tracked)
+        self.assertEqual(tracked["gate"], "fail")
+        self.assertEqual(tracked["failure_class"], "refusal")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "track.jsonl")
+            self.assertTrue(cli.record_run(path, tracked),
+                            "rc 12 must be recorded, not dropped")
+            self.assertEqual(self.agent.track.load(path)[0]["failure_class"],
+                             "refusal")
+
+
+
+
+# --- FAMILYFENCE-b: the writer record says HOW it knows what answered ---------
+#
+# FAMILYFENCE proved a review may not run on its writer's family, and RUNMODEL
+# proved the gateway can name the model that served a run. Neither holds for an
+# own-account client: it has no gateway to ask, and its plan model was never
+# evidence. Measured 2026-09-29 on qodercli 1.1.63, `--model NoSuchModel99`
+# prints `[config] Model "NoSuchModel99" is not in the loaded catalog; falling
+# back to default model "efficient" for this session.` and exits 0 — argv is what
+# was ASKED for. The client does record the truth out of band, in a file the
+# spawner never read: ~/.qoder/projects/*/<session-id>.jsonl holds
+# {"type":"runtime-config","model":"efficient"} and one assistant row per reply
+# with message.model, and ~/.qoder/logs/runs/*/qodercli.log maps the account's
+# internal key to the name the registry can place ("qfmodel" ->
+# "Qwen3.8-Flash"). claude keeps the same transcript shape (assistant
+# message.model = "claude-sonnet-5-5") and takes `--session-id <uuid>`.
+#
+# So the writer record gains `source` — the difference between a proof and an
+# assumption — and a review whose reviewer is only assumed says
+# `CROSS-FAMILY: unknown` instead of claiming an independence it cannot show.
+
+QODER_SESSION = "6a52a548-0e30-4bec-a74e-2ef56d19ac33"
+CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555"
+QODER_RUN = "2026-09-29T04-37-05-340Z-d1krfj-p914864"
+
+
+def _qoder_transcript(home, session_id, model, project="-tmp"):
+    """A `~/.qoder/projects/<project>/<session>.jsonl` shaped like the real one."""
+    d = os.path.join(home, ".qoder", "projects", project)
+    os.makedirs(d, exist_ok=True)
+    rows = [{"type": "workspace-directories", "sessionId": session_id,
+             "directories": ["/tmp"]},
+            {"type": "runtime-config", "sessionId": session_id, "model": model,
+             "reasoningEffort": None, "timestamp": 1790656631990},
+            {"type": "user", "sessionId": session_id,
+             "message": {"role": "user", "content": "t"}},
+            {"type": "assistant", "sessionId": session_id,
+             "message": {"role": "assistant", "model": model, "content": []}}]
+    path = os.path.join(d, session_id + ".jsonl")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+    return path
+
+
+def _qoder_run_log(home, session_id, pairs, argv_model="Qwen3.8-Flash"):
+    """A `~/.qoder/logs/runs/<run>/` pair: the manifest names the argv the client
+    was started with, the log carries the key -> display_name map the account
+    resolves for that session."""
+    d = os.path.join(home, ".qoder", "logs", "runs", QODER_RUN)
+    os.makedirs(d, exist_ok=True)
+    with io.open(os.path.join(d, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump({"run_id": QODER_RUN, "cli_version": "1.1.63", "cwd": "/tmp",
+                   "argv": ["node", "qodercli", "-p", "--permission-mode", "dont_ask",
+                            "--model", argv_model, "--session-id", session_id, "t"]}, fh)
+    with io.open(os.path.join(d, "qodercli.log"), "w", encoding="utf-8") as fh:
+        fh.write("2026-09-29T04:37:08.868Z INFO  [session=%s] session.config.loaded "
+                 'project_root="/tmp" model="%s"\n' % (session_id, argv_model))
+        for key, display in pairs.items():
+            fh.write("2026-09-29T04:37:12.306Z INFO  debug.message "
+                     '[QoderInferRequest details] model_config={"key":"%s",'
+                     '"display_name":"%s","model":"","format":"openai"}, '
+                     "custom_model=null\n" % (key, display))
+        fh.write("2026-09-29T04:37:15.059Z INFO  [session=%s turn=a] "
+                 'model.response.completed provider="qoder" model="%s"\n'
+                 % (session_id, list(pairs)[0]))
+    return d
+
+
+def _claude_transcript(home, session_id, model):
+    d = os.path.join(home, ".claude", "projects", "-tmp")
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, session_id + ".jsonl")
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"type": "assistant", "sessionId": session_id,
+                             "message": {"role": "assistant", "model": model,
+                                         "content": []}}) + "\n")
+    return path
+
+
+class QoderSessionEvidenceTests(unittest.TestCase):
+    """FAMILYFENCE-b: the client's own session record is the only witness for a
+    run that never touched the gateway, and it is read by the session id the
+    spawner minted for it — never by "the newest file in there"."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.clients = self.agent.clients
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def test_a_qoder_transcript_names_the_model_that_answered(self):
+        # The rows hold the account's key (`qfmodel`); the run log maps it to the
+        # display name a registry family can be read from.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        _qoder_run_log(self.home, QODER_SESSION, {"qfmodel": "Qwen3.8-Flash"})
+        self.assertEqual(self.clients.reported_model("qoder", QODER_SESSION,
+                                                     home=self.home), "Qwen3.8-Flash")
+
+    def test_a_key_the_account_log_cannot_map_is_reported_as_the_key(self):
+        # Naming the key beats inventing a name and beats silence: the family gate
+        # cannot place it, and says so, while a reader still sees what served.
+        _qoder_transcript(self.home, QODER_SESSION, "efficient")
+        self.assertEqual(self.clients.reported_model("qoder", QODER_SESSION,
+                                                     home=self.home), "efficient")
+
+    def test_a_claude_transcript_needs_no_key_map(self):
+        _claude_transcript(self.home, CLAUDE_SESSION, "claude-sonnet-5-5")
+        self.assertEqual(self.clients.reported_model("claude", CLAUDE_SESSION,
+                                                     home=self.home),
+                         "claude-sonnet-5-5")
+
+    def test_a_session_that_is_not_ours_is_not_read(self):
+        # The minted id is the join key and nothing else: another session's model
+        # in the same home is not this run's answer.
+        _qoder_transcript(self.home, "22222222-3333-4444-5555-666666666666", "qfmodel")
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+
+    def test_no_id_no_file_or_a_corrupt_row_is_no_report(self):
+        self.assertIsNone(self.clients.reported_model("qoder", None, home=self.home))
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+        path = _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json\n")
+        self.assertIsNone(self.clients.reported_model("qoder", QODER_SESSION,
+                                                      home=self.home))
+
+    def test_a_client_with_no_transcript_reports_nothing(self):
+        # The rest of the roster has no row in the table, so a run on one of them
+        # is an assumption out loud rather than a silent one.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        for name in ("agy", "qwen", "gemini", "codex", "opencode"):
+            with self.subTest(client=name):
+                self.assertIsNone(self.clients.reported_model(name, QODER_SESSION,
+                                                              home=self.home))
+
+    def test_the_evidence_table_holds_exactly_the_clients_measured(self):
+        # qodercli --help (`--session-id <id>`) and claude --help
+        # (`--session-id <uuid>`) are the two that accept an id from the spawner
+        # and write a transcript under it. Bump this only with a measurement.
+        self.assertEqual(set(self.clients.MODEL_REPORT), {"qoder", "claude"})
+
+
+class WriterProvenanceTests(unittest.TestCase):
+    """FAMILYFENCE-b: `unresolved` said "this run named no model"; it never said
+    "this model is only what we asked for". `source` separates the two, and the
+    difference decides whether a review may claim independence."""
+
+    RUN_ID = "20260929-000000-ff-b-abcdef"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _native(self, plan, registry=None):
+        return self.agent.resolved_writer(dict(plan), False,
+                                          registry=registry or {"models": {}},
+                                          home=self.home)
+
+    def test_a_gateway_run_is_proven_by_the_gateway(self):
+        agent = self.agent
+        plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
+                "model": "omniroute/t2-worker", "client": "opencode"}
+        with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
+             mock.patch.object(agent, "_call_log_rows",
+                               lambda *a, **k: [{"sessionTag": "lane-x/" + self.RUN_ID,
+                                                 "provider": "mimo", "model": "mimo-7",
+                                                 "status": 200,
+                                                 "timestamp": "2026-09-29T00:00:01Z"}]):
+            writer = agent.resolved_writer(plan, True, registry={"models": {}})
+        self.assertEqual(writer["source"], agent.WRITER_SOURCE_GATEWAY)
+        self.assertTrue(agent.writer_is_proven(writer))
+
+    def test_a_native_run_the_client_can_name_is_proven(self):
+        # The plan asked for `Efficient`; the transcript says the run answered with
+        # Qwen3.8-Flash. The record carries the transcript's answer.
+        _qoder_transcript(self.home, QODER_SESSION, "qfmodel")
+        _qoder_run_log(self.home, QODER_SESSION, {"qfmodel": "Qwen3.8-Flash"})
+        writer = self._native({"client": "qoder", "model": "Efficient",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED,
+                               "client_session_id": QODER_SESSION},
+                              registry={"models": {"qwen3.8-flash": {"family": "qwen"}}})
+        self.assertEqual(writer["model"], "Qwen3.8-Flash")
+        self.assertEqual(writer["family"], "qwen")
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_REPORT)
+        self.assertTrue(self.agent.writer_is_proven(writer))
+
+    def test_a_pin_the_client_cannot_confirm_stays_a_pin(self):
+        writer = self._native({"client": "qoder", "model": "Qwen3.8-Max",
+                               "model_source": self.agent.WRITER_SOURCE_PIN,
+                               "client_session_id": QODER_SESSION})
+        self.assertEqual(writer["model"], "Qwen3.8-Max")
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_PIN)
+        self.assertFalse(self.agent.writer_is_proven(writer))
+
+    def test_an_unnamed_native_model_is_an_assumption_and_says_so(self):
+        writer = self._native({"client": "qoder", "model": "Qwen3.8-Flash",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED})
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_ASSUMED)
+        self.assertFalse(self.agent.writer_is_proven(writer))
+
+    def test_a_plan_placeholder_is_never_recorded_as_a_model(self):
+        # claude takes no --model unless the caller names one, so what answers is
+        # the account's business — and "(client default)" is not a model name.
+        writer = self._native({"client": "claude", "model": "(client default)",
+                               "model_source": self.agent.WRITER_SOURCE_ASSUMED})
+        self.assertEqual(writer["model"], self.agent.WRITER_UNRESOLVED)
+        self.assertEqual(writer["family"], self.agent.WRITER_UNRESOLVED)
+        self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_ASSUMED)
+
+    def test_the_free_promo_id_keeps_its_provider_out_of_the_model_name(self):
+        writer = self._native({"client": "qoder", "model": "jetski/jetski-9",
+                               "model_source": self.agent.WRITER_SOURCE_PIN})
+        self.assertEqual((writer["provider"], writer["model"]), ("jetski", "jetski-9"))
+
+    def test_only_the_two_witnesses_count_as_proven(self):
+        self.assertEqual(self.agent.WRITER_PROVEN_SOURCES,
+                         {self.agent.WRITER_SOURCE_GATEWAY,
+                          self.agent.WRITER_SOURCE_REPORT})
+
+    def test_the_writer_line_carries_its_own_provenance(self):
+        agent = self.agent
+        line = agent.writer_line({"provider": "qoder", "model": "Qwen3.8-Flash",
+                                  "family": "qwen", "source": agent.WRITER_SOURCE_REPORT})
+        self.assertEqual(line,
+                         "writer: qoder/Qwen3.8-Flash (qwen) source=client-reported")
+
+
+class CrossFamilyProvenanceTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 3: the review path says out loud when its
+    reviewer is only assumed. A qoder review whose transcript proves the model
+    keeps its CROSS-FAMILY: yes; one with no proof loses the claim, not the run.
+
+    FAMILYFENCE-3 N5 adds the other half of that rule: losing the CLAIM is not
+    losing the ANSWER. The backstop refuses a run whose serving family collides with
+    the fence whether or not a witness named it, so the verdict line has to state the
+    collision the exit code acted on — `NO`, or `NO (assumed)` when unattested — and
+    not sit there saying `unknown` next to exit 12."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def _run(self, transcript=None, over=None):
+        agent = self.agent
+
+        def read_kill_record(run_id):
+            # The author's family comes from ITS record; this run has a record of
+            # its own, so the writer line is written back where a reader can find
+            # it. Neither path ever reads a job.json.
+            if run_id == FENCE_WRITER_RUN:
+                return {"mode": "write",
+                        "writer": {"provider": "nvidia", "model": "nemotron-3-ultra",
+                                   "family": "nvidia",
+                                   "source": agent.WRITER_SOURCE_GATEWAY}}
+            return {"mode": "review"}
+
+        def prepare(statedir, root):
+            patch = mock.patch.object(agent, "mint_client_session_id",
+                                      lambda: QODER_SESSION)
+            patch.start()
+            self.addCleanup(patch.stop)
+            if transcript:
+                _qoder_transcript(self.home, QODER_SESSION, transcript)
+                display = "Qwen3.8-Flash" if transcript == "qfmodel" else transcript
+                _qoder_run_log(self.home, QODER_SESSION, {transcript: display})
+
+        with mock.patch.object(agent, "read_kill_record", read_kill_record):
+            return _fallthrough_run(
+                self, ["r-free"], stops=0,
+                args_over=dict({"client": "qoder", "card": "kind=review",
+                                "review_of": FENCE_WRITER_RUN, "isolate": False},
+                               **(over or {})),
+                families={"qwen3.8-flash": "qwen", "efficient": "qwen",
+                          "nemotron-3-ultra": "nvidia"},
+                env_over={"HOME": self.home}, prepare=prepare)
+
+    def test_a_review_with_no_client_report_is_unknown_not_yes(self):
+        # The plan's model sits outside the author's family, and that is exactly
+        # the claim a review may not make from an assumption.
+        rc, out, err, calls, _ = self._run()
+        self.assertIn("source=assumed-default", out + err)
+        self.assertIn("family: writer=nvidia reviewer=unresolved CROSS-FAMILY: unknown",
+                      out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_proven_review_keeps_its_verdict(self):
+        rc, out, err, calls, _ = self._run(transcript="qfmodel")
+        self.assertIn("writer: qoder/Qwen3.8-Flash (qwen) source=client-reported",
+                      out + err)
+        self.assertIn("family: writer=nvidia reviewer=qwen CROSS-FAMILY: yes", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_pinned_review_with_no_report_is_pinned_and_still_unknown(self):
+        # A caller-named model is a stronger claim than a default and a weaker one
+        # than a transcript: qoder substitutes an unknown name and exits 0.
+        rc, out, err, calls, _ = self._run(over={"model": "Efficient"})
+        self.assertIn("source=pinned", out + err)
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_proven_review_on_a_fenced_family_costs_the_run(self):
+        # The author is unknown here, so the verdict cannot be a comparison with a
+        # writer - what it CAN say, and what the backstop acted on, is that the
+        # family that served is the family this run was told to stay off. Before
+        # FAMILYFENCE-3 N5 the line read `CROSS-FAMILY: unknown` and exit 12 arrived
+        # anyway: the sentence and the verdict answered different questions, and a
+        # reader could not tell from the log which one refused the run.
+        rc, out, err, calls, _ = self._run(transcript="efficient",
+                                           over={"review_of": None,
+                                                 "not_family": ["qwen"]})
+        self.assertIn("family: writer=unresolved reviewer=qwen CROSS-FAMILY: NO",
+                      out + err)
+        self.assertNotIn("CROSS-FAMILY: unknown", out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_unattested_review_on_a_fenced_family_says_no_assumed(self):
+        # R-orch-3's display rule stands: an unproven reviewer prints `unresolved`,
+        # because an assumption may have run anything. But the backstop reads the
+        # assumed family and refuses on it, so the verdict has to own that: `NO`,
+        # marked `(assumed)` - the answer the exit code gave, with its strength
+        # printed beside it.
+        rc, out, err, calls, _ = self._run(
+            over={"review_of": None, "not_family": ["qwen"]})
+        self.assertIn("source=assumed-default", out + err)
+        self.assertIn("family: writer=unresolved reviewer=unresolved "
+                      "CROSS-FAMILY: NO (assumed)", out + err)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+
+    def test_an_assumed_review_outside_the_fence_still_claims_nothing(self):
+        # The other half of the same rule: `(assumed)` is not a licence to print
+        # `yes`. Nothing was witnessed, nothing collides, so nothing is claimed -
+        # and the run is not refused either.
+        rc, out, err, calls, _ = self._run(
+            over={"review_of": None, "not_family": ["nvidia"]})
+        self.assertIn("CROSS-FAMILY: unknown", out + err)
+        self.assertNotIn("CROSS-FAMILY: yes", out + err)
+        self.assertEqual(rc, 0, out + err)
+
+    def test_the_record_written_for_the_run_carries_the_source(self):
+        writes = []
+        agent = self.agent
+        real = agent.write_kill_record
+
+        def spy(run_id, record):
+            if (record or {}).get("writer"):
+                writes.append(dict(record["writer"]))
+            return real(run_id, record)
+
+        with mock.patch.object(agent, "write_kill_record", spy):
+            rc, out, err, calls, _ = self._run(transcript="qfmodel")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(writes[-1]["source"], agent.WRITER_SOURCE_REPORT)
+        self.assertEqual(writes[-1]["family"], "qwen")
+
+
+class NativeSessionIdTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 2, the argv half: the transcript join needs an
+    id only the spawner can supply, so the two clients that keep a transcript get
+    the one flag they document for it — and no client gets a flag it would choke
+    on."""
+
+    UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+    def test_a_qoder_run_is_told_which_session_it_owns(self):
+        r = plan_of("--client", "qoder", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"--session-id " + self.UUID)
+
+    def test_a_qoder_pin_reaches_the_argv(self):
+        # qodercli --help: `-m, --model <model>` ("Default and New Models use
+        # model name"), and `qodercli --list-models` lists the names that work.
+        r = plan_of("--client", "qoder", "--model", "Efficient", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model Efficient", r.stdout)
+        self.assertRegex(r.stdout, r"--session-id " + self.UUID)
+
+    def test_a_claude_headless_run_is_told_which_session_it_owns(self):
+        # claude --help: `--session-id <uuid>  Use a specific session ID for the
+        # conversation (must be a valid UUID)`.
+        r = plan_of("--client", "claude", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"claude -p.*--session-id " + self.UUID)
+
+    def test_a_joinable_claude_run_is_left_alone(self):
+        # --bg --remote-control owns its session; a second id on it is at best
+        # ignored, and the point of the id is a transcript this process can name.
+        r = plan_of("--client", "claude", "--joinable", "--title", "d1", "t",
+                    env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("--session-id", r.stdout)
+
+    def test_a_gateway_run_mints_no_session_id(self):
+        for client in ("qwen", "gemini", "codex", "agy"):
+            r = plan_of("--client", client, "t", env=claude_env())
+            self.assertEqual(r.returncode, 0, "%s: %s" % (client, r.stderr))
+            self.assertNotIn("--session-id", r.stdout, client)
+
+    def test_the_mcp_spawn_forwards_a_qoder_pin(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "client": "qoder",
+                                         "model": "Qwen3.8-Flash",
+                                         "card": {"role": "review"}})
+        self.assertEqual(argv[argv.index("--model") + 1], "Qwen3.8-Flash")
+
+
+@unittest.skipIf(os.name == "nt", "sh stubs; POSIX only")
+class RealLaunchArgvTests(unittest.TestCase):
+    """R-orch-19 / FAMILYFENCE-3 N3: a launch change (the scope wrapper, the env
+    rebuild, the executable resolution) breaks the real Popen while the printed
+    dry-run plan stays green — mocked-Popen suites were green while live spawns
+    broke. These put a fake `qodercli`/`claude` on PATH that RECORDS the argv it
+    was launched with, and run the real CLI to rc 0, so the assertion is about
+    what the client process received: the minted `--session-id` and the pinned
+    `--model` survive the whole launch path, not just `build_command`."""
+
+    UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    CLAUDE_HELP = """Usage: claude [options] [prompt]
+Options:
+  -p, --print                        Print the response and exit
+  --model <model>                    Model for the current session
+  --session-id <uuid>                Use a specific session ID
+  --permission-mode <mode>           Set the permission mode (choices:
+                                     plan, acceptEdits, bypassPermissions)
+"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.calls = os.path.join(self.tmp, "calls")
+
+    def _stub(self, name, help_text, change=False):
+        help_path = os.path.join(self.tmp, name + ".help")
+        with io.open(help_path, "w", encoding="utf-8") as fh:
+            fh.write(help_text)
+        path = os.path.join(self.tmp, name)
+        # `change` writes one file into the cwd: a qoder writer runs in its own
+        # clone, and an isolated run that changed nothing AND printed no REPORT
+        # is INCOMPLETE (10) — the fake has to be a worker that did its job. The
+        # in-place claude launch writes nothing: its cwd is the caller's checkout.
+        script = ("#!/bin/sh\n"
+                  "case \"$1\" in\n"
+                  "  --version) printf '0.0.0-fake\\n'; exit 0 ;;\n"
+                  "  --help) cat '%s'; exit 0 ;;\n"
+                  "esac\n"
+                  "echo \"$*\" >> '%s'\n" % (help_path, self.calls))
+        if change:
+            script += "echo work > launch-proof.txt\n"
+        script += "echo done\\n"
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(script)
+        os.chmod(path, 0o755)
+
+    def _recorded(self):
+        try:
+            with io.open(self.calls, encoding="utf-8") as fh:
+                return fh.read().splitlines()
+        except OSError:
+            return []
+
+    def _env(self, **extra):
+        env = clean_env(PATH=self.tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
+                        AUTOOS_STATE_DIR=self.tmp, **extra)
+        env.pop("AUTOOS_TASK_DIR", None)
+        return env
+
+    def test_a_real_qoder_launch_carries_the_session_id_and_the_pin(self):
+        self._stub("qodercli", QODERCLI_1_1_63_HELP, change=True)
+        # --isolate because a qoder WRITER forces its own clone: the fake answers
+        # from inside it, and the recorded argv is the one the real Popen got.
+        r = run_agent("run", "--client", "qoder", "--tier", "1", "--isolate",
+                      "--model", "Efficient", "Reply with exactly: ack",
+                      env=self._env(AUTOOS_CLAUDE_CRITICAL="test: real launch argv"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launched = [line for line in self._recorded() if line.startswith("-p ")]
+        self.assertEqual(len(launched), 1, self._recorded())
+        self.assertRegex(launched[0], r"--session-id " + self.UUID)
+        self.assertIn("--model Efficient", launched[0])
+
+    def test_a_real_claude_launch_carries_the_session_id_and_the_pin(self):
+        self._stub("claude", self.CLAUDE_HELP)
+        r = run_agent("run", "--client", "claude", "--tier", "1",
+                      "--model", "claude-sonnet-4-5",
+                      "Reply with exactly: ack",
+                      env=self._env(AUTOOS_CLAUDE_CRITICAL="test: real launch argv"))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        launched = [line for line in self._recorded() if line.startswith("-p ")]
+        self.assertEqual(len(launched), 1, self._recorded())
+        self.assertRegex(launched[0], r"--session-id " + self.UUID)
+        self.assertIn("--model claude-sonnet-4-5", launched[0])
+
+
+class NativeComboTests(unittest.TestCase):
+    """FAMILYFENCE-3 N4: an own-account run answers with the client's OWN model,
+    never a gateway combo. Before this its route was recorded as `t1-orchestrator`
+    — a combo OmniRoute does not even serve it through — so `ps`, the worker
+    record and the run log all named a route the run never ran. The route a native
+    run records is now `native:<client>`; a gateway run keeps its real combo."""
+
+    def _route_line(self, *args, env=None):
+        r = plan_of(*args, env=env or claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def test_a_qoder_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "qoder", "--tier", "1", "--model",
+                               "Efficient", "t")
+        self.assertIn("route: native:qoder", out)
+        self.assertNotIn("t1-orchestrator", out)
+
+    def test_a_claude_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "claude", "--tier", "1", "t")
+        self.assertIn("route: native:claude", out)
+
+    def test_an_agy_run_records_its_own_account_route(self):
+        out = self._route_line("--client", "agy", "--tier", "1", "t")
+        self.assertIn("route: native:agy", out)
+
+    def test_the_build_plan_route_combo_is_the_native_one_too(self):
+        # The record, the log and the print all read build_plan's route, so the
+        # rewrite has to live there — not only in the printed line.
+        agent = load_agent()
+        allow_in_place(self, agent)
+        args = argparse.Namespace(client="qoder", tier=1, card=None, task="t",
+                                  free=False, free_model=agent.DEFAULT_FREE_MODEL,
+                                  model="Efficient", clean=False,
+                                  allow_training=False, title=None, lean=False,
+                                  joinable=False, auto=True, isolate=False,
+                                  max_depth=None, dry_run=True, no_defer=False,
+                                  not_family=None, review_of=None,
+                                  no_fallthrough=False, run_id=None)
+        cfg = {"agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator"}},
+               "providers": {"omniroute": {"models": {"t1-orchestrator": {}}}}}
+        with mock.patch.object(agent, "gateway_up", lambda: True):
+            plan = agent.build_plan(args, cfg)
+        self.assertEqual(plan["route"]["combo"], "native:qoder")
+        self.assertEqual(plan["route"]["tier"], 1)
+        self.assertIn("--model Efficient", " ".join(plan["cmd"]))
+
+    def test_a_gateway_run_keeps_its_real_combo(self):
+        out = self._route_line("--client", "opencode", "--card", "role=implement", "t")
+        self.assertIn("route: t", out)
+        self.assertNotIn("native:opencode", out)
+
+
+class QoderFenceTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 2, the gate half: a pinned model is a model
+    choice, so the fence rules it for an own-account client exactly as it rules
+    one for a gateway client — and a name the registry cannot place stays unsafe
+    for a review, which is 0dc1691's rule, not a new one."""
+
+    def test_a_pinned_model_inside_the_fence_is_refused(self):
+        # nemotron is not a qoder model and nobody would run it there: it is the
+        # family this gate has to rule. --not-family nvidia leaves the card's own
+        # route clean (no review route carries an nvidia leg), so the only thing
+        # that can refuse the run is the pin.
+        r = plan_of("--client", "qoder", "--card", "role=review", "--model",
+                    "nemotron-3-ultra", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("nvidia", r.stderr)
+
+    def test_the_pin_is_ruled_for_an_own_account_client_though_no_route_names_it(self):
+        # qoder never appears in a route: its model goes to the CLI verbatim, so a
+        # fence that only reads routes cannot see this choice at all.
+        agent = load_agent()
+        args = argparse.Namespace(client="qoder", tier=None, card="role=review",
+                                  model="Qwen3.8-Flash", free=False,
+                                  free_model=agent.DEFAULT_FREE_MODEL, clean=False,
+                                  allow_training=False, task="t", title=None,
+                                  not_family=["qwen"], review_of=None,
+                                  no_fallthrough=False, isolate=True)
+        registry = {"routes": {}, "policy": {},
+                    "models": {"qwen3.8-flash": {"family": "qwen"}}}
+        with mock.patch.object(agent, "load_live_registry", lambda: registry):
+            fence = agent.family_fence(args)
+            self.assertEqual(fence["families"], ["qwen"])
+            with self.assertRaises(agent.FamilyFenceRefused):
+                agent.resolve_route_unchecked(args, {}, agent.clients.CLIENTS["qoder"],
+                                              fence=fence)
+
+    def test_a_pin_outside_the_fence_reaches_the_client(self):
+        agent = load_agent()
+        args = argparse.Namespace(client="qoder", tier=None, card="role=review",
+                                  model="Qwen3.8-Flash", free=False,
+                                  free_model=agent.DEFAULT_FREE_MODEL, clean=False,
+                                  allow_training=False, task="t", title=None,
+                                  not_family=["nvidia"], review_of=None,
+                                  no_fallthrough=False, isolate=True)
+        registry = {"routes": {}, "policy": {},
+                    "models": {"qwen3.8-flash": {"family": "qwen"}}}
+        cfg = {"providers": {"omniroute": {"models": {n: {} for n in
+                                                     list(routing.ALL_COMBOS)}}}}
+        with mock.patch.object(agent, "load_live_registry", lambda: registry):
+            route = agent.resolve_route_unchecked(args, cfg,
+                                                  agent.clients.CLIENTS["qoder"],
+                                                  fence=agent.family_fence(args))
+        self.assertIsNotNone(route["tier"])
+
+    def test_an_unplaceable_pin_is_not_safe_for_a_review(self):
+        r = plan_of("--client", "qoder", "--card", "role=review", "--model",
+                    "NoSuchModel99", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+
+    def test_the_same_unplaceable_pin_is_allowed_for_a_writer(self):
+        # strictness is the review role, not a general ban on unknown models.
+        r = plan_of("--client", "qoder", "--card", "role=implement", "--model",
+                    "NoSuchModel99", "--not-family", "nvidia", "t", env=claude_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_the_writers_family_excludes_a_pinned_review_of_it(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        agent = load_agent()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}, clear=False):
+            self.assertTrue(agent.write_kill_record(FENCE_WRITER_RUN, {
+                "mode": "write",
+                "writer": {"provider": "qoder", "model": "Qwen3.8-Flash",
+                           "family": "qwen", "source": "client-reported"}}))
+        # The Claude declaration is the same one every other fence test here uses
+        # (claude_env): a qoder model name is no route the registry carries, so the
+        # budget gate prices nothing and refuses it before the fence ever speaks.
+        # This test measures the fence's answer, not the budget's.
+        env = claude_env(AUTOOS_STATE_DIR=tmp)
+        r = run_agent("run", "--dry-run", "--client", "qoder", "--card", "role=review",
+                      "--review-of", FENCE_WRITER_RUN, "--model", "Qwen3.8-Flash", "t",
+                      env=env)
+        self.assertEqual(r.returncode, 12, r.stdout + r.stderr)
+        self.assertIn("qwen", r.stderr)
+
+
+class PsWriterRowTests(unittest.TestCase):
+    """FAMILYFENCE-b requirement 1: a row of `ps` is the same record `status`
+    answers with, and the runner-private kill store is its only source — job.json
+    lives in the directory the worker owns."""
+
+    RUN_ID = "20260929-000000-ffrow-aaaaaa"
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers, mode=0o700, exist_ok=True)
+        old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR")}
+        os.environ["AUTOOS_STATE_DIR"] = os.path.join(self.tmp, "state")
+        os.environ["AUTOOS_WORKERS_DIR"] = self.workers
+        self.addCleanup(self._restore, old)
+
+    def _restore(self, old):
+        for name, value in old.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    def _row(self, wid=RUN_ID, **over):
+        rec = {"id": wid, "pid": os.getpid(),
+               "pid_start": self.agent._proc_starttime(os.getpid()),
+               "started": self.agent.utc_now_iso(), "session_tag": "lane-a",
+               "client": "qoder", "model": "Efficient",
+               "model_source": "assumed-default", "route": "", "title": "",
+               "cwd": "/x", "sandbox": "", "task_head": "do a thing", "depth": 1}
+        rec.update(over)
+        with io.open(os.path.join(self.workers, wid + ".json"), "w",
+                     encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return wid
+
+    def _table(self, rows):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.agent._print_worker_table(rows)
+        return out.getvalue()
+
+    def test_a_run_the_client_answered_for_shows_the_model_that_answered(self):
+        wid = self._row()
+        self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_REPORT}}))
+        rows = self.agent.list_workers(self.workers)
+        self.assertEqual(rows[0]["model"], "Efficient", "what was asked stays")
+        self.assertEqual(rows[0]["writer"]["model"], "Qwen3.8-Flash")
+        self.assertEqual(rows[0]["family"], "qwen")
+        self.assertTrue(rows[0]["model_proven"])
+        table = self._table(rows)
+        self.assertIn("Qwen3.8-Flash", table)
+        self.assertIn("qwen", table)
+        self.assertNotIn("qwen?", table)
+
+    def test_an_assumed_writer_is_marked_unproven_in_the_table(self):
+        wid = self._row()
+        self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Efficient", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_ASSUMED}}))
+        rows = self.agent.list_workers(self.workers)
+        self.assertFalse(rows[0]["model_proven"])
+        self.assertIn("qwen?", self._table(rows))
+
+    def test_a_run_with_no_writer_row_invents_none(self):
+        self._row()
+        rows = self.agent.list_workers(self.workers)
+        self.assertIsNone(rows[0]["writer"])
+        self.assertEqual(rows[0]["family"], "")
+        self.assertFalse(rows[0]["model_proven"])
+        self.assertIn("Efficient", self._table(rows))
+
+    def test_a_record_written_for_another_run_never_answers_this_one(self):
+        # The store is keyed by the run id, so the join cannot be talked into
+        # lending another run its writer — and the other run keeps its own, or the
+        # row would read as "the store is empty" instead of "the ids disagree".
+        other = "20260929-000001-ffrow-bbbbbb"
+        self._row()
+        self._row(other)
+        self.agent.write_kill_record(other, {
+            "mode": "write", "writer": {"provider": "qoder", "model": "Qwen3.8-Max",
+                                        "family": "qwen", "source": "client-reported"}})
+        rows = self.agent.list_workers(self.workers)
+        by_id = {r["id"]: r for r in rows}
+        self.assertIsNone(by_id[self.RUN_ID]["writer"])
+        self.assertEqual(by_id[other]["writer"]["model"], "Qwen3.8-Max")
+
+    def test_the_mcp_ps_rows_carry_the_same_writer(self):
+        wid = self._row()
+        self.agent.write_kill_record(wid, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+            "source": "client-reported"}})
+        out = mcp_server.ps()
+        row = [w for w in out["workers"] if w["id"] == wid][0]
+        self.assertEqual(row["writer"]["model"], "Qwen3.8-Flash")
+        self.assertEqual(row["family"], "qwen")
+
+    def test_a_forged_job_json_writer_is_ignored_by_status(self):
+        path = os.path.join(mcp_server.state_root(), self.RUN_ID)
+        os.makedirs(path)
+        mcp_server._write_json(os.path.join(path, "job.json"), {
+            "id": self.RUN_ID, "run_id": self.RUN_ID, "request": {"client": "qoder"},
+            "task": "t", "argv": [], "cwd": str(ROOT), "route": {},
+            "started": time.time(), "pid": os.getpid(),
+            "model": "claude-sonnet-5",
+            "writer": {"provider": "qoder", "model": "claude-sonnet-5",
+                       "family": "anthropic", "source": "client-reported"}})
+        mcp_server._write_json(os.path.join(path, "exit.json"),
+                               {"rc": 0, "ended": time.time()})
+        self.agent.write_kill_record(self.RUN_ID, {"mode": "write", "writer": {
+            "provider": "qoder", "model": "Efficient", "family": "qwen",
+            "source": self.agent.WRITER_SOURCE_ASSUMED}})
+        st = mcp_server._state(path)
+        self.assertEqual(st["writer"]["model"], "Efficient", st)
+        self.assertEqual(st["writer"]["source"], "assumed-default")
+
+    def test_a_live_run_records_the_model_it_was_asked_for_and_why(self):
+        # Before an answer exists, the row can only carry the ask — and it has to
+        # say where the ask came from, so a default never reads as a pin. A read-only
+        # qoder review is the run that needs no clone, so this stays an in-place run
+        # and only the record is under test.
+        rc, out, err, calls, _ = _fallthrough_run(
+            self, ["r-free"], stops=0,
+            args_over={"client": "qoder", "card": "kind=review", "isolate": False},
+            env_over={"HOME": tempfile.mkdtemp()})
+        self.assertEqual(rc, 0, out + err)
+        rows = self.agent.list_workers(self.agent.workers_dir(), include_ended=True)
+        row = [r for r in rows if r["client"] == "qoder"][-1]
+        self.assertEqual(row["model"], "Qwen3.8-Flash")
+        self.assertEqual(row["model_source"], "assumed-default")
 
 @unittest.skipIf(os.name == "nt", "POSIX process groups; group_record() is empty on Windows")
 class AttemptGroupRecordTests(unittest.TestCase):
@@ -15806,6 +17754,113 @@ class VerdictLineTests(unittest.TestCase):
                 "```\n"
                 "and then it died.\n")
         self.assertIsNone(self.verdict(text))
+
+    # VERDICTFENCE: the fence scan measured two bugs — a ` ```' that is not a
+    # fence at all, and an unclosed fence that swallows the deliverable.
+    DIFF_FENCE = (
+        "diff --git a/docs/AGENTS.md b/docs/AGENTS.md\n"
+        "@@ -10,6 +10,7 @@\n"
+        " before\n"
+        " ```\n"
+        "+fence inside the diffed file\n"
+        " after\n")
+
+    def test_a_fence_line_inside_a_git_diff_does_not_hide_the_verdict(self):
+        # Measured (run 20260929-061040-review-familyfence-a8a66-22ed12): the
+        # reviewer ran `git diff`, one context line of that diff was ' ```' — a
+        # fence inside the DIFFED file, prefixed by the diff's own space — the
+        # scan took it for an opener, found no closer, and so skipped the
+        # reviewer's own verdict 450 lines later. Graded failed/no-verdict.
+        filler = "Thinking about the diff and the ref snapshot.\n" * 450
+        self.assertEqual(self.verdict(self.DIFF_FENCE + filler + "VERDICT: READY\n"),
+                         "READY")
+
+    def test_a_verdict_inside_a_closed_fence_stays_ignored(self):
+        # The protection that must survive: a real, CLOSED block is the
+        # contract pasted back at us, not a decision.
+        text = ("checked the diff\n"
+                "```\n"
+                "VERDICT: ready\n"
+                "```\n"
+                "and then it died with no verdict.\n")
+        self.assertIsNone(self.verdict(text))
+
+    def test_an_unclosed_fence_hides_what_follows_it(self):
+        # VERDICTFENCE-R2 (a): the round-1 rescan is removed — an opener the
+        # transcript never closes fails CLOSED. A cut paste makes the fence
+        # PAIRING ambiguous (content fences shift it), so what follows cannot
+        # be trusted to sit outside a block.
+        self.assertIsNone(self.verdict("```text\nVERDICT: fix-first\n"))
+
+    # VERDICTFENCE-R2 (a..c): the cross-family review (Muse) measured three
+    # forgeries the round-1 rescan performed. Exact texts, exact verdicts.
+    def test_a_paste_cut_mid_fence_forges_no_verdict(self):
+        # B1: a reviewer that pasted a file (its own fences included) and
+        # crashed leaves the paste's VERDICT standing between a looked-like
+        # closer and the crash's opener. The pairing is ambiguous there and
+        # the fail-closed scan must read NO verdict, not the paste's.
+        self.assertIsNone(self.verdict(
+            "```\nchecking worker output\n```\nVERDICT: READY\n```\n"))
+
+    def test_a_trailing_unclosed_fence_does_not_overwrite_an_earlier_verdict(self):
+        # B2: the real verdict came first; everything after the unclosed
+        # opener is a paste that never ended. The rescan re-read it unfenced
+        # and `ready` overwrote `fix-first`.
+        self.assertEqual(self.verdict(
+            "VERDICT: fix-first\nsome notes\n```\nVERDICT: ready\n"),
+            "fix-first")
+
+    def test_a_tilde_does_not_close_a_backtick_fence(self):
+        # B3: per CommonMark a closing fence is the opener's OWN character, at
+        # least as long. '~~~' is content inside a ``` block, the block is
+        # still open at EOF, and the verdict inside it is not the reviewer's.
+        self.assertIsNone(self.verdict("```\ncode\n~~~\nVERDICT: ready\n"))
+
+    def test_a_long_fence_ignores_a_short_closer(self):
+        # Same rule by length: ' ```' cannot close ' ````'. The block stays
+        # open through both verdicts and the scan ends inside it.
+        self.assertIsNone(self.verdict(
+            "````\nVERDICT: fix-first\n```\nand then\nVERDICT: ready\n"))
+
+    def test_hunk_body_lines_are_neither_fences_nor_verdicts(self):
+        # VERDICTFENCE-R2 (b): the diff itself is the safe, deterministic read.
+        # Lines inside a hunk body (counted from the @@ header's b/d) toggle no
+        # fence and state no verdict — the diffed file's fences and verdicts
+        # are that FILE's text, not the reviewer's.
+        diff = ("diff --git a/x b/x\n"
+                "index 1234567..89abcde 100644\n"
+                "--- a/x\n"
+                "+++ b/x\n"
+                "@@ -1,4 +1,3 @@\n"
+                " VERDICT: ready\n"
+                "-VERDICT: ready\n"
+                "+ VERDICT: ready\n"
+                "- VERDICT: fix-first\n"
+                " context tail\n")
+        self.assertIsNone(self.verdict(diff))
+        # and the hunk-awareness must not swallow the reviewer's OWN verdict
+        # stated after the hunk ends:
+        self.assertEqual(self.verdict(diff + "VERDICT: not ready\n"),
+                         "not ready")
+
+    def test_a_blank_line_in_a_hunk_counts_as_stripped_context(self):
+        # VERDICTFENCE-3: a terminal/transcript trailing-whitespace strip
+        # leaves a blank context line with NO leading space. While the header's
+        # counts remain it is still hunk content and consumes one from both
+        # sides; ending the hunk on it would scan the rest of the body as
+        # reviewer text.
+        self.assertIsNone(self.verdict("@@ -1,3 +1,3 @@\n a\n\n VERDICT: READY\n"))
+        # and once the counts are consumed the next line IS reviewer text again:
+        self.assertEqual(self.verdict("@@ -1,2 +1,2 @@\n a\n\nVERDICT: fix-first\n"),
+                         "fix-first")
+
+    def test_a_fence_deeper_than_markdowns_indent_is_content(self):
+        # Markdown opens a fence at up to 3 spaces of indent; deeper is content,
+        # and must not flip the scan in and back out of a block.
+        text = ("    ```\n"
+                "VERDICT: ready\n"
+                "    ```\n")
+        self.assertEqual(self.verdict(text), "ready")
 
     def test_the_last_valid_line_wins(self):
         text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"

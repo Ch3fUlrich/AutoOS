@@ -81,7 +81,7 @@
     {
       "id": "omniroute-t1-orchestrator",
       "model": "openai/t1-orchestrator",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
       "reasoning": true
     },
@@ -102,21 +102,21 @@
     {
       "id": "omniroute-t2-orchestrator",
       "model": "openai/t2-orchestrator",
-      "max_input_tokens": 200000,
+      "max_input_tokens": 1048576,
       "max_output_tokens": 32768,
       "reasoning": true
     },
     {
       "id": "omniroute-t2-worker-clean",
       "model": "openai/t2-worker-clean",
-      "max_input_tokens": 131072,
+      "max_input_tokens": 1048576,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
       "id": "omniroute-t3-driver-clean",
       "model": "openai/t3-driver-clean",
-      "max_input_tokens": 131072,
+      "max_input_tokens": 1048576,
       "max_output_tokens": 16384,
       "reasoning": false
     },
@@ -128,17 +128,10 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-opus-4-6",
-      "model": "openai/opus-4-6",
-      "max_input_tokens": 200000,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
       "id": "omniroute-gemini-3.8-flash",
       "model": "openai/gemini-3.8-flash",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 65536,
       "reasoning": false
     },
     {
@@ -151,8 +144,8 @@
     {
       "id": "omniroute-deepseek-v4.1-flash",
       "model": "openai/deepseek-v4.1-flash",
-      "max_input_tokens": 131072,
-      "max_output_tokens": 32768,
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 393216,
       "reasoning": true
     },
     {
@@ -182,7 +175,7 @@
       "id": "litellm-t1-orchestrator",
       "gateway": "litellm",
       "model": "openai/t1-orchestrator",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
       "reasoning": true
     },
@@ -222,14 +215,14 @@
       "id": "litellm-t1-orchestrator-free-only",
       "gateway": "litellm",
       "model": "openai/t1-orchestrator-free-only",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
       "reasoning": true
     },
     {
       "id": "omniroute-t1-orchestrator-free-only",
       "model": "openai/t1-orchestrator-free-only",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
       "reasoning": true
     }

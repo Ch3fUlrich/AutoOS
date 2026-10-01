@@ -609,6 +609,8 @@ cmd_init() {
     # the operator's only.
     [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home" "$DATA_DIR/qoder-home"
 
+    # OPENCODE_MEM_LIMIT is deliberately absent (2026-09-29): a 1536m cap
+    # OOM-killed opencode serve and cut every in-flight run across the fleet.
     ensure_env_file "$STACK_ENV" \
         AUTOOS_UID "$(id -u)" AUTOOS_GID "$(id -g)" \
         AUTOOS_CODE_DIR "$CODE_DIR" AUTOOS_STACK_DATA "$DATA_DIR" \
@@ -617,7 +619,7 @@ cmd_init() {
         OMNIROUTE_MEMORY_MB 1536 OMNIROUTE_MEM_LIMIT 2560m \
         OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT 6 \
         OMNIROUTE_CHAT_ADMISSION_QUEUE_MS 60000 \
-        OPENCODE_MEM_LIMIT 1536m AUTOOS_OPENHANDS_MEMORY 2g \
+        AUTOOS_OPENHANDS_MEMORY 2g \
         || return 1
 
     # opencode config: derived from the host's, never hand-kept twice.

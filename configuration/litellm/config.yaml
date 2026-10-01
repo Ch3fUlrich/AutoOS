@@ -50,7 +50,39 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   - model_name: t2-worker
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
@@ -61,12 +93,20 @@ model_list:
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: nebius/zai-org/GLM-5.2
-      api_key: os.environ/NEBIUS_API_KEY
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
+      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   - model_name: t2-worker
     litellm_params:
       model: openai/muse-spark-1.3-contributor
@@ -74,9 +114,8 @@ model_list:
       api_key: os.environ/META_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: openai/qwen7b
-      api_base: https://api.free.ai/v1
-      api_key: os.environ/FREE_AI_API_KEY
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t2-worker
 
   # ── t2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
@@ -97,7 +136,39 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
@@ -106,15 +177,6 @@ model_list:
     litellm_params:
       model: scaleway/mistral-small-3.2-24b-instruct-2506
       api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
-      model: nebius/zai-org/GLM-5.2
-      api_key: os.environ/NEBIUS_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
-      model: openai/qwen7b
-      api_base: https://api.free.ai/v1
-      api_key: os.environ/FREE_AI_API_KEY
   # AUTOOS-MANAGED-END t2-worker-free-only
 
   # ── t2-worker-paid / t3-driver-paid: hand-curated, deepseek-funded again ────
@@ -137,29 +199,78 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver
   - model_name: t3-driver
     litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: nebius/zai-org/GLM-5.2
-      api_key: os.environ/NEBIUS_API_KEY
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: scaleway/qwen3-235b-a22b-instruct-2507
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: mistral/mistral-code-latest
-      api_key: os.environ/MISTRAL_API_KEY
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t3-driver
     litellm_params:
-      model: deepseek/deepseek-flash
-      api_key: os.environ/DEEPSEEK_API_KEY
+      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: mistral/mistral-code-latest
+      api_key: os.environ/MISTRAL_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t3-driver
 
   # ── t3-driver-clean: gateway-only legs stripped ────────────────────────────
@@ -177,21 +288,49 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver-free-only
   - model_name: t3-driver-free-only
     litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
-      model: nebius/zai-org/GLM-5.3-Flash
-      api_key: os.environ/NEBIUS_API_KEY
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-20b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: groq/openai/gpt-oss-120b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: scaleway/mistral-small-3.2-24b-instruct-2506
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
   # AUTOOS-MANAGED-END t3-driver-free-only
 
   # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
@@ -220,30 +359,46 @@ model_list:
       additional_drop_params: ["strict"]
   # AUTOOS-MANAGED-END t4-rag
 
+  # AUTOOS-MANAGED-START t4-researcher
+  - model_name: t4-researcher
+    litellm_params:
+      model: gemini/gemini-3.8-flash
+      api_key: os.environ/GEMINI_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: scaleway/qwen3-235b-a22b-instruct-2507
+      api_key: os.environ/SCALEWAY_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: openai/qwen7b
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
+  # AUTOOS-MANAGED-END t4-researcher
+
   # ── t1-orchestrator: orchestrator-1M, meta_api first then free gemini fallback ─────────
   # AUTOOS-MANAGED-START t1-orchestrator
   - model_name: t1-orchestrator
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
   - model_name: t1-orchestrator
     litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
+      model: openai/google/gemini-3.8-flash
+      api_base: https://api.free.ai/v1
+      api_key: os.environ/FREE_AI_API_KEY
   - model_name: t1-orchestrator
     litellm_params:
-      model: nebius/zai-org/GLM-5.3-Flash
-      api_key: os.environ/NEBIUS_API_KEY
-  - model_name: t1-orchestrator
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   - model_name: t1-orchestrator
     litellm_params:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
+  - model_name: t1-orchestrator
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t1-orchestrator
 
   # ── t1-orchestrator-free-only: zero spend, gemini free leg ──────────────────────
@@ -252,19 +407,6 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
-      rpm: 10 # AI Studio free: Flash-family pooled, dynamic limits
-  - model_name: t1-orchestrator-free-only
-    litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t1-orchestrator-free-only
-    litellm_params:
-      model: nebius/zai-org/GLM-5.3-Flash
-      api_key: os.environ/NEBIUS_API_KEY
-  - model_name: t1-orchestrator-free-only
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
   # AUTOOS-MANAGED-END t1-orchestrator-free-only
 
   # ── spark-1.3-contributor: 1M ctx, meta_api paid contributor leg ──────────────
@@ -283,7 +425,18 @@ model_list:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
+  - model_name: t1-orchestrator-paid
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
   # AUTOOS-MANAGED-END t1-orchestrator-paid
+
+  # AUTOOS-MANAGED-START t2-orchestrator
+  - model_name: t2-orchestrator
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END t2-orchestrator
 
   # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────
   # deepseek-v4.1-flash was omitted while providers.deepseek was 402
@@ -302,7 +455,81 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
+  - model_name: gemini-3.8-flash
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
   # AUTOOS-MANAGED-END gemini-3.8-flash
+
+  # ── FREEWIRE 2026-09-30: pinned single-provider free aliases ───────────────
+  # Probe-passed free legs (L1-backlog/ws-free-probe-20260930) that get their
+  # own omniroute combo; their providers carry a LiteLLM transport/key, so each
+  # is a managed tier here too. Legs are filled by tools/sync-router-tiers.py.
+  # AUTOOS-MANAGED-START groq-qwen3.8-27b
+  - model_name: groq-qwen3.8-27b
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  # AUTOOS-MANAGED-END groq-qwen3.8-27b
+
+
+
+  # AUTOOS-MANAGED-START or-laguna-s-2.1-free
+  - model_name: or-laguna-s-2.1-free
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-laguna-s-2.1-free
+
+  # AUTOOS-MANAGED-START or-nemotron-3-super-free
+  - model_name: or-nemotron-3-super-free
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-nemotron-3-super-free
+
+  # AUTOOS-MANAGED-START or-north-mini-code-free
+  - model_name: or-north-mini-code-free
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-north-mini-code-free
+
+  # AUTOOS-MANAGED-START or-qwen3.8-27b-free
+  - model_name: or-qwen3.8-27b-free
+    litellm_params:
+      model: openrouter/qwen/qwen3.8-27b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  # AUTOOS-MANAGED-END or-qwen3.8-27b-free
+
+  # TORDER 2026-10-01: pinned single-provider credit tiers (ovh x3 + vertex)
+  # AUTOOS-MANAGED-START ovh-qwen3.8-27b
+  - model_name: ovh-qwen3.8-27b
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  # AUTOOS-MANAGED-END ovh-qwen3.8-27b
+
+  # AUTOOS-MANAGED-START ovh-gpt-oss-120b
+  - model_name: ovh-gpt-oss-120b
+    litellm_params:
+      model: ovhcloud/gpt-oss-120b
+      api_key: os.environ/OVHCLOUD_API_KEY
+  # AUTOOS-MANAGED-END ovh-gpt-oss-120b
+
+  # AUTOOS-MANAGED-START ovh-qwen3-coder-30b
+  - model_name: ovh-qwen3-coder-30b
+    litellm_params:
+      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
+      api_key: os.environ/OVHCLOUD_API_KEY
+  # AUTOOS-MANAGED-END ovh-qwen3-coder-30b
+
+  # AUTOOS-MANAGED-START vertex-gemini-3.8-flash
+  - model_name: vertex-gemini-3.8-flash
+    litellm_params:
+      model: vertex/gemini-3.8-flash
+      api_key: os.environ/VERTEX_API_KEY
+  # AUTOOS-MANAGED-END vertex-gemini-3.8-flash
 
   # ── cheaperinference pinned single-model aliases ───────────────────────────
 

@@ -99,6 +99,13 @@ jobs:
           yamllint -d '{extends: relaxed, rules: {line-length: {max: 140}}}' \
             catalog/ Windows/ansible/ Linux/ubuntu_autoinstall/ .github/
 
+      - name: Combo contract gate (TORDER)
+        run: |
+          python3 tools/combo-contract.py
+          python3 tools/registry.py render omniroute --check
+          python3 tools/registry.py render ide --check
+          python3 tools/sync-ide-models.py --check
+
       - name: Documentation links
         run: python3 tests/check-links.py .
 
@@ -228,10 +235,14 @@ jobs:
           # used: the heuristic unix-home, rfc1918 and private-host shapes
           # legitimately match test fixtures, example.conf and autoinstall
           # placeholders under tests/, lib/ and configuration/, and this gate
-          # must stay green to be worth keeping.
+          # must stay green to be worth keeping. `tools/` is included as of
+          # 2026-10-01: a leaked absolute path in tools/combo-contract.py reached
+          # main unseen while its docs/ copy was caught; the one pre-existing
+          # tools/ match (a /home/... example in tools/hostexec/policy.py) is now
+          # a placeholder.
           python3 scripts/public-scrub/scan.py \
             --patterns scripts/public-scrub/patterns.txt \
-            infra/ scripts/ docs/ catalog/ README.md AGENTS.md
+            infra/ scripts/ docs/ catalog/ tools/ README.md AGENTS.md
 
       # The gate is only as good as patterns.txt: these fixtures fail when a shape
       # stops matching, or when a documentation value starts matching one.

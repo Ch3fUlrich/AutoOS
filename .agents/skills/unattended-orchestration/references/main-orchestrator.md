@@ -55,7 +55,7 @@ R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
   - Never loose in the parent folder.
   - Scratch files go to `<repo>-worktrees/.sessions/<key>/`.
   - Until the runner defaults to this, set `"worktreeParent"` to that folder in the run config.
-  - CAO in WSL needs ext4: use `$HOME/<repo>-worktrees/`.
+  - On WSL the worktrees need ext4: use `$HOME/<repo>-worktrees/`.
 - **The L2 brief carries**, in this order:
   - the chunk and its "Done means";
   - the files it owns, and the files it must not touch;
@@ -76,8 +76,8 @@ R-orch-14. Put both ids in every L2 brief.
 |---|---|---|
 | Claude Haiku / Sonnet | anthropic | Stable. Runner launcher `claude` with `"model": "haiku"`/`"sonnet"`, or the Agent tool inside an L2 |
 | Gemini 3.8 Flash | google | Stable. Runner launcher `agy` |
-| DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (cao-runbook.md §9.7). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
-| Muse Spark 1.3-contributor | meta | **Not yet measured as a batch executor.** The route to test first is OpenCode (AutoOS configures provider `meta`, model `muse-spark-1.3-contributor`): `opencode run -m meta/muse-spark-1.3-contributor`. CAO pool `muse → mcode` is unverified. In OpenHands it's the `orchestrator`/`suborchestrator` profile (a human-watched canvas, not headless) |
+| DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (SKILL.md §9.7 of the pre-removal revision). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
+| Muse Spark 1.3-contributor | meta | **Not yet measured as a batch executor.** The route to test first is OpenCode (AutoOS configures provider `meta`, model `muse-spark-1.3-contributor`): `opencode run -m meta/muse-spark-1.3-contributor`. In OpenHands it's the `orchestrator`/`suborchestrator` profile (a human-watched canvas, not headless) |
 | OpenRouter (free and cheap paid) | per model (nvidia, google, poolside, cohere, moonshot, z-ai, …) | OpenCode (`openrouter/<id>`) or the OpenHands `openrouter-*` profiles. Free `:free` ids are capped at 20 requests/min and 50/day, or 1,000/day after $10 of lifetime credits. Models, prices and limits: [`l3-routing.md`](l3-routing.md) |
 | Local Ollama | oss | OpenCode (`ollama/<tag>`) or the OpenHands `ollama-*` profiles. RTX 3060 12 GB + 128 GB RAM: a 7B coder runs at 41.9 tok/s; the 30B class at ~5 tok/s with offload. Ollama's default context is 4,096 tokens, so set `num_ctx` per request. One GPU model at a time |
 

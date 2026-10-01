@@ -4,7 +4,736 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- opencode-direct fallback ladder (2026-10-01, L0/operator): documented the no-gateway model ladder for lanes when the omniroute combos fail — openrouter `:free` only (NO credit; every paid openrouter leg is denied) → opencode Zen free → meta direct → litellm → ollama. In-opencode usage is not gateway proxying (no combos/admission/backoff). Live probes: `opencode/longcat-2.5-preview-free`, `opencode/space-bunny-free`, `opencode/mimo-v2.6-flash-free`, `openrouter/nvidia/nemotron-3-super-120b-a12b:free`, `openrouter/qwen/qwen3.8-27b:free` OK; `meta/muse-spark-1.3` DOWN (`META_API_KEY` unset); `litellm/t2-worker` rejected — the server serves `tier2` (use `litellm/tier2`); `ollama/qwen2.5-coder:7b` answers direct on `127.0.0.1:11434` (54 s cold) but the opencode ref refuses (per-user `baseURL: host.docker.internal`). Also records the 7 paid openrouter route legs TORDER-OR drops. See `docs/handoff/2026-10-01-opencode-direct-fallback-ladder.md`.
+- REVIEWGATE-2FAM (2026-09-30, operator): `review-status`/`ready` now count SEATS — a ready record needs at least two `kind=cross-family` entries, each READY, from distinct registry families, none the author's; the detail names missing/duplicated seats, an optional `family=` token is cross-checked against the registry, every counted seat prints as `seat N: <model> (<family>) verdict=<v>`, and more than 3 seats is a non-blocking note (no cap). One seat + the Sonnet final no longer reads as reviewed.
+- PROVIDERCOV (2026-09-30, ws-omniroute provider-coverage lane): 20 operator-listed providers added to `catalog/ai-registry.json` as `available:false` with measured `$comment` reasons (none can serve chat completions through the gateway); to avoid colliding with the `clients` section, rows renamed `opencode` → `opencode_gateway` and `qoder` → `qoder_ai`; `meta`/`meta_api` base URL `https://api.meta.ai/v1` re-checked and kept. The D1 reconcile drops this branch's `providers.ovhcloud` credit-tier stub (ws-ovh `f6f5e69` wins at merge), tests 20→19 missing. Gates: `python tests/test_registry.py` 305 OK; `python tools/registry.py check` ok 25 routes/71 models/53 providers (52 after D1).
+- TORDER batch 2 (2026-10-01, operator): every **`huggingface/*`** (10 legs) and **`antigravity/*`** (4 legs) leg is gone from the bands — unusable (401 / no credentials) and rate-limited-for-days respectively — with the providers marked unavailable-with-reason plus a revisit note and their declarations kept gated (the openrouter pattern). `hf-glm-5.2`, `hf-qwen3.8-27b` and `opus-4-6` now render `omitted`, and the live apply **pruned all three stale combos** (they had survived the previous apply). `models.Qwen3.8-27B` `context_advertised` 262000 → **128000** (the gateway's own `combo-min`, measured). Vertex's credential requirement is documented: the provider authenticates from the **GCP service-account JSON** `configuration/vertex-credentials-*.json` (now git-ignored), not a plain API key. **Latency:** there is no per-leg timeout knob in the gateway — `requestQueue.maxWaitMs` 180000 is the Spark queue wait, not a hop budget, and `providerCooldown` is disabled; the crawl is fixed by shortening the chains, and the 30-min park then skips a parked leg. Measured after the change: `t2-worker` served by free `groq/qwen/qwen3.8-27b` in **629 ms** (0 fallbacks), `t1-orchestrator` by credit `vertex/gemini-3.8-flash` in **6706 ms / 1 fallback** (was 22556 ms / 3 fallbacks to paid deepseek), `ovh-qwen3.8-27b` by `ovh/Qwen3.8-27B` (0 fallbacks; 23455 ms of *upstream* latency, not chain crawl). Render/contract/DryRun all exit 0 (23 combos, 8 omitted, contract 23 PASS); 2 free-family reviews APPROVE. Remaining: `free-ai/google/gemini-3.8-flash` 429s `premium_requires_purchase` so it is not a free 1M leg, leaving `t1-orchestrator-free-only` effectively single-provider; one `vertex`/`meta-api` connection row still 401s on an undecryptable stored key (credential-store repair, L0); `meta-api`'s 401 is not a missing key (it reads `api-keys.yml` key `meta`).
+- TORDER (2026-10-01, operator): the routing chain is re-ordered **trial → free → credits → paid with `deepseek` LAST**, and the tier windows are now contractual. `t1-orchestrator`/`t1-orchestrator-free-only` keep only legs with a measured window **≥ 600000** (`gemini/gemini-3.8-flash`, `free-ai/google/gemini-3.8-flash`, `vertex/gemini-3.8-flash`, `meta-api/muse-spark-1.3-contributor`, `deepseek/deepseek-flash`) so t1 renders **1M**; every sub-1M leg moved to the t2/t3 bands, which stay **128k** (gated by their lowest implementer). `vertex/gemini-3.8-flash` was added to the t2-worker/t3-driver **credits** band and `scaleway/*`/`antigravity/*` kept but no longer heads. Four credit single-combos added: `ovh-qwen3.8-27b`, `ovh-gpt-oss-120b`, `ovh-qwen3-coder-30b`, `vertex-gemini-3.8-flash`. Render-source fix for the 128k-compaction bug: `routes.gemini-3.8-flash` context 131072 → **1048576** with the `gemini/gemini-3.8-flash` free head restored, `models.gemini-3.8-flash` `output_max` 32768 → **65536** and `context_usable.tokens` → **1048576**, `providers.google_ai_studio` re-opened under the repeated-429 backoff policy; all five surfaces re-rendered from the registry, so `render omniroute --check` exits 0 and `opencode.jsonc` carries `limit { context: 1048576, output: 65536 }`. No paid openrouter leg is routable any more (all 8 declared paid legs removed or left gated; `providers.openrouter` stays available for the 22 `:free` legs). New **`tools/combo-contract.py`** gate asserts, per combo, limit == registry context == combos.json context, the free→credits→paid order with paid last, leg resolvability against the live catalog, the t1 ≥600000 / t2-t3 128k windows, and openrouter `:free`-only — wired fail-closed into `apply.ps1`/`apply.sh` and CI, and documented as the `combo-create` skill rule. Verified live after apply: `t2-worker` served by the **free** `groq/qwen/qwen3.8-27b` leg (gemini 503 → skipped by the model lockout instead of hammered), `ovh-qwen3.8-27b` by `ovh/Qwen3.8-27B` (767 ms, 0 fallbacks), `vertex-gemini-3.8-flash` by `vertex/gemini-3.8-flash` (2171 ms, 0 fallbacks), each logging `Combo context limit: 1048576 (source=target)`. Open gaps: `free-ai/google/gemini-3.8-flash` actually 429s `premium_requires_purchase` (not free), the `vertex`/`meta-api` connections 401 after an Encryption "auth tag" failure, `hf-glm-5.2`/`hf-qwen3.8-27b`/`opus-4-6` stay in `combos.json` but are uncreatable live and are not pruned, and `ovh-qwen3.8-27b` resolves 128000 (`combo-min`) against its declared 256k.
+- T1SECOND (2026-10-01): `t1-orchestrator` stays at **two** distinct usable providers when the nebius removal lands — the free `groq/qwen/qwen3.8-27b` leg (FREEKEYS-1 `tool_calls: proven`, provider-tier free) is added after the scaleway band and before the paid `meta-api`/`deepseek` legs. Registry `routes.t1-orchestrator.legs` + a dated `T1SECOND` `$comment`, re-rendered `combos.json`, `configuration/litellm/config.yaml` and `docs/models.md`. Gates: `ComboCrossProviderTests.test_every_agentic_route_has_two_distinct_usable_providers` + `..._three_usable_legs` pass (counts 2/4/5/4/5/4); `registry.py check`/`validate` `ok`; `render litellm/ide/openhands/models-doc --check` ok; `audit-router.py --offline` no drift; live `t1-orchestrator` probe 200 with a `get_weather` tool call; failure sets identical at base.
+- Resilience defaults (2026-10-01, commits `51fd01d2`/`3b0135e3`): the repeated-429 rotation policy is now applied **respect-set** (an operator value wins) and exactly once in every tracked gateway-spawn site — `OMNIROUTE_ROTATION_ENABLED=true`, `OMNIROUTE_ROTATE_ON_429=true`, `OMNIROUTE_ROTATE_429_THRESHOLD=3`, `OMNIROUTE_ROTATE_429_WINDOW_SECONDS=120`, `OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS=300`, `OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=1800000` — i.e. **rotate after 3×429 in 120 s, 300 s cooldown per leg, 30 min park** — in `configuration/start-stack.ps1`/`.sh`, `configuration/omniroute/apply.ps1`/`.sh` and the logon helper `configuration/autostart/Start-AutoOSStack.ps1`; previously a free-probe *proposal* with no tracked surface. Gates: failing-first `-Filter 'repeated-429'` 0 passed/1 failed → post 49/0; Linux `--filter '429 rotation policy'` 1/0; a child-process env dump proves respect-set + exactly-once; `shellcheck` clean; no gateway restart.
+- Patch artifacts (2026-10-01): certified-pristine revert paths and idempotent reapply for the clamp, deepseek and vertex gateway patches — 15 new `*.autoos-backup-pristine-3.8.50-*` backups streamed from the published `omniroute@3.8.50` tarball (15/15 re-hashed equal; `_14jycqh._.js` byte-identical so it correctly got none), the clamp reapply artifact `configuration/omniroute/qwen-clamp-reapply.ps1` + README (ports the untracked `patch_dist.py`, fixes its dropped `/` in `VERIFY_NEW`, idempotent, backs up each file), and `_18ct13i._.js` added to `reason-fix-reapply.ps1` (which also gained the UTF-8 BOM so it parses under Windows PowerShell 5.1). Gates: deepseek run 1 `12 patched`/run 2 `0 patched, 12 skipped`; clamp run 1 `6 patched`/run 2 `0 patched, 6 skipped`; `-DryRun` writes nothing; `patch-verify` gives pre-restart **GO** — 19/19 patched files carry a certified revert path, `_18ct13i` reapply `0 patched, 12 skipped`, and the reasoning + vertex probes pass against a throwaway gateway on `:20146`; no live package file modified, no gateway restart.
+- Probe scripts (2026-09-30/10-01): the gateway probe set is now tracked — `tools/probe-free.py` (the 43-leg free-tier probe plus the `analyse-gemini-log.py`/`analyse-gemini-codes.py` health/429 readers), `tools/probe-clamp.py` (`5b9b7dd7`; asserts an over-cap `max_tokens` is clamped, not rejected; PASS/SKIP exit 0, FAIL exits 1; logs a 429/`chat_admission_busy` with a 60–120 s backoff), `tools/probe-vertex.py`/`probe-vertex-isolated.py` (trailing model turn), and `tools/probe-reasoning*.py` (`probe-reasoning-repro.py` overwrite-vs-preserve before/after). Keys come from `AUTOOS_OMNIROUTE_KEY` or `api-keys.yml` in memory and are never printed. Gates: clamp live `VERDICT: PASS - ... request answered 200; no max_completion_tokens cap 400`, exit-code proof against a fake gateway (fail=1/skip=0/pass=0), key-leak check False, two runs identical; reasoning repro 4/4 isolated cases PASS.
+- Admission fixes (2026-09-30): `chat_admission_busy` sheds under ≥3 concurrent heavy streams were the single-slot structural gate — `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT` is now respect-set (only when unset, once) in `configuration/start-stack.ps1`/`.sh` and `configuration/omniroute/apply.ps1`/`.sh` to **4** (4+4=8 effective; measured before 3-wide → 2×200+1×503, after 4-wide → 4 admitted, 0 sheds); the launcher shim class is pinned on `apply.ps1`, `start-stack.ps1` **and** the logon helper `configuration/autostart/Start-AutoOSStack.ps1` — each resolves `omniroute.cmd` via PATH with an `%APPDATA%\npm` fallback and fails loudly (`exit 1`) instead of starting the bare name. Commits `880ec58`/`1179e3f` (AdmissionFix) + `d88ed3b` (P0). Gates: new `tests/run-tests.ps1:9779` launcher admission/shim `Test-Case` (failing-first `failed 1` → post `29 passed`); parse errors 0; `apply.ps1 -DryRun` exits 0; full suite 5 failures pre-existing on base.
+- Nebius removal (2026-10-01): every `nebius/*` leg is gone — the combos half removed the six legs from `configuration/omniroute/combos.json` (all six agentic combos) with a dated `NEBREMOVAL` `$comment`, and the registry half (L1-beta) dropped the `nebius` provider + legs from `catalog/ai-registry.json` and re-synced `litellm`/`docs/models.md`/consumers. Gates: `apply.ps1 -DryRun` + live apply (22/22 combos, resilience already current); live store `TOTAL combos: 22 / Nebius legs in live store: 0`; six touched combos 6/6 HTTP 200; `registry.py check`/`validate` ok; `render omniroute --check` drifts on exactly the six edited combos until the registry half lands (expected, not weakened).
+- FREEWIRE + gemini retention (2026-09-30, commits `7eff6020`/`4cb49b43`/`2ff537a4`): wired the **10 probe-proven free legs** (huggingface `zai-org/GLM-5.2` + `Qwen/Qwen3.8-27B`; groq `qwen/qwen3.8-27b` + `openai/gpt-oss-120b`/`gpt-oss-20b`; openrouter `:free` ×4; `vertex/gemini-3.8-flash`) into the registry and every render, with 5 new model rows and 3 rows promoted `tool_calls: proven`, 7 new single-provider combos, free bands interleaved before the credits band in the five agentic routes (**never** `*-clean`), and **3 policy allow-rules** above `deny-groq`/`deny-openrouter`; the OpenRouter guard moved (`providers.openrouter.available` false→true, the two paid DSMAX legs re-gated at the route level). **Operator correction: the gemini exclusion was reversed — gemini retained; usage governed by the repeated-429 backoff policy (3×429/120 s → 300 s cooldown per leg; 30 min park).** Gates: `registry.py check`/`validate` `ok: registry 2026-09-30, 32 routes, 80 models, 34 providers`; 5 renders + `sync-ide-models.py --check` ok; `audit-router.py --offline` no drift; 10/10 newly wired legs ack HTTP 200 (22:45–22:46Z, no 429/503/504, no `chat_admission_busy`); ≥2-distinct-usable-provider invariant green on all six agentic routes; a full `tests/test_*.py` sweep vs the `a975d48` baseline shows no new failures and 7 fixed.
+- OVH legs + registry (2026-09-30, commits `f6f5e695`/`7e329c7e`/`158818ea`): `providers.ovhcloud` credit-tier entry ($200 cap, `model_prefix: "ovh"`) with 3 model rows (Meta-Llama-3.3-70B, Mistral-Small-3.2-24B, Qwen3-Coder-30B — each probed 3/3 ack+tool+round-trip, `tool_calls: proven`) and the `ovhcloud/*` legs in `t2-worker`/`t3-driver`; then stale `context_advertised` synced to live measurements (`gemini-3.8-flash` 131072→1048576, `claude-opus-4-6-thinking` 200000→1048576) with `vertex/gemini-3.8-flash` and `deepseek/deepseek-flash` added to routes and the `context_declared` labels + renders updated. Gates: `registry.py check`/`validate` ok; `test_registry.py` 300 OK and `test_registry_render.py` 160 OK; all 5 renders `--check` ok; `audit-router.py --offline` no drift; live apply idempotent with a 200 ack per touched combo.
+- Vertex leg + 1M contexts (a5bcb69, 2026-09-30): `configuration/omniroute/combos.json` raised five combos to the measured 1M window — `gemini-3.8-flash` 128k→1M with `vertex/gemini-3.8-flash` as second leg, `opus-4-6`/`t2-orchestrator` 200k→1M from the antigravity leg, `t2-worker-clean`/`t3-driver-clean` 128k→1M from `deepseek/deepseek-flash` — while the genuine 128k clamps (`t1-orchestrator`, `t2-worker`, `t3-driver`, `t4-rag` and their free-only twins) stay untouched; `apply.ps1`/`apply.sh` gained only the §3 resilience design comment. Gates: `test_registry_render.py` 155 pass / 5 expected cross-lane failures (stale registry contexts are L1-beta's half); `apply.ps1 -DryRun` + live idempotent apply (`vertex/gemini-3.8-flash already 1048576`); `audit-router.py --offline` no drift; per-touched-combo ack probes.
+- REVIEWGATE-2FAM (2026-09-30, operator): `review-status`/`ready` now count **seats** — a ready record needs at least two `kind=cross-family` entries, each READY, from distinct registry families, none the author's; an optional `family=` token is cross-checked against the registry; the detail names the missing/duplicated seat, every counted seat prints as `seat N: <model> (<family>) verdict=<v>`, and more than 3 seats is a non-blocking note (no cap). One seat plus the Sonnet final no longer reads as reviewed. Landed on `L1-backlog/reviewgate-2fam` (`d0f70f15`); `tests/test_autoos_spawner.py` red-first (33 tests, 4F+11E before) → `ReviewStatusTests`+`ReadyCommandTests` 63 OK; full-file failure set identical at base `e58274a`.
+- Redactions (2026-09-30, public repo): the real username/user-home path is scrubbed from `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` on `L1-backlog/ws-hygiene-main-20260930` (`4ba83ed0` — that branch is not yet an ancestor of this one), and the P0 admission lane redacted token-like session ids and the inherited user-home path → `<session-id>` / `C:/Users/<user>` (findings, verdicts and the evidence list unchanged).
+- ApplyJson (2026-10-01): `configuration/omniroute/apply.ps1` now parses `catalog/ai-registry.json` case-sensitively and duplicate-tolerantly, so a registry carrying two keys that differ only by case (vendor model spellings, e.g. `Qwen/Qwen3.8-27B` beside `qwen/qwen3.8-27b`) no longer throws `ConvertFrom-Json`'s `DuplicateKeysInJsonString` (5.1) / "keys with different casing" (pwsh) and silently skips provider registration. New `ConvertFrom-AutoOSRegistryJson`/`ConvertTo-AutoOSRegistryObject` (`-AsHashtable` on pwsh 7; `JavaScriptSerializer` on Windows PowerShell 5.1, which has no `-AsHashtable`) project back onto the same PSObject shape, first-wins on a case-only pair (confined to `models`, which the launcher never reads). Guard test: `Get-AutoOSProviderMap tolerates registry keys differing only by case`, red pre-fix on both shells.
+- DS1M follow-up (2026-09-30): `openhands/profiles/deepseek-flash.json` re-pinned to the catalog numbers — `max_input_tokens` 1048576, `max_output_tokens` 393216 (was the stale 131072/32768). The vendored-template gate was red on it: `python tests/check-vendored.py` and `tests/linux/04-registry-models.sh` ("the vendored openhands profiles match the catalog snapshot").
+- AGYCANON (2026-09-30, operator): antigravity renders canonically again — the live `/v1/models` was re-measured and lists 19 canonical `antigravity/*` rows and zero `agy/*` (both spellings route; canonical wins), so `providers.antigravity.model_prefix` is retired `"agy"` → `null` and `render_omniroute()` emits the registry spelling unchanged. The mechanism stays live for providers that genuinely diverge (`scaleway` → `scw`), and `GATEWAY_ONLY` keeps dropping both spellings for combos rendered before this change. Re-rendered: `configuration/omniroute/combos.json` (4 combos: `opus-4-6`, `t2-orchestrator`, `t2-worker`, `t2-worker-free-only`); schema description + `gateway_ref()` docstring updated. Gates, red-first: `GatewayRefTests` in `tests/test_registry.py` + `tests/test_registry_render.py` (retired-prefix + still-applied-prefix cases), `tests/linux/17-ai-routing.sh` `known_drops` respelled. Verified: `test_registry.py` 300 OK, `test_registry_render.py` 160 OK, `check-vendored.py` OK, all 5 `render --check` OK, `sync-router-tiers --check` OK, `registry.py check`/`validate` OK, `audit-router.py --offline` no drift.
+- DS1M (2026-09-30, operator): `deepseek-v4.1-flash` is a 1M-context route again — the vendor Models & Pricing page (https://api-docs.deepseek.com/quick_start/pricing) states MODEL `deepseek-flash` = VERSION DeepSeek-V4.1-Flash with CONTEXT LENGTH 1M and MAX OUTPUT 384K, and OpenRouter's live catalog agrees (`deepseek/deepseek-v4.1-flash` context_length 1048576). `models.deepseek-flash` + both v4.1 spellings corrected 131072/65536/32768 → 1048576/524288/393216 (usable stays at the 50% default until probe-recall measures it); `routes.deepseek-v4.1-flash` declares `1M` so `clamp_route_context` keeps the promise. Re-rendered: `combos.json`, `ide-models.json`, `tier-profiles.json`, `docs/models.md` table, `opencode.jsonc` (via sync-ide-models). Gate: `DeepSeekFlashContext1MTests` (red-first, 3 tests) + re-pinned `legacy-models.golden.json` and the ps1 combos-context pin. Live gateway applied: 15 combos, native `deepseek/deepseek-flash` leg serving. Known gap exposed by the apply: `meta-api` is not a gateway provider type (`providers add meta-api` → Invalid provider), so the spark legs have no live connection — see the handoff.
+- CAO removal (2026-09-29, operator): CAO is deprecated — the batch runner is the only lane. Deleted the `cao/` package (18 modules), `tests/cao/` (21 files), `infra/mcp-servers/cao-setup/` (12 files) and `references/cao-runbook.md`; cut the `## CAO quickstart` section from the skill; dropped the `cao` block from `handoff.config.example.json`; de-CAOed the skill description, Files table, R-coord-09, `l3-routing.md`, `main-orchestrator.md`, `rule-map.md`, `trust_worktree.py`, `pytest.ini`, `repository-index/SKILL.md` and `AGENTS.md`. Gate: `tests/test_no_cao.py` (red-first, 4 passed).
 
+### Changed — the review gate counts two cross-family seats (REVIEWGATE-2FAM, 2026-09-30)
+
+One `AutoOS-Review: kind=cross-family` entry was enough for `review_status()` — and therefore for
+`review-status` and `ready` — so one reviewer plus the Sonnet final read as "reviewed", and two
+spellings of one family would have read as two seats once the floor rose. The gate now counts
+SEATS: an entry counts only when it names a registry-known reviewer and author, the two families
+differ, any `family=` the entry declares matches the registry (a mismatch names both sides and
+refuses the seat), and the verdict is READY. **Two counted seats from distinct families** are
+required, with no cap: past three seats the operator's 2-3 guidance prints as a note, never a
+refusal. The detail names exactly what is missing or duplicated ("2 cross-family seats required;
+have 1", "reviewers X and Y are the same family (qwen)"), and the report prints every counted seat
+as `seat N: <model> (<family>) verdict=<v>`. `REVIEW_ENTRY_FIELDS` gains the optional `family=`
+token; the hint and `run`'s paste-ready `record-line:` example show it. The Sonnet final check and
+the exit codes are unchanged.
+
+- **Tests**: `tests/test_autoos_spawner.py` `ReviewStatusTests` (red first: 33 tests, 4F+11E before
+  the implementation) and `ReviewStatusTests`+`ReadyCommandTests` (63 OK after); full file 1153
+  tests, 64F+2E — the identical failure set at base `e58274a` (1148 tests, 64F+2E); lane-only
+  failures none.
+
+### Fixed — the spawned worker resolves the gateway too, not the clone's loopback (GWLOOPBACK-2, 2026-09-30)
+
+GWLOOP cured the spawner's own `gateway_up()` pre-check, but the spawned worker was still born
+broken in-container: its opencode reads the *sandbox clone's* `opencode.jsonc`, whose omniroute
+provider pins `http://127.0.0.1:20128/v1` — refused inside a container, where the gateway is the
+`omniroute` sibling — so every in-container gateway-path worker died on its first model call (0 of
+58 records; the memspec P1 review seat 1R died `ConnectionRefused`).
+
+- **The child's `OPENCODE_CONFIG_CONTENT` overlay now carries
+  `providers.omniroute.settings.baseURL`** = the address this process resolved to (`GATEWAY`,
+  rebound by the pre-check), spelled with the repo's API root (`/v1`; an override that carries its
+  own path keeps it) by the new `gateway_base_url()`, stamped into the child env by
+  `stamp_worker_gateway()` inside `worker_env()` — the one place both spawn sites build the child
+  env, after the plan merge and the key. opencode merges the content source last (v2.0.19
+  `Config.load` appends it after the discovered files; measured 2026-09-30: the same clone, same
+  env — `opencode run --standalone` fails ConnectionRefused without the stamp and reaches the
+  gateway with it), so the clone's file cannot pin a worker to an address its container refuses.
+  No file on disk is rewritten; on a host the stamp spells exactly what the file already says; a
+  `--free` overlay (no provider block) and a document without the provider are left alone.
+- **Tests**: `tests/test_gateway_selection.py` `GatewayBaseUrlTests` (5 cases, red first: the
+  container/host shapes, the call-time default, trailing slash, an override's own path) and
+  `tests/test_autoos_spawner.py` `WorkerGatewayOverlayTests` (9 cases, red first: the stamp, the
+  merge into a provider block, the host shape, `--free`/non-omniroute/malformed documents
+  untouched, the plan's copy kept, the checkout file byte-identical, and the whole
+  `build_plan` → `worker_env` emit path). Full spawner suite: 1140 tests, 64F+2E — the identical
+  failure set at base `2df2d5c` (1131 tests, 64F+2E), lane-only failures none.
+### Fixed — `autoos-agent.py` resolves its gateway instead of assuming loopback (GWLOOP, 2026-09-30)
+
+`tools/autoos-agent.py` hard-coded `GATEWAY = "http://127.0.0.1:20128"`. That address is right
+on a host and refused inside the stack's containers, where the gateway is a sibling container
+the compose network reaches as `omniroute` (`configuration/docker/ai-stack/compose.yml` spells
+the in-network address `http://omniroute:20128`): from a container every gateway-backed run
+refused in the `gateway_up()` pre-check with "start it" advice for an address that could never
+answer there.
+
+- **`GATEWAY` is resolved, not hard-coded**: `gateway_candidates()` orders an explicit
+  `AUTOOS_OMNIROUTE_URL` (the override `tools/autoos_usage.py` already reads) first, then the
+  docker DNS name `http://omniroute:20128`, then `http://127.0.0.1:20128` as the fallback;
+  `resolve_gateway()` takes the first. Selection stays string-only, so importing the tool still
+  contacts nothing (the new test asserts `urlopen` is never called during import).
+- **An override is the only candidate**: a deliberately dead `AUTOOS_OMNIROUTE_URL` (the shell
+  suite sets one on purpose) fails closed exactly as before, instead of being rescued by a live
+  gateway behind another name.
+- **`gateway_up()` is the pre-check**: it walks those candidates in order and rebinds `GATEWAY`
+  to the first that answers, so the import-time guess becomes the address the rest of the
+  process talks to - the host case too, where `omniroute` does not resolve outside the compose
+  network and loopback remains the gateway.
+- **Tests**: `tests/test_gateway_selection.py` (16 cases: candidates, the const, an I/O-free
+  import, a fresh interpreter with and without the override, the health GET, and every pre-check
+  path, all probes injected), wired into `tests/linux/33-documentation.sh`;
+  `docs/web-services.md` now states the resolution order in the publish-address section.
+
+- WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
+
+### Fixed — the round-1 unclosed-fence rescan forged verdicts; VERDICTFENCE-R2 replaces it (2026-09-29)
+
+The cross-family review (Muse) of the round-1 rescan measured three forgeries on `6e182a3`, all
+live: (B1) a reviewer that pasted a file and crashed, `'```\nchecking worker output\n```\nVERDICT:
+READY\n```\n'`, graded READY — the paste's verdict, never the reviewer's; (B2) `'VERDICT:
+fix-first\nsome notes\n```\nVERDICT: ready\n'` graded `ready` — the rescan overwrote the real
+earlier verdict; (B3) `'```\ncode\n~~~\nVERDICT: ready\n'` graded `ready` — `~~~` does not close a
+``` fence (and a ` ``` ` cannot close ` ```` `). A rescan that re-reads the tail "unfenced" is
+unsafe by construction: a transcript cut mid-block makes the fence pairing ambiguous, so nothing
+after the first marker can be trusted to sit outside a paste.
+
+- **`tools/autoos_agent_mcp.py` `review_verdict`**: the rescan is removed — a fence still open at
+  the end of the text fails CLOSED, hiding everything from the first fence marker on (verdicts
+  stated before any fence, like B2's `fix-first`, survive). The scan is diff-hunk-aware: after an
+  `@@ -a[,b] +c[,d] @@` header, the hunk body (counted from b/d; `\ No newline` counts toward
+  neither) toggles no fence and matches no verdict, and `diff --git`/`index`/`---`/`+++` header
+  lines are skipped — this is what saves the round-1 measured git-diff case deterministically,
+  without re-reading anything unfenced. Fences follow CommonMark: the closer must be the opener's
+  own character, at least as long, whitespace-only, at ≤3 spaces indent. Quoted/template rejects
+  and last-verdict-wins are kept. A blank line while the hunk counts remain is a context line that
+  lost its single leading space to a terminal's trailing-whitespace strip and consumes one from
+  both counts (VERDICTFENCE-3, measured: `'@@ -1,3 +1,3 @@\n a\n\n VERDICT: READY\n'` had graded
+  `READY`).
+- **One round-1 test inverted by rule (a)**: `test_an_unclosed_fence_does_not_hide_what_follows_it`
+  asserted the rescan behavior itself (`"```text\nVERDICT: fix-first\n"` → `fix-first`); it is now
+  `test_an_unclosed_fence_hides_what_follows_it` → `None`, matching pre-round-1 fail-closed.
+- New tests (`VerdictLineTests`), all red on `6e182a3` first: B1/B2/B3 exact texts, the
+  long-opener/short-closer, and a hunk whose body verdicts are never counted while a verdict
+  stated after the hunk still is. Follow-up named in code: verdicts should come from
+  reviewer-owned model turns of a structured transcript (R-orch-16), not raw-stdout scraping.
+
+### Fixed — `review_verdict` let one stray fence swallow a reviewer's verdict (VERDICTFENCE, 2026-09-29)
+
+Measured on run `20260929-061040-review-familyfence-a8a66-22ed12`: the reviewer ran `git diff` and
+the transcript carried its output. One context line of that hunk was ' ```' — a markdown fence
+*sitting in the diffed file*, prefixed by the diff's own leading space. The scan tested the
+**stripped** line's first characters, took it for a fence opener, never found a closer, and so
+skipped every later line including the reviewer's own `VERDICT: READY` 450 lines down
+(transcript line 1436 vs 1894). The run graded `failed/no-verdict` — the deliverable existed and
+was read as absent.
+
+- **`tools/autoos_agent_mcp.py`**: `_FENCE_RE` is now markdown's own rule — up to 3 spaces of
+  indent, then three or more ` or ~ — matched against the raw line after the ANSI strip. The
+  per-line verdict test moved out to `_verdict_value()` so the two scans share one definition of a
+  verdict instead of restating it.
+- **An unclosed fence no longer hides what follows it**: the scan remembers the line of the last
+  opener that was never closed and re-reads everything after it unfenced. The toggling is strictly
+  alternating, so that opener is the last fence marker in the text and the tail below it is
+  unfenced as far as this scan can tell.
+- **Kept**: a `VERDICT` line inside a real, **closed** fenced block is still the contract pasted
+  back at us and stays ignored, as do `>`-quoted lines and template lines carrying `<` or `|`; the
+  last valid verdict still wins.
+
+Tests first in `tests/test_autoos_spawner.py` (`VerdictLineTests`): the measured git-diff shape,
+a closed block staying ignored, an unclosed opener not hiding `fix-first`, and a fence deeper than
+markdown's indentation reading as content (that one inverted the parity of a *real* block, which is
+how a closed block used to leak its verdict).
+
+- FAMILYFENCE-5 (2026-09-29, cross-family review Muse — these gate D-115, so they are fixed before the final): (1) `reviewer_run_override` replaced the run's combo with the `policy.reviewers` pick AFTER the fence had answered, so an authored review card whose card `author` differs from `--review-of`'s writer planned and announced a reviewer inside the fenced family and only the post-run backstop noticed (rc 12 after the review had run) — `_fence_check_reviewer` now judges the swapped model spelling (its `policy.reviewers` family) and the swapped combo's legs, and `cmd_run`'s fence is passed into both the v1 and the v2 route walk, so the refusal is a PLAN-time `FamilyFenceRefused` / rc 12 (`FamilyFenceReviewerOverrideTests`); (2) the FAMILYFENCE-4 refusal's second "way out" told the caller to add `--not-family`, which does not clear that refusal (the writer stays unnamed and rc 2 re-fires) — it now reads "spawn the review through the same autoos-agent MCP/checkout that spawned the writer, or drop `--review-of` and name the writer's family with `--not-family`", in the CLI text and in the MCP `spawn` tool's own description; (3) `--not-family ""` silently no-oped (`fence_family_names` drops a blank before the FAMILYFENCE-3 B2 name check can call it unknown) while MCP refused the same value — a blank is a broken argument on the CLI too and is refused with rc 2 before any name beside it is judged (`fence_blank_refusal`, `not_family_values`, `FamilyFenceUnknownNameTests`); (4) the white-box N1 test that asserted a `fence=` keyword on a `build_plan` spy (mutation proves nothing else observes that argument on the free path) is replaced by a behavioural one: a fenced model sitting next in the ordered free chain after a rate-limit stop is walked past and the run serves the next un-fenced spelling (`FamilyFenceFreeChainTests.test_a_fenced_model_next_in_line_is_walked_past_on_the_real_re_plan`, kills the test when the chain-walk fence filter goes).
+- FAMILYFENCE-4 (2026-09-29): `run --review-of <id>` and `spawn(review_of=...)` whose writer family this checkout's runner-private record store cannot name (no record, no writer, or an unresolved one) now REFUSE with rc 2 — the message names the store searched and the two ways out (spawn through the MCP/checkout that spawned the writer, or `--not-family`) — instead of warning and planning onto a combo carrying that family; `family_fence` gained the `refusal` field, and the `cross-family not enforced` warning stays only for a review naming neither (`FamilyFenceUnreadableWriterTests`).
+- WINFAIL2 (2026-09-29): Windows test fixes — CRLF card fixture in `test_autoos_card.py` (`newline=""` so Windows text mode does not double `\r\n` to 44 lines) and omitted `reasoning_effort` in `run-tests.ps1` (key is dropped, not null — `PSObject.Properties` check replaces the null compare under StrictMode).
+
+### Fixed — the CROSS-FAMILY verdict answers the question the exit code asked (FAMILYFENCE-3 N5, 2026-09-29)
+
+A qoder review fenced off its own assumed family printed
+
+    writer: qoder/Qwen3.8-Flash (qwen) source=assumed-default
+    family: writer=unresolved reviewer=unresolved CROSS-FAMILY: unknown
+    autoos-agent: no model outside family qwen left - refusing (FAMILYFENCE)   [exit 12]
+
+The sentence said *cannot tell*; the exit code said *this one collides*. Both come from
+the post-run backstop, but they read different questions: `cross_family_line` compared
+the reviewer family with the AUTHOR's family only, and printed `unknown` for an
+unproven reviewer, while `cmd_run` flipped rc to 12 on the serving family being in
+`fence["families"]` whether or not any witness attested to it. FAMILYFENCE-b's
+requirement 3 was about not CLAIMING independence from an assumption — a weaker reason
+to print `yes` — and it was read as a reason to print `unknown` about a collision the
+run was being refused for.
+
+- **`fence_collision(family, fence)`** (`tools/autoos-agent.py`) is now the one home for
+  "is the family that served a family this fence rules out?" — the author's own family
+  or any `--not-family` name, compared in `resolver.family_key` form. The verdict line
+  and the backstop read it, so they cannot drift apart again; the refusal text is
+  unchanged.
+- **The verdict set is `yes | NO | NO (assumed) | unknown`.** A collision prints `NO`,
+  marked `(assumed)` when nothing witnessed the model that hit it — the exit code acts
+  on an assumption, so the line says so and says how strongly. `yes` stays
+  witnessed-only: an unattested reviewer that collides with nothing still prints
+  `unknown`, never a claim of independence.
+- **Docs** — the module docstring, the MCP `spawn` tool description and
+  `.agents/skills/unattended-orchestration` all listed `yes|NO|unknown` and said `NO`
+  needed a witness; both now describe the four-value set.
+- **Tests** (`tests/test_autoos_spawner.py`, `CrossFamilyProvenanceTests`):
+  `test_a_proven_review_on_a_fenced_family_costs_the_run` (renamed from
+  `test_a_proven_same_family_review_costs_the_run`, which never tested a *same-family*
+  comparison — the author was `unresolved` in it, so what it actually proved is that the
+  verdict line stayed `unknown` while the exit was 12: the defect, asserted as
+  behaviour), `test_an_unattested_review_on_a_fenced_family_says_no_assumed`, and
+  `test_an_assumed_review_outside_the_fence_still_claims_nothing` for the `yes` half.
+
+### Added — a real launch carries the session id and the pin, proven unmocked (FAMILYFENCE-3 N3, 2026-09-29)
+
+Skill R-orch-19: "a mocked-Popen suite can be green while a live spawn drops a flag."
+`NativeSessionIdTests` asserts on the dry-run's *printed* argv, so a launch change (the
+scope wrapper, the env rebuild, the executable resolution) can break the real
+`Popen` and leave the printed plan unchanged. This adds a POSIX stub for `qodercli`
+and `claude` that writes its OWN received argv to a file and exits 0; the CLI runs
+itself through `run_agent` (no mock).
+
+- **Tests** (`tests/test_autoos_spawner.py`, `RealLaunchArgvTests`): the recorded
+  qoder and claude launch must both match `--session-id <uuid>` and the caller's
+  `--model`. The qoder stub writes one file into its own clone — the INCOMPLETE
+  verdict that penalises an isolated worker that changed nothing would otherwise
+  refuse the launch, masking the flag check.
+
+### Fixed — a `not_family` handed over as one bare string fences one family, not its letters (FAMILYFENCE-3 N2, 2026-09-29)
+
+`fence_family_names` iterated its argument directly, which is right for the CLI's
+`append` list and wrong for every other caller: `not_family="mimo"` — the shape a
+programmatic caller of `family_fence` (a hand-built args namespace, an importable API
+call) hands over — fenced the families `"m"`, `"i"` and `"o"`, which the registry
+carries none of, and the real family stayed unfenced while the run read as guarded.
+The MCP spawn path builds a repeated `--not-family` flag and so was already a list; the
+defect was one call below, at the fence's single home. A bare string is now one name
+there.
+
+- **Test** (`tests/test_autoos_spawner.py`, `FamilyFenceStringNameTests`): a string
+  yields one `family_key`, and `family_fence` built from one string excludes exactly
+  that family.
+- **Follow-up (same day):** 7508d2a landed that test and this entry but *not* the guard —
+  the red/green check reverted `tools/autoos-agent.py` to `HEAD` with `git restore` and the
+  fix was never re-applied before the commit, so the lane shipped a failing test. The full
+  suite caught it two items later; the guard is the same edit re-applied. Lesson recorded
+  where it belongs: `git restore --source=HEAD -- <file>` is a *destructive* way to prove a
+  test is red. Prove red on a copy of the tree, or re-read the diff into the commit message
+  before committing.
+
+### Fixed — the free fallthrough re-plan carries the fence into the leg choice (FAMILYFENCE-3 N1, 2026-09-29)
+
+`_free_fallthrough_plan` filtered the fenced families out of the chain it walks, then
+rebuilt the next attempt with `build_plan(args, cfg, sandbox=...)` — without the
+`fence=` argument the gateway fallthrough's re-plan already passes. `build_plan` answers
+the fence for whatever leg IT picks, so the re-plan was one leg away from serving the
+family the chain walk had just refused. The re-build now carries the same fence object.
+
+- **Test** (`tests/test_autoos_spawner.py`,
+  `FamilyFenceFreeChainTests.test_the_free_fallthrough_re_plan_carries_the_fence_into_build_plan`):
+  the re-plan's `build_plan` call must receive the fence, not a rebuilt or empty one.
+
+### Fixed — a `--not-family` name the registry does not carry is refused, not a silent no-op (FAMILYFENCE-3 B2, 2026-09-29)
+
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family mimo --dry-run` exited **0** and planned the run: `mimo` names no family
+the registry declares — `opencode/mimo-v2.6-flash-free` is family `xiaomi` — so the
+fence excluded nothing while the run read, to its caller and to any later judge, as a
+guarded review. A typo in a safety flag must not downgrade the flag to a comment.
+
+- **`registry_family_names`** (`tools/autoos-agent.py`): the known families are the
+  `models` rows' and `policy.reviewers` rows' `family` fields in `resolver.family_key`
+  form — the same two sources `reviewer_family` compares against, so the name check and
+  the fence cannot drift. `cmd_run` checks the names *this caller typed* (a writer
+  family read from a kill record is already the registry's own answer) right after the
+  fence is built and before any leg is chosen; an unknown name exits 2 naming it and
+  the known families (`fence_name_refusal`). An unreadable registry, or one that
+  declares no family at all, is not evidence a name is wrong — the check stands down.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceUnknownNameTests`): the live
+  `--not-family mimo` case (rc 2, names `mimo`, lists `xiaomi`, plans nothing), a stub
+  refusal that launches nothing, and the regression that a known name — any spelling of
+  it — keeps the fence's own exit 12.
+
+### Fixed — an own-account run records the route it actually ran (FAMILYFENCE-3 N4, 2026-09-29)
+
+`run --client qoder --tier 1 --model Efficient --dry-run` printed
+`route: t1-orchestrator reason=explicit-tier routing=1`, and the same lie reached the
+worker record and the run log: `t1-orchestrator` is an OmniRoute combo, and a native
+client never resolves one. `build_command` gives qoder/claude/agy the model pin (or the
+registry's `default_model`) verbatim, the `MODEL_INPUT` row for those clients carries no
+`("route",)` kind at all, and `own_account_track_entry` returns `None` for a non-gateway
+client precisely because "an own-account client never ran the gateway route it names". The
+route line was the one place still naming a route the run could not have run — so `ps`, the
+record and the log reported a gateway combo for a run that answered on the client's own model.
+
+- **`build_plan`** (`tools/autoos-agent.py`): when the client is not a gateway client, the
+  recorded combo is `native:<client>` (e.g. `native:qoder`). The rewrite happens *after*
+  `resolve_route`, on purpose: the FAMILYFENCE leg check and the PRIV3 sensitive-combo check
+  both read the card's real gateway combo, and standing them down alongside the label would
+  have opened a hole rather than closed a mislabel. `combo_legs("native:qoder", registry)`
+  answers no legs, which is the honest input to provider-benching, and the fallthrough
+  exclusion set now carries the same label the plan recorded.
+- **Tests** (`tests/test_autoos_spawner.py`, `NativeComboTests`): the live dry-run line for
+  qoder, claude and agy names `native:<client>` and not a `t…` combo, the in-process
+  `build_plan` route dict carries the native combo (with its tier and its `--model` pin
+  intact in the argv), and a gateway `--client opencode --card role=implement` keeps its real
+  resolver combo — the rewrite is for own-account clients only.
+
+### Fixed — the fence judges the model that serves, not a combo that never does (FAMILYFENCE-3 B1, 2026-09-29)
+
+A live smoke from the FAMILYFENCE-b tip refused a run it must not:
+`run --client opencode --card role=review,complexity=trivial --free --isolate --lean
+--not-family qwen --dry-run` exited 12 — `no model outside family qwen left` — although
+the `--free` head (`opencode/muse-spark-1.3-contributor-free`, family meta) sits outside
+that fence. `--not-family meta` announced the walk onto nemotron and *then* refused the
+same way; only `--not-family nvidia` ran. The cause was the combo-leg check
+(`fence_blocks_route`: a route is fenced when ANY leg is, because OmniRoute can fall
+through to it) applied to runs no combo ever serves: every t1/t2/t3 combo carries one
+qwen leg and one meta leg, and a `--free` run resolves no combo at all — the free chain
+head is the serving model, and it was already fenced by `fence_free_head` before the
+plan. The check ran anyway, and ran even when `--free` meant no combo served the run.
+
+- **`model_decided`** (`tools/autoos-agent.py`): when `--free` or an own-account
+  `--model` pin has already picked the serving model, the fence is judged on that model
+  (`fence_free_head` / `fence_blocks_model`) and `resolve_route_unchecked` /
+  `_resolve_route_v2` skip the combo-leg refusal *and* the fenced-route exclusion —
+  the exclusion would have left the resolver an empty route table, trading the wrong
+  rc 12 for a wrong rc 2. A gateway `--model` pin is still a combo run (OmniRoute
+  resolves it to legs), so the combo check keeps its teeth there.
+- **A combo refusal now names the way out**: the route-based refusal prints
+  `... - use --free or pin --model outside family <fams>` (`route_fence_refusal`);
+  model-based refusals (free chain spent, pin inside the fence) keep the plain line,
+  because for them there is no combo to route around.
+- **Tests** (`tests/test_autoos_spawner.py`, `FamilyFenceServingModelTests`): the
+  three live dry-run cases above (qwen and meta allowed on `--free` with the right
+  head, a fence covering the whole free chain still `EXIT_NO_OTHER_FAMILY`), the
+  own-account-pin live case, and the combo-refusal way-out line.
+
+### Added — every client records the model that really answered; qoder can be pinned (FAMILYFENCE-b / 2026-09-29)
+
+FAMILYFENCE fenced by family, and 0dc1691 prints a `CROSS-FAMILY` verdict — but for
+an own-account client the verdict rested on an *assumption*. Measured 2026-09-29: for
+`client=qoder` the runner-private record's `model` was the plan's `QODER_DEFAULT_MODEL`
+(`Qwen3.8-Flash`), `exit.json` held only a rc, `ps`/`status`/`result` showed no model,
+and `spawn` had no way to name one. qodercli 1.1.63 makes the assumption a lie: an
+unknown `--model` is **silently substituted** — it prints `falling back to default
+model "efficient"`, answers with the account's promo model (`qfmodel` / display name
+`Efficient`), and **exits 0**. A qoder review's family could be neither proven nor
+fenced, yet the verdict still read `yes`.
+
+- **Provenance is now in the writer record** (`tools/autoos-agent.py`): the resolved
+  writer gained a `source` field — `gateway-log` (the OmniRoute call log),
+  `client-reported` (the client's own transcript), `pinned` (an explicit `--model`),
+  `assumed-default` (only the plan guessed). `WRITER_PROVEN_SOURCES` is the first two:
+  an *asked-for* model is never evidence of what answered. `writer_is_proven()` gates
+  the post-run verdict, so an unproven reviewer prints
+  `family: writer=.. reviewer=unresolved CROSS-FAMILY: unknown` — requirement 3's
+  `assumed-default → unknown`, never `yes`. The `source=` string rides on the `writer:`
+  line so a human reading one run sees why it believes what it believes.
+- **qoder/claude report their own model** (`tools/autoos_clients.py`): a new
+  `MODEL_REPORT` table names where each client's truth lives. qoder's is
+  `~/.qoder/projects/*/<session>.jsonl` (an assistant `message.model` and a
+  `runtime-config` line) joined to `~/.qoder/logs/runs/*/manifest.json` (argv → the
+  session id) and `qodercli.log` (`model_config={"key":..,"display_name":..}`) — the
+  account stores an encrypted catalog, so the key→display translation is read from the
+  run log, not `~/.qoder/.models`. `reported_model()` returns `None` when it cannot
+  tell, and `None` is the honest answer that keeps `CROSS-FAMILY: unknown`. claude's
+  transcript already carries a full model id. The join is exact because both clients
+  accept a caller-supplied `--session-id`: `build_plan` mints one per attempt
+  (qodercli refuses a duplicate id) and `build_command` puts it on the argv.
+- **A pin reaches the record and the fence**: `resolved_writer`'s native branch prefers
+  `client-reported` over the `pinned`/`assumed-default` plan model, and
+  `resolve_route_unchecked` now fences `--model` for an **own-account** client too —
+  qoder never appears in a route, so a fence that only reads routes was blind to the
+  whole choice. `--model` (CLI) / `model` (MCP `spawn`) already reached argv; the
+  pinned family now feeds `family_fence` like a gateway leg's, and a name the registry
+  cannot place stays unsafe for a review role (0dc1691's rule, unchanged) while a write
+  run keeps it.
+- **Surfaced, never from job.json** (R-orch-17): the kill record is the only source.
+  `ps` gained `MODEL`/`FAMILY` columns that prefer the proven writer's model and print
+  `?` for an unproven one, plus `model_source`/`writer`/`model_proven` on every row;
+  `status`/`result` already return the record's `writer`, so `source` flows through the
+  MCP and CLI for every client. `worker_writer(run_id)` reads the record and nothing else.
+- **Tests** (`tests/test_autoos_spawner.py`): `QoderSessionEvidenceTests` (a synthetic
+  transcript home proves the join is machine-independent — a real `~/.qoder` session id
+  answering would be the AGENTS.md-forbidden "passes only on the box it was written
+  on"), `WriterProvenanceTests`, `CrossFamilyProvenanceTests` (assumed-default → unknown,
+  never yes; a proven same-family reviewer still costs rc 12), `NativeSessionIdTests`,
+  `QoderFenceTests`, `PsWriterRowTests` (a record written for another run never answers
+  this one — and the other row keeps *its* writer, so the test cannot pass by both
+  being `None`).
+- **Deviations worth naming**: no `--list-models` pre-flight refusal — that list is
+  account/network-bound and the brief asked the post-run verdict be honest, which the
+  provenance gate is; qoder stays on text output because `review_verdict()` anchors
+  `^\s*VERDICT:`; the *author's* family still fences even when its own source is
+  unproven (the conservative direction — refuse a possibly-cross review, never claim a
+  cross one).
+
+### Added — a review never silently runs on the writer's model family (FAMILYFENCE / 2026-09-29)
+
+D-115 says a review is independent because it comes from another model family. The
+spawner did not enforce that about its *own* choices: measured 2026-09-29, an
+ORCH-A1 writer resolved to NVIDIA `nemotron-3-ultra`, both requested cross-family
+reviewers (`mimo`, `muse`) hit rate limits, and SB-B's fallthrough walked the
+ordered free chain — which lists nemotron too, with no family exclusion anywhere —
+onto the writer's own model. The run exited 0 and printed the review. Nothing said
+the word "same family"; the label "cross-family" was simply inherited from the
+request.
+
+- **The fence is one object and one predicate** (`tools/autoos-agent.py`):
+  `family_fence()` settles who may not serve the run *before* any leg is picked, and
+  `fence_blocks_model()` answers it at every choice the spawner makes — the `--free`
+  chain head, an explicit `--model`, the v1 `select_combo` route, `--tier`, the v2
+  resolver's route set and every fallthrough candidate. Families are compared only in
+  `resolver.family_key` form and read only from the registry (`reviewer_family`), never
+  guessed from a model name, so the rule cannot be restated differently per site.
+  `--not-family <fam>` (repeatable) removes those families from the WHOLE plan.
+- **A review fences its writer by default**: `--review-of <run-id>` takes that run's
+  WRITER family out of the plan without being asked, reading it from the run's
+  **runner-private kill record** — never from its `job.json`, which lives in the
+  directory the worker owns and would let a writer choose who reviews it
+  (skill R-orch-17). A review with neither flag still runs, and says so on stderr:
+  `review without a known writer family - cross-family not enforced`. Its silence
+  is what got measured.
+- **Refuse rather than lie** (new `EXIT_NO_OTHER_FAMILY = 12`, documented beside
+  `EXIT_READ_ONLY_WRITE`, in the module docstring's exit-code table, and in
+  `autoos_track.py`'s failure-class comment): when every remaining model or route is
+  inside the fence the run exits 12 with
+  `no model outside family <fam> left - refusing (FAMILYFENCE)` and launches nothing.
+  `FamilyFenceRefused` is deliberately **not** a `ValueError`, because every
+  fallthrough path already catches `ValueError` as "no leg answered → exit 8", and a
+  fence relabelled as an ordinary provider exhaustion is the same lie in a different
+  code. An exhausted chain of un-fenced models still exits 8. The track record classifies
+  rc 12 as `refusal` like rc 6 — the fence refused, so the route never got the chance to
+  be unreliable (`NON_QUALITY_FAILURES` ignores it in `p_success`).
+- **`--no-fallthrough`** pins the run to the model it was planned on: a stop there is
+  the run's answer, with its own rc and no re-plan onto whatever survived. An
+  orchestrator that asked for a verdict from one named model would otherwise get one
+  from whichever model answered, and the report says nothing about which.
+- **The claim is checked after the run too**: a review prints
+  `family: writer=<fam> reviewer=<fam> CROSS-FAMILY: yes|NO|unknown` beside its
+  `writer:` line, judged on the *resolved* writer (the gateway call log, not the plan) —
+  OmniRoute can fall through to a leg inside a combo the spawner never saw. A resolved
+  same-family answer exits 12 instead of 0. A model the registry cannot place is not
+  safe for a review (unknown is never evidence of independence); a write-role run keeps it.
+- **Callers reach it** (`tools/autoos_agent_mcp.py`): `spawn` takes `not_family`
+  (a list of names, validated — a dict would reach the CLI as one flag per key),
+  `review_of` and `no_fallthrough`. `FamilyFenceMcpPlumbingTests` includes an
+  unmocked real spawn (R-orch-19) asserting `--not-family nvidia` is in the argv the
+  runner actually started the CLI with.
+- **Tests** (`tests/test_autoos_spawner.py`): `FamilyFenceFreeChainTests` (the
+  measured chain: mimo + muse rate-limited, writer family nvidia → `free_models`
+  stops at the two honest reviewers, nemotron never launched, rc 12; the forged
+  `job.json` that loses to the kill record; the unknown-family skip; exit-8
+  exhaustion preserved), `FamilyFenceRouteTests`, `NoFallthroughTests`,
+  `CrossFamilyReportTests`, `FamilyFenceRecordTests`, `FamilyFenceMcpPlumbingTests`.
+- **Deviation worth naming**: there is no `verify` card role in either card dialect
+  (v1 `role` is orchestrate|implement|review, v2 `kind` adds plan/research/bulk/
+  debug/final), so the role default fires for `review` — v1 or v2 spelling — and for
+  `--tier 3`, which is the reviewer agent.
+### Fixed — the green record is the runner's, not the worker's (PREPUSH-3, 2026-09-29)
+
+PREPUSH-2 made the record's *shape* unreadable to a forgery; the forge was still
+trivial because the file it had to match sat in `<git-dir>/autoos-prepush.log`,
+inside the checkout the worker writes in. The certificate now lives in a
+runner-private store, `<state-dir>/prepush/<sha>.json` — the sibling of the
+spawner's kill record, same `clients.state_dir()` base, same 0700 dir / 0600
+file, the path imported from `autoos_clients` rather than restated, so the two
+stores move together. One JSON record per commit (the newest wins, so a green
+after an override still readies a sha and an override after green unready it),
+written atomically by temp + rename. It binds what a green run actually implies:
+the commit sha, that commit's *tree* hash, the sorted manifest of commands the
+gate ran, each command's exit result and its parsed `N passed` count, and the
+UTC stamp. `--check-ready <sha>` recomputes the sha's tree from the repo and
+accepts only a record whose sha AND tree match what git says now, whose stamp
+parses, whose manifest and results are both non-empty, and whose every result is
+ok: the sha check is what refuses a lane that amended after a green run (the
+record is filed under the commit it ran on), and the tree check is what refuses a
+record that names a commit it never actually verified. The old log file stays as a
+human-readable annotation and readiness never reads it. Finally, a gate run that
+carries `AUTOOS_AGENT_RUN_ID` — the mark the spawner puts into every worker — runs
+the checks, prints its verdict, and writes no green record: a worker cannot
+certify its own push, only the orchestrator that merges the lane can. `ready`
+needed no change; it asks `local_green()`, which is where the store is read. The
+reader is guarded the same way as the writer, because the default state root is
+`<checkout>/logs`: a runner that was never given `AUTOOS_STATE_DIR` keeps its
+records under the very tree it certifies, so under the worker's mark a store that
+resolves inside that checkout is refused outright instead of believed — otherwise
+a hand-written JSON of exactly the gate's shape would be a self-issued certificate
+(what the spawner's env does to `AUTOOS_STATE_DIR` is not a boundary a gate may
+depend on). Measured on this lane's own sandbox: `--check-ready HEAD` answers with
+that refusal, and the refusal names its remedy.
+Tests: `LogRecordTests.test_the_record_binds_the_tree_the_commit_carries_and_the_sorted_manifest`,
+`test_the_record_stores_each_commands_result_and_parsed_counts`,
+`test_the_record_is_written_privately_and_atomically`,
+`test_the_store_lives_outside_the_checkout_the_worker_writes_in`;
+`CheckReadyTests.test_a_forged_line_in_the_worktree_log_certifies_nothing`,
+`test_a_record_that_binds_another_tree_is_not_green`,
+`test_a_record_with_a_red_result_is_not_green`,
+`test_a_green_record_does_not_carry_an_amended_commit`,
+`test_the_record_the_gate_writes_is_the_record_the_gate_reads` (round trip
+through the real gate); `WorkerRecordTests.test_a_worker_run_reports_green_and_records_nothing`,
+`test_a_worker_run_still_refuses_a_red_tree`, `test_the_same_gate_outside_a_worker_run_records_green`,
+`test_a_record_kept_in_the_workers_own_checkout_certifies_nothing`;
+and on the spawner side `ReadyCommandTests.test_a_forged_worktree_log_line_does_not_carry_ready`.
+
+### Fixed — the PREPUSH gate reads its own record shape and nothing else (PREPUSH-2, 2026-09-29)
+
+`local_green()` and `--check-ready` called *any* second field that was not `OVERRIDE` a
+green record, so one line appended to the log certified a push that never happened:
+`echo "$SHA anything-at-all" >> <git-dir>/autoos-prepush.log` and the sha was ready
+(measured on the lane's own HEAD, ee92774). The log lives in the git dir, where any
+process that can write the checkout can append to it, and `ready` is the last gate before
+main moves — a substring test was never enough. `parse_record()` is now the file's only
+reader: it accepts `green_line`'s `<sha> <utc> green: <commands>` and the override's
+`<sha> OVERRIDE <reason>`, requires the full 40-hex sha and the UTC stamp the gate stamps
+itself, and ignores every other line. `green_records()` is the one predicate both
+`local_green()` and `--check-ready` ask, so the two cannot drift apart.
+Tests: `CheckReadyTests.test_a_forged_free_text_line_is_not_green`,
+`test_only_the_two_shapes_the_gate_writes_count_as_records`,
+`test_a_malformed_line_is_ignored_and_hides_no_real_record`, and a round trip pinning the
+writer to the reader.
+
+- **The root cause of both CI 36529545083 reds is the mapping, not the two tests.** A lane
+  that adds `tests/test_x.py` was sent only `tests/test_x.py`: `SuiteWiringTests` (every
+  `tests/test_*.py` must be *run* by a harness) and `RepoLintTests` (every POSIX-only
+  pattern in one must carry a Windows guard) are tree-wide *scans*, so they name no file
+  and no case body mentions them — the lane ran the file it had written and CI went red in
+  the two lints that read it. `tools/affected-tests.py` now keeps `REPO_META_SCANS`, a
+  `(lint, scanned-paths)` table: a change to `tests/test_*.py`, a suite harness
+  (`tests/linux/*.sh`, `tests/run-tests.ps1`), a workflow, or any `.ps1`/`.psm1` selects
+  the lint that scans it. A new tree-wide lint over the suites must be added there the way
+  a new harness must be added to `test_suite_wiring.py`'s `WIRING` — an unstated scan is an
+  unselected one. Test:
+  `MappingTests.test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite`,
+  with `test_an_ordinary_change_selects_no_repo_wide_lint` holding the other side.
+- **CI1 (shard b): `tests/test_prepush.py` is wired into a harness**, with the same
+  `python3 tests/<name>.py` run shape as its neighbour `test_affected_tests.py`, in
+  `tests/linux/33-documentation.sh`. `tests/test_suite_wiring.py` refuses a unit-test file
+  no harness runs, and 60 gate cases had been sitting unexecuted since the file landed.
+- **CI2 (shard f): its bash fixtures carry a Windows guard.** Seven `#!/usr/bin/env bash`
+  and `#!/bin/sh` stubs — the `run-tests.sh` fakes and the foreign-hook fixtures — had none,
+  which is what `RepoLintTests.test_posix_guards_are_clean` is there to catch. The guard sits
+  on `RepoFixture.suite_is_green`/`suite_is_red` and `RunListTests.capture_suite`, plus the
+  four cases that write a shebang themselves, so every test that builds a suite stub skips
+  on Windows by itself instead of 30 cases each repeating the reason.
+
+### Fixed — the gate's installer fails closed and keeps its own promises (PREPUSH-2, 2026-09-29)
+
+Four defects at the edges of the gate, each with a test that names it:
+
+- **A hook whose gate is missing refused the push (NB2).** The shim
+  `trust_worktree.py` installs printed `no $root/tools/prepush.py -- nothing was
+  checked` and exited **0**, so a lane that lost the gate — rebased onto a base
+  without it, checked out an older branch — pushed exactly the untested sha D-154
+  exists to stop, while the installer's own message said the gate was installed. A
+  check that could not run is not a check that passed. It now exits 1, points at the
+  `AUTOOS_PREPUSH_OVERRIDE` that leaves a record `--check-ready` refuses, and does
+  **not** exec the chained hook: the chain is what runs *after* the gate passes, so
+  handing over would let an operator's `exit 0` push the branch anyway. Tests:
+  `HookInstallTests.test_a_gate_that_is_not_there_refuses_the_push`,
+  `.test_a_gate_that_is_not_there_does_not_hand_over_to_the_operators_hook` — both a
+  real `git push` against a bare origin and its ref list, which is also how the first
+  cut's unterminated quote was found.
+- **`2` means the gate could not run (NB3).** The docstring promised it and every
+  path returned 1: no checkout, no HEAD commit, no `tools/affected-tests.py`, a
+  mapper that died or printed no JSON. 1 is a verdict the lane can act on; the
+  absence of a verdict is not, and a caller that waits on "not ready yet" waits
+  forever on a checkout that cannot answer — `tools/autoos-agent.py`'s `ready`
+  already splits its own git failures that way. The locating helpers raise
+  `GateCouldNotRun`, `main` maps it, and the refusals read as the `REFUSED` constant.
+  Test: `CouldNotRunTests` (six paths, plus
+  `.test_a_red_check_is_still_a_refusal` holding the other side).
+- **The install dir is where git says it is (NB1).** `hooks_dir` asks
+  `git rev-parse --git-path hooks`, which is the only answer that tracks
+  `core.hooksPath`; a path built from `.git/hooks` installs a gate no push reads on a
+  host that set it. That is how `dbba511` already wrote it, so the tests pass at this
+  HEAD: they are the regression pin, and were checked by hardcoding `.git/hooks` and
+  watching both go red. Test:
+  `HookInstallTests.test_core_hooksPath_moves_where_the_gate_installs_and_git_still_runs_it`,
+  `.test_a_relative_core_hooksPath_is_resolved_against_the_checkout`.
+- **One home for the gate's git helper (NB6).** `_git` existed twice, in
+  `tools/prepush.py` and in the skill's `trust_worktree.py`, and the only caller is
+  `hooks_dir` — so the copy that can drift is precisely the one that decides where
+  the gate lands. The skill now imports the gate's helper, lazily and *after* the
+  `tools/prepush.py` existence check, because a repository without the gate must hear
+  "nothing installed" rather than an ImportError. Test:
+  `HookInstallTests.test_the_git_helper_has_one_home_and_lives_in_the_gate`.
+
+### Added — a pre-push gate, so a lane cannot be ready at a sha it never tested (PREPUSH, D-154, 2026-09-29)
+
+Three lanes were green at home and red in CI, in three different ways: **SCOPECLI** (CI
+36517453134) cited rule R-orch-17 that existed only on a newer main — it never merged main and
+never ran `tests/test_skill_rules.py`; **SBA** (CI 36493098467) had a fixture `git commit` die
+with rc 128 on the runner, because it passed at home only thanks to the dev host's global
+`user.name`/`user.email`; **FREEKEYS2** (CI 36506339556 shard e) shipped 17 red render tests
+because the worker ran the pytest files it *guessed* were relevant, not the ones its own changed
+files imply. Each is a missing run, not a missing fix — so the gate computes the run list from the
+diff and refuses the push.
+
+- **`tools/prepush.py`** (new; one home for the logic, the hook is a three-line shim onto it): the
+  fetched `origin/main` must be an ancestor of HEAD (R-coord-01), with no network; CI's own plan
+  check runs first (`tests/test_ci_shards.py`, `tests/ci-shards.py`); the rest of the run list
+  comes from the changed files; the suite runs in **CI's git env**
+  (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, inherited `GIT_AUTHOR_*`/`GIT_COMMITTER_*`
+  dropped) under `/usr/bin/python3`, so a test that leans on a host identity or a venv shim fails
+  here instead of in CI. Green appends `<sha> <utc> green: <commands>` to
+  `<git-dir>/autoos-prepush.log` (per worktree, never tracked); red exits 1 and prints the failing
+  command. A bash run that examined *nothing* is red too: `run-tests.sh` exits 0 on a filter that
+  matched no case, printing `passed 0 failed 0 skipped 0`, so the gate reads the tally as well as
+  the status — R-worker-05's "'no tests ran' exited 0 and was pushed" in this tool's own shape.
+  `AUTOOS_PREPUSH_OVERRIDE="<reason>"` steps over it loudly, for orchestrators, and is
+  logged as **never green**.
+- **`tools/affected-tests.py`** gained a file-based question: `--changed-files-from REV` (with
+  `--format plan` for the gate). The mapping rules are the three reds — skills, `CHANGELOG.md` and
+  `docs/**` always pull `tests/test_skill_rules.py`; registry/route/combo files pull the render
+  and sync tests *plus* the bash `render`/`apply` filters; `tools/X.py` pulls the tests that name
+  it; a changed `tests/linux/NN-*.sh` pulls that part. Two gaps found while running it against
+  this very change: the id corpus attributes a mention to one *case* (so a test file that builds
+  the tool's path in a module-level constant named it in every case and in none), and it reads
+  only `tests/` (so a skill's own tests under `.agents/skills/<name>/tests/` were invisible).
+  Every changed `.py` is now answered a second way, by the pytest files whose text names it, and a
+  changed test file is run whichever directory holds it. A bash part is never run unfiltered
+  (R-host-08).
+- **`autoos-agent.py ready`** now reads that log (D-110): reviews and a pushed sha prove the lane
+  was looked at and shipped, only the record proves it was run — which is what catches a lane that
+  pushed with `git push --no-verify`, a path no hook can reach. An orchestrator that means to waive
+  names a reason with `--allow-unverified "<reason>"`, and the reason rides on the line.
+- **`trust_worktree.py`** installs the hook into `git rev-parse --git-path hooks` as part of
+  approving a fresh worktree, and **chains** a pre-push hook it did not write
+  (`pre-push.autoos-chained`) rather than replacing it. It is idempotent (a second run reports
+  `skipped`) and reachable alone via `--hook-only`, because rule D-111 keeps this path away from
+  `~/.claude.json` — the hook step never reads or writes that file.
+- **Skill**: `R-coord-12` and the code-enforced list in `unattended-orchestration/SKILL.md` state
+  the rule; the gate's own docstring stays the source of truth for its order.
+- **Tests** (`tests/test_prepush.py`, 50; 8 more in `ReadyCommandTests`): each refusal shape, the
+  CI-like git env proven behaviourally (a temp global config that the gate forces to `/dev/null`,
+  so the fixture commit fails 128 — and a repo carrying its own identity still passes, so isolation
+  is not a wall), the green and override records, `--check-ready`'s exact-sha match, the hook
+  install's idempotence and chaining with `HOME` pointed at a temp dir (asserting `~/.claude.json`
+  is never created), and the file→tests mapping against the real tree for all three measured reds.
+
+### Removed — the push and dispatch grants, and the fencing that only shaped them (ORCH-A1 phase 1 round 13, routing-00 D-159)
+
+A pre-granted lane push was a capability the profiles could not scope per session, and the
+12 rounds of denies that followed it fenced only command *text* — every one of them shaped the
+grant rather than guarding anything the classifier could not decide. Round 13 deletes the grant
+and its shaping fence set, and keeps the one deny that protects a shared asset.
+
+- **Gone** (`tools/launch_profiles.py`): `COORDINATOR_ALLOW`, `L2_PUSH_ALLOW`,
+  `L2_WORKFLOW_ALLOW` and everything that existed to narrow them — `L2_PUSH_DENY`,
+  `_l1_push_deny`, `_l1_refspec_deny`, `_l1_workflow_deny`, `L1_PUSH_DENY`,
+  `L1_WORKFLOW_DENY`, `L1_REFSPEC_DENY`, the repeated-`--ref`/`-r`/`-R`/`--repo`/empty-`--ref`
+  dispatch denies, the round 6–8 character classes (tab/CR/LF, quotes, `$`, backtick,
+  backslash, `{`, `&`, `>`, `<`, `;`, `#`), the no-ref / `:` / `+:` / `@` denies, the bare
+  `git push` deny, the `git -C`/`--git-dir=`/`-c` wrapper denies as such, the dead
+  refspec-destination classes, and the now-unused `LANE_PREFIXES` (LOW-7). Only
+  `l1-routing`'s `apply.sh` run grant survives; every other profile's `allow` list is empty.
+  Those commands are **unlisted** now, so they reach the classifier — which, unlike a deny,
+  can explain itself to the session that hit it.
+- **Kept:** push-to-`main` in every spelling git accepts. The fence anchor became
+  `*git*push` — a glob between the tokens, not the contiguous literal `git push` — so dropping
+  the three wrapper blanket denies did not open a main hole: `git push origin main` and
+  `git -C x push origin main` are denied by the same entry, while `git -C x push origin L1-x`
+  is not. `main` is fenced as a whole ref name (`main`, `heads/main`, `refs/heads/main`, proven
+  equivalent with real git) in every argv position (after a space, a colon or a `+`), plus the
+  push-wide flags that reach `main` without naming it (`--force`/`-f`, `--all`, `--mirror`,
+  `--tags`/`--follow-tags`, `refs/tags/`, `tag `) and `:HEAD`, which creates a stray branch
+  instead of moving `main` but must not be free. The dispatch fence keeps only the `--ref`
+  main spellings. `docker push registry/app:main` stays outside the fence — an image tag is not
+  a branch. Secret fences, the `~/.claude.json` fence, the always-deny set and the leaf fences
+  are untouched.
+- **`tests/fixtures/push-corpus.json` + `tests/test_push_corpus.py`** (new): every push
+  spelling the 12 earlier rounds ever fenced, 213 rows, each one
+  `{cmd, expect: deny|allow-lane|prompt, why, round}`. `deny` rows are the fences' witnesses,
+  `prompt` rows name what round 13 stopped fencing and who owns it now. `RealGitPremiseTests`
+  moved here from `tests/test_launch_profiles.py` and the push tables left with it (2836 → 631
+  lines). Both wired into `tests/linux/33-documentation.sh`.
+- **A fence is a decision on a real command:** every rendered push/dispatch deny rule must match
+  a corpus `deny` row (`FenceWitnessTests`), which is what surfaced three rules nothing could
+  reach — a refspec carries exactly one colon, so `*:main:*` was dead. `A1-D5`'s contradictory
+  `allow` target for those fences is now the corpus witness too, instead of a second
+  hand-kept table.
+- **Residuals, recorded not fenced** (spec §3.3, owner **HOOKS H2**): MED-3 (git config,
+  aliases, functions — invisible to text), MED-4 (glob refspecs), MED-5 (a ref name rewritten or
+  substituted before push). The handoff is written on both sides — the H2 row of
+  `docs/plans/2026-09-28-agent-hooks-spec.md` §6 now carries the same three ids and the corpus
+  rows that pin them, because an owner that was never told is a handoff that did not happen.
+  Until H2's real-argv guard lands, the guard on those is the
+  classifier plus the kept main fence plus server-side protection — and `main` currently has
+  neither protection nor rulesets (measured), which stays an open operator action.
+- Spec `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §3.1–§3.3, A1-D4, A1-D5,
+  Q4/Q6/Q9 and all six `configuration/launch-profiles/*.settings.example.json` (via
+  `render --out`, never by hand) updated in the same change.
+
+### Added — role launch-profile templates rendered from the harness fences, with scope and contradiction tests (ORCH-A1 phase 1)
+
+*Rounds 1–12. The push and dispatch grants described below, and the denies that shaped them,
+were removed by round 13 (the entry above); the render tool, the harness-fence source and the
+secret/main fences are still what ships.*
+
+- **`configuration/launch-profiles/<role>.settings.example.json`** (new, six
+  roles): per-role pre-reviewed grant bundles (spec
+  `docs/plans/2026-09-28-orch-a1-role-launch-profiles-spec.md` §2–§3).
+  The L1 roles (`l1-coordinator`, `l1-routing`) pre-grant lane-branch push
+  and `gh workflow run`; `l1-routing` alone adds the gateway `apply.sh` run
+  grant; `l2-orchestrator` (round 3, D-138, tightened round 4) pre-grants
+  only push to `L2-*` lane branches and `gh workflow run --ref L2-*`,
+  under the same always-deny fences (deny wins). The L2 grant is per
+  role, not per session: any `l2-orchestrator` session may push/dispatch
+  on any `L2-*` lane branch (per-session scoping is not expressible in a
+  per-role profile). Round 4 renders L2-only deny fences into that one
+  profile so the `L2-*` allow glob cannot span a refspec colon, a `refs/`
+  path or a delete flag — only `git push [-u] origin L2-<name>`
+  (same-name push, destination = source) is allowed there, and branch
+  deletion is an explicit deny; round 5 constrains the grant by shape,
+  not tokens (enumerating tokens missed `L2-x L1-foo` and `L2-x --prune`):
+  anything after the branch token denies (a second argument of any kind)
+  and any option before the ref denies but `-u` (long options via one
+  shape, short force/delete flags enumerated — a lone `-*` shape would
+  shadow the `-u` allow since deny beats allow), so exactly one `L2-*`
+  ref, same-name, no options except `-u` is allowed there. The L1 grants
+  are unchanged.
+  `l0-router` and the leaves carry no pre-grant.
+  Every profile denies push-to-`main` (fence set, not one string: ref
+  spellings plus `--all`/`--mirror`/`HEAD`/bare, compound and prefixed
+  spellings; round 13 widened the anchor to `*git*push` so a `git -C` /
+  `--git-dir` / `-c` wrapper is fenced by the same entry as the plain
+  form, and dropped the wrapper blanket denies), secret access and
+  `~/.claude.json` writes. Rules live under `permissions` (the only shape
+  the CLI reads); fail-closed for non-interactive sessions comes from the
+  launch flags, not from this file. Runtime `<role>.settings.json` files
+  are git-ignored.
+- **Text fencing is blind, so the profiles are not the last line** (rewritten by round 13 to match spec §3.3): a command-text fence cannot see git config, an alias or which branch is checked out, so a bare `git push` on `main` carries no `main` token to match — round 13 leaves that command *unlisted*, i.e. to the classifier, and the guard that reads argv is HOOKS H2's `git-push-to-main` PreToolUse hook, not a wider glob here. Server-side protection is the one check that depends on neither, and `main` has none (measured: unprotected, rulesets empty); enabling it is a deferred operator action, not this lane's.
+- **`tools/launch_profiles.py`** (new): the one home of the deny render —
+  `read_deny_all` plus the secret/credential entries of `bash_deny_all`
+  plus the profile-specific always-deny entries. `render --check` fails
+  naming each drifted template, in the `tools/registry.py` style. No
+  `--dangerously-skip-permissions` anywhere; consumption (`--settings`
+  wiring), fleet cutover and REVIVE stay later lanes.
+- **`tests/test_launch_profiles.py`** (new, stdlib unittest): branch-scope
+  and secret-scope tables over the rendered matchers (documented matcher
+  model: `Bash(cmd:*)` prefix / exact / `*` glob with `&&`/`||`/`;`/`|`
+  splitting and `Read/Edit` path-glob forms, deny wins) and the A1-D5 contradiction test (a contradictory `allow` still
+  decides `deny`; precedence re-checked at CLI 2.1.283/2.1.267 —
+  `claude --help` prints no precedence rule). Wired into the Linux suite
+  (`tests/linux/33-documentation.sh` "launch profiles: ...").
 ### Fixed — a run now records and announces which scope path it took (SCOPECLI-b, 2026-09-29)
 
 L1-main's evidence from the SCOPECLI mechanism: on WSL a `run --isolate` sat in `0::/init.scope`,
@@ -2197,6 +2926,41 @@ ids become tombstones is a separate, catalog-only edit.
 - Docs: **`docs/catalog.md`** gained the two Fields rows and a
   *Retiring a component (tombstone)* section — the rules above, and why `note` and
   `notes` are different fields.
+### Added — the MEMSPEC P1 memory facade: five methods, one file-backed graph, `schema: 2` events (MEMSPEC P1, 2026-09-30)
+
+- **`tools/memory_facade_mcp.py`** — the typed facade MCP server (D-037): the
+  five §4 methods `recall`/`remember`/`link`/`supersede`/`context_pack`
+  (spec:62-68), the write rules on EVERY write (hub link, closed relation
+  list, ≤600-char body, secret scan — all validation before any write), and
+  the receipts spec:77-80 requires: entity id, the NEW `version_id`, author
+  session + restart generation id (D-042), source. Every successful write
+  appends the §5 `schema: 2` event envelope agreed with L2-general (fleet
+  console spec §4.3): ULID, `memory.<kind>.<created|updated|merged|
+  superseded|redirected>` plus `memory.edge.linked`, `prev_version_id` only
+  on updated|superseded, append-only, never a body or a secret; refused
+  writes and no-ops append nothing. Single design per the L1-backlog
+  arbitration: links are `{"rel","id"}` pairs (bare ids refused by name),
+  `version_id` is an int, env is one `AUTOOS_MEMORY_*` family, and store +
+  events are file-backed with defaults under the git-ignored `logs/` tree.
+- **`tools/memory_facade_engine.py`** — the swappable engine seam (D-067,
+  spec:255-260): file-backed JSON store (R0 fixture seed + canonical saved
+  shape, atomic temp-rename), int versions with a readable history
+  (spec:79), the alias ladder with order-insensitive normalisation so rung 2
+  fires (spec:66), recall ranked by text + hub distance inside the 600-token
+  budget (spec:84), `context_pack` with hub facts, open contradictions and
+  recent events inside 1.5k (spec:88-91), and the spec:73 closed relation
+  list as the minimal spec-grounded set `about`/`part_of`/`supersedes` (the
+  spec mandates a list and enumerates none — verified against spec:73/116,
+  the fleet console §4.3 and PLAN §14; `related_to` is not on it).
+- **`tests/test_memory_facade_mcp.py`** (33 tests), **`tests/test_memory_events.py`**
+  (13), the R0 fixture `tests/fixtures/memory/` (7 nodes, deliberate hub
+  distances) and both `tests/linux/33-documentation.sh` wiring blocks — red
+  first (24 + 13 failing at 1324ad8), green after 4c06a9c. The events suite
+  pins the scripted sequence created → updated → merged+redirected → edge
+  linked → superseded + `supersedes` edge, the envelope, and byte-prefix
+  append-only growth. P1 exit (spec:217) met: the five methods round-trip
+  and the events validate against §4.3.
+
 ### Fixed — `policy.leg_rules` match case-insensitively, so no DeepSeek Pro spelling escapes the deny (DSAMEND2, 2026-09-28)
 
 - **`tools/registry.py:leg_rule_for()`** (Muse review 1 of DSAMEND, MEDIUM): the

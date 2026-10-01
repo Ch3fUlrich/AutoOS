@@ -42,6 +42,13 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Download.psm1') -DisableNameCheck
 # New-AutoOSUsbPlan only ever throw or return data.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 
+# Wall-clock bound on this module's direct network fetches (2026-10-01): the
+# same defect class as AutoOS.Download.psm1 - Invoke-RestMethod/Invoke-WebRequest
+# have no default timeout, so a stalled GitHub API or release mirror hangs the
+# Ventoy step forever. 300 s is far above any healthy fetch for these small
+# release assets and only fires on a genuine stall.
+$script:AutoOSUsbFetchTimeoutSec = 300
+
 # Get-AutoOSUsbRawDisk
 # Prints the raw disk records this module reasons over: parsed from
 # $env:AUTOOS_FAKE_DISKS (a JSON array) when the caller has set it, or from
@@ -1549,20 +1556,20 @@ function Install-AutoOSUsbVentoy {
         if ($env:AUTOOS_FAKE_VENTOY_RELEASE) {
             $release = $env:AUTOOS_FAKE_VENTOY_RELEASE | ConvertFrom-Json
         } else {
-            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ventoy/Ventoy/releases/latest'
+            $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/ventoy/Ventoy/releases/latest' -TimeoutSec $script:AutoOSUsbFetchTimeoutSec
         }
         $asset = $release.assets | Where-Object { $_.name -like '*-windows.zip' } | Select-Object -First 1
         $shaAsset = $release.assets | Where-Object { $_.name -eq 'sha256.txt' } | Select-Object -First 1
         if (-not $asset) { throw "Install-AutoOSUsbVentoy: no windows.zip asset in the latest Ventoy release" }
 
         $zipPath = Join-Path $cacheDir $asset.name
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing -TimeoutSec $script:AutoOSUsbFetchTimeoutSec
 
         if (-not $shaAsset) {
             Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
             throw "Install-AutoOSUsbVentoy: no published sha256 found for $($asset.name) - refusing to install an unverified Ventoy"
         }
-        $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing).Content
+        $shaText = (Invoke-WebRequest -Uri $shaAsset.browser_download_url -UseBasicParsing -TimeoutSec $script:AutoOSUsbFetchTimeoutSec).Content
         $wantLine = ($shaText -split "`r?`n") | Where-Object { $_ -match [regex]::Escape($asset.name) } | Select-Object -First 1
         $want = if ($wantLine) { ($wantLine.Trim() -split '\s+')[0] } else { $null }
         $have = Get-AutoOSFileSha256 -Path $zipPath

@@ -10,6 +10,12 @@
 #   3. (re)creates the tier combos from configuration/omniroute/combos.json
 #   4. prunes the combos listed there as "retired" from the store (only those)
 #
+# B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
+# file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+# content is the credential, NOT a plain API key; git-ignored), not from
+# api-keys.yml. Credential-store repair (two vertex/meta connections, one
+# undecryptable 401) is L0's, not apply's.
+#
 # Safe to re-run: providers are add-or-update, a combo the store already holds
 # unchanged is left alone, and a retired combo that is already gone is simply
 # not found again. Model refs the live catalog does not know are skipped with a
@@ -43,6 +49,7 @@ GATEWAY="${AUTOOS_OMNIROUTE_URL:-http://127.0.0.1:20128}"
 if [[ -n "${AUTOOS_OMNIROUTE_URL:-}" ]]; then export OMNIROUTE_BASE_URL="$GATEWAY"; fi
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$ROOT/configuration/api-keys.yml}"
 COMBOS_FILE="$HERE/combos.json"
+OVERRIDES_FILE="$HERE/context-overrides.json"
 DRY=0
 PROBE=0
 DRIFT=0
@@ -448,7 +455,26 @@ if ! gateway_up; then
         bash "$AI_STACK" up omniroute
         gateway_up || { echo "Gateway did not start — run: $AI_STACK status"; exit 1; }
     else
+        # Raise the chat admission heavy-in-flight limit from the default of 1.
+        # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+        # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+        # for parallel agents (swarm, multi-lane) without over-allocating heap.
+        # Respect a user-set value — do not clobber.
+        : "${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:=8}"
+        export OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT
         echo "Starting OmniRoute (background)…"
+        # Sane skip-on-repeated-429 policy (operator 2026-10-01): the gateway reads
+        # these from its own process env at startup (open-sse/services/rotationConfig.ts:84-110;
+        # provider-breaker family at open-sse/config/constants.ts:251-277), so the
+        # launcher that spawns it is the only surface. Rotate a leg only after three
+        # 429s inside a 120s window (the shipped default of 1 hops on the first
+        # 429), then cool the leg for 300s. Respect-set: an operator value wins.
+        export OMNIROUTE_ROTATION_ENABLED="${OMNIROUTE_ROTATION_ENABLED:-true}"
+        export OMNIROUTE_ROTATE_ON_429="${OMNIROUTE_ROTATE_ON_429:-true}"
+        export OMNIROUTE_ROTATE_429_THRESHOLD="${OMNIROUTE_ROTATE_429_THRESHOLD:-3}"
+        export OMNIROUTE_ROTATE_429_WINDOW_SECONDS="${OMNIROUTE_ROTATE_429_WINDOW_SECONDS:-120}"
+        export OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS="${OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS:-300}"
+        export OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS="${OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS:-1800000}"
         nohup omniroute --no-open --port 20128 >/tmp/omniroute-apply.log 2>&1 &
         for _ in $(seq 1 24); do gateway_up && break; sleep 5; done
         gateway_up || { echo "Gateway did not start — run: omniroute doctor"; exit 1; }
@@ -1009,6 +1035,12 @@ else
     done
 fi
 
+# TORDER 2026-10-01: combo-contract gate (fail-closed, also under --dry-run).
+if ! python3 "$ROOT/tools/combo-contract.py"; then
+  echo "combo-contract failed - refusing to create combos" >&2
+  exit 1
+fi
+
 # ─── (Re)create combos ──────────────────────────────────────────────────────
 # The gateway's model catalog, read once. The omniroute *client* key authorises
 # /v1/models, and it goes to omni_rest — which writes a 0600 curl --config file
@@ -1047,6 +1079,25 @@ echo "Resilience:"
 # zen free promo stays FIRST (free when it works), but a 403 is a permanent
 # error, so at 12 the gateway retried the dead promo on every request. At 2 it
 # is skipped for resetTimeoutMs (30s) after two failures, then retried again.
+# Fast failover (CTXFIX 2026-09-30): the breaker IS the fast-skip mechanism,
+# not maxWaitMs. degradationThreshold=1 hops on the first degradation signal
+# (a 429 counts), failureThreshold=2 opens the breaker after two hard
+# failures - at most two cheap round-trips before the leg is skipped for
+# resetTimeoutMs. maxWaitMs=180000 is the queue wait (Spark thinking time),
+# not the per-leg wait; a rate-limited leg returns 429 in < 1 s and the
+# chain hops immediately. No value change needed for this lane.
+# B2-LATENCY 2026-10-01 (t1 22556 ms crawl: gemini 503 -> free-ai 429 ->
+# vertex error -> meta-api 401 before deepseek served): live
+# get-api-resilience shows requestQueue.maxWaitMs 180000 (queue wait, NOT
+# per-leg), providerBreaker.apikey 2/1/30000, oauth 8/5/60000,
+# connectionCooldown apikey base 3000/maxBackoff 5 (oauth 5000/8),
+# waitForCooldown 3 retries/30 s, comboCooldownWait 90 s/5 attempts/300 s budget,
+# providerCooldown DISABLED. No per-leg timeout knob exists in this API surface
+# (no legTimeoutMs); the 30-min hard-down park + 3x429/120 s->300 s cooldown +
+# CHAT_MAX_HEAVY=8 are gateway process env (08:07Z restart), not patchable here.
+# So no wiring change: current == proposed (180000 / 2 / 1 / 30000). The crawl
+# stops by REMOVING dead legs (B2-HF/B2-AGY: huggingface 401 + antigravity
+# rate-limited gone from bands), shortening the chain, not by retuning.
 # Through the CLI, not curl + the client key: /api/resilience is a management
 # route and answers the client key with 403 "Invalid management token"
 # (measured 2026-09-24); the local CLI sends the machine loopback token.
@@ -1333,6 +1384,78 @@ else
             echo "  ! $prune_name: $prune_kind, delete failed - run: omniroute combo delete $prune_name --yes"
         fi
     done <<<"$prune_names"
+fi
+
+# ─── Model context overrides ────────────────────────────────────────────────
+# The gateway resolves a model's context window from the registry, the
+# models.dev sync and the provider's own discovery; where none of them knows the
+# model it falls back to 128000 - and a client whose own limit is higher gets
+# rejected and compacts (the 2026-09-30 deepseek-v4.1-flash and
+# spark-1.3-contributor failures: live sessions compacted every ~5 minutes).
+# context-overrides.json lists the known-wrong resolutions; each is applied
+# through the documented management route PATCH /api/model-capability-overrides
+# {target, key: "context_length", value}. Idempotent: an override already at the
+# wanted value is reported, not rewritten. A local gateway with no manage key
+# cannot be driven from bash here (curl cannot mint the CLI's machine token),
+# so that case prints the dashboard fallback and moves on.
+echo "Overrides:"
+if [[ ! -f "$OVERRIDES_FILE" ]]; then
+    echo "  = no context-overrides.json - nothing to do"
+else
+    override_rows=""
+    if ! override_rows="$(python3 - "$OVERRIDES_FILE" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+for o in doc.get("overrides", []) if isinstance(doc, dict) else []:
+    if isinstance(o, dict) and o.get("target") and isinstance(o.get("context"), int):
+        print("%s\t%d" % (o["target"], o["context"]))
+PY
+    )"; then
+        echo "  ! $OVERRIDES_FILE is unreadable - nothing applied"
+        override_rows=""
+    fi
+    if [[ -z "$override_rows" ]]; then
+        echo "  = context-overrides.json lists none"
+    else
+        while IFS=$'\t' read -r ov_target ov_context; do
+            [[ -z "$ov_target" ]] && continue
+            if [[ $DRY -eq 1 ]]; then
+                echo "  - would ensure $ov_target context = $ov_context"
+                continue
+            fi
+            if [[ -z "$REST_KEY" ]]; then
+                echo "  ! $ov_target: no manage key for the management API - set it in the dashboard (Model Overrides)"
+                continue
+            fi
+            if ! omni_rest GET /api/model-capability-overrides; then
+                echo "  ! $ov_target: ${REST_ERROR:-the gateway did not answer}"
+                continue
+            fi
+            override_current="$(python3 -c 'import json,sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    doc = {}
+value = None
+for row in (doc.get("overrides") if isinstance(doc, dict) else None) or []:
+    if isinstance(row, dict) and row.get("target") == sys.argv[1] and row.get("key") == "context_length":
+        value = row.get("value")
+print("" if value is None else value)' "$ov_target" <<<"$REST_BODY")"
+            if [[ "$override_current" == "$ov_context" ]]; then
+                echo "  = $ov_target already $ov_context"
+                continue
+            fi
+            override_body="$(python3 -c 'import json,sys; print(json.dumps({"target": sys.argv[1], "key": "context_length", "value": int(sys.argv[2])}))' "$ov_target" "$ov_context")"
+            if ! omni_rest PATCH /api/model-capability-overrides "$override_body"; then
+                echo "  ! $ov_target override failed - ${REST_ERROR:-the gateway refused}; set it in the dashboard"
+                continue
+            fi
+            echo "  + $ov_target context -> $ov_context"
+        done <<<"$override_rows"
+    fi
 fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────

@@ -238,7 +238,7 @@ content in docs.
 | `structured-memory` | **every** session — recall at start, persist at end |
 | `swarm-orchestration` | multi-file work (drives `qa-swarm`, `review-triage`) |
 | `qa-swarm` / `review-triage` | review phase only (native rewrites; scope: AutoOS) |
-| `unattended-orchestration` | work runs for **hours with nobody watching**, or a CAO hierarchy |
+| `unattended-orchestration` | work runs for **hours with nobody watching** |
 | `mcp-servers-setup` | wiring or debugging the MCP stack |
 | `no-mistakes` / `babysit-prs` | pre-push validation / async CI sweeps |
 | `repository-index` | lost, or unsure which skill applies |

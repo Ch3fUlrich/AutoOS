@@ -6,6 +6,15 @@
     bash tests/run-tests.sh  --filter "$(python3 tools/affected-tests.py --from-diff HEAD~1 --format filter)"
     pwsh tests/run-tests.ps1 -Filter (python3 tools/affected-tests.py --from-diff HEAD~1 --format filter)
 
+    python3 tools/affected-tests.py --changed-files-from origin/main --format plan
+        {"pytest": [...], "parts": [...], "terms": "...", "ids": [...], "files": [...]}
+
+The second question is the file-shaped one and it is answered by
+`map_changed_files()`: given the paths a lane changed, which tests must it run.
+`tools/prepush.py` asks it, because three CI reds (SCOPECLI, SBA, FREEKEYS2 — the
+rules are in that file's docstring) came from a worker running the tests it
+*guessed* were relevant. Each rule there is pinned by tests/test_prepush.py.
+
 Why this exists (lessons PROVPIN, MUSEPIN 2026-09-27): after a route or provider
 flip a worker picks its own --filter terms, the shell and Pester cases naming the
 changed id never run, and CI goes red twice for want of a list nobody derived. The
@@ -605,6 +614,193 @@ def changed_registry_ids(root: Path, rev: str, registry: Path):
     return ids
 
 
+# ─── changed files -> run list (the pre-push gate, operator D-154) ──────────
+# Three CI reds came from a worker guessing which tests its change touched. The
+# guess is derivable from the file list, so tools/prepush.py asks for it here
+# rather than trusting what the lane thought was relevant. Each rule below names
+# the red it exists for; see tests/test_prepush.py, which pins all of them.
+SKILL_RULES_TEST = "tests/test_skill_rules.py"
+# SCOPECLI (CI 36517453134): a cited R-id that resolves nowhere. A skill file, a
+# changelog or a doc is where a rule id is cited, so any of them maps here — and
+# the mapping adds it unconditionally, because the check is cheap and a dangling
+# id is otherwise invisible until CI reads the file the lane never ran.
+RULE_CITING_PATHS = (".agents/skills/", "docs/")
+RULE_CITING_FILES = ("CHANGELOG.md",)
+# CI 36529545083 (shards b and f, 2026-09-29) — the gap behind both reds: a lane added
+# `tests/test_prepush.py`, ran the file it had written, and CI went red in two tests that
+# own no mention of it. `SuiteWiringTests` requires every `tests/test_*.py` to be wired
+# into a harness; `RepoLintTests` requires every POSIX-only pattern in one to carry a
+# Windows guard. They are *scans* over the suite, so a changed file is their input and
+# nothing in a case body names them — the mapping selects them by the shape of the path.
+# A new tree-wide lint over the suites must be added here, the way a new harness must be
+# added to `tests/test_suite_wiring.py`'s WIRING: an unstated scan is an unselected one.
+REPO_META_SCANS = (
+    # every unit test file, and every harness that runs one.
+    ("tests/test_suite_wiring.py",
+     re.compile(r"^tests/(test_[^/]+\.py|linux/[^/]+\.sh|run-tests\.ps1)$"
+                r"|^\.github/workflows/[^/]+\.ya?ml$")),
+    # the POSIX-guard scan over tests/, and the BOM scan over every .ps1/.psm1 in git.
+    ("tests/test_windows_portability.py",
+     re.compile(r"^tests/test_[^/]+\.py$|\.psm?1$")),
+)
+# FREEKEYS2 (CI 36506339556 shard e): the registry flipped and none of the render
+# tests ran. The pytest half is named outright; the bash half is the render/apply
+# filters, which no test *name* ties to the registry file and so cannot be derived
+# by mentioning it; tests/linux/17-ai-routing.sh is the part that reads it.
+REGISTRY_TESTS = ("tests/test_registry_render.py",
+                  "tests/test_sync_router_tiers_registry.py")
+REGISTRY_PART = "17"
+REGISTRY_TERMS = ("render", "apply")
+# A route, a router tier file, a combo map or a registry: any of them is answered
+# by the routing part, and every one of them is named with one of these words.
+REGISTRY_PATH = re.compile(r"(registry|route|router|combo)", re.IGNORECASE)
+OMNIR_ROUTE_DIR = "configuration/omniroute/"
+APPLY_TERM = "apply"
+LINUX_PART = re.compile(r"^tests/linux/([0-9]{2})-[^/]+\.sh$")
+#: Every directory family this repository keeps pytest files in. `discover()` reads
+#: the first alone — its corpus is the three suites, and a case-level corpus is the
+#: wrong shape for the gate, which needs whole files (see `pytest_files_naming`).
+#: A skill keeps its own tests beside itself, which is how a gate reading only
+#: `tests/` would wave a changed `trust_worktree.py` through unrun — the FREEKEYS2
+#: miss one directory over.
+PYTEST_GLOBS = ("tests/test_*.py",
+                ".agents/skills/*/tests/**/test_*.py",
+                "infra/**/test_*.py",
+                "scripts/**/test_*.py")
+
+_DISCOVER_CACHE = {}
+
+
+def discover_cached(root: Path = ROOT):
+    """`discover()` once per root: the gate and a multi-file map scan the same tree."""
+    key = str(Path(root))
+    if key not in _DISCOVER_CACHE:
+        _DISCOVER_CACHE[key] = discover(Path(root))
+    return _DISCOVER_CACHE[key]
+
+
+def pytest_files_naming(root: Path, name: str):
+    """Every pytest file whose text names ``name`` — a tool's basename, `.py` and all.
+
+    `affected()` attributes a mention to the single case that made it, which is what
+    a ``--filter`` term needs. The gate needs the whole *file*, and the ordinary way
+    to name a tool is a module-level constant — a fact of the file, present in every
+    case and in none of them. Over-inclusion costs seconds; a miss costs a CI red.
+    """
+    root = Path(root)
+    out = set()
+    for pattern in PYTEST_GLOBS:
+        for path in sorted(root.glob(pattern)):
+            if name in _read(path):
+                out.add(path.relative_to(root).as_posix())
+    return out
+
+
+def map_changed_files(files, root: Path = ROOT, ids=()):
+    """``{"pytest": [...], "parts": [...], "terms": "...", "ids": [...]}``.
+
+    `files` are repository-relative paths (POSIX separators) as `git diff
+    --name-only` prints them; `ids` are registry ids already known to have changed,
+    which are fed through the id mapping this tool was built for.
+
+    A `tools/X.py` change is answered by every test that *names* it — which is how
+    a test reaches a tool, whether it imports it by path or spells it in a
+    subprocess command line — using the same strict-at-the-end matching as the ids.
+    A case-level corpus cannot see a module-level constant, nor a skill's tests that
+    live outside `tests/`, so every changed `.py` is answered a second way — by the
+    pytest files whose text names it — and a changed test file is always run, in
+    whichever directory holds it.
+    A change to a file a *tree-wide lint* scans is answered by that lint: `tests/` and
+    the harnesses over it select `REPO_META_SCANS` (`SuiteWiringTests`, `RepoLintTests`),
+    because the scan reads every file of a shape and no case body can name it (the two
+    reds of CI 36529545083, where a lane ran only the test file it had just written).
+    Over-inclusion is allowed and a miss is not: a lane that ran too much loses a
+    minute, a lane that ran too little loses CI.
+    """
+    pytest = {SKILL_RULES_TEST}
+    parts, terms, tool_files, registry = set(), [], [], False
+    py_names = set()
+    for raw in files:
+        path = str(raw).replace("\\", "/")
+        if REGISTRY_PATH.search(path):
+            registry = True
+        if path.startswith(OMNIR_ROUTE_DIR):
+            terms.append(APPLY_TERM)
+        match = LINUX_PART.match(path)
+        if match:
+            parts.add(match.group(1))
+        if path.startswith("tools/") and path.endswith(".py"):
+            tool_files.append(path)
+        for meta, scanned in REPO_META_SCANS:
+            # A tree-wide lint is answered by the lint itself, not by the file that
+            # tripped it: the scan reads every file of a shape, so any change to one
+            # is a change to its input (CI 36529545083). `search`, because a pattern
+            # here is a set of anchored alternatives, not one anchored expression.
+            if scanned.search(path):
+                pytest.add(meta)
+        name = path.rsplit("/", 1)[-1]
+        if name.startswith("test_") and name.endswith(".py"):
+            # A changed test file runs whatever directory holds it: the file that
+            # asserts the change is the change's covering test, and where the
+            # author put it is not a fact the gate gets to disagree with.
+            pytest.add(path)
+        elif name.endswith(".py"):
+            py_names.add(name)
+    for name in sorted(py_names):
+        pytest.update(pytest_files_naming(root, name))
+    if registry:
+        pytest.update(REGISTRY_TESTS)
+        parts.add(REGISTRY_PART)
+        terms.extend(REGISTRY_TERMS)
+    names = sorted(set(tool_files) | {f.rsplit("/", 1)[-1] for f in tool_files}
+                   | set(ids or ()))
+    if names:
+        corpus = discover_cached(root)
+        hits = affected(corpus, names)
+        corpora = {}
+        by_runner = {}
+        for test in corpus:
+            corpora.setdefault(test.runner, []).append(test.name)
+        for hit in hits:
+            if hit.runner == "pytest":
+                pytest.add(hit.path.as_posix())
+            by_runner.setdefault(hit.runner, []).append(hit)
+        sh_terms, _assigned, unfilterable = selection({"sh": by_runner.get("sh", [])},
+                                                      corpora)
+        if sh_terms:
+            terms.extend(sh_terms.split(","))
+        for name in unfilterable:
+            sys.stderr.write("affected-tests: a test this change affects cannot be "
+                             "selected by --filter (no usable token): %s\n" % name)
+    return {"pytest": sorted(pytest), "parts": sorted(parts),
+            "terms": ",".join(dedupe_terms(terms)), "ids": sorted(names)}
+
+
+def dedupe_terms(terms):
+    """Keep order, drop duplicates: a filter list that repeats a term says nothing new."""
+    seen, out = set(), []
+    for term in terms:
+        if term and term not in seen:
+            seen.add(term)
+            out.append(term)
+    return out
+
+
+def changed_files(root: Path, rev: str):
+    """The paths that differ between <rev>...HEAD — what a lane actually pushed.
+
+    Three dots, not two: the lane's own commits are what CI will build on top of
+    the merge base, and a two-dot diff of a branch that has not merged main yet
+    reports all of main's newer work as "changed", which would run the world.
+    """
+    proc = subprocess.run(["git", "-C", str(root), "diff", "--name-only",
+                           "%s...HEAD" % rev], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.exit("affected-tests: git diff %s...HEAD failed: %s"
+                 % (rev, proc.stderr.strip()))
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
 LABELS = {"sh": "sh        (tests/run-tests.sh --filter)",
           "ps1": "ps1       (tests/run-tests.ps1 -Filter)",
           "pytest": "pytest  (python3 -m pytest)"}
@@ -643,17 +839,29 @@ def main(argv=None) -> int:
                         help="route, provider or model ids (or any string a test may name)")
     parser.add_argument("--from-diff", metavar="REV",
                         help="take the ids from %s entries changed since REV" % REGISTRY)
+    parser.add_argument("--changed-files-from", metavar="REV",
+                        help="take the changed paths from `git diff REV...HEAD` and "
+                             "answer with the run list they imply (see map_changed_"
+                             "files); --format plan prints it as JSON for the "
+                             "pre-push gate, tools/prepush.py")
     parser.add_argument("--registry", metavar="PATH",
                         help="registry to diff (default: <root>/%s)" % REGISTRY)
     parser.add_argument("--root", metavar="DIR", default=str(ROOT),
                         help="repository to scan (default: this checkout)")
-    parser.add_argument("--format", choices=("human", "filter", "pytest"), default="human",
+    parser.add_argument("--format", choices=("human", "filter", "pytest", "plan"),
+                        default="human",
                         help="output shape (default: human table)")
     args = parser.parse_args(argv)
 
-    if not args.ids and not args.from_diff:
+    if not args.ids and not args.from_diff and not args.changed_files_from:
         parser.print_usage(sys.stderr)
-        sys.stderr.write("affected-tests: give at least one ID or --from-diff REV\n")
+        sys.stderr.write("affected-tests: give at least one ID, --from-diff REV or "
+                         "--changed-files-from REV\n")
+        return 2
+    if args.format == "plan" and not args.changed_files_from:
+        sys.stderr.write("affected-tests: --format plan needs "
+                         "--changed-files-from REV (the run list is derived from the "
+                         "files a lane changed, not from ids)\n")
         return 2
 
     root = Path(args.root)
@@ -662,6 +870,31 @@ def main(argv=None) -> int:
     if args.from_diff:
         ids += [i for i in changed_registry_ids(root, args.from_diff, registry)
                 if i not in ids]
+
+    if args.changed_files_from:
+        files = changed_files(root, args.changed_files_from)
+        # The registry's id half rides along: a lane that edited the registry
+        # changed route/provider/model ids too, and the id mapping is what names
+        # the shell and Pester cases those ids appear in (FREEKEYS2's first miss).
+        plan_ids = list(ids)
+        if any(REGISTRY_PATH.search(str(f).replace("\\", "/")) for f in files):
+            plan_ids += [i for i in changed_registry_ids(root, args.changed_files_from,
+                                                         registry) if i not in plan_ids]
+        plan = map_changed_files(files, root=root, ids=plan_ids)
+        plan["files"] = files
+        if args.format == "filter":
+            sys.stdout.write(plan["terms"] + "\n" if plan["terms"] else "")
+        elif args.format == "pytest":
+            sys.stdout.write(" ".join(plan["pytest"]) + "\n" if plan["pytest"] else "")
+        elif args.format == "plan":
+            sys.stdout.write(json.dumps(plan) + "\n")
+        else:
+            print("files: %s" % (", ".join(files) if files else "(none)"))
+            print("pytest: %s" % " ".join(plan["pytest"]))
+            print("parts: %s" % (", ".join(plan["parts"]) or "(none)"))
+            print("filter: %s" % (plan["terms"] or "(none)"))
+            print("ids: %s" % (", ".join(plan["ids"]) or "(none)"))
+        return 0
 
     tests = discover(root)
     hits = affected(tests, ids)

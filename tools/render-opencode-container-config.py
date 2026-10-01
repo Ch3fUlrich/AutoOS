@@ -109,6 +109,140 @@ def rewrite_mcp(block, serena_url, host_alias, notes):
     return out
 
 
+# Fleet pins (2026-09-30, routing-00): settings the fleet depends on that must
+# survive every `ai-stack.sh init` render regardless of the host source file.
+# Add-only semantics: missing keys are set, explicit host choices are kept.
+GH_READONLY = {
+    "gh repo sync *": "allow",
+    "gh workflow run *": "allow",
+    "gh workflow view *": "allow",
+    "gh run list *": "allow",
+    "gh run view *": "allow",
+    "gh run watch *": "allow",
+    "gh pr list *": "allow",
+    "gh pr view *": "allow",
+    "gh pr status *": "allow",
+    "gh api *": "allow",
+    "gh release view *": "allow",
+    "gh *": "deny",
+}
+
+
+# Fleet model policy (operator 2026-09-30): orchestration runs on the paid
+# DeepSeek combo at max effort (opencode-zen and the spark gateway leg were the
+# rate-limited / 502 heads), and leaves spawn on the Vertex AI provider in
+# OmniRoute (fast, not rate-limited). These are pins because the host source
+# (~/.config/opencode/opencode.json) is projected from an older opencode.jsonc
+# and would otherwise revert the live fixes on the next `ai-stack.sh init`.
+FLEET_AGENT_MODELS = {
+    "orchestrator": "omniroute/deepseek-v4.1-flash",
+    "suborchestrator": "omniroute/deepseek-v4.1-flash",
+    "leaf-implementer": "omniroute/vertex-gemini-3.1-pro-preview",
+    # Operator 2026-09-30: leaves spawn on Vertex. Probed live before pinning:
+    # `vertex/gemini-3.1-pro-preview` and `vertex/gemini-2.5-flash` answer 200,
+    # but `vertex/claude-sonnet-4-5` is 501 ("not implemented, or supported, or
+    # enabled" -- the Vertex project has no Claude entitlement) and
+    # `vertex/DeepSeek-V4-Flash` is 400 (gateway payload bug). Pointing the
+    # reviewer at a dead leg would fail every leaf review, so it defaults to a
+    # different family that is up now; free-first (NVIDIA nemotron).
+    "leaf-reviewer": "omniroute/nemotron-3-ultra-free",
+}
+# Reviewer fallback (paid, funded, 1M, always up): omniroute/deepseek-v4.1-flash.
+# If the operator enables Claude in the Vertex Model Garden, the reviewer can
+# move back to omniroute/vertex-claude-sonnet-4-5.
+DEEPSEEK_VARIANTS = ("low", "high", "max")
+# id -> (gateway modelID, context window). The gateway (7647-model catalogue
+# 2026-09-30) serves a `vertex/` provider; these four are the fleet's picks.
+FLEET_VERTEX_MODELS = {
+    "vertex-gemini-3.1-pro-preview": ("vertex/gemini-3.1-pro-preview", 1000000),
+    "vertex-gemini-2.5-flash": ("vertex/gemini-2.5-flash", 1000000),
+    "vertex-claude-sonnet-4-5": ("vertex/claude-sonnet-4-5", 200000),
+    "vertex-deepseek-v4-flash": ("vertex/DeepSeek-V4-Flash", 1000000),
+}
+# Non-Vertex fleet aliases the agents reference (same shape, same pinning).
+FLEET_EXTRA_MODELS = {
+    "nemotron-3-ultra-free": ("nvidia/nemotron-3-ultra-550b-a55b:free", 1048576),
+}
+FLEET_ALIAS_MODELS = dict(FLEET_VERTEX_MODELS, **FLEET_EXTRA_MODELS)
+
+
+def pin_fleet_overrides(cfg, notes):
+    """Force fleet-critical settings; record each change in notes."""
+    agents = cfg.get("agent")
+    if isinstance(agents, dict):
+        sub = agents.get("suborchestrator")
+        # Dev/testing: orchestrator sessions must stay promptable in Home.
+        # Flip back to "subagent" (here AND live) when testing ends (D-163).
+        if isinstance(sub, dict) and sub.get("mode") != "primary":
+            sub["mode"] = "primary"
+            notes.append("suborchestrator.mode pinned primary (fleet dev, D-163)")
+        # Model pins are add-if-present: a source without the fleet agents is
+        # left alone, so the renderer stays usable for the generic AutoOS config.
+        for name, model in FLEET_AGENT_MODELS.items():
+            a = agents.get(name)
+            if isinstance(a, dict) and a.get("model") != model:
+                a["model"] = model
+                notes.append("agent.%s model pinned %s" % (name, model))
+    scopes = []
+    if isinstance(cfg.get("permission"), dict):
+        scopes.append(("top-level", cfg["permission"]))
+    if isinstance(agents, dict):
+        for name, a in agents.items():
+            if isinstance(a, dict) and isinstance(a.get("permission"), dict):
+                scopes.append(("agent:" + name, a["permission"]))
+    for label, perm in scopes:
+        bash = perm.get("bash")
+        if isinstance(bash, dict):
+            added = [k for k in GH_READONLY if k not in bash]
+            for k in added:
+                bash[k] = GH_READONLY[k]
+            if added:
+                notes.append("%s: pinned %d gh rules" % (label, len(added)))
+    for provkey in ("provider", "providers"):
+        block = cfg.get(provkey)
+        if not isinstance(block, dict):
+            continue
+        # The block maps provider-name -> {models: {...}} (live shape). Tolerate
+        # a flat {models: {...}} too. The earlier version read `<block>.models`
+        # directly, matched nothing, and silently applied no model pins.
+        entries = []
+        if isinstance(block.get("models"), dict):
+            entries.append((provkey, block["models"]))
+        for pname, prov in block.items():
+            if isinstance(prov, dict) and isinstance(prov.get("models"), dict):
+                entries.append(("%s.%s" % (provkey, pname), prov["models"]))
+        for label, models in entries:
+            m = models.get("deepseek-v4.1-flash")
+            # Operator 2026-09-30: the model serves ~1M, not 128k.
+            if isinstance(m, dict) and isinstance(m.get("limit"), dict):
+                if m["limit"].get("context") != 1048576:
+                    m["limit"]["context"] = 1048576
+                    notes.append("%s.models.deepseek-v4.1-flash context pinned 1M" % label)
+            # Operator 2026-09-30: the combo offered no effort variants, so #max
+            # could not be selected. Restore the registry ladder (none is implicit).
+            if isinstance(m, dict):
+                have = [v.get("id") for v in m.get("variants") or []
+                        if isinstance(v, dict)]
+                if not all(v in have for v in DEEPSEEK_VARIANTS):
+                    m["variants"] = [
+                        {"id": v, "settings": {"reasoningEffort": v}}
+                        for v in DEEPSEEK_VARIANTS
+                    ]
+                    notes.append("%s.models.deepseek-v4.1-flash variants pinned %s"
+                                 % (label, "/".join(DEEPSEEK_VARIANTS)))
+            # Operator 2026-09-30: expose the Vertex AI provider so leaves can
+            # spawn on a fast, non-rate-limited leg.
+            for mid, (model_id, ctx) in FLEET_ALIAS_MODELS.items():
+                if mid in models:
+                    continue
+                models[mid] = {
+                    "modelID": model_id,
+                    "name": model_id,
+                    "limit": {"context": ctx, "output": 32768},
+                }
+                notes.append("%s.models added %s -> %s" % (label, mid, model_id))
+
+
 def render(src, code_dir, gateway, serena_url, host_alias):
     notes = []
     cfg = json.loads(json.dumps(src))
@@ -118,6 +252,7 @@ def render(src, code_dir, gateway, serena_url, host_alias):
         cfg["providers"] = rewrite_providers(cfg["providers"], gateway, notes, "V2")
     if "mcp" in cfg:
         cfg["mcp"] = rewrite_mcp(cfg["mcp"], serena_url, host_alias, notes)
+    pin_fleet_overrides(cfg, notes)
     if isinstance(cfg.get("instructions"), list):
         root = os.path.realpath(code_dir).rstrip("/") + "/"
         keep = []

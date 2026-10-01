@@ -217,8 +217,53 @@ if (-not (Test-Gateway)) {
         Write-Host "omniroute is not installed. Run: .\setup.ps1 -Only omniroute -Yes"
         exit 1
     }
+    # Sane skip-on-repeated-429 policy (operator 2026-10-01): the gateway reads
+    # these from its own process env at startup (open-sse/services/rotationConfig.ts:84-110;
+    # provider-breaker family at open-sse/config/constants.ts:251-277), so the
+    # launcher that spawns it is the only surface. Rotate a leg only after three
+    # 429s inside a 120s window (the shipped default of 1 hops on the first
+    # 429), then cool the leg for 300s. Respect-set: never clobber a user value.
+    if (-not $env:OMNIROUTE_ROTATION_ENABLED) {
+        $env:OMNIROUTE_ROTATION_ENABLED = 'true'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_ON_429) {
+        $env:OMNIROUTE_ROTATE_ON_429 = 'true'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_429_THRESHOLD) {
+        $env:OMNIROUTE_ROTATE_429_THRESHOLD = '3'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS) {
+        $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS = '120'
+    }
+    if (-not $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS) {
+        $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS = '300'
+    }
+    if (-not $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS) {
+        $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS = '1800000'
+    }
+    # Raise the chat admission heavy-in-flight limit from the default of 1.
+    # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+    # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+    # for parallel agents (swarm, multi-lane) without over-allocating heap.
+    # Respect a user-set value — do not clobber.
+    if (-not $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT) {
+        $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'
+    }
     Write-Host 'Starting OmniRoute in the background...'
-    Start-Process -FilePath 'omniroute' -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
+    # A bare 'omniroute' resolves to the npm .ps1 shim (ExternalScript), which
+    # Start-Process cannot launch as a Win32 app - pin the .cmd shim instead.
+    # Resolved via PATH with a %APPDATA%\npm fallback (never a hardcoded user
+    # path): a missing shim is a loud failure, not a silent wait for a gateway
+    # that never starts.
+    $omnirouteCmd = $null
+    $omnirouteCmdInfo = Get-Command omniroute.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($omnirouteCmdInfo) { $omnirouteCmd = $omnirouteCmdInfo.Source }
+    if (-not $omnirouteCmd) { $omnirouteCmd = Join-Path $env:APPDATA 'npm\omniroute.cmd' }
+    if (-not (Test-Path -LiteralPath $omnirouteCmd)) {
+        Write-Host "Could not find omniroute.cmd (the npm shim). Run: .\setup.ps1 -Only omniroute -Yes"
+        exit 1
+    }
+    Start-Process -FilePath $omnirouteCmd -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
     $tries = 0
     while ((-not (Test-Gateway)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
     if (-not (Test-Gateway)) { Write-Host 'Gateway did not answer. Run `omniroute doctor`.'; exit 1 }

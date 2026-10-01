@@ -302,7 +302,16 @@ file for opencode, OpenHands, the serena container and the host CLIs.
 #### The publish address
 
 `AUTOOS_STACK_BIND` defaults to `0.0.0.0`, deliberately: host CLIs (Claude
-Code, `autoos-agent.py`, `apply.sh`) talk to `127.0.0.1:20128`, OpenHands
+Code, `apply.sh`) talk to `127.0.0.1:20128`, and `autoos-agent.py` picks its
+gateway the same way from either side of the stack - an explicit
+`AUTOOS_OMNIROUTE_URL` first, then the compose-network address
+`http://omniroute:20128`, then `127.0.0.1:20128` as the fallback, with the
+`gateway_up()` health pre-check keeping whichever candidate answers. The
+spawned worker is told the same answer: `stamp_worker_gateway()` writes the
+resolved address (with the provider API root, `/v1`) into the child's
+`OPENCODE_CONFIG_CONTENT` overlay, which opencode merges last - the sandbox
+clone's own `opencode.jsonc` pins loopback, which its container refuses
+(GWLOOPBACK-2). OpenHands
 sandboxes reach the gateway through the docker gateway address
 (`host.docker.internal`), and the proxy - on another host - uses the LAN
 address. Narrowing the bind would break one of them; the LAN exposure is

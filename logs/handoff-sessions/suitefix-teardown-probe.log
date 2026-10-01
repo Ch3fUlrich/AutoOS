@@ -1,0 +1,5 @@
+# teardown-probe re-run 2026-10-01, verbatim helper text from each revision
+BEFORE_pwsh TEARDOWN_SEC=120,03 SERVED=System.Byte[]
+AFTER_pwsh TEARDOWN_SEC=0,02 SERVED=System.Byte[]
+BEFORE_winps51 TEARDOWN_SEC=120,02 SERVED=System.Byte[]
+AFTER_winps51 TEARDOWN_SEC=0,02 SERVED=System.Byte[]

@@ -421,15 +421,17 @@ def gateway_ref(leg, registry) -> str:
     """The id the OmniRoute gateway catalog actually serves for a registry leg.
 
     A provider may spell its models differently in the live gateway than in this
-    registry: the antigravity OAuth bridge (agy CLI) serves ``agy/*`` ids
-    (measured against the live catalog's /v1/models, 2026-09-27), while the
-    registry keeps ``antigravity/*`` because resolve_leg()/usable_legs() and
-    every saved route/selection already use that spelling. This is the ONE
-    translation point between the two: a provider declaring ``model_prefix``
-    has each leg rewritten to ``<model_prefix>/<model>``; every other leg - and
-    any leg that does not resolve, or is not a string - is returned unchanged
-    (rule 1 already reports a malformed leg loudly, and a render must not hide
-    one behind a silent rewrite).
+    registry: scaleway's free grant serves ``scw/*`` ids (FREEKEYS-1) while the
+    registry keeps ``scaleway/*`` because resolve_leg()/usable_legs() and every
+    saved route/selection already use that spelling. (antigravity is the
+    historical case that motivated this field: its ``agy`` prefix, declared
+    2026-09-27, was retired to null 2026-09-30 - AGYCANON - after the live
+    catalog was re-measured back to canonical ``antigravity/*`` ids.) This is
+    the ONE translation point between the two: a provider declaring
+    ``model_prefix`` has each leg rewritten to ``<model_prefix>/<model>``; every
+    other leg - and any leg that does not resolve, or is not a string - is
+    returned unchanged (rule 1 already reports a malformed leg loudly, and a
+    render must not hide one behind a silent rewrite).
 
     The registry's own leg spelling never moves, so the resolver and
     apply.sh/apply.ps1 (which look a provider connection up by ``omniroute_id``)
@@ -1309,8 +1311,22 @@ IDE_MODEL_ORDER = (
     "spark-1.3-contributor",
     "opus-4-6",
     "t4-rag",
+    "t4-researcher",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
+    # FREEWIRE 2026-09-30: pinned single-provider free combos for the
+    # probe-passed free legs (L1-backlog/ws-free-probe-20260930). Listed here
+    # because render_ide() requires this constant to name every route id (a
+    # route added without it raises rather than silently mis-ordering).
+    "hf-glm-5.2", "hf-qwen3.8-27b",
+    "or-nemotron-3-super-free", "or-qwen3.8-27b-free",
+    "or-north-mini-code-free", "or-laguna-s-2.1-free",
+    "groq-qwen3.8-27b",
+    # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
+    # Listed here because render_ide() requires this constant to name every
+    # route id (a route added without it raises rather than silently mis-ordering).
+    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
+    "vertex-gemini-3.8-flash",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",
