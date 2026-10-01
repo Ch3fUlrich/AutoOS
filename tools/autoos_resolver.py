@@ -911,7 +911,16 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
     closed the same way (tests/test_registry.py), so the resolver must not
     read an unknown tier as free.
     """
-    tiers = [leg_tier(name, registry) for name in leg_names]
+    tiers = []
+    for name in leg_names:
+        try:
+            tiers.append(leg_tier(name, registry))
+        except (ValueError, KeyError):
+            # A registry oddity (a leg whose provider is gone) reads as an
+            # unknown tier -- non-free, held back, never a crash (T0-PAID-4
+            # Q4). The unknown-tier branch below already renders None as
+            # "unknown".
+            tiers.append(None)
     if not any(tier in _FREEISH_TIERS for tier in tiers):
         return legs, skipped
     healthy = ", ".join(name for name, tier in zip(leg_names, tiers)
@@ -2392,20 +2401,20 @@ def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
                  for reason in reasons):
             try:
                 tier = leg_tier(leg, registry)
-            except ValueError:
+            except (ValueError, KeyError):
                 tier = None
             lines.append("non-free held back: %s (tier %s) held as last "
                          "resort while a free/trial/credit leg is healthy"
                          % (leg, "unknown" if tier is None else tier))
     try:
         chosen_tier = leg_tier(chosen_leg, registry)
-    except ValueError:
+    except (ValueError, KeyError):
         chosen_tier = None
     if chosen_tier not in _FREEISH_TIERS:
         for leg, reasons in skipped_legs.items():
             try:
                 tier = leg_tier(leg, registry)
-            except ValueError:
+            except (ValueError, KeyError):
                 tier = None
             if tier in _FREEISH_TIERS:
                 lines.append("last_resort: %s skipped (%s)"

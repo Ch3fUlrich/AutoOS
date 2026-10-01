@@ -4570,6 +4570,28 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertEqual(legs2, legs)
         self.assertEqual(skipped2, skipped)
 
+    def test_hold_back_paid_legs_survives_a_missing_provider(self):
+        # T0-PAID-4 Q4: a registry oddity (a leg whose provider is gone)
+        # must not crash the plan -- the unresolvable leg reads as an
+        # unknown tier (non-free, held back) instead of raising.
+        reg = self.fixture()
+        legs = [("free-p", "free-model"), ("ghost-p", "ghost-model")]
+        kept, skipped = r._hold_back_paid_legs(
+            legs, ["free-p/free-model", "ghost-p/ghost-model"], {}, reg)
+        self.assertEqual(kept, [("free-p", "free-model")])
+        self.assertIn("ghost-p/ghost-model", skipped)
+
+    def test_last_resort_lines_survive_a_missing_provider(self):
+        # T0-PAID-4 Q4: same oddity through the explain path -- naming a
+        # held-back leg whose provider is gone must not raise.
+        reg = self.fixture()
+        lines = r._paid_last_resort_lines(
+            "free-p/free-model",
+            {"ghost-p/ghost-model": ["non-free held back: ghost-p/ghost-model "
+                                     "is last resort while free-p/free-model "
+                                     "is healthy"]}, reg)
+        self.assertTrue(any("ghost-p/ghost-model" in line for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()
