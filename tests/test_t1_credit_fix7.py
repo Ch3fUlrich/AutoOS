@@ -91,10 +91,13 @@ class R1GatewaySpellingsCount(unittest.TestCase):
         self.assertEqual(guards["vertex_ai"]["state"], "refuse")
 
     def test_model_prefix_only_counts(self):
-        # provider field carries the gateway spelling, model carries prefix
+        # provider field carries the gateway spelling, model carries prefix.
+        # The alias is read from the registry, never hardcoded: without a
+        # registry only the id itself matches (old behaviour exactly).
         reg = _reg()
         rows = [_row("vertex", "vertex/gemini-3.8-flash")]
-        self.assertTrue(usage.is_spend_row(rows[0], "vertex_ai"))
+        self.assertTrue(usage.is_spend_row(rows[0], "vertex_ai", reg))
+        self.assertFalse(usage.is_spend_row(rows[0], "vertex_ai"))
 
     def test_similar_prefix_does_not_count(self):
         self.assertFalse(usage.is_spend_row(

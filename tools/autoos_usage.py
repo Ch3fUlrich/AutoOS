@@ -590,11 +590,45 @@ def month_start(now):
         day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def is_spend_row(row, provider=SPEND_PROVIDER):
-    """True when the gateway billed this row to the watched paid provider."""
+def _provider_spellings(provider, registry=None):
+    """Every namespace a provider's call-log rows may carry, lowercased.
+
+    T1-CREDIT-FIX-7 R1: the gateway bills under the connection id
+    (`providers.<id>.omniroute_id` -- `vertex` for `vertex_ai`), not the
+    registry id, and model spellings carry the same namespace
+    (`vertex/...`, `ovh/...` via `model_prefix`). All three are read from
+    the data, never a name list, so a renamed connection is covered the
+    moment its row lands. Without a registry only the id itself matches
+    (the old behaviour exactly)."""
+    spellings = {str(provider).strip().lower()}
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    if isinstance(entry, dict):
+        for key in ("omniroute_id", "model_prefix"):
+            val = entry.get(key)
+            if isinstance(val, str) and val.strip():
+                spellings.add(val.strip().lower())
+    return spellings
+
+
+def is_spend_row(row, provider=SPEND_PROVIDER, registry=None):
+    """True when the gateway billed this row to the watched provider.
+
+    Matches the registry id, its `omniroute_id`/`model_prefix`, and rows
+    whose model is namespaced `<any of those>/...` -- a `vertex/...` model
+    billed under either spelling is vertex_ai's money either way. A bare
+    model under another provider (`gemini-3.8-flash` via AI-Studio) and a
+    lookalike namespace (`vertexish/...`) match nothing: the comparison is
+    exact per namespace, never a substring."""
     if not isinstance(row, dict):
         return False
-    return str(row.get("provider") or "").strip().lower() == provider
+    spellings = _provider_spellings(provider, registry)
+    if str(row.get("provider") or "").strip().lower() in spellings:
+        return True
+    model = row.get("model")
+    if isinstance(model, str) and "/" in model:
+        if model.split("/", 1)[0].strip().lower() in spellings:
+            return True
+    return False
 
 
 def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=None,
@@ -618,7 +652,7 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
     calls = tokens_in = tokens_out = 0
     unpriced = set()
     for r in rows:
-        if not is_spend_row(r, provider):
+        if not is_spend_row(r, provider, registry):
             continue
         ts = row_timestamp(r)
         if ts is not None and ts < since:
