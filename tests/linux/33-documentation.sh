@@ -621,6 +621,14 @@ if it "autoos_card: section order, line caps, header fields, the card check verb
     out="$(python3 tests/test_autoos_card.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# SEAT-EVIDENCE (D-260): the per-turn served-model evidence tool
+# (tools/seat-model-evidence.py). Fixtures are temp SQLite dbs reproducing
+# the opencode schema shape; the real example dbs are read-only and skipped
+# when absent. Nothing is spawned, no db is written.
+if it "seat-model-evidence: per-turn served model, exit codes, credential privacy (unit tests)"; then
+    out="$(python3 tests/test_seat_model_evidence.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
 # the glob matcher, every policy.risk_rules shape, the sha audit draw, assess()
 # against a temp git repo, and the `risk` verb. Fixtures are temp repos and
