@@ -64,6 +64,10 @@ Reviewer nonce: **`B2-NONCE-C2A88E01`**.
   session `ses_f0941152dffeE6QEehc4GBZr7z`, verdict **APPROVE** (nonce echoed `B2-NONCE-C2A88E01`).
 - Rate-limit log: none.
 
+### D-TORDER-2 ACCEPT (L0 decision, this commit)
+
+- `feat(routing): D-TORDER-2 ACCEPT — t1-orchestrator-free-only deliberately single-provider on gemini/gemini-3.8-flash (free-ai premium_requires_purchase, openrouter :free <=262k, huggingface unusable; real load on t1-orchestrator vertex credits) + SINGLE_PROVIDER_EXEMPTIONS gate + note-missing fails + skill + test (302 passed, contract 23 PASS e-exempted)`
+
 ### Batch 2 commits
 
 `44f21cdb` B2-HF, `aced9915` B2-AGY, `60191348` B2-PRUNE, `ff0c57ee` B2-OVH,
