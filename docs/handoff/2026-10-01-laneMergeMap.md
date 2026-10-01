@@ -1,4 +1,4 @@
-# Lane merge-readiness map — 2026-10-01
+# Lane merge-readiness map — 2026-10-01 (snapshot)
 
 **Author:** subagent `ws-merge-map-20260930` (branch `L1-backlog/ws-merge-map-20260930`,
 read-only analysis).
@@ -19,7 +19,7 @@ All 22 requested branches exist (none missing). One, `ws-ovh-review-2`, is **emp
 (0 commits ahead of its merge base) — see §1. `ws-nebius-combos-20260930` and
 `ws-freewire-20260930` are the **same commit** (`2ff537a`) — see §4.
 
-> **Snapshot, not current.** This map describes `origin/main` at `e58274a8` on 2026-10-01 only. Main has taken about 50 of these lanes since. Every branch tip, ahead/behind count, CLEAN/CONFLICT verdict, merge order and "exists / empty / same commit" statement below is historical. Re-run the commands in this document against the current `origin/main` before acting on any of it.
+> **Snapshot, not current.** This map describes `origin/main` at `e58274a8` on 2026-10-01 only. Since then main has taken 44 `ws-*` lanes (counted at `75af3236`); of the 22 branch tips in the table below, 20 are already ancestors of main (`git merge-base --is-ancestor`), `ws-remote` is not, and one tip sha is not resolvable in a fleet clone. Every branch tip, ahead/behind count, CLEAN/CONFLICT verdict, merge order and "exists / empty / same commit" statement below is historical. Re-run the commands in this document against the current `origin/main` before acting on any of it.
 
 ---
 
