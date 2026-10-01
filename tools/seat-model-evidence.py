@@ -95,6 +95,10 @@ DEFAULT_GATEWAY_KEY = "autoos-local"
 # own rows are never lost at the boundary (stated in the output, D-261 G3).
 WINDOW_PAD_SECONDS = 5
 
+# The one status a call-log row must carry to prove anything was served;
+# rows on any other value are the H2 drop candidates (D-266).
+STATUS_OK = 200
+
 # The single field (a)/(c) key; (b) is the CLI flag. Kept explicit so the
 # output can name exactly what was read.
 DB_FIELD = ("session_message[type=assistant].data.model.providerID"
@@ -205,10 +209,15 @@ def read_run_record_window(run_id, logs_root):
     return s, e
 
 
-def read_run_record_session(run_id, logs_root):
-    """The opencode session id the run record knows, if any (workers first,
-    then job.json request). None = unknown -> window attribution falls back
-    to the every-row-model-must-match rule (D-261 G4)."""
+def read_run_record_session_tag(run_id, logs_root):
+    """The spawner's lane tag for a run, from the run record (D-266 H1).
+
+    workers/<id>.json `session_tag` is what the runner writes; job.json may
+    carry it too; output.log line `session-tag: <tag>` is the spawner's own
+    stdout. The ORDER is the trust order: the record the runner commits is
+    authoritative over anything printed. Returns None when the run record
+    knows no tag — a window alone must then refuse, never attribute.
+    """
     root = Path(logs_root)
     for path in (root / "workers" / (run_id + ".json"),
                  root / "agents" / run_id / "job.json"):
@@ -218,12 +227,37 @@ def read_run_record_session(run_id, logs_root):
             d = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        for cand in (d.get("session_id"), d.get("session"),
-                     (d.get("request") or {}).get("session")
-                     if isinstance(d.get("request"), dict) else None):
-            if isinstance(cand, str) and cand:
-                return cand
+        req = d.get("request") if isinstance(d.get("request"), dict) else {}
+        for cand in (d.get("session_tag"), req.get("session_tag")):
+            if isinstance(cand, str) and cand.strip():
+                return cand.strip()
+    out = root / "agents" / run_id / "output.log"
+    if out.is_file():
+        try:
+            for line in out.read_text(errors="replace").splitlines():
+                if line.startswith("session-tag:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val:
+                        return val
+        except OSError:
+            pass
     return None
+
+
+def tag_matches(value, want, run_id):
+    """True when a row's sessionTag IS this run's tag (D-266 H1).
+
+    The spawner sends the header as `<tag>/<run-id>` (D-063) and the gateway
+    logs the header verbatim, while the record stores the bare tag — both
+    spellings are this run. Exact equality only: a prefix match would
+    attribute a sibling run of the same lane (a concurrent seat) to this one.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return False
+    value = value.strip()
+    if value == want:
+        return True
+    return bool(run_id) and value == want + "/" + run_id
 
 
 # --- source (b): the opencode CLI --model from opencode.log -----------------
@@ -395,19 +429,76 @@ def _shift_iso(s, seconds):
         timespec="seconds")
 
 
-def gateway_evidence(rows, expect, start, end, key, session):
-    """Filter to the run window (datetimes, D-261 G2), the spawner's key name
-    and, when the run record knows it and the rows carry one, the session id
-    (G4). Returns (turns, cids, window_rows, mismatch_count) where
-    window_rows counts everything attributed to this window+key+session."""
+def _served_model(r):
+    provider = r.get("provider")
+    mid = r.get("model")
+    if isinstance(provider, str) and isinstance(mid, str):
+        return f"{GW_PROVIDER_ALIASES.get(provider, provider)}/{mid}"
+    return None
+
+
+def _is_status(r, want):
+    st = r.get("status")
+    if isinstance(st, bool):
+        return False
+    try:
+        return int(st) == want
+    except (TypeError, ValueError):
+        return False
+
+
+_ERROR_CLASSES = (
+    ("timeout", ("timeout", "timed out", "etimedout", "stall", "no response")),
+    ("abort", ("abort", "interrupted", "canceled", "cancelled")),
+    ("rate-limit", ("rate limit", "ratelimit", "too many requests", "429")),
+)
+
+
+def _error_class(r):
+    """One fixed class name for a non-200 row — never the error body, which
+    carries vendor text (account names, model ids) that has no business in a
+    public evidence file (D-266 H2)."""
+    err = r.get("error")
+    text = str(err).strip().lower() if err is not None else ""
+    if not text:
+        return "no-response"
+    for name, pats in _ERROR_CLASSES:
+        if any(pat in text for pat in pats):
+            return name
+    try:
+        st = int(r.get("status"))
+    except (TypeError, ValueError):
+        st = 0
+    return "server-error" if st >= 500 else "client-error"
+
+
+def gateway_evidence(rows, expect, start, end, key, tag, run_id):
+    """Attribute call-log rows to ONE seat run, then apply the non-200 rule.
+
+    Attribution (D-266 H1) is the run's sessionTag; the datetime window and
+    the spawner's key name are only secondary bounds — a window alone never
+    counts. A row that carries no sessionTag field at all makes the whole
+    page unattributable, which exits 3 rather than degrading to the window.
+
+    Non-200 rows (D-266 H2: a 504 stall, an error, a missing response) are
+    dropped IFF at least one 200 row remains AND every 200 row served the
+    expected model exactly. Otherwise they stay in the evidence, because
+    without a matching 200 row there is nothing to attribute the run to.
+    Zero 200 rows -> 3 (nothing was served); a 200 row on another model -> 2.
+    """
+    if not tag:
+        die("cannot attribute: no session tag in the run record "
+            "(a window alone is not attribution)")
     start_dt, end_dt = _parse_ts(start), _parse_ts(end)
-    turns = []
-    cids = []
+    total = 0
     window_rows = 0
-    mismatch = 0
+    tagged = 0
+    ok_rows = []
+    bad_rows = []
     for r in rows:
         if not isinstance(r, dict):
             continue
+        total += 1
         ts = _parse_ts(r.get("timestamp"))
         if ts is None:
             continue
@@ -417,27 +508,45 @@ def gateway_evidence(rows, expect, start, end, key, session):
             continue
         if key and r.get("apiKeyName") != key:
             continue
-        row_sess = r.get("sessionId")
-        if session and isinstance(row_sess, str) and row_sess != session:
-            continue
         window_rows += 1
-        provider = r.get("provider")
-        mid = r.get("model")
-        served = None
-        if isinstance(provider, str) and isinstance(mid, str):
-            served = f"{GW_PROVIDER_ALIASES.get(provider, provider)}/{mid}"
-        if served != expect:
-            mismatch += 1
+        row_tag = r.get("sessionTag")
+        if isinstance(row_tag, str) and row_tag.strip():
+            tagged += 1
+        if not tag_matches(row_tag, tag, run_id):
+            continue
+        (ok_rows if _is_status(r, STATUS_OK) else bad_rows).append(r)
+    if not window_rows:
+        die("no gateway call-log rows in the run window")
+    if not tagged:
+        die("cannot attribute: no call-log row in the window carries a "
+            "sessionTag field")
+    if not ok_rows:
+        die("no status-200 row carries this seat's session tag (nothing was "
+            "served: cannot attribute)")
+    mismatch = sum(1 for r in ok_rows if _served_model(r) != expect)
+    keep = ok_rows if mismatch == 0 else sorted(
+        ok_rows + bad_rows, key=lambda r: _parse_ts(r.get("timestamp")) or end_dt)
+    turns = []
+    cids = []
+    for r in keep:
         cid = r.get("correlationId")
         if isinstance(cid, str):
             cids.append(cid)
-        turns.append({"index": len(turns), "served_model": served,
+        turns.append({"index": len(turns), "served_model": _served_model(r),
                       "requested_model": r.get("requestedModel"),
                       "status": r.get("status"), "correlation_id": cid,
                       "field": "call_log.model + call_log.provider"})
-    if not turns:
-        die("no gateway call-log rows in the run window")
-    return turns, cids, window_rows, mismatch
+    dropped_reasons = {}
+    if mismatch == 0:
+        for r in bad_rows:
+            cls = f"{r.get('status')} {_error_class(r)}"
+            dropped_reasons[cls] = dropped_reasons.get(cls, 0) + 1
+    return {
+        "turns": turns, "cids": cids, "window_rows": window_rows,
+        "mismatch": mismatch, "n_rows_total": total, "n_200": len(ok_rows),
+        "n_dropped": 0 if mismatch else len(bad_rows),
+        "dropped_reasons": dropped_reasons,
+    }
 
 
 def write_output(doc, args, sandbox):
@@ -445,9 +554,13 @@ def write_output(doc, args, sandbox):
         str(sandbox) + ".seat-evidence.json")
     out.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
     sha = hashlib.sha256(out.read_bytes()).hexdigest()
+    extra = ""
+    if doc["kind"] == "response-side":
+        # D-266 H3: what was served and what dropped, on one line.
+        extra = f" n_200={doc['n_200']} n_dropped={doc['n_dropped']}"
     print(f"evidence {out} sha256 {sha} kind {doc['kind']} "
           f"all_match {'true' if doc['all_match'] else 'false'} "
-          f"turns {doc['turn_count']}")
+          f"turns {doc['turn_count']}{extra}")
     return out
 
 
@@ -455,7 +568,6 @@ def run_gateway(args, sandbox, expect):
     start = args.since
     end = args.until
     pad = 0
-    session = None
     if args.run_id and not (start or end):
         start, end = read_run_record_window(args.run_id, args.logs_root)
         if not start:
@@ -465,28 +577,37 @@ def run_gateway(args, sandbox, expect):
         start = _shift_iso(start, -WINDOW_PAD_SECONDS)
         end = _shift_iso(end, WINDOW_PAD_SECONDS)
         pad = WINDOW_PAD_SECONDS
-        session = read_run_record_session(args.run_id, args.logs_root)
     if not start and not end:
         die("--gateway needs --run-id (a finished record with start and end) "
             "or --since/--until")
+    tag = args.session_tag or None
+    if not tag and args.run_id:
+        tag = read_run_record_session_tag(args.run_id, args.logs_root)
     key = args.key if args.key is not None else DEFAULT_GATEWAY_KEY
     rows = gateway_fetch(sandbox)
-    turns, cids, window_rows, mismatch = gateway_evidence(
-        rows, expect, start, end, key, session)
+    stats = gateway_evidence(rows, expect, start, end, key, tag,
+                             args.run_id)
+    turns = stats["turns"]
+    cids = stats["cids"]
+    mismatch = stats["mismatch"]
     warnings = []
     if mismatch:
-        warnings.append("window shared with other traffic")
-        print(f"{PROG}: warning: window shared with other traffic "
-              f"({mismatch} of {window_rows} attributed rows served another "
-              f"model)", file=sys.stderr)
+        warnings.append("rows served another model")
+        print(f"{PROG}: warning: {mismatch} of {len(turns)} attributed "
+              "rows served another model", file=sys.stderr)
     doc = {
         "kind": "response-side",
         "sandbox": str(sandbox),
         "expected": expect,
         "window": {"since": start, "until": end, "key": key,
-                   "padding_seconds": pad, "session": session},
+                   "padding_seconds": pad, "session_tag": tag},
         "run_id": args.run_id,
-        "window_rows": window_rows,
+        "session_tag": tag,
+        "window_rows": stats["window_rows"],
+        "n_rows_total": stats["n_rows_total"],
+        "n_200": stats["n_200"],
+        "n_dropped": stats["n_dropped"],
+        "dropped_reasons": stats["dropped_reasons"],
         "turns": turns,
         "turn_count": len(turns),
         "correlation_ids": cids,
@@ -573,6 +694,10 @@ def main(argv):
                     help="response-side check via OmniRoute call logs")
     ap.add_argument("--since", default=None, help="gateway window start (ISO)")
     ap.add_argument("--until", default=None, help="gateway window end (ISO)")
+    ap.add_argument("--session-tag", default=None,
+                    help="the spawner's session tag (default: read "
+                         "session_tag from --run-id's record); the call-log "
+                         "field sessionTag must equal it (D-266 H1)")
     ap.add_argument("--key", default=None,
                     help=f"gateway apiKeyName to filter on (default "
                          f"{DEFAULT_GATEWAY_KEY}, the spawner key)")

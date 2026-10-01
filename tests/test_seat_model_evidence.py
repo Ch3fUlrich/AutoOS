@@ -47,6 +47,10 @@ GOOD = {"providerID": "opencode", "id": "nemotron-3-ultra-free"}
 GW_KEY = "autoos-local"
 SPARK = "spark-1.3-contributor"
 SPARK_EXPECT = "omniroute/spark-1.3-contributor"
+# D-266 H1: the spawner stamps every gateway request with this lane tag and
+# OmniRoute logs it verbatim in the call-log field `sessionTag` (measured
+# live 2026-10-01: no row carries a `sessionId` field at all).
+TAG = "AutoOS/seat-test"
 
 
 def epoch_for(iso):
@@ -55,23 +59,29 @@ def epoch_for(iso):
         iso.replace("Z", "+00:00")).timestamp()
 
 
-def write_job_record(root, rid, started_epoch, ended_epoch):
+def write_job_record(root, rid, started_epoch, ended_epoch,
+                     session_tag=TAG):
     """agents/<rid>/job.json with ONLY the epoch-seconds started/ended."""
     d = Path(root) / "agents" / rid
     d.mkdir(parents=True, exist_ok=True)
     rec = {"id": rid, "started": started_epoch}
     if ended_epoch is not None:
         rec["ended"] = ended_epoch
+    if session_tag:
+        rec["session_tag"] = session_tag
     (d / "job.json").write_text(json.dumps(rec))
 
 
-def write_workers_window(root, rid, started_iso, ended_iso, session_id=None):
+def write_workers_window(root, rid, started_iso, ended_iso, session_id=None,
+                       session_tag=TAG):
     """workers/<rid>.json carrying the ISO window (+ optional session id)."""
     w = Path(root) / "workers"
     w.mkdir(parents=True, exist_ok=True)
     rec = {"id": rid, "started": started_iso, "ended": ended_iso}
     if session_id:
         rec["session_id"] = session_id
+    if session_tag:
+        rec["session_tag"] = session_tag
     (w / (rid + ".json")).write_text(json.dumps(rec))
 
 
@@ -191,8 +201,14 @@ def parse_stdout(proc):
     parts = proc.stdout.split()
     assert parts[0] == "evidence" and parts[2] == "sha256" \
         and parts[4] == "kind" and parts[6] == "all_match", proc.stdout
-    return {"path": parts[1], "sha": parts[3], "kind": parts[5],
-            "match": parts[7], "turns": int(parts[9])}
+    r = {"path": parts[1], "sha": parts[3], "kind": parts[5],
+         "match": parts[7], "turns": int(parts[9])}
+    # D-266 H3: the response-side line continues with n_200=/n_dropped=.
+    for tok in parts[10:]:
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            r[k] = v
+    return r
 
 
 class SeatEvidenceTests(unittest.TestCase):
@@ -308,12 +324,12 @@ class SeatEvidenceTests(unittest.TestCase):
             rows = [
                 {"timestamp": "2026-10-01T21:10:00Z", "provider": "opencode",
                  "model": "nemotron-3-ultra-free", "requestedModel": NEMO,
-                 "status": "success", "correlationId": "c1",
-                 "apiKeyName": "autoos-local"},
+                 "status": 200, "correlationId": "c1",
+                 "apiKeyName": "autoos-local", "sessionTag": TAG},
                 {"timestamp": "2026-10-01T21:12:00Z", "provider": "opencode",
                  "model": "mimo-v2.6-flash-free", "requestedModel": NEMO,
-                 "status": "success", "correlationId": "c2",
-                 "apiKeyName": "autoos-local"},
+                 "status": 200, "correlationId": "c2",
+                 "apiKeyName": "autoos-local", "sessionTag": TAG},
             ]
             fake = Path(tmp) / "fakegw.py"
             fake.write_text("import json;print(json.dumps(%r))" % (rows,))
@@ -322,7 +338,7 @@ class SeatEvidenceTests(unittest.TestCase):
             try:
                 out = Path(tmp) / "ev.json"
                 proc = run_tool(base, NEMO, out, extra=[
-                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                     "--until", "2026-10-01T21:30:00Z"])
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
                 doc = json.loads(out.read_text())
@@ -340,11 +356,11 @@ class SeatEvidenceTests(unittest.TestCase):
             rows = [
                 {"timestamp": "2026-10-01T21:10:00Z", "provider": "opencode",
                  "model": "nemotron-3-ultra-free", "requestedModel": NEMO,
-                 "status": "success", "correlationId": "c1",
-                 "apiKeyName": "autoos-local"},
+                 "status": 200, "correlationId": "c1",
+                 "apiKeyName": "autoos-local", "sessionTag": TAG},
                 # out of window -> ignored
                 {"timestamp": "2026-09-01T00:00:00Z", "provider": "opencode",
-                 "model": "other-model", "status": "success",
+                 "model": "other-model", "status": 200,
                  "correlationId": "old", "apiKeyName": "autoos-local"},
             ]
             fake = Path(tmp) / "fakegw.py"
@@ -353,7 +369,7 @@ class SeatEvidenceTests(unittest.TestCase):
             try:
                 out = Path(tmp) / "ev.json"
                 proc = run_tool(base, NEMO, out, extra=[
-                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                     "--until", "2026-10-01T21:30:00Z"])
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 r = parse_stdout(proc)
@@ -382,9 +398,14 @@ class SeatEvidenceTests(unittest.TestCase):
 
     def _spark_row(self, ts, model=SPARK, prov=SPARK, key=GW_KEY, **kw):
         r = {"timestamp": ts, "provider": prov, "model": model,
-             "requestedModel": kw.get("req", SPARK_EXPECT), "status": 200,
+             "requestedModel": kw.get("req", SPARK_EXPECT),
+             "status": kw.get("status", 200),
              "correlationId": kw.get("cid", "c-" + ts[-9:-1]),
-             "apiKeyName": key}
+             "apiKeyName": key, "sessionTag": kw.get("tag", TAG)}
+        if kw.get("tag", TAG) is None:
+            r.pop("sessionTag")
+        if kw.get("status", 200) != 200:
+            r["error"] = kw.get("err", "upstream stalled: no response after 300s")
         if "sessionId" in kw:
             r["sessionId"] = kw["sessionId"]
         return r
@@ -407,7 +428,7 @@ class SeatEvidenceTests(unittest.TestCase):
                     payload = rows if wrap is None else {wrap: rows}
                     self._gw(tmp, payload)
                     proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                        "--gateway", "--since", "2026-10-01T21:09:00Z",
+                        "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                         "--until", "2026-10-01T21:30:00Z"])
                     self.assertEqual(proc.returncode, 0,
                                      proc.stdout + proc.stderr)
@@ -424,7 +445,7 @@ class SeatEvidenceTests(unittest.TestCase):
                 f"{sys.executable} {fake}"
             try:
                 proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                     "--until", "2026-10-01T21:30:00Z"])
                 self.assertEqual(proc.returncode, 3, proc.stderr)
                 self.assertIn("500", proc.stderr)
@@ -440,7 +461,7 @@ class SeatEvidenceTests(unittest.TestCase):
                 f"{sys.executable} {fake}"
             try:
                 proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                     "--until", "2026-10-01T21:30:00Z"])
                 self.assertEqual(proc.returncode, 3, proc.stderr)
             finally:
@@ -459,7 +480,7 @@ class SeatEvidenceTests(unittest.TestCase):
             ]
             self._gw(tmp, rows)
             proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                "--gateway", "--since", "2026-10-01T21:09:00+00:00",
+                "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00+00:00",
                 "--until", "2026-10-01T21:30:00Z"])
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             doc = json.loads(out.read_text())
@@ -526,7 +547,7 @@ class SeatEvidenceTests(unittest.TestCase):
                                 key="someone-else", cid="theirs2"),
             ])
             proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                 "--until", "2026-10-01T21:30:00Z"])
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             doc = json.loads(out.read_text())
@@ -546,35 +567,14 @@ class SeatEvidenceTests(unittest.TestCase):
                                 cid="shared"),
             ])
             proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                 "--until", "2026-10-01T21:30:00Z"])
             self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
             doc = json.loads(out.read_text())
             self.assertEqual(doc["window_rows"], 3)
-            self.assertIn("window shared with other traffic",
+            self.assertIn("rows served another model",
                           json.dumps(doc["warnings"]))
-            self.assertIn("window shared with other traffic", proc.stderr)
-
-    def test_gateway_session_id_filter_attributes_shared_key(self):
-        # G4: when the rows carry sessionId and the run record knows it,
-        # filter by it — shared-key traffic from other sessions drops out.
-        with tempfile.TemporaryDirectory() as tmp:
-            base, root, out = self._gw_base(tmp)
-            write_workers_window(root, "rid", "2026-10-01T21:59:58Z",
-                                 "2026-10-01T22:17:44Z",
-                                 session_id="ses_seat")
-            self._gw(tmp, [
-                self._spark_row("2026-10-01T22:00:00Z", cid="mine",
-                                sessionId="ses_seat"),
-                self._spark_row("2026-10-01T22:01:00Z", cid="theirs",
-                                model="muse-spark-1.3-contributor",
-                                sessionId="ses_other"),
-            ])
-            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
-                            logs_root=root, extra=["--gateway"])
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            doc = json.loads(out.read_text())
-            self.assertEqual(doc["correlation_ids"], ["mine"])
+            self.assertIn("rows served another model", proc.stderr)
 
     def test_gateway_measured_provider_alias(self):
         # G5: spark seat logs provider "spark-1.3-contributor"; --expect
@@ -583,7 +583,7 @@ class SeatEvidenceTests(unittest.TestCase):
             base, root, out = self._gw_base(tmp)
             self._gw(tmp, [self._spark_row("2026-10-01T21:10:00Z")])
             proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                 "--until", "2026-10-01T21:30:00Z"])
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
@@ -597,9 +597,146 @@ class SeatEvidenceTests(unittest.TestCase):
                 prov="openai-compatible-chat-c125c82d-7b07-4e6c-spark-1.3-contributor",
                 cid="uuid")])
             proc = run_tool(base, SPARK_EXPECT, out, extra=[
-                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--gateway", "--session-tag", TAG, "--since", "2026-10-01T21:09:00Z",
                 "--until", "2026-10-01T21:30:00Z"])
             self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+
+    def test_gateway_session_tag_filter_excludes_concurrent_seat(self):
+        # D-266 H1: sessionTag is the required attribution key. A concurrent
+        # seat in the same window on the same key is excluded by its tag; a
+        # row with no tag field at all is never attributed.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="mine"),
+                self._spark_row("2026-10-01T22:01:00Z", cid="theirs",
+                                tag="AutoOS/other-seat/rid2"),
+                self._spark_row("2026-10-01T22:02:00Z", cid="untagged",
+                                tag=None),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["correlation_ids"], ["mine"])
+            self.assertEqual(doc["session_tag"], TAG)
+            self.assertEqual(doc["n_rows_total"], 3)
+            # window_rows is the window+key bound; the tag is what attributes.
+            self.assertEqual(doc["window_rows"], 3)
+            self.assertEqual(doc["turn_count"], 1)
+            self.assertEqual(doc["n_200"], 1)
+
+    def test_gateway_tag_with_run_id_suffix_matches(self):
+        # D-063: the header the spawner sends is "<tag>/<run-id>", so the row
+        # carries that exact value; the record knows the bare tag.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z", cid="mine",
+                                          tag=TAG + "/rid"),
+                          self._spark_row("2026-10-01T22:01:00Z", cid="sib",
+                                          tag=TAG + "/other-run")])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--run-id", "rid",
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["correlation_ids"], ["mine"])
+
+    def test_gateway_no_tag_in_record_exit_three(self):
+        # D-266 H1: a window alone never counts as attribution.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_workers_window(root, "rid", "2026-10-01T21:59:58Z",
+                                 "2026-10-01T22:17:44Z", session_tag=None)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("cannot attribute", proc.stderr)
+
+    def test_gateway_rows_without_tag_field_exit_three(self):
+        # D-266 H1: a tag in the record but no tag field on any row is
+        # unattributable too.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z", tag=None)])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("cannot attribute", proc.stderr)
+
+    def test_gateway_504_rows_dropped_when_200_all_match(self):
+        # D-266 H2: non-200 rows drop out when at least one 200 row remains
+        # and every 200 row served the expected model.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="ok1"),
+                self._spark_row("2026-10-01T22:01:00Z", cid="stall",
+                                status=504,
+                                prov="spark-1.3-contributor"),
+                self._spark_row("2026-10-01T22:02:00Z", cid="ok2"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            r = parse_stdout(proc)
+            self.assertEqual(r["turns"], 2)
+            self.assertEqual(r["n_200"], "2")
+            self.assertEqual(r["n_dropped"], "1")
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["n_rows_total"], 3)
+            self.assertEqual(doc["n_200"], 2)
+            self.assertEqual(doc["n_dropped"], 1)
+            self.assertEqual(doc["dropped_reasons"], {"504 timeout": 1})
+            self.assertEqual(sorted(t["correlation_id"] for t in doc["turns"]),
+                             ["ok1", "ok2"])
+            self.assertNotIn("stall", json.dumps(doc["correlation_ids"]))
+
+    def test_gateway_200_row_on_other_model_exit_two(self):
+        # D-266 H2: a 200 row on another model is a real mismatch; the
+        # non-200 rows are NOT dropped (the drop rule is an iff).
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="ok"),
+                self._spark_row("2026-10-01T22:01:00Z", cid="wrong",
+                                model="muse-spark-1.3-contributor",
+                                prov="openai-compatible-chat-c125c82d"),
+                self._spark_row("2026-10-01T22:02:00Z", cid="stall", status=504),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["n_200"], 2)
+            self.assertEqual(doc["n_dropped"], 0)
+            self.assertEqual(doc["dropped_reasons"], {})
+
+    def test_gateway_only_504_rows_exit_three(self):
+        # D-266 H2: zero status-200 rows proves nothing -> 3.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="s1", status=504),
+                self._spark_row("2026-10-01T22:01:00Z", cid="s2", status=504),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out,
+                            extra=["--gateway", "--session-tag", TAG,
+                                   "--since", "2026-10-01T21:09:00Z",
+                                   "--until", "2026-10-01T22:30:00Z"])
+            self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+            self.assertIn("no status-200 row", proc.stderr)
 
     def test_keyless_requires_run_id_in_argparse(self):
         # G5: --run-id is a required source for the keyless mode.
