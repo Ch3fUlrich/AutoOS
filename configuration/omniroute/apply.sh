@@ -1048,8 +1048,10 @@ fi
 # "Authorization: Bearer <key>"` puts the key in argv, where every user on the
 # machine can read it out of `ps` for the lifetime of the call.
 live_ids=""
-# Resolve the client key using the new gateway-named field logic
-# Let stderr through so deprecation warnings and missing-key errors are visible
+# The client key is resolved ONCE per run, by the one rule in tools/autoos_gateway_key.py. Every
+# later use (the combo catalog read, the --probe) reads $_client_key: each resolve is a separate
+# python process, so a second one would print the legacy-field deprecation line a second time.
+# stderr is let through so that line and a missing-key error are visible.
 _client_key="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
 if command -v python3 >/dev/null; then
     if omni_rest GET /v1/models "" "$_client_key"; then
@@ -1460,8 +1462,7 @@ fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then
-    # Let stderr through so deprecation warnings and missing-key errors are visible
-    key="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
+    key="$_client_key"  # resolved once, above: a second resolve would repeat the deprecation line
     if [[ -z "$key" || $DRY -eq 1 ]]; then
         echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
     elif (( ${#PROBE_COMBOS[@]} == 0 )); then

@@ -6548,7 +6548,37 @@ if it "gwkey: F5 setup.sh --host-name --dry-run writes nothing"; then
 fi
 
 # F6: apply/start-stack show the deprecation line (not swallowed)
-if it "gwkey: F6 apply/start-stack show deprecation line"; then
+# The helper-only F6 below calls the resolver by itself; THESE run the real scripts.
+if it "gwkey: apply.sh --probe prints the legacy-field deprecation line exactly once"; then
+    d="$(_prune_sandbox)"
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    out="$( ( export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+              unset AUTOOS_OMNIROUTE_KEY
+              _prune_apply "$d" --probe ) )"
+    n="$(printf '%s\n' "$out" | grep -c "is deprecated")"
+    ok=1
+    (( n == 1 )) || { ok=0; echo "deprecation lines: $n" >&2; printf '%s\n' "$out" | head -20 >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "new field not named" >&2; }
+    [[ "$out" == *"sk-test-legacy"* ]] && { ok=0; echo "the key value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply.sh --probe resolve/notice count wrong"; fi
+fi
+
+if it "gwkey: start-stack.sh resolves the client key once, and refuses to start without one naming the field"; then
+    ok=1
+    n="$(grep -c 'autoos_resolve_client_key "' "$ROOT/configuration/start-stack.sh")"
+    (( n == 1 )) || { ok=0; echo "start-stack.sh resolve calls: $n" >&2; }
+    d="$(mktemp -d)"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY; export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/none.yml" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1
+              bash "$ROOT/configuration/start-stack.sh" none 2>&1; echo "rc=$?" ) )"
+    [[ "$out" == *"rc=1"* ]] || { ok=0; echo "start-stack.sh did not refuse: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "expected field not named: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack.sh key resolution"; fi
+fi
+
+if it "gwkey: F6 the resolver shows the deprecation line naming old and new field"; then
     d="$(mktemp -d)"
     ok=1
     # Test apply.ps1 shows deprecation warning
