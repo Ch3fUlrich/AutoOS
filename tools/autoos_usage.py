@@ -502,9 +502,84 @@ def credit_guards_unreadable(registry, failure):
         out[provider] = {"provider": provider, "state": "unknown",
                          "spend_usd": 0.0, "spend_unknown": True,
                          "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                         "window_limited": credit_window_limited(registry,
+                                                                 provider),
                          "note": "credit spend unknown %s: %s"
                                  % (provider, failure or "no call-log rows")}
     return out
+
+
+def credit_started_date(registry, provider, today=None):
+    """The UTC date a grant started billing (`providers.<id>.credit_started`,
+    YYYY-MM-DD), or None.
+
+    T1-CREDIT-FIX-7 R2: the gateway call-log window defaults to the calendar
+    month, but a grant cap covers the WHOLE grant -- without a start date,
+    September spend reads as $0 on October 1st. A present, well-formed, past
+    (or today) date extends the measured window back to the grant's start;
+    anything else (absent, malformed, impossible calendar date, in the
+    future) reads as absent -- the month-to-date window stays, and the guard
+    notes say so loudly instead of passing a partial window off as a total.
+    `today` is injectable so tests need no clock."""
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    raw = entry.get("credit_started") if isinstance(entry, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.datetime.strptime(raw.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None  # malformed or impossible date; registry.py flags it
+    if parsed > _today_date(today):
+        return None  # a grant that starts tomorrow has no measured spend yet
+    return parsed
+
+
+def credit_window_limited(registry, provider, today=None):
+    """True when a `credit` grant has no usable `credit_started`.
+
+    Carried on every guard as `window_limited` so the resolver's loud line
+    and the report renderer can name the month-to-date limit without
+    re-deriving the date rule (single home: `credit_started_date`)."""
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    if not isinstance(entry, dict) or entry.get("tier") != "credit":
+        return False
+    return credit_started_date(registry, provider, today) is None
+
+
+def _window_suffix(registry, provider, today=None):
+    """The loud month-to-date caveat, or "" when the window covers the grant."""
+    if credit_window_limited(registry, provider, today):
+        return " (window: month-to-date only; set credit_started)"
+    return ""
+
+
+def _since_or_month_start(since, today=None):
+    """The spend window start: the caller's `since`, else this month's start.
+
+    `today` (a date/datetime/None) is the injectable clock tests drive;
+    without it the wall clock is read once here, not per provider."""
+    if since is not None:
+        return since
+    if today is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif isinstance(today, datetime.datetime):
+        now = today if today.tzinfo is not None else today.replace(
+            tzinfo=datetime.timezone.utc)
+    else:
+        now = datetime.datetime.combine(today, datetime.time.min,
+                                        tzinfo=datetime.timezone.utc)
+    return month_start(now)
+
+
+def _effective_since(registry, provider, since, today=None):
+    """The window start a grant is measured over: `since` extended back to
+    `credit_started` when the grant declares one (T1-CREDIT-FIX-7 R2)."""
+    start = credit_started_date(registry, provider, today)
+    if start is None:
+        return since
+    start_dt = datetime.datetime.combine(start, datetime.time.min,
+                                         tzinfo=datetime.timezone.utc)
+    return min(since, start_dt)
 
 
 def _unmeasured_guard(registry, provider, note):
@@ -518,6 +593,7 @@ def _unmeasured_guard(registry, provider, note):
     return {"provider": provider, "state": "unknown",
             "spend_usd": 0.0, "spend_unknown": True,
             "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+            "window_limited": credit_window_limited(registry, provider),
             "note": note}
 
 
@@ -550,6 +626,15 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
     combo falls through, while fail-closed dropped the whole trial tier on a
     403. `failure` names the cause for the note; it is never a silent $0.00.
 
+    T1-CREDIT-FIX-7 R2: the window a grant is measured over starts at
+    `providers.<id>.credit_started` (YYYY-MM-DD) when the grant declares a
+    usable one, else at `since` (default: this month's start). The cap covers
+    the whole grant, so without a start date the window is month-to-date
+    only -- and every guard note then says so loudly
+    ("(window: month-to-date only; set credit_started)") instead of passing
+    a partial window off as a total. `today` is the injectable clock the
+    window math reads instead of the wall clock.
+
     Each guard is ``{"provider", "state", "spend_usd", "spend_unknown",
     "cap_usd", "warn_usd", "models_unpriced", "note"}``, with `state` from
     `spend_guard` (`ok` below the warn line, `warn` at it, `refuse` at the hard
@@ -560,7 +645,7 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
     reader can tell "measured $0" from "unmeasured".
     """
     if since is None:
-        since = month_start(datetime.datetime.now(datetime.timezone.utc))
+        since = _since_or_month_start(None, today)
     prices = prices_from_registry(registry)
     out = {}
     for provider in credit_guard_providers(registry):
@@ -581,6 +666,8 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                     "cap_usd": monthly_cap_usd(registry, provider),
                     "warn_usd": spend_warn_usd(registry, provider),
                     "models_unpriced": 0,
+                    "window_limited": credit_window_limited(
+                        registry, provider, today),
                     "note": note}
                 continue
             out[provider] = {
@@ -589,14 +676,20 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                 "cap_usd": monthly_cap_usd(registry, provider),
                 "warn_usd": spend_warn_usd(registry, provider),
                 "models_unpriced": 0,
+                "window_limited": credit_window_limited(
+                    registry, provider, today),
                 "note": "credit spend unknown %s: %s - leg kept (fail open: "
                         "a spent prepaid grant rejects at the provider and "
-                        "the combo falls through)"
-                        % (provider, failure or "no call-log rows")}
+                        "the combo falls through)%s"
+                        % (provider, failure or "no call-log rows",
+                           _window_suffix(registry, provider, today))}
             continue
+        window_start = _effective_since(registry, provider, since, today)
         try:
-            spend = paid_spend(rows, prices, registry, since, provider=provider)
+            spend = paid_spend(rows, prices, registry, window_start,
+                               provider=provider)
             state, note = spend_guard(registry, provider, spend["spend_usd"])
+            note += _window_suffix(registry, provider, today)
         except ValueError:
             # Config errors (a grant that cannot state its cap) still raise:
             # the usage report exits 3 on them (pinned by T1-CREDIT-FIX-2
@@ -620,6 +713,8 @@ def credit_guards(registry, rows, since=None, failure=None, today=None):
                          "cap_usd": monthly_cap_usd(registry, provider),
                          "warn_usd": spend_warn_usd(registry, provider),
                          "models_unpriced": spend["models_unpriced"],
+                         "window_limited": credit_window_limited(
+                             registry, provider, today),
                          "note": note}
     return out
 
@@ -1040,9 +1135,14 @@ def render_credit_guards(guards):
         if guard.get("state") == "unknown" or guard.get("spend_unknown"):
             # Unmeasured, never "$0.00": a bare zero reads as an intact grant
             # and once printed as `credit exhausted ... $0.00/$cap`.
-            lines.append("credit SPEND UNKNOWN %s - %s; its legs stay available "
-                         "(fail open) until spend is measured"
-                         % (provider, guard.get("note") or "spend unmeasured"))
+            # T1-CREDIT-FIX-7 R2: when the grant declares no `credit_started`
+            # the (absent) measurement covers month-to-date only -- say so.
+            line = ("credit SPEND UNKNOWN %s - %s; its legs stay available "
+                    "(fail open) until spend is measured"
+                    % (provider, guard.get("note") or "spend unmeasured"))
+            if guard.get("window_limited") and "month-to-date" not in line:
+                line += " (window: month-to-date only; set credit_started)"
+            lines.append(line)
         elif guard.get("state") == "manual":
             # T1-CREDIT-FIX-5 M1: a dated manual figure is not measured spend.
             # Name it (with its age, in the note) so it never reads as live.

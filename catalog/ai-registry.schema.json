@@ -174,6 +174,11 @@
           "default": 20,
           "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX-5 M3, D-220, 2026-10-01): the USD reserve a `credit` grant keeps below its total, so a measured spend REFUSES the leg at `credit_usd - margin` (vertex_ai $230, ovhcloud $180 at the default $20) instead of at the full grant. Must be >= 0 and < credit_usd; tools/registry.py's check_registry() enforces both."
         },
+        "credit_started": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX-7 R2, D-220, 2026-10-01): the date (YYYY-MM-DD) the grant started billing, so the spend guard measures the WHOLE grant instead of month-to-date. Optional; absent keeps the month-to-date window, loudly. Must be a real calendar date, not in the future; tools/registry.py's check_registry() enforces both."
+        },
         "tier": {
           "enum": ["free", "paid", "subscription", "credit"],
           "description": "`credit` (brief FREEKEYS-1, D-132/D-141) is a metered API the operator funded with a one-off vendor grant rather than a standing plan: the spend is real, so it is not `free` (a free tier is never private-safe and is what the probes may spend), and it is not `paid` either, because the money is a finite balance the guard must track — see `credit_usd` and `monthly_cap_usd`. tools/registry.py's private_safe() rejects any tier that is not exactly paid or subscription, and tools/probe_common.py probes only tier free, so a credit leg is never probed by the standing probes and never reaches a -clean route; the FREEKEYS-1 grant probe (logs/freekeys1_probe.py, an uncommitted work file) is the deliberate, capped exception."

@@ -3005,6 +3005,30 @@ def _check_credit_guards(registry) -> list:
             except ValueError:
                 problems.append("providers.%s: credit_spent_as_of must be a valid "
                                 "date YYYY-MM-DD, got %r" % (provider_id, as_of))
+    # T1-CREDIT-FIX-7 R2: the optional grant start. `credit_started` (YYYY-MM-DD)
+    # is the date the grant started billing, so the guard can measure the WHOLE
+    # grant instead of month-to-date. Absent is fine (the window stays
+    # month-to-date, loudly); present must be a real calendar date, not in the
+    # future -- a grant that starts tomorrow has no measured spend yet.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or "credit_started" not in provider:
+            continue
+        raw = provider.get("credit_started")
+        if not isinstance(raw, str) or not raw.strip():
+            problems.append("providers.%s: credit_started must be a date "
+                            "YYYY-MM-DD, got %r" % (provider_id, raw))
+            continue
+        try:
+            parsed = datetime.strptime(raw.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            problems.append("providers.%s: credit_started must be a valid "
+                            "calendar date YYYY-MM-DD, got %r"
+                            % (provider_id, raw))
+            continue
+        if parsed > datetime.now(timezone.utc).date():
+            problems.append("providers.%s: credit_started %r is in the future - "
+                            "a grant that starts tomorrow has no measured "
+                            "spend yet" % (provider_id, raw))
     # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
     # label every reader branches on, so a row that keeps `credit_usd` and calls
     # itself `free` silently un-limits the money, drops out of the leg filter's
