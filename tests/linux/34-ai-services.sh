@@ -2392,6 +2392,32 @@ if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"
     if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
 fi
 
+if it "svc: register-autostart defaults the 429-rotation policy in omniroute.env, respect-set"; then
+    # The autoos-omniroute unit carries no Environment= (it would shadow the
+    # operator's .env); its env surface is ~/.omniroute/.env, which OmniRoute's
+    # own loadEnvFile() reads (bin/omniroute.mjs). register-autostart.sh must
+    # append each policy default only when the key is absent, exactly once.
+    d="$(_svc_reg_sandbox)"
+    printf 'STORAGE_ENCRYPTION_KEY=keep-me\nOMNIROUTE_ROTATE_429_THRESHOLD=7\n' >"$d/omniroute.env"
+    first="$(_svc_reg "$d" --only autoos-omniroute)"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    for pair in OMNIROUTE_ROTATION_ENABLED=true OMNIROUTE_ROTATE_ON_429=true \
+                OMNIROUTE_ROTATE_429_THRESHOLD=7 OMNIROUTE_ROTATE_429_WINDOW_SECONDS=120 \
+                OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS=300 \
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=1800000; do
+        name="${pair%%=*}"
+        [[ "$(grep -cE "^${name}=" "$d/omniroute.env")" == 1 ]] || { ok=0; echo "$name not exactly once" >&2; }
+    done
+    grep -q '^OMNIROUTE_ROTATE_429_THRESHOLD=7$' "$d/omniroute.env" || { ok=0; echo "operator value overwritten" >&2; }
+    grep -q '^STORAGE_ENCRYPTION_KEY=keep-me$' "$d/omniroute.env" || { ok=0; echo "existing line lost" >&2; }
+    [[ "$(grep -cE '^OMNIROUTE_' "$d/omniroute.env")" == 6 ]] || { ok=0; echo "expected exactly 6 policy lines" >&2; }
+    [[ "$first" == *"+ appended 5 rotation default(s)"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"429 rotation policy already set"* ]] || { ok=0; echo "second: $second" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart 429-rotation policy is wrong"; fi
+fi
+
 # Same class, the omni_env append site: two backups of ~/.omniroute/.env in
 # the same second must not collide either.
 if it "backup residual: register-autostart backs up omniroute.env twice in one second without overwriting"; then

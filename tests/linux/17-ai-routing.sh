@@ -2539,12 +2539,21 @@ if it "start-stack.sh and apply.sh default the repeated-429 rotation policy, res
         [OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS]=300
         [OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS]=1800000
     )
-    for f in configuration/start-stack.sh configuration/omniroute/apply.sh; do
+    for f in configuration/start-stack.sh configuration/omniroute/apply.sh \
+             configuration/autostart/Start-AutoOSStack.sh; do
         for name in "${!policy[@]}"; do
             want="export $name=\"\${$name:-${policy[$name]}}\""
             n="$(grep -Fc "$want" "$f" || true)"
             [[ "$n" == 1 ]] || { ok=0; echo "$f: $name default appears $n times, want 1" >&2; }
         done
+    done
+    # The systemd unit (autoos-omniroute.service) takes its env from
+    # ~/.omniroute/.env, which register-autostart.sh writes; it must name every
+    # policy key (and it is the surface for the unit, not a unit Environment=).
+    for name in "${!policy[@]}"; do
+        want="$name=${policy[$name]}"
+        grep -qF "$want" configuration/autostart/register-autostart.sh \
+            || { ok=0; echo "register-autostart.sh does not default $want" >&2; }
     done
     if (( ok )); then pass; else fail "429-rotation policy defaults regressed"; fi
 fi
