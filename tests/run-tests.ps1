@@ -7147,6 +7147,56 @@ Test-Case 'gwkey: the shared URL table classifies every row the same way (module
     Assert-True ($wrong.Count -eq 0) ($wrong -join '; ')
 }
 
+Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for word (only the console writer differs)' {
+    # start-stack.ps1 is standalone (it imports no module), so it holds copies of the gateway-key rule.
+    # A copy that drifts picks another key field than apply.ps1 on the same machine: compare the TEXT.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $pick = {
+        param($file, $name)
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+        $f = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true))
+        if ($f.Count -ne 1) { return $null }
+        return ($f[0].Extent.Text -replace "`r`n", "`n")
+    }
+    $differ = @()
+    foreach ($n in $names) {
+        $m = & $pick (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') $n
+        $c = & $pick (Join-Path $Root 'configuration\start-stack.ps1') $n
+        if ($null -eq $m -or $null -eq $c) { $differ += "$n (missing in one file)"; continue }
+        $c = $c.Replace('Write-Host ', 'Write-AutoOSLine ')
+        if ($m -cne $c) { $differ += $n }
+    }
+    Assert-True ($differ.Count -eq 0) ("start-stack.ps1 drifted from the module: " + ($differ -join ', '))
+}
+
+Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in AUTOOS_HOST_CONFIG like the module' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','Write-AutoOSNoticeOnce'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd) . ([scriptblock]::Create($text)); & $cmd }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG; HOME_ = $env:USERPROFILE }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssw_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path (Join-Path $d 'autoos') -Force
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'autoos\host.yml'), "host_name: tilde-host`n")
+        $env:USERPROFILE = $d
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = '~/autoos/host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = '  http://127.0.0.1:20128  '
+        $m = Get-AutoOSClientKeyField
+        $c = & $inCopy $text 'Get-AutoOSClientKeyField'
+        Assert-Equal $m 'omniroute_tilde_host'
+        Assert-Equal $c $m 'the start-stack copy picked another field than the module'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        $env:USERPROFILE = $saved.HOME_
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'gwkey: start-stack.ps1 parity with module function' {
     # start-stack.ps1 carries a copy of the local-gateway check (Test-AutoOSLocalGateway).
     # This test loads both and asserts they give identical answers for the WS-OMNIREMOTE URL table.

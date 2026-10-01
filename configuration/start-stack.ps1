@@ -140,7 +140,14 @@ function Test-AutoOSLocalGateway {
 }
 
 function Get-AutoOSHostConfigPath {
-    if ($env:AUTOOS_HOST_CONFIG) { return [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG) }
+    if ($env:AUTOOS_HOST_CONFIG) {
+        $path = [Environment]::ExpandEnvironmentVariables($env:AUTOOS_HOST_CONFIG)
+        # Expand leading ~ (parity with Python/bash)
+        if ($path -like '~*') {
+            $path = $path -replace '^~', $env:USERPROFILE
+        }
+        return $path
+    }
     if ([Environment]::OSVersion.Platform -eq 'Win32NT') {
         $base = $env:LOCALAPPDATA
         if (-not $base) { $base = "$env:USERPROFILE\AppData\Local" }
@@ -209,7 +216,7 @@ function Get-AutoOSClientKey {
     # 4. Missing - clear error
     $context = if ($isLocal) { 'a local gateway' } else { 'a non-local gateway' }
     $hostFile = Get-AutoOSHostConfigPath
-    Write-Host "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname."
+    Write-Host "No OmniRoute client key for $context. Expected field '$field' in $KeysFile (or set AUTOOS_OMNIROUTE_KEY). Host name from AUTOOS_HOST_NAME or $hostFile (host_name:), falling back to short hostname." -Level error
     return $null
 }
 
