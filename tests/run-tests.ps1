@@ -2396,21 +2396,43 @@ function Start-AutoOSTestHttpServer {
     # inside a background job: the first version launched python via
     # Start-Process and never got a port back on the windows-latest CI
     # runner. No python, no HttpListener URL ACL, nothing to install.
-    # Returns @{ Job; Port }; the caller must Stop-AutoOSTestHttpServer it.
-    param([Parameter(Mandatory)][string]$Directory)
+    # Returns @{ Job; Port; StopFile }; the caller must Stop-AutoOSTestHttpServer it.
+    # -Hang makes every accepted request stall forever: the connection is
+    # accepted and the request read, then nothing is ever sent until teardown.
+    # That is the stalled-mirror shape the download timeout exists for.
+    param([Parameter(Mandatory)][string]$Directory, [switch]$Hang)
+    # Read the switch into a plain boolean in THIS scope: the job below reaches
+    # it with $using:, so the parameter is genuinely used here even though the
+    # job scriptblock is where the value is consumed.
+    $hangRequested = [bool]$Hang
     $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
+    $stopFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
     $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
         param($dir, $portFile)
         $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
         $listener.Start()
         [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
-        while ($true) {
+        # AcceptTcpClient() blocks in native code and is not interruptible, so
+        # Remove-Job -Force on a job parked in it waits the full 120 s job
+        # stop/close timeout (found 2026-10-01). Poll a stop-file instead and
+        # leave the accept loop cooperatively: Stop-AutoOSTestHttpServer writes
+        # it, the job exits on its own, and Remove-Job returns at once.
+        while (-not (Test-Path -LiteralPath $using:stopFile)) {
+            if (-not $listener.Pending()) { Start-Sleep -Milliseconds 25; continue }
             $client = $listener.AcceptTcpClient()
             try {
                 $stream = $client.GetStream()
                 $reader = [IO.StreamReader]::new($stream)
                 $request = $reader.ReadLine()
                 while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                if ($using:hangRequested) {
+                    # Hold the socket open, answer nothing, and leave only when
+                    # teardown writes the stop-file (the cooperative stop the
+                    # 2026-10-01 harness fix requires: an uninterruptible job
+                    # makes Remove-Job -Force wait the full 120 s).
+                    while (-not (Test-Path -LiteralPath $using:stopFile)) { Start-Sleep -Milliseconds 50 }
+                    continue
+                }
                 $status = '404 Not Found'; $body = [byte[]]::new(0)
                 if ($request -match '^GET\s+(\S+)') {
                     $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
@@ -2431,6 +2453,7 @@ function Start-AutoOSTestHttpServer {
                 $client.Close()
             }
         }
+        $listener.Stop()
     }
     $port = $null
     for ($i = 0; $i -lt 100; $i++) {
@@ -2443,15 +2466,118 @@ function Start-AutoOSTestHttpServer {
     Remove-Item -LiteralPath $portFile -Force -ErrorAction SilentlyContinue
     if (-not $port) {
         $why = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+        # Release the job the same cooperative way, or this error path pays the
+        # same 120 s stop timeout it is reporting on.
+        Set-Content -LiteralPath $stopFile -Value 'stop' -ErrorAction SilentlyContinue
         Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
         throw "test http server did not report a port (job state $($job.State)) $why"
     }
-    @{ Job = $job; Port = $port }
+    @{ Job = $job; Port = $port; StopFile = $stopFile }
 }
 
 function Stop-AutoOSTestHttpServer {
     param($Server)
-    if ($Server -and $Server.Job) { Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue }
+    if ($Server -and $Server.Job) {
+        # Ask the job to leave its accept loop before forcing it. Without this
+        # it is parked in AcceptTcpClient() (native, uninterruptible) and
+        # Remove-Job -Force waits the full 120 s job stop/close timeout. The
+        # written stop-file makes the job exit on its own, so removal is
+        # immediate (measured 0.02 s, 2026-10-01).
+        if ($Server.StopFile) { Set-Content -LiteralPath $Server.StopFile -Value 'stop' -ErrorAction SilentlyContinue }
+        Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue
+        if ($Server.StopFile) { Remove-Item -LiteralPath $Server.StopFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'test http server: Stop-AutoOSTestHttpServer returns promptly, never the 120 s job stop timeout' {
+    # Regression for the harness teardown bug (2026-10-01): the fixture used to
+    # block in AcceptTcpClient(), which Remove-Job -Force cannot interrupt, so
+    # every one of the 13 server-starting cases stalled ~120 s on teardown.
+    # 15 s is a generous bound: the bug is 120 s, the fix is well under 1 s.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        [IO.File]::WriteAllText((Join-Path $tmp 'ping.txt'), 'pong')
+        # One real request proves the poll loop actually serves, not just exits.
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/ping.txt" -UseBasicParsing -TimeoutSec 5
+        # The fixture sends no Content-Type, so .Content is a byte[] not text.
+        $served = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
+        Assert-True ($served -eq 'pong') "the poll loop did not serve a request: [$served]"
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Stop-AutoOSTestHttpServer $srv
+        $sw.Stop()
+        $srv = $null   # already stopped; the finally must not stop it twice
+        Assert-True ($sw.Elapsed.TotalSeconds -lt 15) ("teardown took {0:N1}s, expected < 15s" -f $sw.Elapsed.TotalSeconds)
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a stalled endpoint fails within the wall-clock bound instead of hanging (timeout)' {
+    # 2026-10-01 defect, failing-first: Get-AutoOSRawDownload shelled out to
+    # curl / Invoke-WebRequest with no time bound, so a mirror that accepted
+    # the connection and then sent nothing pinned the provision forever. The
+    # bound is injectable through AUTOOS_DOWNLOAD_TIMEOUT_SEC exactly so this
+    # is provable without waiting an hour: with a 2 s ceiling the fetch must
+    # fail fast, with a transport-failure message, and leave no .part behind.
+    # Against the pre-fix code this test has no bound to honour and hangs.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_stall_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp -Hang
+    $prev = $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC
+    $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = '2'
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/stall.bin" -Destination $out | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        $sw.Stop()
+        # Two-sided window: >= 1 s proves the stall actually happened (a
+        # connection-refused or DNS failure returns in well under a second and
+        # would otherwise satisfy the assertion without exercising the bound);
+        # < 30 s is generous for the injected 2 s bound plus curl's bounded
+        # retries, where the unfixed behaviour is unbounded.
+        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -ge 1 -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
+            ("threw={0} elapsed={1:N1}s part={2} msg=[{3}]" -f $threw, $sw.Elapsed.TotalSeconds, (Test-Path -LiteralPath "$out.part"), $msg)
+    } finally {
+        if ($null -eq $prev) { Remove-Item Env:\AUTOOS_DOWNLOAD_TIMEOUT_SEC -ErrorAction SilentlyContinue } else { $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = $prev }
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'every production network fetch in lib\windows carries a wall-clock bound' {
+    # The same 2026-10-01 defect class, enforced structurally so a NEW unbounded
+    # call site fails here instead of hanging a real provision: every shipped
+    # Invoke-WebRequest/Invoke-RestMethod invocation needs -TimeoutSec, and every
+    # direct curl invocation needs --max-time. Comment lines are skipped; only
+    # invocation lines are judged.
+    #
+    # It is a tripwire, not a proof: it matches '-Uri' on the same line as the
+    # verb, so a splatted, aliased (iwr/irm) or line-continued invocation, or a
+    # bare 'curl'/'--output', would slip past. That is the deliberate trade for
+    # a zero-dependency, readable guard; the behavioural stall test above is
+    # what actually exercises the bound.
+    $dir = Join-Path $Root 'lib\windows'
+    $bad = @()
+    foreach ($file in Get-ChildItem -Path $dir -Filter '*.psm1') {
+        $n = 0
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            $n++
+            $code = $line.Trim()
+            if ($code.StartsWith('#')) { continue }
+            if ($code -match 'Invoke-WebRequest\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-WebRequest without -TimeoutSec"
+            } elseif ($code -match 'Invoke-RestMethod\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-RestMethod without -TimeoutSec"
+            } elseif ($code -match '(&\s*\$curl\.Source|curl\.exe).*?-o\s' -and $code -notmatch '--max-time') {
+                $bad += "$($file.Name):$n curl without --max-time"
+            }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ($bad -join '; ')
 }
 
 Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {

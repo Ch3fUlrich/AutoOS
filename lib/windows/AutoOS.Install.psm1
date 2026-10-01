@@ -27,6 +27,13 @@ $script:Answers = @{}
 $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:AgentHarness = $null
 
+# Wall-clock bound on this module's direct network fetches (2026-10-01): the
+# same defect class as AutoOS.Download.psm1 - Invoke-WebRequest has no default
+# timeout, so a stalled host hangs a provision forever. These fetches are all
+# small ancillary files (a font, an installer script), so 300 s is far above
+# any healthy transfer and only fires on a genuine stall.
+$script:AutoOSFetchTimeoutSec = 300
+
 function Initialize-AutoOSInstaller {
     param([bool]$DryRun = $false, [hashtable]$Answers = @{}, [string]$RepoRoot = $null)
     $script:DryRun  = $DryRun
@@ -631,7 +638,7 @@ function Install-AutoOSNerdFont {
         if (-not (Test-Path $fontDir)) { New-Item -ItemType Directory -Path $fontDir -Force | Out-Null }
         $url = 'https://github.com/romkatv/powerlevel10k-media/raw/master/MesloLGS%20NF%20Regular.ttf'
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing
+        Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing -TimeoutSec $script:AutoOSFetchTimeoutSec
         # Per-user font registration; no elevation needed.
         $key = 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts'
         if (-not (Test-Path $key)) { New-Item -Path $key -Force | Out-Null }
@@ -3592,7 +3599,7 @@ function Install-AutoOSQoderCli {
             Write-AutoOSLine "downloading Qoder CLI installer from $url" -Level muted
             $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoder-install-$([Guid]::NewGuid().ToString('N')).ps1"
             try {
-                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec $script:AutoOSFetchTimeoutSec
                 if (-not (Test-Path -LiteralPath $tmp) -or (Get-Item $tmp).Length -eq 0) { throw 'empty download' }
                 powershell -NoProfile -ExecutionPolicy Bypass -File $tmp
                 if ($LASTEXITCODE -ne 0) { Write-AutoOSLine 'Qoder CLI installer failed' -Level warn; return }
