@@ -3034,6 +3034,43 @@ class CreditSpendGuardTests(unittest.TestCase):
         del reg["providers"]["deepinfra"]["monthly_cap_usd"]
         self.assertTrue(self.credit_problems(reg))
 
+    def test_a_dated_manual_spend_pair_is_accepted(self):
+        """T1-CREDIT-FIX: the manual fallback fields are optional but paired --
+        a complete dated figure passes the shipped check."""
+        reg = mutated()
+        reg["providers"]["morph"]["credit_spent_usd"] = 3.5
+        reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
+        self.assertEqual(registry._check_credit_guards(reg), [])
+
+    def test_a_half_present_manual_spend_is_flagged(self):
+        """A figure with no date cannot age; a date with no figure judges
+        nothing -- both halves are flagged, not trusted."""
+        for figure, as_of in ((3.5, None), (None, "2026-09-30")):
+            reg = mutated()
+            if figure is not None:
+                reg["providers"]["morph"]["credit_spent_usd"] = figure
+            if as_of is not None:
+                reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_a_malformed_manual_spend_is_flagged(self):
+        for figure, as_of in ((-1.0, "2026-09-30"), (True, "2026-09-30"),
+                              ("3.5", "2026-09-30"), (3.5, ""),
+                              (3.5, None), (3.5, 20260930)):
+            reg = mutated()
+            reg["providers"]["morph"]["credit_spent_usd"] = figure
+            reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_absent_manual_spend_needs_nothing(self):
+        """The pair is optional: no credit row carries it today, and the
+        shipped registry stays clean."""
+        self.assertEqual(registry._check_credit_guards(load_registry()), [])
+
 
 class ThirdPartyClaudeLegTests(unittest.TestCase):
     """FREEKEYS-1 step 4 (D-102): a Claude model reached through anyone else's

@@ -310,31 +310,142 @@ def credit_guard_providers(registry):
                   if isinstance(entry, dict) and entry.get("tier") == "credit")
 
 
-def credit_guards(registry, rows, since=None):
+def manual_credit_spend(registry, provider):
+    """(spend_usd, as_of) from the registry's dated manual figure, or (None, None).
+
+    `providers.<id>.credit_spent_usd` + `credit_spent_as_of` is the operator's
+    dated reading of a grant's billed spend, for when the gateway call-log
+    ledger cannot be read. Both or neither: a figure with no date cannot age
+    and a date with no figure judges nothing, so a half-present or malformed
+    pair reads as absent here (tools/registry.py flags it; the plan never
+    crashes on it)."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    figure = entry.get("credit_spent_usd")
+    as_of = entry.get("credit_spent_as_of")
+    if figure is None and as_of is None:
+        return None, None
+    if (isinstance(figure, bool) or not isinstance(figure, (int, float))
+            or figure < 0 or not isinstance(as_of, str) or not as_of.strip()):
+        return None, None
+    return float(figure), as_of.strip()
+
+
+def spend_failure_note(exc):
+    """The one-line reason a spend figure is unmeasured, from the failure.
+
+    A gateway 403 (or 401) names the manage key, because a 15-byte revoked or
+    wrong-scoped key 403s every call-log read and the spend then reads as $0 --
+    which downstream used to print as `credit exhausted ... $0.00/$cap`. An
+    OSError is the key file itself (missing, empty, unreadable). Anything else
+    keeps its type name only: an error text can carry the gateway URL or the
+    home path, and this note is printed into plans and reports (AGENTS.md
+    rule 1). The HTTP contract is `fetch_window`'s: 401 with no credential,
+    403 when the key lacks the 'manage' scope."""
+    if isinstance(exc, UsageError):
+        text = str(exc)
+        if "HTTP 403" in text:
+            return "manage key rejected (403) - spend unmeasured"
+        if "HTTP 401" in text:
+            return "manage key rejected (401) - spend unmeasured"
+        return "credit grant unreadable (%s) - spend unmeasured" % type(exc).__name__
+    if isinstance(exc, OSError):
+        return "manage key unreadable (%s) - spend unmeasured" % type(exc).__name__
+    return "credit grant unreadable (%s) - spend unmeasured" % type(exc).__name__
+
+
+def credit_guards_unreadable(registry, failure):
+    """``{provider id: guard}`` when even the manual fallback cannot be built.
+
+    Pure last resort: no pricing math, only best-effort cap reads, so it cannot
+    raise. Every grant reads `unknown` (fail open), never `refuse`.
+    """
+    out = {}
+    for provider in credit_guard_providers(registry):
+        cap = warn = 0.0
+        try:
+            cap = monthly_cap_usd(registry, provider)
+            warn = spend_warn_usd(registry, provider)
+        except ValueError:
+            pass  # a grant with no cap cannot be judged, only kept openly
+        out[provider] = {"provider": provider, "state": "unknown",
+                         "spend_usd": 0.0, "spend_unknown": True,
+                         "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                         "note": "credit spend unknown %s: %s"
+                                 % (provider, failure or "no call-log rows")}
+    return out
+
+
+def credit_guards(registry, rows, since=None, failure=None):
     """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
+
+    Field semantics (T1-CREDIT-FIX): `credit_usd` is the trial grant TOTAL in
+    USD -- what the vendor funded. `spent` is what the grant already billed
+    (the ledger figure below, or the dated manual figure). Remaining =
+    credit_usd minus spent. The leg is exhausted only when spent reaches
+    `monthly_cap_usd` (which equals `credit_usd` -- refuse at 100 % of the
+    grant), so `$0 spent of $N` is an intact grant, never an exhausted one.
 
     This is the builder that feeds the resolver's leg filter (brief FREEKEYS-1b
     items 2 and 4): one figure per grant, produced by `paid_spend` over the same
     rows the report prints and judged by `spend_guard` against the provider's own
     `monthly_cap_usd`, so what blocks a leg and what the ledger reports are never
-    two different numbers. `rows` are the gateway's call-log rows; a grant with no
+    two different numbers. `rows` are the gateway's call-log rows -- the only
+    spend ledger in this repo (no separate ledger or cost store exists; the rows
+    priced client-side against the registry ARE the ledger); a grant with no
     rows of its own is at $0, and a grant whose models carry no price is reported
     with `models_unpriced` above 0 -- which is exactly the state the resolver
     refuses the leg for, because $0 here would otherwise read as untouched money.
 
-    Each guard is ``{"provider", "state", "spend_usd", "cap_usd", "warn_usd",
-    "models_unpriced", "note"}``, with `state` from `spend_guard`: `ok` below the
-    warn line, `warn` at it (80 % of the grant by default), `refuse` at the cap.
+    `rows=None` means the ledger could not be read at all (gateway down, key
+    missing or rejected): the figure falls back to the registry's dated manual
+    spend (`manual_credit_spend`), and when no manual figure exists the guard
+    reads `unknown` -- fail OPEN with a `spend unknown` note, because a prepaid
+    trial grant that is truly spent rejects at the provider (402/429) and the
+    combo falls through, while fail-closed dropped the whole trial tier on a
+    403. `failure` names the cause for the note; it is never a silent $0.00.
+
+    Each guard is ``{"provider", "state", "spend_usd", "spend_unknown",
+    "cap_usd", "warn_usd", "models_unpriced", "note"}``, with `state` from
+    `spend_guard` (`ok` below the warn line, `warn` at it, `refuse` at the cap)
+    or `unknown` when nothing measurable exists. `spend_unknown` is True only
+    for the unknown state, so a reader can tell "measured $0" from "unmeasured".
     """
     if since is None:
         since = month_start(datetime.datetime.now(datetime.timezone.utc))
     prices = prices_from_registry(registry)
     out = {}
     for provider in credit_guard_providers(registry):
+        if rows is None:
+            manual, as_of = manual_credit_spend(registry, provider)
+            if manual is not None:
+                state, note = spend_guard(registry, provider, manual)
+                out[provider] = {
+                    "provider": provider, "state": state,
+                    "spend_usd": manual, "spend_unknown": False,
+                    "cap_usd": monthly_cap_usd(registry, provider),
+                    "warn_usd": spend_warn_usd(registry, provider),
+                    "models_unpriced": 0,
+                    "note": "%s (manual figure $%.2f as of %s; gateway ledger "
+                            "unreadable: %s)"
+                            % (note, manual, as_of,
+                               failure or "no call-log rows")}
+                continue
+            out[provider] = {
+                "provider": provider, "state": "unknown",
+                "spend_usd": 0.0, "spend_unknown": True,
+                "cap_usd": monthly_cap_usd(registry, provider),
+                "warn_usd": spend_warn_usd(registry, provider),
+                "models_unpriced": 0,
+                "note": "credit spend unknown %s: %s - leg kept (fail open: "
+                        "a spent prepaid grant rejects at the provider and "
+                        "the combo falls through)"
+                        % (provider, failure or "no call-log rows")}
+            continue
         spend = paid_spend(rows, prices, registry, since, provider=provider)
         state, note = spend_guard(registry, provider, spend["spend_usd"])
         out[provider] = {"provider": provider, "state": state,
                          "spend_usd": spend["spend_usd"],
+                         "spend_unknown": False,
                          "cap_usd": monthly_cap_usd(registry, provider),
                          "warn_usd": spend_warn_usd(registry, provider),
                          "models_unpriced": spend["models_unpriced"],
@@ -664,7 +775,13 @@ def render_credit_guards(guards):
     lines = []
     for provider in sorted(guards or {}):
         guard = guards[provider]
-        if guard.get("state") == "warn":
+        if guard.get("state") == "unknown" or guard.get("spend_unknown"):
+            # Unmeasured, never "$0.00": a bare zero reads as an intact grant
+            # and once printed as `credit exhausted ... $0.00/$cap`.
+            lines.append("credit SPEND UNKNOWN %s - %s; its legs stay available "
+                         "(fail open) until spend is measured"
+                         % (provider, guard.get("note") or "spend unmeasured"))
+        elif guard.get("state") == "warn":
             lines.append("credit WARN %s $%.2f of a $%.2f grant (warn line $%.2f)"
                          % (provider, guard["spend_usd"], guard["cap_usd"],
                             guard["warn_usd"]))
@@ -854,7 +971,8 @@ def main(argv=None, *, fetch=None, env=None, now=None):
         key = read_manage_key(path)
     except OSError:
         print("autoos-usage: manage key file missing or empty: %s - create a manage-scoped "
-              "key in the OmniRoute dashboard and save it there (mode 600)" % path, file=sys.stderr)
+              "key in the OmniRoute dashboard and save it there (mode 600) - spend unmeasured"
+              % path, file=sys.stderr)
         return 3
 
     gateway = (env.get("AUTOOS_OMNIROUTE_URL") or DEFAULT_GATEWAY).rstrip("/")
@@ -865,6 +983,19 @@ def main(argv=None, *, fetch=None, env=None, now=None):
                                               if spend_on else cutoff)
     except UsageError as e:
         print("autoos-usage: %s" % e, file=sys.stderr)
+        text = str(e)
+        # The distinct manage-key line (T1-CREDIT-FIX): a 403 is the observed
+        # failure -- a short/revoked/wrong-scoped key the gateway refuses --
+        # and the spend it leaves behind is unmeasured, never $0.00.
+        if "HTTP 403" in text:
+            print("autoos-usage: manage key rejected (403) - spend unmeasured",
+                  file=sys.stderr)
+        elif "HTTP 401" in text:
+            print("autoos-usage: manage key rejected (401) - spend unmeasured",
+                  file=sys.stderr)
+        else:
+            print("autoos-usage: spend unmeasured (%s)" % type(e).__name__,
+                  file=sys.stderr)
         return 3
 
     priced = args.cost or args.lines or spend_on

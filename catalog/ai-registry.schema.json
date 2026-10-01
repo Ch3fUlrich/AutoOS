@@ -160,6 +160,14 @@
           "type": ["number", "null"],
           "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1, D-132/D-141): the one-off vendor credit in USD the operator funded this `credit`-tier provider with, from the vendor's own grant (source in the row's $comment). It is the balance the spend guard is sized against: `monthly_cap_usd` is set to the same number (refuse at 100 % of the grant) and `monthly_warn_fraction` to 0.8 (warn at 80 %). tools/registry.py's check_registry() requires the trio to agree on every `credit` row."
         },
+        "credit_spent_usd": {
+          "type": ["number", "null"],
+          "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX, 2026-10-01): the operator's dated reading of what this grant already billed in USD, read only when the gateway call-log ledger cannot be reached (tools/autoos_usage.py manual_credit_spend). Goes with credit_spent_as_of (both or neither); tools/registry.py's check_registry() requires a number >= 0."
+        },
+        "credit_spent_as_of": {
+          "type": ["string", "null"],
+          "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX, 2026-10-01): the date (YYYY-MM-DD) the credit_spent_usd figure was read, so the fallback can age. Goes with credit_spent_usd (both or neither); tools/registry.py's check_registry() requires a non-empty string."
+        },
         "tier": {
           "enum": ["free", "paid", "subscription", "credit"],
           "description": "`credit` (brief FREEKEYS-1, D-132/D-141) is a metered API the operator funded with a one-off vendor grant rather than a standing plan: the spend is real, so it is not `free` (a free tier is never private-safe and is what the probes may spend), and it is not `paid` either, because the money is a finite balance the guard must track — see `credit_usd` and `monthly_cap_usd`. tools/registry.py's private_safe() rejects any tier that is not exactly paid or subscription, and tools/probe_common.py probes only tier free, so a credit leg is never probed by the standing probes and never reaches a -clean route; the FREEKEYS-1 grant probe (logs/freekeys1_probe.py, an uncommitted work file) is the deliberate, capped exception."

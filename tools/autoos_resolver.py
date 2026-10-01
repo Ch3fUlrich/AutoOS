@@ -923,19 +923,26 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       (``registry.leg_denied``) is skipped with reason ``leg_rules: <leg>
       denied by <rule id>`` - the same legs ``registry.gateway_legs`` drops,
       since a gateway combo never carries a denied leg.
-    - the credit grant (brief FREEKEYS-1b, items 2-3): a leg of a provider whose
-      ``tier`` is ``credit`` is a finite amount of the operator's money, so two
-      things refuse it. No price on file -- ``credit leg unpriced <model>`` --
-      because an unpriced grant bills $0 and would read as an untouched allowance
-      while it drains; this half needs no `credit_guards` at all, which is what
-      makes it fail closed rather than open. And the guard's own ``refuse`` at
-      100 % of ``providers.<id>.monthly_cap_usd`` -- ``credit exhausted <provider>
+    - the credit grant (brief FREEKEYS-1b, items 2-3, as amended by
+      T1-CREDIT-FIX): a leg of a provider whose ``tier`` is ``credit`` is a
+      finite amount of the operator's money, so two things refuse it. No price
+      on file -- ``credit leg unpriced <model>`` -- because an unpriced grant
+      bills $0 and would read as an untouched allowance while it drains; this
+      half needs no `credit_guards` at all, which is what makes it fail closed
+      rather than open. And the guard's own ``refuse`` at 100 % of
+      ``providers.<id>.monthly_cap_usd`` -- ``credit exhausted <provider>
       $x/$cap`` -- reading the state `autoos_usage.credit_guards` computes from
       recorded usage rows, so the figure the resolver acts on is the figure the
-      usage report prints. At the warn line (``monthly_warn_fraction``, 80 % by
-      default) the leg stays: there is money left. It is named in `credit_warns`
-      so the plan's ``explain`` and the caller's report say so instead of the
-      guard being silent until it blocks.
+      usage report prints. Field semantics: ``credit_usd`` is the trial grant
+      TOTAL; remaining = credit_usd minus spent; ``$0 spent of $N`` is intact,
+      never exhausted. An UNMEASURABLE spend (guard state ``unknown``, or no
+      guard data) keeps the leg and is named in `credit_warns` as ``credit
+      spend unknown`` -- fail open, because a spent prepaid grant rejects at
+      the provider and the combo falls through. At the warn line
+      (``monthly_warn_fraction``, 80 % by default) the leg likewise stays:
+      there is money left. It is named in `credit_warns` so the plan's
+      ``explain`` and the caller's report say so instead of the guard being
+      silent until it blocks.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -1051,17 +1058,42 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("leg_rules: %s denied by %s"
                            % (leg, rule.get("id", "(unnamed)")))
 
-        # FREEKEYS-1b (items 2-3): a `credit` provider's grant is finite, and the
-        # guard has to bite here -- a number the report prints and nothing refuses
-        # is what let a $10 grant drain invisibly (rev-freekeys1 findings 2 and 3).
-        # Both halves fail closed: no `credit_guards` from the caller means no spend
-        # data, and no spend data plus no price is a leg nobody can cost, so the
-        # unpriced check refuses it outright.
+        # FREEKEYS-1b (items 2-3) as amended by T1-CREDIT-FIX: a `credit`
+        # provider's grant is finite, and the guard has to bite here -- a number
+        # the report prints and nothing refuses is what let a $10 grant drain
+        # invisibly (rev-freekeys1 findings 2 and 3). Field semantics:
+        # `credit_usd` is the trial grant TOTAL; spent is what it already
+        # billed; remaining = credit_usd minus spent. Only a MEASURED spend at
+        # or above the cap refuses the leg. An unmeasurable spend (guard state
+        # `unknown`, or no guard data at all) keeps the leg with a `spend
+        # unknown` note -- fail open, because a prepaid trial grant that is
+        # truly spent rejects at the provider (402/429) and the combo falls
+        # through, while fail-closed put the whole trial tier offline on a
+        # manage-key 403 (`credit exhausted ovhcloud $0.00/$200.00` at $0
+        # spent). Both halves still fail closed where they must: no price on
+        # file refuses the leg outright (an unpriced grant bills $0 and would
+        # read as an untouched allowance while it drains), and a measured
+        # spend at the cap refuses it.
         if registry["providers"][provider_id].get("tier") == "credit":
             if not credit_leg_priced(model_id, registry):
                 reasons.append("credit leg unpriced %s" % model_id)
             guard = (credit_guards or {}).get(provider_id) or {}
-            if guard.get("state") == "refuse":
+            if guard.get("state") == "unknown" or guard.get("spend_unknown") \
+                    or not guard:
+                if credit_warns is not None:
+                    # The guard note already names the provider and the cause;
+                    # it is the explain line verbatim (one line per grant per
+                    # plan, however many of its legs a route carries and
+                    # however many routes were filtered to get here).
+                    if guard and guard.get("note"):
+                        line = guard["note"]
+                    else:
+                        line = ("credit spend unknown %s - no guard data, "
+                                "spend unmeasured, leg kept (fail open)"
+                                % provider_id)
+                    if line not in credit_warns:
+                        credit_warns.append(line)
+            elif guard.get("state") == "refuse":
                 reasons.append("credit exhausted %s $%.2f/$%.2f"
                                % (provider_id, float(guard.get("spend_usd") or 0.0),
                                   float(guard.get("cap_usd") or 0.0)))
@@ -1174,6 +1206,34 @@ def filter_routes(card, features, client_state, registry, overlay,
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
                 for leg, leg_reasons in skipped.items()))
+
+        # T1-CREDIT-FIX: a route whose class has no scoring priors cannot be
+        # scored -- latency_minutes and track.p_success both raise ValueError
+        # on a missing class entry (fail closed, pinned by their own tests) --
+        # so it is removed here with the gap named instead of crashing the
+        # whole plan in step 4. Reached in production by the four class
+        # `credit` single-leg routes TORDER TASK4 added without
+        # policy.latency_seed.credit / policy.seed_priors.credit entries: while
+        # fail-closed they never survived filtering, so nobody noticed; with
+        # the trial legs back they score (and die) first. Their ovhcloud /
+        # vertex legs are usable again, but the singles wait on the operator
+        # adding the two seed entries -- this reason is the pointer. Only
+        # checked when the policy maps exist at all: a registry with no policy
+        # section is a unit-test synthetic exercising the leg filters, not a
+        # data gap, and scoring never ran on it either way.
+        policy = registry.get("policy") or {}
+        seeds = policy.get("latency_seed") or {}
+        priors = policy.get("seed_priors") or {}
+        route_class = route.get("class")
+        if route_class and (seeds or priors):
+            missing = [key for key, mapping in
+                       (("policy.latency_seed", seeds),
+                        ("policy.seed_priors", priors))
+                       if route_class not in mapping]
+            if missing:
+                reasons.append("no scoring priors for class %r (%s) - add the "
+                               "class entries before this route can plan"
+                               % (route_class, " and ".join(missing)))
 
         if reasons:
             removed[route_id] = reasons

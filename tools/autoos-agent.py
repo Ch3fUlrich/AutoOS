@@ -4497,32 +4497,28 @@ CREDIT_GUARD_CACHE: dict = {}
 
 
 def _credit_guards_unreadable(registry: dict, why: str) -> dict:
-    """Every `credit` grant refuses, because nobody can say what it has spent.
+    """Every `credit` grant stays available, with the reason named.
 
-    The half of the guard that must not be optimistic (brief FREEKEYS-2 item 2):
-    a usage read that fails leaves the resolver with no spend figure, and "no
-    figure" is not "$0 left" — it is the state that let a $10 grant drain
-    invisibly before. Returning `refuse` per grant drops only the credit legs of
-    a route, so a card with a free leg still plans; returning `{}` would drop
-    nothing and let the grant spend past its cap.
+    The fail-OPEN half of the guard (T1-CREDIT-FIX, supersedes the FREEKEYS-2
+    fail-closed contract): a usage read that fails leaves the resolver with no
+    spend figure, and "no figure" is not "$0 spent" -- printing it as $0.00 of
+    a $200 grant is what reported an untouched trial grant as EXHAUSTED and
+    skipped every trial leg (`credit exhausted ovhcloud $0.00/$200.00`). The
+    figure falls back to the registry's dated manual spend when one exists
+    (`autoos_usage.manual_credit_spend`), else to `unknown`, which the leg
+    filter keeps with a `spend unknown` note. A prepaid trial grant that is
+    truly spent rejects at the provider (402/429) and the combo falls through
+    at run time, so keeping the leg risks one refused call, while refusing it
+    puts the whole trial tier offline on a 403.
 
-    `why` is an exception *type name*, never its message: a gateway error text
-    can carry the URL and a key-file error the home path, and this note is
-    printed into the plan, the run log and `route --explain` (AGENTS.md rule 1).
+    `why` is the one-line `autoos_usage.spend_failure_note` for the failure --
+    `manage key rejected (403) - spend unmeasured` for the observed short-key
+    403 -- never a message that can carry key material (AGENTS.md rule 1).
     """
-    out = {}
-    for provider in usage_mod.credit_guard_providers(registry):
-        cap = warn = 0.0
-        try:
-            cap = usage_mod.monthly_cap_usd(registry, provider)
-            warn = usage_mod.spend_warn_usd(registry, provider)
-        except ValueError:
-            pass  # a grant with no cap cannot be judged, only refused
-        out[provider] = {"provider": provider, "state": "refuse", "spend_usd": 0.0,
-                         "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
-                         "note": "credit grant unreadable (%s): no spend data, so "
-                                 "the leg is refused until the gateway answers" % why}
-    return out
+    try:
+        return usage_mod.credit_guards(registry, None, None, failure=why)
+    except Exception:  # noqa: BLE001 - the manual fallback must never fail the plan
+        return usage_mod.credit_guards_unreadable(registry, why)
 
 
 def plan_credit_guards(registry: dict, now=None, fetch=None,
@@ -4537,7 +4533,9 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     the same reader the `usage` report prints, so what blocks a leg and what the
     ledger shows are never two numbers. A read that fails (gateway down, key
     missing or unauthorised, an unparseable page) returns
-    `_credit_guards_unreadable`, not an empty map.
+    `_credit_guards_unreadable` -- the fail-open fallback (dated manual figure,
+    else `unknown` with a `spend unknown` note), not an empty map and no longer
+    a `refuse` map.
 
     Two things make this safe inside a plan (FREEKEYS-2c, rev-freekeys2 finding
     4). The cache is keyed by `registry` identity, so a caller that hands this a
@@ -4545,10 +4543,12 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     a lane that reloads — gets guards built from that registry's own caps
     instead of the first one's answer. And the usage read is wrapped in
     `except Exception`, not a list of expected types: every failure mode this
-    can predict already refuses the credit legs, and one it cannot predict must
-    do the same rather than raise through `route_plan_for` and take the plan
-    down with it. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
-    `Exception`, so Ctrl-C still works.
+    can predict already lands in `unknown` (fail open), and one it cannot
+    predict must do the same rather than raise through `route_plan_for` and take
+    the plan down with it. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
+    `Exception`, so Ctrl-C still works. T1-CREDIT-FIX: the landing state for
+    every failure mode, predicted or not, is now `unknown` (fail open, legs
+    kept with a `spend unknown` note), not `refuse`.
 
     `fetch`/`env`/`now` are injectable so a test can drive this without a
     gateway, a key or the clock; the callers pass none of them.
@@ -4571,8 +4571,8 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
         rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
         guards = usage_mod.credit_guards(registry, rows, cutoff)
-    except Exception as exc:  # noqa: BLE001 - fail closed, never fail the plan
-        guards = _credit_guards_unreadable(registry, type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - fail open, never fail the plan
+        guards = _credit_guards_unreadable(registry, usage_mod.spend_failure_note(exc))
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 

@@ -94,6 +94,16 @@ today every credit leg is dropped until real prices are recorded. Free-tier mode
 are untouched by both rules, and `registry.py check` rejects a row that keeps
 `credit_usd` while calling itself another tier.
 
+T1-CREDIT-FIX (2026-10-01): `credit_usd` is the grant TOTAL; remaining =
+`credit_usd` minus spent, so `$0 spent of $N` is intact, never exhausted. Spend
+that cannot be measured (gateway call-log unreadable -- e.g. a manage key the
+gateway answers with 403 -- and no dated `credit_spent_usd`/`credit_spent_as_of`
+figure on the provider row) keeps the leg with a `credit spend unknown ...`
+note in the plan's `explain` (fail open: a truly spent prepaid grant rejects at
+the provider and the combo falls through). A 403 names itself distinctly --
+`manage key rejected (403) - spend unmeasured` -- in both the plan notes and the
+`usage` command output, never as a silent `$0.00`.
+
 ## Where to get them
 
 Ordered by free value. "Training" = free tier may train on prompts: fine for

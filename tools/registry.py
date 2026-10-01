@@ -2914,6 +2914,34 @@ def _check_credit_guards(registry) -> list:
                 and "monthly_cap_usd" not in provider:
             problems.append("providers.%s: monthly_warn_fraction without monthly_cap_usd"
                             % provider_id)
+    # T1-CREDIT-FIX: the dated manual spend fallback. `credit_spent_usd` is the
+    # operator's dated reading of what a grant already billed, read when the
+    # gateway call-log ledger cannot be reached (those rows priced client-side
+    # are the only spend ledger in the repo -- no separate store exists, so no
+    # equivalent field predates this one). A figure with no date cannot age and
+    # a date with no figure judges nothing, so the pair is all-or-nothing; a
+    # negative or non-numeric figure, or an empty date, would silently mistime
+    # the fallback, so both are flagged here rather than trusted.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        figure = provider.get("credit_spent_usd")
+        as_of = provider.get("credit_spent_as_of")
+        if figure is None and as_of is None:
+            continue
+        if figure is None or as_of is None:
+            problems.append("providers.%s: credit_spent_usd and credit_spent_as_of "
+                            "go together (a dated manual spend needs both a "
+                            "figure and its date), got %r and %r"
+                            % (provider_id, figure, as_of))
+            continue
+        if isinstance(figure, bool) or not isinstance(figure, (int, float)) \
+                or figure < 0:
+            problems.append("providers.%s: credit_spent_usd must be a number >= 0, "
+                            "got %r" % (provider_id, figure))
+        if not isinstance(as_of, str) or not as_of.strip():
+            problems.append("providers.%s: credit_spent_as_of must be a non-empty "
+                            "date (YYYY-MM-DD), got %r" % (provider_id, as_of))
     # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
     # label every reader branches on, so a row that keeps `credit_usd` and calls
     # itself `free` silently un-limits the money, drops out of the leg filter's
