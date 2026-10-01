@@ -1034,8 +1034,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         # T1-CREDIT-FIX-7 R5: the D-220 loud line says the leg is KEPT, so it
         # is stashed here and emitted only when the leg survives every other
         # filter below (a leg then skipped for tool_calls/context/etc. must
-        # not claim it was kept).
+        # not claim it was kept). T1-CREDIT-FIX-8 C4: the quiet unknown line
+        # says KEPT too, so it is stashed the same way.
         pending_loud = None
+        pending_unknown = None
 
         # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
         # reserved for finals. Held per leg, not per route, so a mixed route
@@ -1158,8 +1160,10 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                         line = ("credit spend unknown %s - no guard data, "
                                 "spend unmeasured, leg kept (fail open)"
                                 % provider_id)
-                    if line not in credit_warns:
-                        credit_warns.append(line)
+                    # T1-CREDIT-FIX-8 C4: stashed, not emitted -- the leg may
+                    # yet be skipped below, and a skipped leg must not say
+                    # 'kept' (the same defect R5 fixed for the loud line).
+                    pending_unknown = line
                     # T1-CREDIT-FIX-5 M2 (D-220): while a credit leg is kept on
                     # unknown spend the plan says so LOUDLY -- even when the leg
                     # is otherwise unremarkable -- so an operator never mistakes
@@ -1235,6 +1239,12 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         else:
             # T1-CREDIT-FIX-7 R5: the leg survived -- only now may the plan
             # say LOUDLY that an unknown-spend credit leg was kept.
+            # T1-CREDIT-FIX-8 C4: the stashed quiet unknown line is emitted
+            # here too, for the same reason -- before the loud line, as
+            # before.
+            if (pending_unknown is not None and credit_warns is not None
+                    and pending_unknown not in credit_warns):
+                credit_warns.append(pending_unknown)
             if (pending_loud is not None and credit_warns is not None
                     and pending_loud not in credit_warns):
                 credit_warns.append(pending_loud)
