@@ -66,11 +66,11 @@
 **Family:** longcat
 **Verdict: REDACTION DID NOT HOLD on main or most lanes.** Commits `1bb1175`/`90cd698` replaced the username with `<user>` on their own branches only; the same unredacted content persists on `main` and the lane branches.
 
-**Commands run** (per branch, tracked files): `git grep -n -I -i 'mauls' <branch>` and `git grep -n -I 'ses_f0' <branch>`. (Note: an initial run misplaced `--` before the rev, which silently invalidated it — re-run with correct `git grep <pattern> <branch>` order; all results below are from the corrected runs.)
+**Commands run** (per branch, tracked files): `git grep -n -I -i '<user>' <branch>` and `git grep -n -I 'ses_f0' <branch>`. (Note: an initial run misplaced `--` before the rev, which silently invalidated it — re-run with correct `git grep <pattern> <branch>` order; all results below are from the corrected runs.)
 
 ### Required branches — hit counts
 
-| Branch | `mauls` (username path) | `ses_f0` (session ids) |
+| Branch | `<user>` (username path) | `ses_f0` (session ids) |
 |---|---|---|
 | main | 1 | 5 |
 | L1-backlog/ws-providers-rescue-20260930 | 1 | 0 |
@@ -83,7 +83,7 @@
 
 ### Hit locations (branch:file:line)
 
-**`mauls`:**
+**`<user>`:**
 - main: `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`
 - ws-providers-rescue: `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`
 - ws-nebiuswave2: `docs/handoff/2026-09-30-laneFreeWire.md:4`; `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`
@@ -103,17 +103,17 @@
 
 ### Branches outside the required list (read in this run — hits found)
 
-- `L1-backlog/ws-designmemo-20260930`: `mauls` ×2 — `docs/handoff/2026-09-30-routing-design-proposals.md:20`, `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`; `ses_f0` ×1 — `docs/handoff/2026-09-30-routing-design-proposals.md:769`. **This doc was committed 2026-09-30, after the redaction commits** — the redaction did not hold here either.
-- `L1-backlog/ws-researcher-20260930`: `mauls` ×1 — `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`; `ses_f0` ×0.
+- `L1-backlog/ws-designmemo-20260930`: `<user>` ×2 — `docs/handoff/2026-09-30-routing-design-proposals.md:20`, `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`; `ses_f0` ×1 — `docs/handoff/2026-09-30-routing-design-proposals.md:769`. **This doc was committed 2026-09-30, after the redaction commits** — the redaction did not hold here either.
+- `L1-backlog/ws-researcher-20260930`: `<user>` ×1 — `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`; `ses_f0` ×0.
 - Full sweep (all 58 local branches): the single most pervasive hit is `docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19` (username path) on main and 13+ lane branches — each lane carries its own unredacted copy.
 
 ### What the redaction commits actually did
 
 - `git branch --contains 1bb1175` → only `L1-backlog/ws-gw-admission-20260930`; `git branch --contains 90cd698` → only `L1-backlog/ws-p0-admission-fix-20260930`. Both branches grep clean (0/0).
-- `git show 1bb1175` diff: `C:/Users/mauls/…` → `C:/Users/<user>/…` in `docs/handoff/2026-09-30-workstation-omniroute-handoff.md`; `C:\Users\mauls\…` → `C:\Users\<user>\…` in `measure-admission.ps1`. Commit message: "no session-id leaks found".
+- `git show 1bb1175` diff: `C:/Users/<user>/…` → `C:/Users/<user>/…` in `docs/handoff/2026-09-30-workstation-omniroute-handoff.md`; `C:\Users\<user>\…` → `C:\Users\<user>\…` in `measure-admission.ps1`. Commit message: "no session-id leaks found".
 - `git show 90cd698`: redacted `docs/handoff/2026-09-30-laneP0-admission.md`, `docs/handoff/2026-09-30-workstation-omniroute-handoff.md`, `logs/handoff-sessions/DONE-ws-p0-admission.md` — on that branch only.
 
-**Conclusion:** the redaction held only on the two branches the commits landed on. It never propagated to `main` (1 `mauls` + 5 `ses_f0` hits) or to 6 of the 8 required lane branches. Any merge of those lanes into main without a re-redaction pass would reintroduce the username path and session ids into main's history.
+**Conclusion:** the redaction held only on the two branches the commits landed on. It never propagated to `main` (1 `<user>` + 5 `ses_f0` hits) or to 6 of the 8 required lane branches. Any merge of those lanes into main without a re-redaction pass would reintroduce the username path and session ids into main's history.
 
 ---
 
