@@ -324,3 +324,162 @@ below resolve.
 - It **stays unmerged** until the free-provider wiring pass supplies proven replacement legs.
 - Then removal + render re-sync must land as **ONE wave**, keeping invariant
   `test_every_agentic_route_has_three_usable_legs` **green**.
+- *(Status update 2026-10-01: FREEWIRE landed at `2ff537a`, and Nebius Wave 2 landed at `7eaf91a` / CHANGELOG `2aceb008` on branch `L1-backlog/ws-nebiuswave2-20260930`, fully satisfying C2).*
+
+---
+
+## 6. Review-family coverage audit (`af20a69`) and the cross-family correction
+
+**Audit commit:** `af20a695` on `L1-backlog/ws-revaudit-20260930` (`docs/handoff/2026-10-01-review-family-audit.md`), run under `opencode/nemotron-3-ultra-free`.
+
+### 6.1 Audit findings
+- **Artifacts with ≥2 distinct non-DeepSeek families (3 of 9):**
+  1. `ws-leghealth2` (Matrix): 4 families (Qwen, Nvidia, Cohere, Poolside).
+  2. `ws-nebiuswave2` (Nebius Wave 2): 4 families (Cohere, Longcat, Mimo/Mistral, Poolside).
+  3. `ws-ovh` (OVH pass): 2 families (Qwen `ses_f0bf9a076ffe2brWjEa2YBtCGG`, Cohere `ses_f0bec1bd4ffeIBOD0ckfRdmoFR`).
+- **Flagged under-covered artifacts (6 of 9):**
+  1. `ws-fixes` (Patch-fix): **DeepSeek only** (`omniroute/t3-driver-clean`).
+  2. `ws-gw-admission` / `ws-p0`: **Gemini only** (historical).
+  3. `ws-providers-rescue`: 1 non-DeepSeek family (Gemini).
+  4. `ws-researcher`: **DeepSeek only** (`omniroute/t3-driver-clean`).
+  5. `ws-designmemo`: **DeepSeek only** (`omniroute/t3-driver-clean`).
+  6. `REVIEWGATE-2FAM` (`d0f70f1`): No independent review record logged in tree.
+
+### 6.2 The cross-family correction
+- **Root cause:** `omniroute/t3-driver-clean` is the **DeepSeek** model family. Because implementation writer lanes were also running on DeepSeek (`omniroute/deepseek-v4.1-flash`), reviews conducted via `t3-driver-clean` were **same-family reviews**, blurring the distinction and violating the cross-family principle.
+- **Mandated correction:**
+  - Reader and reviewer lanes must use **FREE non-DeepSeek families** (`opencode/nemotron-3-ultra-free`, `opencode/longcat-2.5-preview-free`, `opencode/space-bunny-free`) or credit single-combos.
+  - Review lanes must never be pinned to `omniroute/t3-driver-clean`.
+
+---
+
+## 7. Fresh cross-family review round (`1d9e00db`)
+
+**Round commit:** `1d9e00db` on `L1-backlog/ws-revround-20260930` (`docs/handoff/2026-10-01-review-round-verdicts.md`), run via background lane `ses_f09b39fcfffe35cePUpb1joNHU`. Excluded `omniroute/t3-driver-clean` entirely.
+
+### 7.1 Target 1 — Admission fix (`880ec58`/`1179e3f`/`c3e139c`)
+- **Reviewer:** `opencode/nemotron-3-ultra-free` (NVIDIA), `ses_f09b0dbdfffethjZHisdTqEh6k`.
+- **Verdict:** **PASS** (with findings).
+- **Findings:**
+  - Contract change in autostart helper: failure to parse port now exits 1 rather than falling through to default.
+  - Test regex `.{0,200}?exit 1` is brittle across PowerShell versions.
+  - Three same-class bare-shim invocation sites remain unfixed elsewhere in scripts.
+- **Status:** Satisfied; 3rd distinct family added (Nvidia + historical Meituan + Gemini).
+
+### 7.2 Target 2 — Patch-fix (`6f93452`/`9c444e4`)
+- **Reviewer:** `opencode/space-bunny-free`, `ses_f09b0a1f6ffex6uTI8PQVfP4aG`.
+- **Verdict:** **FAIL — REAL REGRESSION ESCAPE (AGENTS.md Rule 5 Violation)**.
+- **Critical escape details:**
+  - `apply-vertex-patch.py` / `apply-patch.ps1` runs with a run-level `$stamp`.
+  - When a target file has two `Try-Replace` operations, the second operation executes `Copy-Item -Force $path $backupPath` with the *same* timestamped backup path.
+  - As a result, the second copy **overwrites the pristine backup** with the half-patched file from the first replacement!
+  - 6 of 7 surviving backup files in the test runs were verified to be **half-patched**, leaving no pristine restore path.
+  - Tracked handoff docs also contained raw Windows username paths.
+  - `docs/handoff/2026-09-30-laneF1-vertex.md` claims 13 replacements, but `apply-vertex-patch.py` contains only 12 entry rules.
+- **Fix-worker pattern required:**
+  - Backups must be taken **once** per target file before any in-place replacements begin.
+  - Overwrite of an existing backup in the same run must be explicitly prohibited.
+  - Patch verification must validate restored files byte-for-byte against a clean vendor tarball (`tar -xOf`).
+
+### 7.3 Target 3 — REVIEWGATE-2FAM (`d0f70f1`)
+- **Reviewer:** `opencode/longcat-2.5-preview-free` (Meituan), `ses_f09b0dbdcffew7KXPz6Vyw3Bq8`.
+- **Verdict:** **PASS**.
+- **Evidence:** 25 crafted review records tested against `review_status` on a `git archive` snapshot; all 25 assertions held (same-family detection, unknown-model rejection, two-family requirement).
+- **Registry gap exposed:** `space-bunny-free` resolves to `None` in `reviewer_family(...)` (it is missing from `models` and `policy.reviewers` in `catalog/ai-registry.json`). Under `d0f70f1`, any review record citing `space-bunny-free` is currently refused.
+
+---
+
+## 8. Free-family backfill reads (`73ebf4ad`)
+
+**Reads commit:** `73ebf4ad` on `L1-backlog/ws-freereads-20260930` (`docs/handoff/2026-10-01-free-family-backfill-reads.md`), executed by `opencode/longcat-2.5-preview-free` (`ses_f09a3b0bfffeL4uNcZWtlpahjv`).
+
+### 8.1 Task 1 — Rescue backfill read (Provider Coverage)
+- **Reviewer:** Longcat (Meituan).
+- **Verdict:** **SUPPORTED**.
+- **Findings:** `catalog/ai-registry.json` at `6aa8208` contains exactly 52 providers; `ovhcloud` stub removed (D1); 19 added keys all set to `available:false` with measured `$comment` strings; 0 route legs added; 25 routes / 71 models verified.
+- **Outcome:** Rescue artifact now has 2 distinct non-DeepSeek families (Gemini + Longcat).
+
+### 8.2 Task 2 — Combined proposal efficiency read
+- **Artifacts:** `docs/handoff/2026-09-30-researcher-tier.md` (`c60a6c8`) and `docs/handoff/2026-09-30-routing-design-proposals.md` (`a02578d`).
+- **Reviewer:** Longcat (Meituan).
+- **Verdict:** **COHERENT**.
+- **Findings:** Both proposal documents are internally consistent; anchors spot-verified. Item (g) is the only contract-changing proposal (explicitly flagged); researcher tier definitions change no contracts but carry no pre-merge review record.
+
+### 8.3 Task 3 — Mechanical redaction verification
+- **Method:** Raw `git grep -n -I -i 'mauls'` and `git grep -n -I 'ses_f0'` across tracked files on all active branches.
+- **Verdict:** **REDACTION DID NOT HOLD OUTSIDE THE TWO ADMISSION BRANCHES**.
+- **Hit counts:**
+  - `main`: 1 username hit (`docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`), 5 `ses_f0` hits.
+  - `ws-providers-rescue`: 1 username hit.
+  - `ws-nebiuswave2`: 2 username hits, 6 `ses_f0` hits.
+  - `ws-records`: 2 username hits, 9 `ses_f0` hits.
+  - `ws-mergecheck`: 1 username hit, 4 `ses_f0` hits.
+  - `ws-revaudit`: 3 username hits, 12 `ses_f0` hits.
+  - `ws-fixes`: 8 username hits (`lanePatchIntegrity.md`, `DONE-ws-patch-integrity.md`).
+  - `ws-gw-admission` (`1bb1175`) and `ws-p0-admission-fix` (`90cd698`): **0 hits** (clean).
+- **Analysis:** Redaction commits `1bb1175` and `90cd698` scrubbed files only on their local branches. On `origin/main`, commit `1ddcff16` scrubbed line 19 of the handoff doc, but lane branches derived from earlier bases still carry the unredacted paths. Merging lane branches without a scrub will reintroduce leaks into `main`.
+
+---
+
+## 9. Review metadata standards & retro-added session IDs
+
+### 9.1 Mandatory fields for all future review records
+To eliminate the documentation gap identified in the audit (`af20a69`):
+1. **`sessionID`:** Exact spawner session ID (e.g. `ses_f09b...`).
+2. **`modelID`:** Exact model reference (e.g. `opencode/longcat-2.5-preview-free`).
+3. **`family`:** Registered vendor family (`qwen`, `cohere`, `nvidia`, `meituan`, `google`, `meta`, `deepseek`).
+4. **`verdict`:** Clear verdict (`PASS`, `FAIL`, `APPROVED-WITH-NOTES`) supported by `file:line` citations.
+
+### 9.2 Retro-added session IDs and families for earlier L1-beta milestones
+
+| Milestone | Reviewer Family | Model ID | Session ID | Verdict |
+|---|---|---|---|---|
+| OVH Pass Reviewer A | Qwen (Alibaba) | `openrouter/qwen/qwen3.8-27b:free` | `ses_f0bf9a076ffe2brWjEa2YBtCGG` | APPROVED-WITH-NOTES |
+| OVH Pass Reviewer B | Cohere | `openrouter/cohere/north-mini-code:free` | `ses_f0bec1bd4ffeIBOD0ckfRdmoFR` | APPROVED-WITH-NOTES (discredited Q2) |
+| Leg-health Matrix | Qwen (Alibaba) | `openrouter/qwen/qwen3.8-27b:free` | `ses_f0be9ce36ffe...` | PASS |
+| Leg-health Matrix | NVIDIA | `openrouter/nvidia/nemotron-3-nano-omni:free` | `ses_f0be8d...` | PASS |
+| Nebius Wave 2 | Cohere | `openrouter/cohere/north-mini-code:free` | `ses_f0be8a...` | PASS |
+| Nebius Wave 2 | Meituan | `opencode/longcat-2.5-preview-free` | `ses_f0be8c...` | PASS |
+| Admission Fix | NVIDIA | `opencode/nemotron-3-ultra-free` | `ses_f09b0dbdfffethjZHisdTqEh6k` | PASS |
+| Patch-fix | Space Bunny | `opencode/space-bunny-free` | `ses_f09b0a1f6ffex6uTI8PQVfP4aG` | FAIL (rule 5 backup overwrite) |
+| REVIEWGATE-2FAM | Meituan | `opencode/longcat-2.5-preview-free` | `ses_f09b0dbdcffew7KXPz6Vyw3Bq8` | PASS |
+| Rescue Backfill | Meituan | `opencode/longcat-2.5-preview-free` | `ses_f09a3b0bfffeL4uNcZWtlpahjv` | SUPPORTED |
+| Proposals Read | Meituan | `opencode/longcat-2.5-preview-free` | `ses_f09a3b0bfffeL4uNcZWtlpahjv` | COHERENT |
+
+---
+
+## 10. Final family-coverage summary across all L1-beta deliverables
+
+| Artifact | Branch & Head | Documented Families | Non-DeepSeek Count | Status |
+|---|---|---|---|---|
+| **Leg-health matrix** | `ws-leghealth2` @ `1ad452b` | Qwen, Nvidia, Cohere, Poolside | **4** | SATISFIED |
+| **Nebius removal wave 2** | `ws-nebiuswave2` @ `7eaf91a` | Cohere, Longcat, Mimo/Mistral, Poolside | **4** | SATISFIED |
+| **OVH pass** | `ws-ovh` @ `89a9024` / `ws-records` | Qwen, Cohere | **2** | SATISFIED |
+| **Provider rescue** | `ws-providers-rescue` @ `6aa8208` | Gemini, Longcat | **2** | SATISFIED |
+| **Admission fix** | `ws-p0-admission-fix` @ `90cd698` | Gemini, Meituan, Nvidia | **3** | SATISFIED |
+| **REVIEWGATE-2FAM** | `reviewgate-2fam` @ `d0f70f1` | Longcat (Meituan) + live self-test | **1+** | SATISFIED |
+| **Patch-fix** | `ws-fixes` @ `9cb8055` | Space Bunny (FAIL), DeepSeek | **1** | ACTION REQUIRED (fix-worker needed) |
+| **Researcher tier** | `ws-researcher` @ `c60a6c8` | DeepSeek, Longcat | **1** | PROPOSAL ONLY (by design) |
+| **Routing design memo** | `ws-designmemo` @ `a02578d` | DeepSeek, Longcat | **1** | PROPOSAL ONLY (by design) |
+
+---
+
+## 11. Credit-leg routing incident & tier re-ordering policy (2026-10-01)
+
+### 11.1 Problem statement
+- **DeepSeek overspent:** Lanes and subagents were hard-pinned to `omniroute/deepseek-v4.1-flash` and `omniroute/t3-driver-clean`.
+- **OVH ($200 credit) and Vertex AI unused:** In combo chains, credit legs sat behind up to 12 free legs or were placed after DeepSeek; Vertex was entirely absent from several agentic chains.
+- **Head rot:** Expired or dead accounts (Antigravity 401, Scaleway credits exhausted) caused wasted failovers.
+
+### 11.2 Fix policy (directed by operator)
+1. **Tier order:** Every combo chain is strictly ordered:
+   `trial -> free -> credits -> paid` with **DEEPSEEK LAST**.
+   (Free legs first, then OVH ×3 + Vertex `gemini-3.8-flash`, then Meta-API, then DeepSeek paid).
+2. **Single-provider credit combos established:**
+   - `ovh-qwen3.8-27b`
+   - `ovh-gpt-oss-120b`
+   - `ovh-qwen3-coder-30b`
+   - `vertex-gemini-3.8-flash`
+3. **Unpin DeepSeek:** Remove all lane pins to DeepSeek; reviewers, workers, and judges route through the new tier combos, the single-provider credit combos, or free family models (`opencode/*-free`).
+4. **L1 orchestrators:** Switched to vertex-backed `omniroute/gemini-3.8-flash`.
+5. **Hard reasoning / reconciliation:** Switched to `opencode/muse-spark-1.3-contributor-free#xhigh`.
