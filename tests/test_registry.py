@@ -3090,6 +3090,66 @@ class ThirdPartyClaudeLegTests(unittest.TestCase):
                   for leg in (route.get("legs") or []) if leg in legs}
         self.assertEqual(served, set())
 
+    # The 19 operator-listed providers still missing from the registry
+    # (lane A ws-providers-rescue, 2026-09-30).  All were probed through the
+    # OmniRoute gateway (GET /v1/models + chat-completion trials); none could
+    # serve a chat completion, so each is available:false with a measured
+    # $comment.  (ovhcloud was reconciled to the ws-ovh lane, commit f6f5e69,
+    # and dropped from this branch — see docs/handoff/2026-09-30-laneA-providers.md.)
+    # Like the 11 FREEKEYS-1 providers above, none may carry a
+    # Claude-named model row or serve a Claude leg in any route.
+    MISSING_19 = (
+        "api_airforce", "llm7", "nscale", "siliconflow", "sealion",
+        "routeway", "requesty", "aion_labs", "agnes", "pollinations",
+        "g4f", "kilo_gateway", "ainative", "felo",
+        "uncloseai", "opencode_gateway", "ai_horde", "z_ai", "qoder_ai",
+    )
+
+    def test_each_of_the_19_missing_providers_is_registered(self):
+        reg = load_registry()
+        for pid in self.MISSING_19:
+            self.assertIn(pid, reg["providers"], "%s missing from providers" % pid)
+
+    def test_each_of_the_19_missing_providers_is_available_false(self):
+        reg = load_registry()
+        for pid in self.MISSING_19:
+            self.assertIs(reg["providers"][pid].get("available"), False,
+                          "providers.%s available is not false" % pid)
+
+    def test_each_of_the_19_missing_providers_has_a_measured_comment(self):
+        reg = load_registry()
+        for pid in self.MISSING_19:
+            comment = reg["providers"][pid].get("$comment", "")
+            self.assertTrue(comment, "providers.%s has no $comment" % pid)
+            self.assertIn("2026-09-28", comment,
+                         "providers.%s $comment lacks probe date" % pid)
+            self.assertIn("available is false", comment,
+                         "providers.%s $comment lacks 'available is false'" % pid)
+
+    def test_the_19_missing_providers_register_no_claude_model(self):
+        """D-102 held the probe off Claude, so none of the 19 missing providers
+        may carry a Claude-named model row or serve a Claude leg."""
+        reg = load_registry()
+        legs = {"%s/%s" % (pid, model_key) for pid in self.MISSING_19
+                for model_key in self.claude_models(reg)}
+        served = {leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if leg in legs}
+        self.assertEqual(served, set())
+
+    def test_the_19_missing_providers_appear_in_no_route_legs(self):
+        """An available:false provider that never answered must not appear in
+        any route's legs list."""
+        reg = load_registry()
+        pids = set(self.MISSING_19)
+        for route_id, route in reg["routes"].items():
+            for leg in (route.get("legs") or []):
+                if not isinstance(leg, str):
+                    continue
+                prefix = leg.split("/", 1)[0]
+                self.assertNotIn(prefix, pids,
+                                 "route %s carries leg %s from a missing-19 provider"
+                                 % (route_id, leg))
+
 
 class CreditTierEvasionTests(unittest.TestCase):
     """FREEKEYS-1b (item 4, rev-freekeys1 finding 6): a credited provider moved to
