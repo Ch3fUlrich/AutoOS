@@ -2956,7 +2956,7 @@
       }
     },
     "hugging_face": {
-      "$comment": "Unverified default tier: free, trains_on_prompts false. FREEWIRE 2026-09-30 (free-probe evidence): three legs on this provider answered (huggingface/zai-org/GLM-5.2, huggingface/Qwen/Qwen3.8-27B, and huggingface/deepseek-ai/DeepSeek-V4-Flash-0731); GLM-5.2 and Qwen3.8-27B are now referenced by routes (hf-glm-5.2, hf-qwen3.8-27B and the free bands of t2-worker/t3-driver and their free-only twins). The DeepSeek-V4-Flash-0731 leg is V4 weights, not V4.1, so it stays referenced by no route (operator rule 'DeepSeek only V4.1 Flash'). The gateway connection id is 'huggingface' (omniroute_id), the registry key stays 'hugging_face'.",
+      "$comment": "Unverified default tier: free, trains_on_prompts false. FREEWIRE 2026-09-30 (free-probe evidence): three legs on this provider answered (huggingface/zai-org/GLM-5.2, huggingface/Qwen/Qwen3.8-27B, and huggingface/deepseek-ai/DeepSeek-V4-Flash-0731); GLM-5.2 and Qwen3.8-27B are now referenced by routes (hf-glm-5.2, hf-qwen3.8-27B and the free bands of t2-worker/t3-driver and their free-only twins). The DeepSeek-V4-Flash-0731 leg is V4 weights, not V4.1, so it stays referenced by no route (operator rule 'DeepSeek only V4.1 Flash'). The gateway connection id is 'huggingface' (omniroute_id), the registry key stays 'hugging_face'. B2-HF 2026-10-01: unusable on this host (401 no active credentials, absent from live /v1/models catalog). Provider gated (available:false) following the openrouter t1-clean pattern: declaration retained + documented, nothing routable. hf-glm-5.2/hf-qwen3.8-27b keep declared legs so they land in omitted (not legless) and apply prunes stale live combos; t2/t3 bands drop hf legs.",
       "api_base": null,
       "id": "hugging_face",
       "litellm_env": "HUGGINGFACE_API_KEY",
@@ -2964,7 +2964,8 @@
       "omniroute_id": "huggingface",
       "provider_data": null,
       "tier": "free",
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "available": false
     },
     "meta": {
       "$comment": "Its only leg (models.muse-spark, llm-models.json's own 'muse-spark' entry) is the contributor model, which trains by contract (configuration/omniroute/combos.json $comment) - unlike openrouter/zen it hosts no non-training sibling, so the provider-level flag is exact here, not a simplification.",
@@ -3470,7 +3471,7 @@
       }
     },
     "hf-glm-5.2": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1132 ms): pinned single-provider free combo for huggingface/zai-org/GLM-5.2. The declared 256k is clamped by the shared models.'zai-org/GLM-5.2' row (context_advertised 128000, the nebius measurement), so the combo renders 128k. opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1132 ms): pinned single-provider free combo for huggingface/zai-org/GLM-5.2. The declared 256k is clamped by the shared models.'zai-org/GLM-5.2' row (context_advertised 128000, the nebius measurement), so the combo renders 128k. opencode/zed only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
       "class": "free",
       "id": "hf-glm-5.2",
       "legs": [
@@ -3491,7 +3492,7 @@
       }
     },
     "hf-qwen3.8-27b": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1276 ms): pinned single-provider free combo for huggingface/Qwen/Qwen3.8-27B (gateway /v1/models context_length 128000, output 32768). opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1276 ms): pinned single-provider free combo for huggingface/Qwen/Qwen3.8-27B (gateway /v1/models context_length 128000, output 32768). opencode/zed only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
       "class": "free",
       "id": "hf-qwen3.8-27b",
       "legs": [
@@ -3904,15 +3905,13 @@
       "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted."
     },
     "t2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted.",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
       "class": "mid",
       "id": "t2-worker",
       "legs": [
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
-        "huggingface/zai-org/GLM-5.2",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
@@ -4037,13 +4036,11 @@
     "t2-worker-free-only": {
       "class": "free",
       "id": "t2-worker-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band.",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
       "legs": [
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
-        "huggingface/zai-org/GLM-5.2",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
@@ -4118,15 +4115,13 @@
       }
     },
     "t3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
       "class": "cheap",
       "id": "t3-driver",
       "legs": [
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
-        "huggingface/zai-org/GLM-5.2",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/Qwen/Qwen3.8-27B",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
@@ -4249,13 +4244,11 @@
     "t3-driver-free-only": {
       "class": "free",
       "id": "t3-driver-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band.",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
       "legs": [
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
-        "huggingface/zai-org/GLM-5.2",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "huggingface/Qwen/Qwen3.8-27B",
         "openrouter/poolside/laguna-s-2.1:free",
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
