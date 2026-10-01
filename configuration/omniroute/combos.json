@@ -84,7 +84,22 @@
     "and stops a future registry+combos apply resurrecting them. Removing the",
     "matching routes.<id>.legs and models/providers rows in",
     "catalog/ai-registry.json is L1-beta's half; until that lands, render",
-    "omniroute --check reports drift on the six combos named above, which beta clears."
+    "omniroute --check reports drift on the six combos named above, which beta clears.",
+    "T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven",
+    "free grant, providers.groq tier free, 128k) added to t1-orchestrator's free",
+    "band after the scaleway legs, before the paid meta-api/deepseek legs. Under",
+    "the registry's usable_legs metric t1-orchestrator otherwise falls to ONE",
+    "distinct provider (scaleway) once L1-beta drops nebius, failing",
+    "test_every_agentic_route_has_two_distinct_usable_providers; this leg is the",
+    "second (groq). It answered a live gateway ack+tool-call probe at 05:58:58Z",
+    "(200, get_weather, max_tokens 512). A provider-tier-PAID leg is not eligible",
+    "here: test_on_t1_it_follows_the_free_band requires every leg ahead of the",
+    "paid contributor to be provider-tier free (huggingface 401s on this host;",
+    "openrouter is provider-tier paid). Added at the registry source",
+    "(routes.t1-orchestrator.legs + the dated route $comment) and mirrored here so",
+    "the live gateway and the tracked source agree; litellm/config.yaml and",
+    "docs/models.md carry the same leg from render. Do not confuse with the",
+    "NEBREMOVAL registry-vs-combos drift above, which is beta's."
   ],
   "retired": [
     "tier1",
@@ -203,6 +218,7 @@
       "models": [
         "scw/qwen3-235b-a22b-instruct-2507",
         "scw/mistral-small-3.2-24b-instruct-2506",
+        "groq/qwen/qwen3.8-27b",
         "meta-api/muse-spark-1.3-contributor",
         "deepseek/deepseek-flash"
       ]

@@ -386,6 +386,10 @@ model_list:
       api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t1-orchestrator
     litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+  - model_name: t1-orchestrator
+    litellm_params:
       model: openai/muse-spark-1.3-contributor
       api_base: https://api.meta.ai/v1
       api_key: os.environ/META_API_KEY
