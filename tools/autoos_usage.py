@@ -360,13 +360,17 @@ def credit_guards_unreadable(registry, failure):
     raise. Every grant reads `unknown` (fail open), never `refuse`.
     """
     out = {}
-    for provider in credit_guard_providers(registry):
+    try:
+        providers = credit_guard_providers(registry)
+    except Exception:
+        return out  # a malformed registry names no grant; never raise
+    for provider in providers:
         cap = warn = 0.0
         try:
             cap = monthly_cap_usd(registry, provider)
             warn = spend_warn_usd(registry, provider)
-        except ValueError:
-            pass  # a grant with no cap cannot be judged, only kept openly
+        except Exception:
+            pass  # a grant with no readable cap cannot be judged, only kept openly
         out[provider] = {"provider": provider, "state": "unknown",
                          "spend_usd": 0.0, "spend_unknown": True,
                          "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
@@ -1008,7 +1012,17 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     # uses to decide "is there money left" is the report the router reads to decide
     # whether to send work there at all (brief FREEKEYS-1b item 2).
     guarded = credit_guard_providers(registry)
-    guards = credit_guards(registry, rows, spend_cutoff) if guarded else None
+    guards = None
+    if guarded:
+        try:
+            guards = credit_guards(registry, rows, spend_cutoff)
+        except Exception as e:
+            # A grant that cannot state its own cap (ValueError) must read as
+            # unmeasured, never as a traceback: the documented exit code is 3.
+            # Type name only -- a message can carry a path or key (rule 1).
+            print("autoos-usage: credit guard unreadable (%s) - spend unmeasured"
+                  % type(e).__name__, file=sys.stderr)
+            return 3
     show_cost = args.cost or args.lines
     report = build_report(rows, dims, cutoff, pages, truncated,
                           prices=prices if show_cost else None,

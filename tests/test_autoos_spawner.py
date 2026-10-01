@@ -13824,28 +13824,29 @@ class CreditGuardWiringTests(unittest.TestCase):
         self.assertEqual(first, second)
 
     def test_an_unexpected_error_from_the_read_keeps_legs_and_never_crashes_a_plan(self):
-        """FREEKEYS-2c (rev-freekeys2 finding 4) as amended by T1-CREDIT-FIX: the
+        """FREEKEYS-2c (rev-freekeys2 finding 4) as amended by T1-CREDIT-FIX-2: the
         guard is built inside the plan, so anything the usage read raises has to
-        land in `unknown` (fail open, legs kept), not on the caller's stack and
-        no longer in `refuse`.
+        land in a KEPT, VISIBLE state, not on the caller's stack.
 
         `fetch_window` already wraps every transport failure into `UsageError`
         and the ledger math tolerates odd row shapes, so nothing in today's data
         walks off the three named types -- the gap was that the catch LISTED
         them. The next helper in that chain that raises something unforeseen
-        (a `TypeError` out of a new arithmetic step) must keep the credit legs
-        exactly like a gateway outage does, not raise through `route_plan_for`
-        and take the whole plan down with it. So the unforeseen raise is
-        injected, and the assertion is about the contract, not about a shape the
-        gateway answers with today."""
+        (a `TypeError` out of a new arithmetic step) must NOT fold into
+        `unknown` -- which would read as a gateway outage -- but land as its
+        own `guard error` state: the credit leg stays, and the note carries the
+        TYPE NAME only (never a message that can hold a path or key). So the
+        unforeseen raise is injected, and the assertion is about the contract,
+        not about a shape the gateway answers with today."""
         def explode(registry, rows, since=None, failure=None):
             raise TypeError("unsupported operand type(s) for *: 'NoneType' and 'float'")
         with mock.patch.object(self.agent.usage_mod, "credit_guards", explode):
             guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
                                                    fetch=self.fetch_ok(self.rows(10, 10)),
                                                    env=self.env())
-        self.assertEqual(guards["morph"]["state"], "unknown")
+        self.assertEqual(guards["morph"]["state"], "guard error")
         self.assertIn("TypeError", guards["morph"]["note"])
+        self.assertNotIn("NoneType", guards["morph"]["note"])
         kept, skipped = _usable(self.agent, self.registry(), guards)
         self.assertIn(("groq", "groq-free"), kept, "the free leg still plans")
         self.assertIn(("morph", "morph-priced"), kept, "the credit leg stays too")

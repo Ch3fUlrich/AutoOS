@@ -4748,11 +4748,13 @@ class CreditFailOpenTests(unittest.TestCase):
         self.assertTrue(any("spend unknown" in w for w in warns), warns)
 
     def test_missing_guard_data_keeps_the_leg_with_a_note(self):
-        """No guard map at all is also 'nothing known': available, noted."""
+        """No guard map at all is also 'nothing known': available, noted --
+        with its own `no guard for` line (T1-CREDIT-FIX-2), never borrowing
+        the `spend unknown` line that means the gateway gave no figure."""
         kept, skipped, warns = self.legs(None)
         self.assertIn(("ovhcloud", "ovh-priced"), kept)
         self.assertNotIn("ovhcloud/ovh-priced", skipped)
-        self.assertTrue(any("spend unknown" in w for w in warns), warns)
+        self.assertTrue(any("no guard for ovhcloud" in w for w in warns), warns)
 
     def test_a_route_whose_class_has_no_scoring_priors_is_removed_not_crashed(self):
         """T1-CREDIT-FIX follow-on: the four class-`credit` single-leg routes

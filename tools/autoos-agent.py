@@ -4516,9 +4516,122 @@ def _credit_guards_unreadable(registry: dict, why: str) -> dict:
     403 -- never a message that can carry key material (AGENTS.md rule 1).
     """
     try:
-        return usage_mod.credit_guards(registry, None, None, failure=why)
+        guards = usage_mod.credit_guards(registry, None, None, failure=why)
     except Exception:  # noqa: BLE001 - the manual fallback must never fail the plan
-        return usage_mod.credit_guards_unreadable(registry, why)
+        guards = usage_mod.credit_guards_unreadable(registry, why)
+    for pid, entry in _paid_guards_unreadable(registry, why).items():
+        guards.setdefault(pid, entry)
+    return guards
+
+
+def _paid_guard_ids(registry: dict) -> list:
+    """Ids of `tier == paid` providers declaring a readable `monthly_cap_usd`.
+
+    Total: never raises, so both fallback builders below can call it freely.
+    A paid row with no (or no readable) cap names nothing to hold spend
+    against, so it is simply not guarded."""
+    try:
+        items = list(((registry or {}).get("providers") or {}).items())
+    except Exception:
+        return []
+    out = []
+    for pid, entry in items:
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        try:
+            usage_mod.monthly_cap_usd(registry, pid)
+        except Exception:
+            continue
+        out.append(pid)
+    return sorted(out)
+
+
+def _paid_guards_unreadable(registry: dict, why: str) -> dict:
+    """`{provider id: guard}` for paid rows when spend cannot be measured.
+
+    Total: never raises. Every entry reads `unknown` with `spend_unknown`
+    True -- and unlike a credit grant the resolver HOLDS the leg on these
+    (fail closed: a post-paid overage bills real money, while a spent prepaid
+    grant rejects at the provider and falls through)."""
+    out = {}
+    for pid in _paid_guard_ids(registry):
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, pid)
+            warn = usage_mod.spend_warn_usd(registry, pid)
+        except Exception:
+            pass
+        out[pid] = {"provider": pid, "state": "unknown",
+                    "spend_usd": 0.0, "spend_unknown": True,
+                    "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                    "note": "paid spend unknown %s: %s - leg held (fail closed)"
+                            % (pid, why or "no call-log rows")}
+    return out
+
+
+def _paid_guards_measured(registry: dict, rows, since) -> dict:
+    """`{provider id: guard}` for paid rows from recorded usage rows.
+
+    Raises on malformed input like `credit_guards` does -- the caller folds
+    those into the expected-failure fallback, and unforeseen bugs into the
+    guard-error map."""
+    prices = usage_mod.prices_from_registry(registry)
+    out = {}
+    for pid in _paid_guard_ids(registry):
+        spend = usage_mod.paid_spend(rows, prices, registry, since,
+                                     provider=pid)
+        state, note = usage_mod.spend_guard(registry, pid, spend["spend_usd"])
+        out[pid] = {"provider": pid, "state": state,
+                    "spend_usd": spend["spend_usd"],
+                    "spend_unknown": False,
+                    "cap_usd": usage_mod.monthly_cap_usd(registry, pid),
+                    "warn_usd": usage_mod.spend_warn_usd(registry, pid),
+                    "models_unpriced": spend["models_unpriced"],
+                    "note": note}
+    return out
+
+
+def _credit_guard_error(registry: dict, type_name: str) -> dict:
+    """`{provider id: guard}` for an UNFORESEEN read bug (T1-CREDIT-FIX-2).
+
+    Distinct from `unknown`: `unknown` means "the gateway gave no figure"
+    (fail open for credit, held for paid), while `guard error` means "our own
+    code raised something the contract does not predict" -- kept for credit,
+    held for paid, and always named in the plan so the bug is visible instead
+    of silent. `type_name` is the exception TYPE NAME only: a message can
+    carry a gateway URL, a home path or key material (AGENTS.md rule 1).
+    Total: never raises."""
+    out = {}
+    try:
+        providers = usage_mod.credit_guard_providers(registry)
+    except Exception:
+        providers = []
+    for provider in providers:
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, provider)
+            warn = usage_mod.spend_warn_usd(registry, provider)
+        except Exception:
+            pass
+        out[provider] = {"provider": provider, "state": "guard error",
+                         "spend_usd": 0.0, "spend_unknown": True,
+                         "cap_usd": cap, "warn_usd": warn,
+                         "models_unpriced": 0,
+                         "note": "credit guard error %s (%s) - spend "
+                                 "unmeasured, leg kept" % (provider, type_name)}
+    for pid in _paid_guard_ids(registry):
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, pid)
+            warn = usage_mod.spend_warn_usd(registry, pid)
+        except Exception:
+            pass
+        out[pid] = {"provider": pid, "state": "guard error",
+                    "spend_usd": 0.0, "spend_unknown": True,
+                    "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                    "note": "paid guard error %s (%s) - spend unmeasured, "
+                            "leg held" % (pid, type_name)}
+    return out
 
 
 def plan_credit_guards(registry: dict, now=None, fetch=None,
@@ -4541,14 +4654,16 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     4). The cache is keyed by `registry` identity, so a caller that hands this a
     different registry — a candidate registry compared against the committed one,
     a lane that reloads — gets guards built from that registry's own caps
-    instead of the first one's answer. And the usage read is wrapped in
-    `except Exception`, not a list of expected types: every failure mode this
-    can predict already lands in `unknown` (fail open), and one it cannot
-    predict must do the same rather than raise through `route_plan_for` and take
-    the plan down with it. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
-    `Exception`, so Ctrl-C still works. T1-CREDIT-FIX: the landing state for
-    every failure mode, predicted or not, is now `unknown` (fail open, legs
-    kept with a `spend unknown` note), not `refuse`.
+    instead of the first one's answer. And the usage read predicts its failures
+    by type (T1-CREDIT-FIX-2): `UsageError` (gateway refusal/unreachable),
+    `OSError` (missing key file), `ValueError` (unreadable ledger, a grant with
+    no cap -- JSON decode errors land here too) map to the `unknown` fallback
+    (fail open for credit, held for paid). An UNFORESEEN bug type
+    (`TypeError`/`AttributeError`/...) is never folded into `unknown` -- which
+    would read as a gateway outage -- but lands as its own `guard error` state
+    (kept for credit, held for paid, type name only in the note), so the bug
+    stays visible. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
+    both, so Ctrl-C still works.
 
     `fetch`/`env`/`now` are injectable so a test can drive this without a
     gateway, a key or the clock; the callers pass none of them.
@@ -4558,7 +4673,8 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     if cached is not None and cached["registry"] is registry:
         return cached["guards"]
     providers = usage_mod.credit_guard_providers(registry)
-    if not providers:
+    paid = _paid_guard_ids(registry)
+    if not providers and not paid:
         CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": {}}
         return CREDIT_GUARD_CACHE[cache_key]["guards"]
     env = os.environ if env is None else env
@@ -4571,8 +4687,20 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
         rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
         guards = usage_mod.credit_guards(registry, rows, cutoff)
-    except Exception as exc:  # noqa: BLE001 - fail open, never fail the plan
+        guards.update(_paid_guards_measured(registry, rows, cutoff))
+    except (usage_mod.UsageError, OSError, ValueError) as exc:
+        # Every failure mode the read predicts (gateway refusal/unreachable,
+        # missing key, unreadable ledger, a grant that cannot state its cap):
+        # `unknown` (fail open for credit, held for paid), never a traceback.
+        # ValueError already covers JSON decode errors: fetch_window rewraps
+        # bad pages as UsageError, and JSONDecodeError subclasses ValueError.
         guards = _credit_guards_unreadable(registry, usage_mod.spend_failure_note(exc))
+    except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
+        # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
+        # surface as its own `guard error` state -- kept for credit, held for
+        # paid, explain line carries the TYPE NAME only -- never silently
+        # `unknown` (which would read as a gateway outage) or `ok`.
+        guards = _credit_guard_error(registry, type(exc).__name__)
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 

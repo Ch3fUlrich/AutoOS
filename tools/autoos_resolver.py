@@ -867,6 +867,24 @@ def credit_leg_priced(model_id, registry) -> bool:
         return False
 
 
+def _paid_cap_usd(registry, provider_id):
+    """`monthly_cap_usd` for a `tier == paid` row, or None (T1-CREDIT-FIX-2).
+
+    Never raises: a paid row with no (or no readable) cap is simply not
+    spend-guarded, so the fail-closed hold below only ever bites a row that
+    declared what it bills against. Mirrors `autoos_usage.monthly_cap_usd`'s
+    validation without importing it (`autoos_usage` already imports this
+    module for `price_factor`, so the import would be circular)."""
+    try:
+        entry = (registry or {}).get("providers", {}).get(provider_id) or {}
+        cap = entry.get("monthly_cap_usd")
+    except Exception:
+        return None
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        return None
+    return float(cap)
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
                client="opencode", now=None, env=None, toolcalls_skips=None,
                credit_guards=None, credit_warns=None):
@@ -938,7 +956,12 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       never exhausted. An UNMEASURABLE spend (guard state ``unknown``, or no
       guard data) keeps the leg and is named in `credit_warns` as ``credit
       spend unknown`` -- fail open, because a spent prepaid grant rejects at
-      the provider and the combo falls through. At the warn line
+      the provider and the combo falls through. A guard that reports its own
+      bug (`guard error`, T1-CREDIT-FIX-2 -- an unforeseen read bug, type name
+      only in the note) likewise keeps the leg and is named verbatim. No guard
+      entry at all is a third shape -- ``credit no guard for <provider>`` (the
+      plan never consulted the guard, a wiring defect) -- kept, but named as
+      its own gap instead of borrowing the `spend unknown` line. At the warn line
       (``monthly_warn_fraction``, 80 % by default) the leg likewise stays:
       there is money left. It is named in `credit_warns` so the plan's
       ``explain`` and the caller's report say so instead of the guard being
@@ -1078,13 +1101,25 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             if not credit_leg_priced(model_id, registry):
                 reasons.append("credit leg unpriced %s" % model_id)
             guard = (credit_guards or {}).get(provider_id) or {}
-            if guard.get("state") == "unknown" or guard.get("spend_unknown") \
-                    or not guard:
+            if not guard:
+                if credit_warns is not None:
+                    # No entry at all: the plan never consulted the guard for
+                    # this grant (a wiring defect), not "the gateway gave no
+                    # figure". Kept (fail open), but named as its own gap.
+                    line = ("credit no guard for %s - guard map has no entry, "
+                            "spend unmeasured, leg kept (fail open)"
+                            % provider_id)
+                    if line not in credit_warns:
+                        credit_warns.append(line)
+            elif guard.get("state") == "guard error" or (
+                    guard.get("state") == "unknown" or guard.get("spend_unknown")):
                 if credit_warns is not None:
                     # The guard note already names the provider and the cause;
                     # it is the explain line verbatim (one line per grant per
                     # plan, however many of its legs a route carries and
-                    # however many routes were filtered to get here).
+                    # however many routes were filtered to get here). A `guard
+                    # error` note carries the bug TYPE NAME only, never a
+                    # message/path/key.
                     if guard and guard.get("note"):
                         line = guard["note"]
                     else:
@@ -1103,6 +1138,31 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                     float(guard.get("cap_usd") or 0.0))
                 # One line per grant per plan, however many of its legs a route
                 # carries and however many routes were filtered to get here.
+                if line not in credit_warns:
+                    credit_warns.append(line)
+        elif registry["providers"][provider_id].get("tier") == "paid" and \
+                _paid_cap_usd(registry, provider_id) is not None:
+            # T1-CREDIT-FIX-2: a post-paid per-token row that declares a
+            # monthly cap is fail CLOSED when spend is unmeasurable -- an
+            # overage bills real money, while a spent prepaid grant rejects at
+            # the provider and falls through. No guard entry at all means the
+            # plan never asked (guards=None/{} in unit callers): kept, exactly
+            # as before -- only a guard that SAYS unmeasured holds the leg.
+            guard = (credit_guards or {}).get(provider_id) or {}
+            if not guard:
+                pass
+            elif guard.get("spend_unknown") or guard.get("state") in (
+                    "unknown", "guard error"):
+                reasons.append("paid spend unmeasured %s - leg held "
+                               "(fail closed)" % provider_id)
+            elif guard.get("state") == "refuse":
+                reasons.append("paid spend %s $%.2f/$%.2f"
+                               % (provider_id, float(guard.get("spend_usd") or 0.0),
+                                  float(guard.get("cap_usd") or 0.0)))
+            elif guard.get("state") == "warn" and credit_warns is not None:
+                line = "paid spend warn %s $%.2f/$%.2f" % (
+                    provider_id, float(guard.get("spend_usd") or 0.0),
+                    float(guard.get("cap_usd") or 0.0))
                 if line not in credit_warns:
                     credit_warns.append(line)
 
