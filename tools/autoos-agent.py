@@ -1084,8 +1084,15 @@ def _isolate_link_inside(path: str, target: str) -> bool:
     the worker can read straight through into a host file — the source's own
     untracked `configuration/api-keys.yml` is exactly such a target. Refused:
     the link is simply not created.
+
+    R8 names the three shapes that are not a target at all — an empty blob, a
+    backslash-only one, and a NUL anywhere in it. A NUL makes `os.symlink`
+    raise ValueError, which is no OSError and so the write loop does not catch
+    it: the whole clone dies for one entry. Refuse it HERE, because the refusal
+    line quotes the path and never this string.
     """
-    if not target or "\\" in target or os.path.isabs(target):
+    if (not target or "\x00" in target or "\\" in target
+            or os.path.isabs(target)):
         return False
     posix = target.replace(os.sep, "/")
     if posix.startswith("/") or re.match(r"^[A-Za-z]:", posix):

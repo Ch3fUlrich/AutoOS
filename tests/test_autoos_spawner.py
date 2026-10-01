@@ -19412,6 +19412,52 @@ class T2IsolateSecretsS5PathSafetyTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(os.path.join(dest, "p")))
         self.assertIn("after.txt", self._tree(dest))
         self.assertIn("'p'", err)
+    def test_r8_nul_in_a_symlink_target_is_skipped_and_never_echoed(self):
+        """R8: a NUL target is refused by the validator, not by a ValueError.
+
+        `os.symlink` raises ValueError (not OSError) on an embedded NUL, so the
+        entry crashed the clone; and the old refusal quoted the OSError text,
+        which echoes bytes back. The line must name the PATH and nothing else.
+        """
+        secret = "CANARY-TARGET-BYTES"
+        dest, _sibling, err = self._mat([
+            ("100644", self._blob("keep\n"), "keep.txt"),
+            ("120000", self._blob(secret + "\x00tail"), "nul.txt"),
+            ("100644", self._blob("after\n"), "after.txt")])
+        self.assertFalse(os.path.lexists(os.path.join(dest, "nul.txt")))
+        self.assertIn("nul.txt", err)
+        self.assertNotIn(secret, err)
+        self.assertIn("after.txt", self._tree(dest))
+
+    def test_r8_link_inside_helper_refuses_nul_empty_and_backslash(self):
+        link_inside = self.cli._isolate_link_inside
+        for bad in ("", "\\", "\\\\server\\share", "ok\x00.txt", "\x00",
+                    "ok.txt\x00", "a\\b", "/abs/target"):
+            self.assertFalse(link_inside("l", bad), repr(bad))
+        for good in ("ok.txt", "../ok.txt", "sub/ok.txt"):
+            self.assertTrue(link_inside("dir/l", good), good)
+
+    def test_r8_refusal_lines_carry_no_exception_text(self):
+        """R8: both failure refusals are constants — no `% exc` anywhere."""
+        exposed = "/home/operator/.ssh/id_ed25519"
+        with mock.patch.object(os, "symlink",
+                               side_effect=OSError(17, "exists", exposed)):
+            _dest, _sibling, err = self._mat(
+                [("120000", self._blob("ok.txt"), "l1")])
+        self.assertIn("'l1'", err)
+        self.assertIn("could not create the link", err)
+        self.assertNotIn(exposed, err)
+        with mock.patch.object(os, "open",
+                               side_effect=OSError(2, "no such", exposed)):
+            _dest, _sibling, err = self._mat(
+                [("100644", self._blob("data\n"), "f1")])
+        self.assertIn("'f1'", err)
+        self.assertIn("could not open for writing", err)
+        self.assertNotIn(exposed, err)
+        reasons = [ln.split(" (", 1)[1] for ln in err.splitlines() if " (" in ln]
+        self.assertTrue(reasons, err)
+        for one in reasons:
+            self.assertNotIn(":", one.rstrip(")\n"), one)
 
 
 class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
