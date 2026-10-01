@@ -75,27 +75,31 @@ helper/teardown and one new regression case.
 trigger (a known false positive for `-ArgumentList`).
 
 The new regression case asserts one request is actually served through the poll loop, then
-that `Stop-AutoOSTestHttpServer` returns in under 15 s (the bug is 120 s, the fix is < 1 s,
-so the bound cannot flake on a slow machine).
+that `Stop-AutoOSTestHttpServer` returns in under 15 s. The stopwatch wraps only the stop call
+(the 5 s request timeout is outside it); the measured value is 0.02–0.03 s and the bug is
+120 s, so 15 s sits far outside machine noise. Any wall-clock assertion can in principle
+flake; at a 500× margin this one is as safe as a bound gets.
 
 ---
 
 ## 2. Failing first — the before/after teardown, from the real helper text
 
 `Stop-AutoOSTestHttpServer` / `Start-AutoOSTestHttpServer` were extracted **verbatim** from
-each revision's file and timed with one served request
-(`%TEMP%\opencode\teardown-probe.ps1`), so the number is the code under review, not a
-paraphrase:
+each revision's file (regex over the two `function` blocks) and timed with one served
+request, so the number is the code under review, not a paraphrase. The script is
+`%TEMP%\opencode\teardown-probe.ps1` on the author host; the retained second run is
+`logs/handoff-sessions/suitefix-teardown-probe.log`:
 
 ```
-BEFORE_pwsh TEARDOWN_SEC=120,01 SERVED=System.Byte[]
-AFTER_pwsh TEARDOWN_SEC=0,03 SERVED=System.Byte[]
+BEFORE_pwsh TEARDOWN_SEC=120,03 SERVED=System.Byte[]
+AFTER_pwsh TEARDOWN_SEC=0,02 SERVED=System.Byte[]
 BEFORE_winps51 TEARDOWN_SEC=120,02 SERVED=System.Byte[]
 AFTER_winps51 TEARDOWN_SEC=0,02 SERVED=System.Byte[]
 ```
 
-(`SERVED=System.Byte[]` is expected: the fixture sends no `Content-Type`, so
-`Invoke-WebRequest.Content` is bytes. The regression case normalises it before comparing.)
+The first run agreed: `120,01 / 0,03 / 120,02 / 0,02`. (`SERVED=System.Byte[]` is expected:
+the fixture sends no `Content-Type`, so `Invoke-WebRequest.Content` is bytes. The regression
+case normalises it before comparing.)
 
 A **harness-level** failing-first run: a throwaway copy of the suite carrying the new
 regression case but the two **baseline** helpers was run with `-Filter 'test http server'`:
@@ -178,4 +182,30 @@ of `13 × 120 s` teardown overhead the diagnosis predicted, removed.
 
 ## 6. Reviewer (different family, nonce-gated)
 
-<!-- filled in by the review step -->
+**Reviewer:** `t3-reviewer` subagent, model route **`omniroute/t3-driver-clean`** (t3 family,
+"t3 cheap-driver-128k") — a different family from the author (`deepseek-v4.1-flash`).
+**Session:** `ses_f0a075b05ffeM28inisEdmgeVV`
+**Artefacts reviewed:** commits `4548e07` (fix) and `73007e3` (docs).
+**Nonce:** `REVIEW-NONCE=95908da238dae795` — returned verbatim (gate passed).
+**Verdict: APPROVED-WITH-NOTES.**
+
+The reviewer independently reproduced: the commit scoping (`git show --stat`; only
+`tests/run-tests.ps1` in the fix commit), the confinement of the hunks to the two helpers plus
+one added case, `$using:` job scoping in both shells, parse errors `0 / 0`, `PSScriptAnalyzer`
+parity `17 = 17` with an identical rule histogram, the BOM/CRLF bytes, and the full-suite
+summaries and failure lists from the two retained logs. It confirmed no test semantics changed
+and that no caller of the fixture (direct, mirror, or prune) is broken by the added key.
+
+Notes, both non-blocking and both applied:
+
+1. The probe / failing-first / focused-run outputs were asserted in text but their artefacts
+   were not retained. **Applied:** the probe re-run is now retained as
+   `logs/handoff-sessions/suitefix-teardown-probe.log`, and §2 names the script path.
+2. §1's "the bound cannot flake on a slow machine" was stronger than provable for any
+   wall-clock assertion. **Applied:** reworded to state the margin and that it wraps only the
+   stop call.
+
+One caveat the reviewer raised is worth keeping: reproducing the `17/17` analyzer parity
+requires the baseline **bytes** as stored (`git cat-file`, BOM intact); a `Set-Content`
+round-trip drops the `PSReviewUnusedParameter` on `$Filter` and shows `16`. That is a
+re-checking artefact, not a repo defect.

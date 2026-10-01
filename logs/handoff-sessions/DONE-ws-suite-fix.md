@@ -67,7 +67,12 @@ correct control for the comparison.
 
 ## Reviewer
 
-See `docs/handoff/2026-10-01-laneSuiteFix.md` §6 for family + verdict + nonce.
+- **Cross-family reviewer:** `t3-reviewer` on `omniroute/t3-driver-clean` (t3 family,
+  "t3 cheap-driver-128k"), session `ses_f0a075b05ffeM28inisEdmgeVV`.
+- **Nonce:** `REVIEW-NONCE=95908da238dae795` — returned verbatim (gate passed).
+- **Verdict:** APPROVED-WITH-NOTES. Both notes (retain probe artefact; soften the
+  wall-clock-flake wording) are applied. Details in
+  `docs/handoff/2026-10-01-laneSuiteFix.md` §6.
 
 ## Open items for L0
 
