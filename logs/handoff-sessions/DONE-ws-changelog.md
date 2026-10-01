@@ -41,6 +41,9 @@ the earlier exclusion, never "gemini excluded".
 
 - DONE notes on sibling branches this lane could not update (list in evidence §5) need the
   "CHANGELOG bullet" line added by their owning lane / L0.
+- Residual redaction: `docs/handoff/2026-09-30-laneFreeWire.md:4` still carries a real
+  username (byte-identical to base `f2d8d607`, another lane's file — not touched here). The
+  freewire lane / L0 should redact it like `4ba83ed0` did the workstation handoff.
 - Merge decision for this branch.
 
 ## Refusals honoured
@@ -58,8 +61,14 @@ section below.
 
 | # | Reviewer route (family) | Verdict | Session |
 |---|---|---|---|
-| 1 | `opencode/nemotron-3-ultra-free` (NVIDIA, free) | _pending_ | _pending_ |
-| 2 | `opencode/space-bunny-free` (Space Bunny, free) | _pending_ | _pending_ |
+| 1 | `opencode/nemotron-3.5-lightning-free` (NVIDIA, free) | APPROVED | `ses_f09acb92bffejx7KngrG6LHdRD` |
+| 2 | `opencode/space-bunny-free` (Space Bunny, free) | APPROVED | `ses_f09acb928ffe5Hpn2HBMvmVMx0` |
 
-Both are nonce-gated on `CHANGELOG-NONCE-9Kx2Vq7M`, read-only. Verdicts are appended after
-they return.
+Both nonce-gated on `CHANGELOG-NONCE-9Kx2Vq7M` (quoted back verbatim), read-only, free
+families only (no DeepSeek / `t3-driver-clean`). Reviewer 2's first pass was `fix-first` on
+`e0fae68` (D1: a real username in the two new files; D2: a false "0 matches / no username in
+any tracked file" claim in the Redactions bullet). Both were fixed and the commit amended to
+`eb182f2`; reviewer 2 re-verified against git and returned APPROVED, and reviewer 1
+re-confirmed APPROVED on `eb182f2`. No `chat_admission_busy`/`Rate limit exceeded` and no
+backoff on either reviewer. This addendum commit adds only the §6 residual note and this
+table; the reviewed claims are unchanged.

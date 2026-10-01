@@ -126,7 +126,18 @@ On **this** branch the DONE notes are `DONE-ws-freewire.md`, `DONE-ws-nebius-com
 `DONE-ws-invariant-fix.md`, `DONE-ws-ovh-finish.md` (+ `OPERATOR-ws-ovh-finish.md`); they are
 covered by bullets 7, 6, 1 and 8 respectively.
 
-## 6. Reviews
+## 6. Residual for L0 (not this lane's file)
+
+The space-bunny reviewer's wider scan found a pre-existing real username still in
+`docs/handoff/2026-09-30-laneFreeWire.md:4` (the freewire lane's evidence doc, which is a
+tracked ancestor of this branch). It is **byte-identical to base `f2d8d607`** and was **not
+touched here** — the operator's "do not touch other lanes' files" rule applies. It should be
+redacted by the freewire lane (or L0) the same way `4ba83ed0` redacted the workstation
+handoff. The `ws-hygiene-main` merge will clear
+`docs/handoff/2026-09-30-workstation-omniroute-handoff.md`; `laneFreeWire.md` needs its own
+fix.
+
+## 7. Reviews
 
 Two `t3-reviewer` subagents, **free model families only** (operator: no DeepSeek /
 `t3-driver-clean`), read-only, nonce-gated on `CHANGELOG-NONCE-9Kx2Vq7M`. Verdicts recorded
