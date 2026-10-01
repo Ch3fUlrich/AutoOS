@@ -315,6 +315,26 @@ omniroute/t1-orchestrator: xhigh`; after it the call answered, and
 
 **Where the direct surface lives** (full vendor ladder, no gateway):
 
+**Hand entries** (`opencode.jsonc`, outside every `AUTOOS-MANAGED` region, so
+`tools/sync-ide-models.py` never rewrites them) are the same passthrough for a
+gateway connection that serves provider ids directly: no combo, no fall-through,
+one leg — `vertex-3.8-flash` → `vertex/gemini-3.8-flash`, and the OVH AI Endpoints
+trial grant as `ovh-direct-gpt-oss-120b` / `ovh-direct-qwen3-coder-30b` /
+`ovh-direct-qwen3.8-27b` → the gateway's own `ovh/*` spellings (OVH's `model_prefix`,
+so the registry reads them back as `ovhcloud/*` legs through
+`registry.registry_ref()`). They are named for trial credit and public work:
+`providers.ovhcloud.trains_on_prompts` is null — unverified, not false — so a
+`privacy=sensitive` card is refused on them (the PRIV3 door in `resolve_route`).
+Operator D-255 bounds this whole surface: **no Gemini Pro model, and only Gemini
+3.6 / 3.7 / 3.8 Flash**, enforced by `tools/autoos-agent.py`'s
+`gemini_model_allowed()` at the spawn door over the model name, the hand entry's
+`modelID` and the route's legs — which is why `vertex-pro`, `vertex-flash`,
+`vertex-flash-lite` and `gemini-2.5-flash` are gone from this file's hand entries,
+and why naming a combo with an off-list leg (`--model omniroute/t2-worker`, whose
+data still carries `deepinfra/google/gemini-3.1-flash-lite`) is refused.
+`tests/test_autoos_spawner.py::GeminiAllowListTests` pins the list; the registry and
+combos rows on the list's far side are reported for the orchestrator, not edited here.
+
 - repo `opencode.jsonc` → `providers.openrouter` with
   `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
   key via `OPENROUTER_API_KEY`);
