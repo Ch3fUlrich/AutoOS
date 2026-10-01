@@ -9642,8 +9642,13 @@ class ReadyCommandTests(unittest.TestCase):
             argv += ["--repo", repo]
         argv += ["--registry", self.registry_path, *extra]
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.agent.main(argv)
+        # T0-FREEZE: the sixth gate reads main CI via gh; these fixtures predate
+        # it and own no main run, so they stub it green — the gate itself is
+        # covered by tests/test_ready_main_freeze.py.
+        with mock.patch.object(self.agent, "main_ci_status",
+                               lambda runner=None: ("success", "999", None)):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.agent.main(argv)
         return rc, out.getvalue(), err.getvalue()
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)

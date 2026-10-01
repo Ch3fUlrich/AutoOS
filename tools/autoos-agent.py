@@ -3075,10 +3075,55 @@ def ci_run_status(run_id, runner=None):
     return data.get("conclusion"), head_sha, None
 
 
+def main_ci_status(runner=None):
+    """``(conclusion, run_id, error)`` — what main's latest completed CI run says.
+
+    WHY: main was red on 13 consecutive pushes while takes were merged anyway,
+    so a lane that lands on a red main certifies a commit against a broken base
+    (source: plan v3 T0-FREEZE). The gate is fail-closed: an unreadable gh is
+    exit 2, never an allow.
+
+    ``gh run list --branch main --status completed --limit 1 --json
+    databaseId,conclusion,headSha``, through the same injectable-runner pattern
+    ``ci_run_status`` uses for ``--ci-run`` (no new network style). Unlike ``gh
+    run view``'s single object, ``gh run list`` prints a JSON ARRAY of such
+    objects; the head row carries the latest completed run on main. Mirrors
+    ``ci_run_status``: a non-None ``error`` means the question was never
+    answered, which is a different exit code from a run that came back red.
+    """
+    runner = runner or subprocess.run
+    argv = ["gh", "run", "list", "--branch", "main", "--status", "completed",
+            "--limit", "1", "--json", "databaseId,conclusion,headSha"]
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "%s" % exc
+    if proc.returncode != 0:
+        return None, None, ((proc.stderr or proc.stdout or "").strip()
+                            or "gh run list exited %d" % proc.returncode)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, None, "gh run list printed output that is not JSON: %s" % exc
+    if not isinstance(data, list) or not data:
+        return None, None, "gh run list answered with no completed runs on main"
+    row = data[0]
+    if not isinstance(row, dict):
+        return None, None, "gh run list answered with a row that is not JSON: %r" % (row,)
+    run_id = row.get("databaseId")
+    if run_id is None:
+        return None, None, ("gh run list answered with no databaseId (conclusion %r)"
+                            % row.get("conclusion"))
+    conclusion = row.get("conclusion")
+    if not conclusion:
+        return None, None, ("gh run list answered with no conclusion for run %s" % run_id)
+    return conclusion, str(run_id), None
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Five gates, in this order, each naming itself when it fails: the record
+    Six gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
     for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
     finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
@@ -3088,7 +3133,14 @@ def cmd_ready(args) -> int:
     record (D-110): the reviews say the lane was looked at and the sha says it
     shipped, but only that record says it was *run*, so a lane pushed with
     ``git push --no-verify`` — which steps over every hook — is refused here
-    unless an orchestrator names a reason with ``--allow-unverified``. The gates
+    unless an orchestrator names a reason with ``--allow-unverified``. The sixth
+    (T0-FREEZE, plan v3) refuses while main CI is red: the latest completed
+    workflow run on ``main`` must conclude ``success``, else the lane is refused
+    as ``main-ci-red`` naming the run id — unless the lane fixes main itself,
+    declared with ``--fixes-main``. The bypass is a CLI flag, not a record
+    field, because the record's machine-readable vocabulary is the closed
+    ``REVIEW_ENTRY_FIELDS`` list and a free-form token there would be ignored
+    prose. The gates
     live in code because the hand-written claim was wrong once -- L1-main refused
     a `ready` line whose record had no reviews (inbox 00:31:52Z).
 
@@ -3156,6 +3208,22 @@ def cmd_ready(args) -> int:
         unverified_field = ' unverified="%s"' % waived
         print("note: --allow-unverified -- %s carries no green pre-push record, and "
               "the reason written on the line is: %s" % (args.sha[:12], waived))
+    # T0-FREEZE (plan v3): no lane merges while main CI is red, except the lane
+    # that fixes main. Runs after the pre-push gate so each refusal names the
+    # gate the caller actually hit; fail-closed like every other unreadable gate.
+    if not getattr(args, "fixes_main", False):
+        main_conclusion, main_run_id, main_error = main_ci_status()
+        if main_error:
+            print("ready: cannot read main CI: %s" % main_error, file=sys.stderr)
+            return 2
+        if main_conclusion != "success":
+            print("ready: not appended -- main-ci-red: main CI run %s is %s, "
+                  "not success; merge nothing until main is green, or declare "
+                  "the fix with --fixes-main" % (main_run_id, main_conclusion))
+            return 1
+    else:
+        print("note: --fixes-main -- the lane declares it fixes main, "
+              "so the main-ci-red gate is waived")
     line = "%s ready %s %s reviews: %s | %s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
@@ -8823,6 +8891,11 @@ def _parser_ready(sub):
                               "another host or pushed past its own hooks: the reason is "
                               "written on the inbox line as unverified=\"<reason>\", and "
                               "a writer clearing its own gate is not what this is for")
+    ready_p.add_argument("--fixes-main", dest="fixes_main", action="store_true",
+                         help="this lane fixes main itself: waive the main-ci-red gate "
+                              "(T0-FREEZE). Without it a red main freezes every lane; "
+                              "with it the lane is allowed onto a red main and one "
+                              "note says the gate was waived")
 
 
 def _parser_inbox(sub):
