@@ -1891,5 +1891,45 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
             self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 131_072, tier_id)
 
 
+class VertexNoKeyLitellmSkipTests(unittest.TestCase):
+    """T1-CLEAN-4 K6 (2026-10-01): providers.vertex_ai authenticates from a GCP
+    service-account JSON (its own $comment says the credential is NOT a plain API
+    key) and declares no litellm_env, yet the managed LiteLLM blocks rendered
+    `api_key: os.environ/VERTEX_API_KEY` - a guessed name for a variable that does
+    not exist, the same unset-key hazard GATEWAY_ONLY exists to avoid
+    (the META_API_KEY lesson). The renderer now drops such a leg and NAMES it."""
+
+    def setUp(self):
+        self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        self.text = LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
+        self.blocks = registry.render_litellm_blocks(self.reg, self.text)
+
+    def test_no_keyless_provider_leg_is_rendered(self):
+        for tier, block in sorted(self.blocks.items()):
+            self.assertNotIn("model: vertex/", block, tier)
+            self.assertNotIn("VERTEX_API_KEY", block, tier)
+
+    def test_a_dropped_leg_is_named_in_a_rendered_comment(self):
+        tiers = [t for t, r in self.reg["routes"].items()
+                 if isinstance(r, dict)
+                 and any(l.startswith("vertex/") for l in (r.get("legs") or []))]
+        self.assertTrue(tiers, "no route carries a vertex leg any more?")
+        named = [t for t in tiers if t in self.blocks]
+        self.assertTrue(named, "no managed tier carries the vertex leg: %s" % tiers)
+        for tier in named:
+            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", self.blocks[tier], tier)
+
+    def test_the_committed_config_matches_the_render(self):
+        self.assertEqual(registry.litellm_diff(self.blocks, self.text), [])
+
+    def test_a_key_provider_keeps_its_leg(self):
+        # the drop is declared-auth only: providers that do have a LiteLLM key
+        # (the <UPPER>_API_KEY convention) must keep rendering, or this "fix"
+        # would silently gut the mirror.
+        joined = "\n".join(self.blocks.values())
+        self.assertIn("model: ovhcloud/gpt-oss-120b", joined)
+        self.assertIn("OVHCLOUD_API_KEY", joined)
+
+
 if __name__ == "__main__":
     unittest.main()

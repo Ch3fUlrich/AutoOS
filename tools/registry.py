@@ -1331,6 +1331,13 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
         start, end = blocks[tier]
         indent = sync.leading_indent(lines[start])
         extras = sync.parse_block(lines, start, end)
+        # K6 (T1-CLEAN-4, 2026-10-01): a leg whose provider declares an auth
+        # LiteLLM cannot express is dropped by litellm_servable_refs() and NAMED
+        # here, in the block itself, so the next reader does not have to diff the
+        # registry to find out why the leg is missing. sync.render_block() owns
+        # the line (via SKIPPED_BY_TIER), so this tool's render and
+        # tools/sync-router-tiers.py's own rewrite cannot drift apart.
+        sync.SKIPPED_BY_TIER[tier] = sync.skipped_refs(routes[tier], registry)
         try:
             block_lines = sync.render_block(tier, refs_by_tier[tier], indent, extras)
         except sync.ConfigError as exc:

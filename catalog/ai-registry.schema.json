@@ -152,6 +152,10 @@
           "description": "Additive field, not in spec 3.1 (brief MUSEAPI, 2026-09-27): the api-keys.yml entry this provider's key is read from, when it is not an entry named after the provider id. meta_api uses the user's existing 'meta' key (one Meta credential, two endpoints: the direct opencode provider and the OpenAI-compatible Model API gateway), so asking api-keys.yml for 'meta_api' would find nothing and skip the connection. Consumers: apply.sh/apply.ps1 (registration), tools/mirror-litellm-env.py (litellm/.env), tests/helpers/check-provider-registry.py (the sharing rule). It must name another provider's api-keys.yml name and two registered providers must never claim one name."
         },
         "litellm_env": { "type": ["string", "null"] },
+        "litellm_auth": {
+          "type": ["string", "null"],
+          "description": "Additive field, not in spec 3.1 (T1-CLEAN-4 K6, 2026-10-01): an auth mode LiteLLM's `os.environ/*` api_key cannot express — `service_account` (Vertex AI reads a GCP service-account JSON, so no API-key env var exists for it). tools/sync-router-tiers.py's no_litellm_key_providers() drops such a provider's legs from every managed LiteLLM block, and tools/registry.py's render names each dropped leg in a `# litellm-skip:` comment line. A null `litellm_env` alone is NOT this: nearly every provider leaves it null and the renderer falls back to the conventional `<PROVIDER>_API_KEY`, which does exist."
+        },
         "litellm_prefix": { "type": ["string", "null"] },
         "model_prefix": {
           "type": ["string", "null"],

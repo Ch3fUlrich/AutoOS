@@ -77,6 +77,12 @@ GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
 PROVIDER_PREFIX: dict = {}
 API_BASE: dict = {}
 ENV_KEY: dict = {}
+# tier -> the legs of that route dropped for a declared no-API-key auth
+# (no_litellm_key_providers). Module state for the same reason as the three maps
+# above: render_block() is reached both from this tool's rewrite() and from
+# tools/registry.py's render_litellm_blocks(), and both must put the identical
+# `# litellm-skip:` line in the identical place or the two surfaces drift (K6).
+SKIPPED_BY_TIER: dict = {}
 
 START = "# AUTOOS-MANAGED-START"
 END = "# AUTOOS-MANAGED-END"
@@ -258,6 +264,47 @@ def _gateway_legs(route, registry):
     return _registry_module().gateway_legs(route, registry)
 
 
+def no_litellm_key_providers(registry):
+    """Provider ids LiteLLM cannot hand an API key (T1-CLEAN-4 K6, 2026-10-01).
+
+    `providers.<id>.litellm_auth` names an auth LiteLLM's `os.environ/*`
+    api_key cannot express — today only `service_account` (Vertex AI, whose own
+    $comment records that the credential file is not a plain key). A falsy
+    `litellm_env` is NOT that: almost every provider leaves it null and Leg
+    falls back to the conventional `<PROVIDER>_API_KEY`, which really exists, so
+    keying the drop on the null would delete groq-era/samba/ovh/scaleway legs
+    that LiteLLM does address. Both spellings (providers key and omniroute_id)
+    are returned, because a leg carries the gateway's spelling.
+    """
+    out = set()
+    providers = registry.get("providers") if isinstance(registry, dict) else None
+    for entry in (providers or {}).values():
+        if isinstance(entry, dict) and entry.get("litellm_auth"):
+            for key in (entry.get("id"), entry.get("omniroute_id")):
+                if key:
+                    out.add(key)
+    return out
+
+
+def skipped_refs(route, registry):
+    """The legs of `route` whose provider declares an auth LiteLLM cannot render
+    (T1-CLEAN-4 K6). Kept separate from litellm_servable_refs() because the two
+    callers (this tool's registry_refs() and tools/registry.py's
+    render_litellm_blocks()) both need the *names*, in leg order, for the
+    `# litellm-skip:` line. Order-preserving and deduped, like the refs list."""
+    no_key = no_litellm_key_providers(registry)
+    legs = (route.get("legs") or []) if isinstance(route, dict) else []
+    return [leg for leg in dict.fromkeys(legs)
+            if isinstance(leg, str) and leg.split("/", 1)[0] in no_key]
+
+
+def skipped_comment(leg, indent=""):
+    """The one rendered line that names a skipped leg (shared so the writer and
+    the checker cannot differ by a space)."""
+    return ("%s  # litellm-skip: %s - providers.%s authenticates without a "
+            "LiteLLM api_key (litellm_auth)" % (indent, leg, leg.split("/", 1)[0]))
+
+
 def litellm_servable_refs(route, registry):
     """The ordered refs a managed LiteLLM block mirrors for one route.
 
@@ -274,10 +321,16 @@ def litellm_servable_refs(route, registry):
     unset os.environ/* var and break whole-group validation at startup — the
     META_API_KEY lesson. Docs rule 1 calls this set out ("minus the legs
     LiteLLM cannot address"); the suite test pins the dropped set so nothing
-    else ever goes missing silently. Pure: (route, registry) -> list."""
+    else ever goes missing silently. A leg whose provider declares a
+    `litellm_auth` LiteLLM cannot express is dropped the same way (T1-CLEAN-4 K6,
+    see no_litellm_key_providers()); tools/registry.py's render names each such
+    drop in a rendered comment line, so the omission is never silent.
+    Pure: (route, registry) -> list."""
+    no_key = no_litellm_key_providers(registry)
     return [
         m for m in _gateway_legs(route, registry)
         if isinstance(m, str) and m.split("/", 1)[0] not in GATEWAY_ONLY
+        and m.split("/", 1)[0] not in no_key
     ]
 
 
@@ -380,6 +433,11 @@ def registry_refs(registry_path, tiers=None):
     missing = [t for t in tiers if t not in routes]
     if missing:
         raise ConfigError(f"{registry_path} has no route(s): {', '.join(missing)}")
+    # K6: this tool's own rewrite() renders through render_block(), so the
+    # skipped-leg names are recorded here as module state - otherwise the writer
+    # would emit the block without them and `render litellm --check` would read
+    # the hand-named omission as drift.
+    SKIPPED_BY_TIER.update({t: skipped_refs(routes[t], doc) for t in tiers})
     return {t: litellm_servable_refs(routes[t], doc) for t in tiers}
 
 
@@ -400,6 +458,8 @@ def render_block(tier, refs, indent="", extras=None):
         for extra in extras.get(leg.llm_model, ()):
             leg_lines.append(extra)
         lines.extend(leg_lines)
+    for leg in SKIPPED_BY_TIER.get(tier, ()):
+        lines.append(skipped_comment(leg, indent))
     lines.append(f"{indent}{END} {tier}")
     return lines
 
