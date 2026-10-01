@@ -41,6 +41,38 @@ OTHER = "opencode/deepseek-r1-distill-qwen-32b"
 SENTINEL_TOKEN = "SENTINEL-SECRET-TOKEN-DO-NOT-LEAK"
 SENTINEL_ACCOUNT = "sentinel-secret-account@example.invalid"
 GOOD = {"providerID": "opencode", "id": "nemotron-3-ultra-free"}
+# Measured live 2026-10-01 (read-only call-log probe): the spawner's gateway
+# traffic is keyed "autoos-local"; the paid spark seat logs provider and model
+# "spark-1.3-contributor" while the run record requests "omniroute/...".
+GW_KEY = "autoos-local"
+SPARK = "spark-1.3-contributor"
+SPARK_EXPECT = "omniroute/spark-1.3-contributor"
+
+
+def epoch_for(iso):
+    import datetime
+    return datetime.datetime.fromisoformat(
+        iso.replace("Z", "+00:00")).timestamp()
+
+
+def write_job_record(root, rid, started_epoch, ended_epoch):
+    """agents/<rid>/job.json with ONLY the epoch-seconds started/ended."""
+    d = Path(root) / "agents" / rid
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"id": rid, "started": started_epoch}
+    if ended_epoch is not None:
+        rec["ended"] = ended_epoch
+    (d / "job.json").write_text(json.dumps(rec))
+
+
+def write_workers_window(root, rid, started_iso, ended_iso, session_id=None):
+    """workers/<rid>.json carrying the ISO window (+ optional session id)."""
+    w = Path(root) / "workers"
+    w.mkdir(parents=True, exist_ok=True)
+    rec = {"id": rid, "started": started_iso, "ended": ended_iso}
+    if session_id:
+        rec["session_id"] = session_id
+    (w / (rid + ".json")).write_text(json.dumps(rec))
 
 
 def real_sandbox(name):
@@ -277,11 +309,11 @@ class SeatEvidenceTests(unittest.TestCase):
                 {"timestamp": "2026-10-01T21:10:00Z", "provider": "opencode",
                  "model": "nemotron-3-ultra-free", "requestedModel": NEMO,
                  "status": "success", "correlationId": "c1",
-                 "apiKeyName": "opencode"},
+                 "apiKeyName": "autoos-local"},
                 {"timestamp": "2026-10-01T21:12:00Z", "provider": "opencode",
                  "model": "mimo-v2.6-flash-free", "requestedModel": NEMO,
                  "status": "success", "correlationId": "c2",
-                 "apiKeyName": "opencode"},
+                 "apiKeyName": "autoos-local"},
             ]
             fake = Path(tmp) / "fakegw.py"
             fake.write_text("import json;print(json.dumps(%r))" % (rows,))
@@ -309,11 +341,11 @@ class SeatEvidenceTests(unittest.TestCase):
                 {"timestamp": "2026-10-01T21:10:00Z", "provider": "opencode",
                  "model": "nemotron-3-ultra-free", "requestedModel": NEMO,
                  "status": "success", "correlationId": "c1",
-                 "apiKeyName": "opencode"},
+                 "apiKeyName": "autoos-local"},
                 # out of window -> ignored
                 {"timestamp": "2026-09-01T00:00:00Z", "provider": "opencode",
                  "model": "other-model", "status": "success",
-                 "correlationId": "old", "apiKeyName": "opencode"},
+                 "correlationId": "old", "apiKeyName": "autoos-local"},
             ]
             fake = Path(tmp) / "fakegw.py"
             fake.write_text("import json;print(json.dumps(%r))" % (rows,))
@@ -331,6 +363,256 @@ class SeatEvidenceTests(unittest.TestCase):
             finally:
                 del os.environ["SEAT_EVIDENCE_GATEWAY_CMD"]
 
+    # --- gateway response-side (D-261 G1-G5) ---------------------------------
+    # Fakes reproduce the REAL measured call-log contract (probed read-only
+    # 2026-10-01 against the live omniroute container): rows carry
+    # timestamp (ms + Z), provider, model, requestedModel, status,
+    # correlationId, apiKeyName; the spawner's traffic is keyed
+    # "autoos-local"; the paid spark seat logs provider
+    # "spark-1.3-contributor".
+
+    def _gw(self, tmp, payload, rows=None):
+        fake = Path(tmp) / "fakegw.py"
+        if payload is None:
+            payload = rows
+        fake.write_text("import json;print(json.dumps(payload))"
+                        .replace("payload", json.dumps(payload)))
+        os.environ["SEAT_EVIDENCE_GATEWAY_CMD"] = f"{sys.executable} {fake}"
+        self.addCleanup(os.environ.pop, "SEAT_EVIDENCE_GATEWAY_CMD", None)
+
+    def _spark_row(self, ts, model=SPARK, prov=SPARK, key=GW_KEY, **kw):
+        r = {"timestamp": ts, "provider": prov, "model": model,
+             "requestedModel": kw.get("req", SPARK_EXPECT), "status": 200,
+             "correlationId": kw.get("cid", "c-" + ts[-9:-1]),
+             "apiKeyName": key}
+        if "sessionId" in kw:
+            r["sessionId"] = kw["sessionId"]
+        return r
+
+    def _gw_base(self, tmp):
+        base, root = self._env(tmp)
+        con, _ = make_fixture(base, [GOOD], cli_model=NEMO, run_model=NEMO,
+                              rid="rid", logs_root=root)
+        con.close()
+        return base, root, Path(tmp) / "ev.json"
+
+    def test_gateway_fetch_accepts_logs_wrapped_rows(self):
+        # G1: helper may answer {logs:[...]} / {data:[...]} / {rows:[...]}
+        # or a bare array; all four shapes must parse.
+        for wrap in (None, "logs", "data", "rows"):
+            with self.subTest(wrap=wrap):
+                with tempfile.TemporaryDirectory() as tmp:
+                    base, root, out = self._gw_base(tmp)
+                    rows = [self._spark_row("2026-10-01T21:10:00.000Z")]
+                    payload = rows if wrap is None else {wrap: rows}
+                    self._gw(tmp, payload)
+                    proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                        "--gateway", "--since", "2026-10-01T21:09:00Z",
+                        "--until", "2026-10-01T21:30:00Z"])
+                    self.assertEqual(proc.returncode, 0,
+                                     proc.stdout + proc.stderr)
+
+    def test_gateway_fetch_http_failure_exit_three_status_only(self):
+        # G1: a non-200 from the API must exit 3 naming the status only.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            fake = Path(tmp) / "fakegw.py"
+            fake.write_text("import sys\n"
+                            "sys.stderr.write('HTTP 500\\n')\n"
+                            "sys.exit(3)\n")
+            os.environ["SEAT_EVIDENCE_GATEWAY_CMD"] = \
+                f"{sys.executable} {fake}"
+            try:
+                proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--until", "2026-10-01T21:30:00Z"])
+                self.assertEqual(proc.returncode, 3, proc.stderr)
+                self.assertIn("500", proc.stderr)
+            finally:
+                del os.environ["SEAT_EVIDENCE_GATEWAY_CMD"]
+
+    def test_gateway_fetch_unparseable_output_exit_three(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            fake = Path(tmp) / "fakegw.py"
+            fake.write_text("print('not json at all')")
+            os.environ["SEAT_EVIDENCE_GATEWAY_CMD"] = \
+                f"{sys.executable} {fake}"
+            try:
+                proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                    "--gateway", "--since", "2026-10-01T21:09:00Z",
+                    "--until", "2026-10-01T21:30:00Z"])
+                self.assertEqual(proc.returncode, 3, proc.stderr)
+            finally:
+                del os.environ["SEAT_EVIDENCE_GATEWAY_CMD"]
+
+    def test_gateway_window_mixed_formats(self):
+        # G2: Z / +00:00 / ms / non-UTC-offset timestamps compared as DATETIMES.
+        # String compare would keep ".500Z" <= "Z" (wrong: after end) and drop
+        # the +01:00 row (wrong: it IS inside 21:09Z-21:30Z).
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            rows = [
+                self._spark_row("2026-10-01T21:30:00.500Z", cid="after"),
+                self._spark_row("2026-10-01T22:10:00+01:00", cid="in01"),
+                self._spark_row("2026-10-01T21:10:00Z", cid="in1"),
+            ]
+            self._gw(tmp, rows)
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--since", "2026-10-01T21:09:00+00:00",
+                "--until", "2026-10-01T21:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(sorted(doc["correlation_ids"]), ["in01", "in1"])
+
+    def test_gateway_run_id_window_padded_five_seconds(self):
+        # G3: --run-id alone -> [started-5s, ended+5s] from the run record.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_workers_window(root, "rid", "2026-10-01T21:59:58Z",
+                                 "2026-10-01T22:17:44Z")
+            rows = [
+                self._spark_row("2026-10-01T21:59:53Z", cid="pad_in"),
+                self._spark_row("2026-10-01T21:59:52Z", cid="pad_out"),
+                self._spark_row("2026-10-01T22:17:49Z", cid="pad_in_end"),
+                self._spark_row("2026-10-01T22:17:50Z", cid="pad_out_end"),
+            ]
+            self._gw(tmp, rows)
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(sorted(doc["correlation_ids"]),
+                             ["pad_in", "pad_in_end"])
+            self.assertEqual(doc["window"]["padding_seconds"], 5)
+
+    def test_gateway_run_id_no_end_exit_three(self):
+        # G3: no end time = run possibly still active -> 3, never "until now".
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_job_record(root, "rid", epoch_for("2026-10-01T21:59:58Z"),
+                             None)
+            self._gw(tmp, [self._spark_row("2026-10-01T22:00:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 3, proc.stderr)
+            self.assertIn("run still active or no end time", proc.stderr)
+
+    def test_gateway_run_id_job_json_epoch_window(self):
+        # G3: job.json started/ended are EPOCH SECONDS -> converted.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_job_record(root, "rid", epoch_for("2026-10-01T21:59:58Z"),
+                             epoch_for("2026-10-01T22:17:44Z"))
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="in"),
+                self._spark_row("2026-10-01T22:17:50Z", cid="out"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["correlation_ids"], ["in"])
+
+    def test_gateway_other_key_rows_not_counted(self):
+        # G4: rows of other runs on a different apiKeyName must not count.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T21:10:00Z", cid="mine"),
+                self._spark_row("2026-10-01T21:11:00Z", key="someone-else",
+                                cid="theirs"),
+                self._spark_row("2026-10-01T21:12:00Z", model="other-model",
+                                key="someone-else", cid="theirs2"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T21:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["window_rows"], 1)
+
+    def test_gateway_shared_window_exit_two_with_warning(self):
+        # G4: same key, other models in the window -> not attributable:
+        # window_rows + 'window shared with other traffic' + exit 2.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T21:10:00Z", cid="a"),
+                self._spark_row("2026-10-01T21:11:00Z", cid="b"),
+                self._spark_row("2026-10-01T21:12:00Z",
+                                model="muse-spark-1.3-contributor",
+                                prov="openai-compatible-chat-c125c82d",
+                                cid="shared"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T21:30:00Z"])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["window_rows"], 3)
+            self.assertIn("window shared with other traffic",
+                          json.dumps(doc["warnings"]))
+            self.assertIn("window shared with other traffic", proc.stderr)
+
+    def test_gateway_session_id_filter_attributes_shared_key(self):
+        # G4: when the rows carry sessionId and the run record knows it,
+        # filter by it — shared-key traffic from other sessions drops out.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            write_workers_window(root, "rid", "2026-10-01T21:59:58Z",
+                                 "2026-10-01T22:17:44Z",
+                                 session_id="ses_seat")
+            self._gw(tmp, [
+                self._spark_row("2026-10-01T22:00:00Z", cid="mine",
+                                sessionId="ses_seat"),
+                self._spark_row("2026-10-01T22:01:00Z", cid="theirs",
+                                model="muse-spark-1.3-contributor",
+                                sessionId="ses_other"),
+            ])
+            proc = run_tool(base, SPARK_EXPECT, out, rid="rid",
+                            logs_root=root, extra=["--gateway"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["correlation_ids"], ["mine"])
+
+    def test_gateway_measured_provider_alias(self):
+        # G5: spark seat logs provider "spark-1.3-contributor"; --expect
+        # omniroute/... must match ONLY the measured alias, never a fuzzy hit.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row("2026-10-01T21:10:00Z")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T21:30:00Z"])
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_gateway_uuid_provider_is_not_aliased(self):
+        # G5: an openai-compatible-chat-<uuid> provider connection is other
+        # traffic — no prefix-fuzzy matching against it.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root, out = self._gw_base(tmp)
+            self._gw(tmp, [self._spark_row(
+                "2026-10-01T21:10:00Z",
+                prov="openai-compatible-chat-c125c82d-7b07-4e6c-spark-1.3-contributor",
+                cid="uuid")])
+            proc = run_tool(base, SPARK_EXPECT, out, extra=[
+                "--gateway", "--since", "2026-10-01T21:09:00Z",
+                "--until", "2026-10-01T21:30:00Z"])
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+
+    def test_keyless_requires_run_id_in_argparse(self):
+        # G5: --run-id is a required source for the keyless mode.
+        with tempfile.TemporaryDirectory() as tmp:
+            base, root = self._env(tmp)
+            con, _ = make_fixture(base, [GOOD], cli_model=NEMO,
+                                  run_model=NEMO, rid="rid", logs_root=root)
+            con.close()
+            proc = run_tool(base, NEMO, Path(tmp) / "ev.json")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn("--run-id", proc.stderr)
+
     # --- structural / privacy ------------------------------------------------
 
     def test_no_assistant_rows_exit_three(self):
@@ -347,7 +629,7 @@ class SeatEvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp) / "AutoOS-fake-sandbox"
             base.mkdir()
-            proc = run_tool(base, NEMO)
+            proc = run_tool(base, NEMO, rid="rid")
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
 
     def test_multiple_sessions_picks_newest_reports_others(self):
