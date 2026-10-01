@@ -379,6 +379,16 @@ pins are now moot — TORDER's render fixpoint supersedes them; the redacted wor
 main's `R-coord-12`; REVIEWGATE-2FAM's two-seat requirement). `ws-incident` is now taken, so the
 C6 renumber has already been resolved in main.
 
+> **⚠ HARD RULE 1 — main tip is CLEAN; a code-path copy was missed by CI.** The tier-order take
+> `bd0ad278` brought `C:\Users\<user>\…` into **public `origin/main`** (`docs/handoff/2026-09-30-laneFreeWire.md`,
+> `2026-10-01-laneConnRotate.md` ×3, `2026-10-01-laneTierOrder.md`, and `tools/combo-contract.py:176`
+> — a code path). **RESOLVED at `14237978`** (tip clean; alpha replaced the code literal with a
+> git-common-dir path). `L1-backlog/ws-mainleak-20261001` is **SUPERSEDED — do NOT take it** (would
+> regress alpha's fix); the username remains in main **history** (rewrite is operator-only).
+> **Preventive fix:** `L1-backlog/ws-scrubgap-20261001` @ `f61d09a1` adds `tools/` to the CI
+> public-scrub scope (it scanned only `docs/`), so a code-path leak can no longer pass unseen —
+> reviewed APPROVED.
+
 ## Branch table
 
 18 local `L1-backlog/*` branches enumerated. 5 at base (`d08f7f2`, no commits);
