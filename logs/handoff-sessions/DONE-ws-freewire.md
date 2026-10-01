@@ -1,4 +1,4 @@
-# DONE — L1-backlog/ws-freewire-20260930 (free-leg wiring + gemini exclusion)
+# DONE — L1-backlog/ws-freewire-20260930 (free-leg wiring + gemini retention)
 
 **Lane:** `L1-backlog/ws-freewire-20260930`
 **Worktree:** `AutoOS-worktrees/AutoOS-ws-freewire`
@@ -8,7 +8,7 @@
 **Inputs:** `L1-backlog/ws-free-probe-20260930` @ `6e978dd`
 (`docs/handoff/2026-09-30-laneFreeProbe.md`)
 **Evidence:** `docs/handoff/2026-09-30-laneFreeWire.md`
-**Commits:** `7eff602` (wiring + gemini removal), `4cb49b4` (test updates)
+**Commits:** `7eff602` (wiring; gemini retained under the 429 backoff policy), `4cb49b4` (test updates)
 
 ---
 
@@ -22,7 +22,7 @@ rendered surface:
 - openrouter `:free`: `qwen/qwen3.8-27b:free`,
   `nvidia/nemotron-3-super-120b-a12b:free`, `cohere/north-mini-code:free`,
   `poolside/laguna-s-2.1:free`
-- plus `vertex/gemini-3.8-flash` as the repointed gemini combo target.
+- plus `vertex/gemini-3.8-flash`, a leg of the `gemini-3.8-flash` combo.
 
 - **5 new model rows** (`Qwen/Qwen3.8-27B`, the 4 openrouter `:free` ids); the
   three groq model rows and `qwen/qwen3.8-27b` promoted `tool_calls: proven`.
@@ -59,17 +59,21 @@ rendered surface:
   the blanket deny. A reviewer routed via `groq-qwen3.8-27b` reproduced a **413**
   (ITPM 7000, requested 14023) — recorded in the evidence §10.
 
-## 3. Gemini removal
+## 3. Gemini retention (429 backoff policy)
 
-- Every `gemini/*` leg removed from all 5 routes; the `gemini-3.8-flash` combo
-  repointed to `vertex/gemini-3.8-flash` (renders `["vertex/gemini-3.8-flash"]`).
+- **gemini retained; usage governed by the repeated-429 backoff policy
+  (3×429/120 s → 300 s cooldown per leg; 30 min park).** The 5 routes that
+  carried a `gemini/*` leg keep it under that policy; `vertex/gemini-3.8-flash`
+  is a leg of the `gemini-3.8-flash` combo. The leg restoration lands on the
+  combined lineage (`gemini-restore`).
 - `providers.google_ai_studio`: `available: false`,
   `unavailable_until: "2026-10-07T00:00:00Z"`; key unwired.
 - Measured reason: **8088** gemini cooling-down lines / **7187**
   `lastErrorCode=429` on 2026-09-30 + live 429 `model_cooldown`.
 - Honest caveat: the gateway *connection* is not deleted (no restart) and a
-  direct probe of the unwired leg returned 200 at 22:46:17Z; **no combo
-  references a `gemini/*` leg** (combo-store scan: `GEMINI LEGS LIVE: []`).
+  direct probe of the unwired leg returned 200 at 22:46:17Z — consistent with
+  retention: the leg is available and its repeated 429s are absorbed per leg by
+  the backoff policy above.
 
 ## 4. 429 policy outcome
 
@@ -95,7 +99,7 @@ rendered surface:
 - `tools/audit-router.py --offline` → `no drift`.
 - **Full `tests/test_*.py` sweep vs the `a975d48` baseline worktree: NO new
   failures; 7 baseline failures fixed** (resolver ×2, sync-ide ×5).
-- `apply.ps1 -DryRun` → correct plan (no `gemini/*`; 7 new combos). **Live apply**
+- `apply.ps1 -DryRun` → correct plan (7 new combos). **Live apply**
   → the 7 combos created; store scan confirms the bands.
 - **Ack probes** on all 10 newly wired legs: **10/10 HTTP 200** (22:45:43–22:46:00Z);
   no 429/503/504, no `chat_admission_busy`.
@@ -127,3 +131,30 @@ free (`ses_f0b7ef95dffetuZMSQd30zGpN2`), Zhipu GLM free
 ## 8. Explicitly NOT done here
 
 The **nebius removal** (follows in the same wave), and **no gateway restart**.
+
+## 9. Fix-up (2026-10-01, operator reversal)
+
+- Redacted the worktree username in `docs/handoff/2026-09-30-laneFreeWire.md`
+  to `C:\Users\<user>\…`.
+- Corrected the gemini wording across this lane's docs: the operator **reversed
+  the earlier decision** — **gemini retained; usage governed by the repeated-429
+  backoff policy (3×429/120 s → 300 s cooldown per leg; 30 min park)**. The
+  measured evidence (8088 cooling-down lines / 7187 × 429 on 2026-09-30) is kept
+  as the policy's justification. No combos/registry content changed — the leg
+  restoration is `gemini-restore`'s job on the combined lineage.
+
+### Fix-up review
+
+- `openrouter/nvidia/nemotron-3-super-120b-a12b:free` (NVIDIA Nemotron, **free**),
+  session `ses_f09a363bbffemq42wfRkLut1sN`, nonce-gated (quoted
+  `FREEWIRE-NONCE-7Qm4Zt9K` read from the evidence) — **APPROVED** on `323b7b0`.
+
+### CHANGELOG bullet
+
+- FreeWire fix-up (2026-10-01): redacted the real worktree path in
+  `docs/handoff/2026-09-30-laneFreeWire.md` to `C:\Users\<user>`, and corrected
+  the lane docs to the operator's reversed gemini policy — **gemini retained;
+  usage governed by the repeated-429 backoff policy (3×429/120 s → 300 s cooldown
+  per leg; 30 min park)**; the 8088 cooling-down / 7187 × 429 measurements are
+  kept as the policy's justification, and no combos/registry content changed (the
+  leg restoration is `gemini-restore`'s job on the combined lineage).
