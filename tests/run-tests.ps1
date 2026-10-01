@@ -8179,9 +8179,10 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
         Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
 
-        # As in bash: a trailing placeholder line wins and reads empty; an indented key is not a top-level key.
+        # Like tools/keys_file.py: a placeholder line is skipped, so the real value above it is used;
+        # an indented key is not a top-level key.
         Set-Content -LiteralPath $keys -Value "opencode_password: real`nopencode_password: REPLACE_WITH_X" -Encoding utf8
-        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'real'
         Set-Content -LiteralPath $keys -Value "  opencode_password: nested" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
 
