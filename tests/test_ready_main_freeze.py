@@ -736,5 +736,89 @@ class Freeze5RepoScopeTests(MainCiFreezeTests):
         self.assertEqual(self.read_inbox(inbox), "")
 
 
+class Freeze5GateOrderTests(MainCiFreezeTests):
+    """T0-FREEZE-5 H7: the main-CI gate runs LAST -- every earlier refusal wins.
+
+    WHY: each `ready` refusal must name the gate the caller actually hit, so
+    the fix it suggests (push; run the pre-push gate) is the fix that unblocks.
+    A main gate that ran first would blame a red main for a lane that was never
+    pushed or never tested. Fixtures are MainCiFreezeTests' own
+    (tests/test_ready_main_freeze.py: `make_repo` ~115 with its push/green
+    switches, `ready` ~145 driving the real CLI, `READY_RECORD` ~157), the same
+    real-temp-repo shape ReadyCommandTests uses
+    (tests/test_autoos_spawner.py ~9596), and the no-jump precedent is
+    `test_the_record_gate_does_not_jump_the_push_gate` (~10037: an unpushed
+    lane hears "not pushed", not "D-110"). The order pinned here:
+    reviews -> pushed -> (--ci-run) -> D-110 pre-push record -> main-ci-red.
+    The AssertionError stubs prove the earlier gate returned BEFORE gh was
+    ever consulted; the NotIn assertions prove the refusal names the right gate.
+    """
+
+    def run_ready_red_main(self, conclusion="failure", run_id="777",
+                           push=True, green=True, sha_override=None,
+                           extra=()):
+        """Drive the real CLI with main CI stubbed red (or green).
+
+        `main_ci_status` raising AssertionError means "must not consult main":
+        any test passing that stub fails if the main gate runs before its gate.
+        """
+        repo, sha = self.make_repo(push=push, green=green)
+        if sha_override is not None:
+            sha = sha_override
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        stub = conclusion
+        if isinstance(stub, type) and issubclass(stub, BaseException):
+            main_fake = mock.Mock(side_effect=stub("must not consult main"))
+        else:
+            main_fake = mock.Mock(return_value=(conclusion, run_id, None))
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status", main_fake):
+            rc, out, err = self.ready(record, repo, sha, inbox, extra=extra)
+        return rc, out, err, self.read_inbox(inbox)
+
+    def test_missing_prepush_record_with_red_main_names_d110(self):
+        rc, out, err, inbox = self.run_ready_red_main(
+            conclusion=AssertionError, push=True, green=False)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("D-110", out + err)
+        self.assertNotIn("main-ci-red", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_unpushed_branch_with_red_main_names_not_pushed(self):
+        rc, out, err, inbox = self.run_ready_red_main(
+            conclusion=AssertionError, push=False, green=False)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("not pushed", out + err)
+        self.assertNotIn("D-110", out + err)
+        self.assertNotIn("main-ci-red", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_wrong_sha_with_red_main_names_not_pushed(self):
+        rc, out, err, inbox = self.run_ready_red_main(
+            conclusion=AssertionError, push=True, green=True,
+            sha_override="0" * 40)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("not pushed", out + err)
+        self.assertNotIn("main-ci-red", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_red_main_with_everything_else_green_names_main_ci_red(self):
+        rc, out, err, inbox = self.run_ready_red_main(
+            conclusion="failure", run_id="777", push=True, green=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("777", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_green_main_with_everything_else_green_is_allowed(self):
+        rc, out, err, inbox = self.run_ready_red_main(
+            conclusion="success", run_id="778", push=True, green=True)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(inbox.splitlines()), 1, out + err + inbox)
+
+
 if __name__ == "__main__":
     unittest.main()
