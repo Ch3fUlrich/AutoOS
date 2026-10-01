@@ -1045,7 +1045,8 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     # registry cannot place fences nothing (fail open here -- reviewer_for
     # still fails that card closed at the review decision).
     fenced_family = None
-    if card.get("kind") == "review" and card.get("author"):
+    if (card.get("kind") == "review" or card.get("role") == "review") \
+            and card.get("author"):
         fenced_family, _fence_why = author_family(card["author"], registry)
 
     legs = []
@@ -2552,7 +2553,8 @@ def plan(card, features, client_state, registry, overlay, track_record,
     # asks: an implement card with a stray author field must not start a review
     # nobody ordered.
     review = None
-    if card.get("kind") == "review" and card.get("author"):
+    if (card.get("kind") == "review" or card.get("role") == "review") \
+            and card.get("author"):
         review = reviewer_for(card["author"], registry, client_state, now,
                               card.get("risk", "normal"),
                               card.get("privacy", "public"))

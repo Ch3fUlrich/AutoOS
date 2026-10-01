@@ -4524,6 +4524,52 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertIn("last_resort", blob)
         self.assertIn("meta-p/meta-model", blob)
 
+    def test_v1_role_review_card_arms_the_author_fence(self):
+        # T0-PAID-4 Q3: v1 cards spell the review as role=review (see
+        # is_final_card) -- the P3 author fence must arm for kind OR role.
+        # usable_legs is the fence's home (plan() requires a v2 kind), so
+        # the v1 card goes straight there: the author's own family (meta)
+        # is fenced and the paid cross-family leg stays usable -- the same
+        # verdict the kind=review control gets.
+        providers = {"meta-p": {"id": "meta-p", "tier": "free",
+                                "trains_on_prompts": False},
+                     "paid-p": {"id": "paid-p", "tier": "paid",
+                                "trains_on_prompts": False}}
+        models = {"writer-model": {"id": "writer-model", "family": "meta",
+                                   "reasoning": False, "effort_ladder": [],
+                                   "tool_calls": "proven", "price_in": 0.0,
+                                   "price_out": 0.0, "output_max": 1000,
+                                   "context_usable": {"tokens": 100000,
+                                                      "source": "default"}}}
+        for model_id, family, price in (("meta-model", "meta", 0.0),
+                                       ("paid-model", "otherfam", 1e-5)):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": price, "price_out": 2 * price,
+                "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        reg = self.fixture(legs=("meta-p/meta-model", "paid-p/paid-model"),
+                           extra_models=models, extra_providers=providers)
+        route = reg["routes"]["r-mix"]
+        overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                            for leg in route["legs"]}}
+        v1 = {"role": "review", "author": "writer-model", "spec": "exact",
+              "risk": "normal", "mode": "balanced", "privacy": "public"}
+        legs, skipped, _notes = r.usable_legs(
+            route, v1, self.feats(), self.state(), reg, overlay,
+            "opencode", self.now())
+        self.assertEqual(legs, [("paid-p", "paid-model")])
+        self.assertIn("meta-p/meta-model", skipped)
+        self.assertTrue(any("same family as author" in reason
+                            for reason in skipped["meta-p/meta-model"]))
+        control = dict(v1, kind="review")
+        legs2, skipped2, _notes2 = r.usable_legs(
+            route, control, self.feats(), self.state(), reg, overlay,
+            "opencode", self.now())
+        self.assertEqual(legs2, legs)
+        self.assertEqual(skipped2, skipped)
+
 
 if __name__ == "__main__":
     unittest.main()
