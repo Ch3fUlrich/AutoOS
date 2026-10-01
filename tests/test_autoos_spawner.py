@@ -9706,6 +9706,7 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(rc, 0, out + err)
         self.assertIn(declared, out)
         self.assertEqual(len(inbox.splitlines()), 1, out + err + inbox)
+        self.assertIn(' fixes_main="%s"' % declared, inbox.rstrip("\n"))
 
     # --- the review gate ----------------------------------------------------
 

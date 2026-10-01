@@ -195,6 +195,7 @@ class MainCiFreezeTests(unittest.TestCase):
             declare_waiver=True)
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(len(inbox.splitlines()), 1, out + err + inbox)
+        self.assertIn(' fixes_main="', inbox.rstrip("\n"))
 
     def test_green_main_is_allowed(self):
         rc, out, err, inbox = self.run_ready_with_main("success", run_id="778")
@@ -215,12 +216,13 @@ class FixMainWaiverTests(MainCiFreezeTests):
     The waiver is honoured ONLY when the environment declares
     AUTOOS_FIXES_MAIN=<lane>@<sha> whose sha equals the --sha being readied;
     a bare flag, or a mismatching env, REFUSES with exit 1 naming main-ci-red
-    and saying the waiver was not declared. The ready line logs the waiver
-    use (lane@sha only).
+    and saying the waiver was not declared and the CI was not consulted. The
+    ready line logs the waiver use (lane@sha in stdout and as
+    fixes_main="lane@sha" on the inbox line).
     """
 
     def run_ready_env(self, env_value, conclusion="failure", run_id="777",
-                      error=None, extra=("--fixes-main",)):
+                      extra=("--fixes-main",)):
         """Drive the real CLI with a controlled AUTOOS_FIXES_MAIN value.
 
         env_value=None is the bare flag (any outer declaration scrubbed, so
@@ -235,7 +237,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
             outer["AUTOOS_FIXES_MAIN"] = env_value
         with mock.patch.dict(os.environ, outer, clear=True), \
                 mock.patch.object(self.agent, "main_ci_status",
-                                  lambda runner=None: (conclusion, run_id, error)):
+                                  lambda runner=None: (conclusion, run_id, None)):
             rc, out, err = self.ready(record, repo, sha, inbox, extra=extra)
         return rc, out, err, self.read_inbox(inbox), sha
 
@@ -244,6 +246,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
         self.assertEqual(rc, 1, out + err)
         self.assertIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
+        self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
 
     def test_bare_flag_is_refused_even_when_main_is_green(self):
@@ -251,6 +254,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
         self.assertEqual(rc, 1, out + err)
         self.assertIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
+        self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
 
     def test_mismatching_env_sha_is_refused(self):
@@ -259,6 +263,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
         self.assertEqual(rc, 1, out + err)
         self.assertIn("main-ci-red", out + err)
         self.assertIn("waiver was not declared", out + err)
+        self.assertIn("CI was not consulted", out + err)
         self.assertEqual(inbox, "")
 
     def test_malformed_env_without_lane_at_sha_is_refused(self):
@@ -268,6 +273,7 @@ class FixMainWaiverTests(MainCiFreezeTests):
                 self.assertEqual(rc, 1, out + err)
                 self.assertIn("main-ci-red", out + err)
                 self.assertIn("waiver was not declared", out + err)
+                self.assertIn("CI was not consulted", out + err)
                 self.assertEqual(inbox, "")
 
     def test_matching_env_waiver_is_honoured_and_logs_lane_at_sha(self):
@@ -286,6 +292,8 @@ class FixMainWaiverTests(MainCiFreezeTests):
         self.assertIn(declared, out)
         self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1,
                          out + err + self.read_inbox(inbox))
+        self.assertIn(' fixes_main="%s"' % declared,
+                      self.read_inbox(inbox).rstrip("\n"))
 
     def test_matching_env_without_the_flag_still_freezes(self):
         """The env alone waives nothing: red main blocks a lane that never
@@ -428,6 +436,130 @@ class MainCiStatusParserTests(unittest.TestCase):
         self.assertIsNone(conclusion)
         self.assertIsNone(run_id)
         self.assertIn("No such file", err)
+
+
+class Freeze3WaiverLineTests(FixMainWaiverTests):
+    """T0-FREEZE-3 G1-G4: waiver rides the inbox line; lane is checked."""
+
+    def ready_with_env(self, env_value, extra=("--fixes-main",)):
+        """Drive the real CLI with an env computed from the real sha.
+
+        run_ready_env cannot name the sha before make_repo runs, so lane
+        tests build the repo first and declare the env from its sha.
+        """
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        outer = dict(os.environ)
+        outer.pop("AUTOOS_FIXES_MAIN", None)
+        if env_value is not None:
+            outer["AUTOOS_FIXES_MAIN"] = env_value(sha) if callable(env_value) else env_value
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: ("failure", "777", None)):
+            rc, out, err = self.ready(record, repo, sha, inbox, extra=extra)
+        return rc, out, err, self.read_inbox(inbox), sha
+
+    def test_waiver_is_written_on_the_inbox_line(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        declared = "%s@%s" % (self.BRANCH, sha)
+        outer = dict(os.environ)
+        outer["AUTOOS_FIXES_MAIN"] = declared
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  lambda runner=None: ("failure", "777", None)):
+            rc, out, err = self.ready(record, repo, sha, inbox,
+                                      extra=("--fixes-main",))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(declared, out)
+        line = self.read_inbox(inbox).rstrip("\n")
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
+        self.assertIn(' fixes_main="%s"' % declared, line)
+
+    def test_basename_lane_is_honoured(self):
+        base = self.BRANCH.rsplit("/", 1)[-1]
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: "%s@%s" % (base, s))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(' fixes_main="%s@%s"' % (base, sha),
+                      inbox.rstrip("\n"))
+
+    def test_waiver_lane_mismatch_is_refused(self):
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: "other@%s" % s)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver lane mismatch", out + err)
+        self.assertIn("other", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_whitespace_only_lane_is_refused(self):
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: " @%s" % s)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_surrounding_whitespace_is_trimmed_then_honoured(self):
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: " %s@%s " % (self.BRANCH, s))
+        self.assertEqual(rc, 0, out + err)
+        line = inbox.rstrip("\n")
+        self.assertIn(' fixes_main="%s@%s"' % (self.BRANCH, sha), line)
+
+    def test_second_at_sign_stays_in_the_sha_half(self):
+        # PINNED: the split partitions at the FIRST '@', so 'a@b@sha' means
+        # lane 'a' and sha 'b@sha' -- which mismatches and is refused as an
+        # undeclared waiver, not as a lane mismatch.
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: "%s@extra@%s" % (self.BRANCH, s))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertNotIn("waiver lane mismatch", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_abbreviated_sha_is_refused(self):
+        # PINNED: the sha must equal --sha exactly; a 12-char prefix waives
+        # nothing.
+        rc, out, err, inbox, sha = self.ready_with_env(
+            lambda s: "%s@%s" % (self.BRANCH, s[:12]))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_bare_flag_says_ci_was_not_consulted(self):
+        rc, out, err, inbox, _sha = self.run_ready_env(None)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("waiver was not declared", out + err)
+        self.assertIn("CI was not consulted", out + err)
+
+    def test_red_main_names_both_waiver_parts(self):
+        rc, out, err, inbox = self.run_ready_with_main("failure", run_id="777")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("--fixes-main", out + err)
+        self.assertIn("AUTOOS_FIXES_MAIN=<lane>@", out + err)
+
+    def test_waived_lane_does_not_consult_ci(self):
+        # BY DESIGN: a waived lane never asks gh about main, so an unreadable
+        # gh is still exit 0 -- the waiver replaces the read, it does not add
+        # to it.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        record = self.write_record(*self.READY_RECORD)
+        outer = dict(os.environ)
+        outer["AUTOOS_FIXES_MAIN"] = "%s@%s" % (self.BRANCH, sha)
+        with mock.patch.dict(os.environ, outer, clear=True), \
+                mock.patch.object(self.agent, "main_ci_status",
+                                  side_effect=AssertionError("must not consult CI")):
+            rc, out, err = self.ready(record, repo, sha, inbox,
+                                      extra=("--fixes-main",))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
 
 
 if __name__ == "__main__":

@@ -3140,8 +3140,12 @@ def cmd_ready(args) -> int:
     declared with ``--fixes-main`` AND the environment declaring
     ``AUTOOS_FIXES_MAIN=<lane>@<sha>`` whose sha equals ``--sha`` (T0-FREEZE-2:
     a bare flag, or a declaration for a different sha, is refused as
-    ``main-ci-red`` saying the waiver was not declared; a declared waiver is
-    logged as ``<lane>@<sha>`` on the ready line's note). The bypass is a CLI
+    ``main-ci-red`` saying the waiver was not declared and the CI was not
+    consulted; a declared waiver is
+    logged as ``<lane>@<sha>`` on the ready line's note and as
+    ``fixes_main="<lane>@<sha>"`` on the ready line itself, copying the
+    ``unverified="<reason>"`` style so the inbox timestamp parser still
+    reads the line). The bypass is a CLI
     flag plus an orchestrator-owned env declaration, not a record
     field, because the record's machine-readable vocabulary is the closed
     ``REVIEW_ENTRY_FIELDS`` list and a free-form token there would be ignored
@@ -3223,18 +3227,36 @@ def cmd_ready(args) -> int:
     # flag is typed by whoever runs the command (including a writer clearing
     # its own gate), while the env is set by the orchestrator that owns the
     # lane — so only a lane whose owner declared the fix can claim it.
+    # T0-FREEZE-3: the env value is stripped of surrounding whitespace before
+    # parsing; the split partitions at the FIRST '@' (a second '@' stays in
+    # the sha half, which then mismatches and is refused); the lane half must
+    # equal args.branch EXACTLY or equal its basename after the last '/'
+    # (documented: exact or basename), and a whitespace-only lane is refused
+    # like a missing one. A sha-matching declaration for another lane is
+    # refused naming main-ci-red and 'waiver lane mismatch'. The waiver field
+    # copies the unverified="..." style so inbox readers still parse the line.
     fixes_waiver = ""
+    fixes_field = ""
     if getattr(args, "fixes_main", False):
-        declared = os.environ.get("AUTOOS_FIXES_MAIN", "")
+        declared = os.environ.get("AUTOOS_FIXES_MAIN", "").strip()
         lane, sep, declared_sha = declared.partition("@")
-        if sep and lane and declared_sha == args.sha:
-            fixes_waiver = declared
-        else:
+        if not sep or not lane or not lane.strip() or declared_sha != args.sha:
             print("ready: not appended -- main-ci-red: --fixes-main was given "
                   "but the waiver was not declared for this sha (want "
-                  "AUTOOS_FIXES_MAIN=<lane>@%s); merge nothing until main is "
-                  "green" % args.sha)
+                  "AUTOOS_FIXES_MAIN=<lane>@%s); CI was not consulted; merge "
+                  "nothing until main is green" % args.sha)
             return 1
+        want_exact = args.branch
+        want_base = args.branch.rsplit("/", 1)[-1]
+        if lane != want_exact and lane != want_base:
+            print("ready: not appended -- main-ci-red: waiver lane mismatch: "
+                  "AUTOOS_FIXES_MAIN declares lane %r but the lane being "
+                  "readied is %r (want exact match or basename after the last "
+                  "'/'); CI was not consulted; merge nothing until main is "
+                  "green" % (lane, args.branch))
+            return 1
+        fixes_waiver = declared
+        fixes_field = ' fixes_main="%s"' % fixes_waiver
     if not fixes_waiver:
         main_conclusion, main_run_id, main_error = main_ci_status()
         if main_error:
@@ -3243,16 +3265,17 @@ def cmd_ready(args) -> int:
         if main_conclusion != "success":
             print("ready: not appended -- main-ci-red: main CI run %s is %s, "
                   "not success; merge nothing until main is green, or declare "
-                  "the fix with --fixes-main" % (main_run_id, main_conclusion))
+                  "the fix with --fixes-main AND env "
+                  "AUTOOS_FIXES_MAIN=<lane>@<sha>" % (main_run_id, main_conclusion))
             return 1
     else:
         print("note: --fixes-main -- %s declares it fixes main, "
               "so the main-ci-red gate is waived" % fixes_waiver)
-    line = "%s ready %s %s reviews: %s | %s%s%s" % (
+    line = "%s ready %s %s reviews: %s | %s%s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
         report["cross_family"]["detail"], report["final"]["detail"], ci_field,
-        unverified_field)
+        unverified_field, fixes_field)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -8921,7 +8944,8 @@ def _parser_ready(sub):
                               "<lane>@<sha> in the environment naming this lane's sha; "
                               "a bare flag is refused. Without a declared waiver a red "
                               "main freezes every lane; with it the lane is allowed "
-                              "onto a red main and one note logs the <lane>@<sha>")
+                              "onto a red main and one note logs the <lane>@<sha> "
+                              "and the inbox line carries fixes_main=\"<lane>@<sha>\"")
 
 
 def _parser_inbox(sub):
