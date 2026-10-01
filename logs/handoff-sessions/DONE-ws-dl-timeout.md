@@ -1,6 +1,6 @@
 # DONE — ws-dl-timeout (L1-backlog/ws-dl-timeout-20260930)
 
-**Status:** complete pending final full-suite comparison (see below).
+**Status:** complete — fix, tests, review follow-up, doc and this note all committed; full-suite comparison below.
 
 ## What was done
 
@@ -20,6 +20,8 @@ Bound every unbounded production download on Windows in wall-clock time.
 ```
 c408e186 fix(download): bound every Windows production network fetch in wall-clock time
 ed1ed397 tests: prove a stalled download fails within the wall-clock bound
+e87648df test(download): tighten the stall test and state the guard's limits
+2964c8ea docs: record the dl-timeout bounds, evidence, review and baseline comparison
 ```
 
 ## Evidence (exact output in `docs/handoff/2026-10-01-laneDlTimeout.md`)

@@ -4,7 +4,8 @@
 - **Branch:** `L1-backlog/ws-dl-timeout-20260930`
 - **Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-dltimeout`
 - **Base:** `96e5a53` (suite-fixture teardown-fix tip)
-- **Commits:** `c408e186` (fix), `ed1ed397` (tests)
+- **Commits:** `c408e186` (fix), `ed1ed397` (tests), `e87648df` (review
+  follow-up), `2964c8ea` (this doc + the DONE note)
 
 ## Defect (verified, not assumed)
 
@@ -144,4 +145,26 @@ were modified — `git diff --name-only` lists no `.sh`).
   `infra/…setup-agent-memory.ps1:214` and `infra/…setup-sync.ps1:176`. Those
   files are vendored infra with their own rules (AGENTS.md §2) and are not part
   of the `lib/windows` production path; recorded for L1 to route.
+
+## Finisher re-verification (independent, same day)
+
+A **finishing session** re-ran the cheap checks against the final tip
+(`2964c8ea`, code tree `e87648df`) instead of trusting the earlier transcript,
+because the working tree moved after the first evidence was captured:
+
+- focused run `-Filter 'stalled endpoint,carries a wall-clock bound'`:
+  `passed 2   failed 0   skipped 0`, both named tests green, under **both**
+  `pwsh` 7.5.8 and Windows PowerShell 5.1.
+- parse errors: `TOTAL=0` for the four touched files under both shells.
+- `Invoke-ScriptAnalyzer`: rule histogram identical to the detached baseline
+  under the suite's own exclusion set *and* the unfiltered broad set.
+- full-suite comparison re-derived from the retained logs `full-base.log` /
+  `full-post.log` (the orphaned baseline→branch driver finished at 08:48):
+  `1732 / 5 / 13` vs `1734 / 5 / 13`, identical failing set.
+
+The finisher did **not** re-run the cross-family reviewer: the previous session's
+verdict and nonce are recorded above and in the follow-up commit `e87648df`,
+which names the reviewer and dispositions each note. It also did not re-run the
+pre-fix hang: that is the retained `pre-stall.log` / `pre-structural.log`
+evidence, and re-running it means deliberately hanging a suite.
 
