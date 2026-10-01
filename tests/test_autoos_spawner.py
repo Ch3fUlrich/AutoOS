@@ -18497,6 +18497,11 @@ class HandEntryPricingTests(unittest.TestCase):
         r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+        # G4 (RWP3): the absence of one phrase was the whole assertion, so a mutant
+        # that benched the run for another reason — or answered that the hand entry
+        # spends Claude — still passed. The door stays open and the spend stays False.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIs(self.spends("omniroute/ovh-direct-gpt-oss-120b"), False)
 
     def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
         # The same door, on the id whose registry row RWP1 adds.
