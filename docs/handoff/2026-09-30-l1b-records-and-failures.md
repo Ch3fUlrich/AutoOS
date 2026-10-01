@@ -528,3 +528,44 @@ gateway proxying. Probe results (tiny ack + one tool call):
 **Ladder:** omniroute combos → openrouter `:free` only (no credit) → opencode Zen free →
 meta direct (down) → litellm (`tier2`) → ollama (local). **public-only where the model
 trains** (meta contributor, `free_ai/*`).
+
+---
+
+## 14. Wave-2 operational facts + patch-fix closure (2026-10-01)
+
+### 14.1 Patch-fix repair closes the `1d9e00db` FAIL
+
+- Branch `L1-backlog/ws-f1-vertex-20260930` @ `0dd39587` (was HOLD-FAIL). Fix, on the lane:
+  `Backup-File` takes **one pristine backup per file** (HashSet guard, no `-Force`, throws
+  if a backup path already exists); `tools/apply-vertex-patch.py` backs up once before its
+  first write and counts a missing file as an **ERROR** (exit 1); username paths redacted;
+  the `laneF1-vertex.md` "13 anchors" claim corrected to 12 chunk replacements.
+- **Proof** (throwaway fake package, no install): ps1 run 1 = `13 patched` → **7 backups, one
+  per file, each SHA256-identical to its pre-run original** → run 2 = `13 skipped`; py run 1 =
+  `12 patched` → 6 backups → run 2 = `12 skipped`; missing dir = `12 errors`, exit 1.
+- **Review: APPROVED** — `openrouter/nvidia/nemotron-3-super-120b-a12b:free`
+  (`ses_f09501ffafferkjWOloKoFvPqJ`), independently re-ran the backup behaviour.
+
+### 14.2 Operational facts (operator 2026-10-01)
+
+- **Vertex WORKS now** — operator fixed the creds; `tools/probe-vertex.py` re-run this
+  session: `vertex/gemini-3.8-flash` Tests 1–4 **all 200** (incl. the trailing-model-turn +
+  tool_calls case), `2026-10-01T09:05Z`. Live measurement.
+- **HuggingFace unusable → combos removal in flight** (FREEWIRE's HF legs being dropped).
+- **Antigravity rate-limited → parked for days.**
+- **t1 fallback latency 22556 ms** → being fixed.
+- **Vertex credential JSON `.gitignore` rule** — LANDED on TORDER `4fd66091`
+  ("fix(secrets): ignore vertex credential JSONs + red-first gate test (CREDIGNORE)").
+
+### 14.3 Meta key (opencode-direct meta rung)
+
+`api-keys.yml` carries a `meta` entry; the gateway `meta-api` connection uses it. For the
+opencode-direct meta rung, `META_API_KEY` was set from that value this session (Windows
+**User** scope, **absent-only**; value never printed). The **gateway `meta-api` route is the
+primary meta path**. Ladder doc updated (`ws-fallback-20261001` @ `b9c29991`).
+
+### 14.4 Merge state vs `origin/main` `88359146`
+
+Our wave has started merging: `L1-backlog/reviewgate-2fam` `d0f70f1` and
+`L1-backlog/redclear` `f93aee3` are **taken** into main. Conflict-map refresh (c) recorded in
+`docs/handoff/2026-09-30-ws-omniroute-branch-merge-checklist.md` (`ws-mergecheck` @ `87962722`).
