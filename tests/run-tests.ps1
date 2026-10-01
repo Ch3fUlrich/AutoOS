@@ -9403,6 +9403,22 @@ Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter
     }
 }
 
+# apply.ps1's registry parse spans three functions after the case-collision fix
+# (FREEWIRE 2026-09-30): dot-sourcing only Get-AutoOSProviderMap leaves it
+# calling an undefined ConvertFrom-AutoOSRegistryJson. Return the whole set, so
+# every test that runs the map function gets a loadable body. Optional consumers
+# (Get-AutoOSProviderDataJson) come along only when present.
+function Get-AutoOSRegistryFunctionSource {
+    param([System.Management.Automation.Language.ScriptBlockAst]$Ast)
+    $texts = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson',
+            'Get-AutoOSProviderMap', 'Get-AutoOSProviderDataJson')) {
+        $d = $Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    return ($texts -join "`n")
+}
+
 Test-Case 'provider data JSON survives both PowerShell generations' {
     # 5.1 strips inner double quotes marshalling to a native exe, pwsh 7
     # passes them through: one literal cannot serve both (groq/cerebras
@@ -9419,7 +9435,7 @@ Test-Case 'provider data JSON survives both PowerShell generations' {
         $n.Name -eq 'Get-AutoOSProviderDataJson' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
     Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text + "`n" + $jsonDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     # Task A5e: catalog/providers.json is deleted; the real call site now
     # points at catalog/ai-registry.json, so this test does too - it exercises
     # the exact call apply.ps1 itself makes.
@@ -9497,7 +9513,7 @@ Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unava
     $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_a5a_' + [Guid]::NewGuid().ToString('N') + '.json')
     @'
 {
@@ -9564,7 +9580,7 @@ Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml nam
     $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
     Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
-    . ([scriptblock]::Create($mapDef.Extent.Text))
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
     $dir = [IO.Path]::GetTempPath()
 
     $clash = Join-Path $dir ('aos_dupkey_' + [Guid]::NewGuid().ToString('N') + '.json')
@@ -9600,6 +9616,60 @@ Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml nam
         Assert-True (-not $registry.Map.Contains('meta_api')) 'a phantom meta_api key must not be offered'
     } finally {
         Remove-Item -LiteralPath $clash, $shared -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Get-AutoOSProviderMap tolerates registry keys differing only by case' {
+    # FREEWIRE finding (2026-09-30, pre-existing at the baseline): the registry
+    # may carry two keys differing only by casing - model ids are vendor
+    # spellings (`Qwen/Qwen3.8-27B` beside `qwen/qwen3.8-27b`). ConvertFrom-Json
+    # maps JSON objects to a case-INSENSITIVE PSObject, so the pair throws
+    # DuplicateKeysInJsonString on Windows PowerShell 5.1 ("keys with different
+    # casing" on pwsh). The throw happened inside Get-AutoOSProviderMap, so the
+    # whole run's provider registration was silently skipped while connections
+    # and combos still applied. This fixture is the guard; it touches no live
+    # registry, so an operator edit cannot make it flaky. Before the fix the
+    # test dot-sources only Get-AutoOSProviderMap, hits the raw ConvertFrom-Json
+    # path and fails with the duplicate-key error - exactly the defect.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $defs = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson', 'Get-AutoOSProviderMap')) {
+        $d = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    . ([scriptblock]::Create(($defs -join "`n")))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_dupcase_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "models": {
+    "Qwen/Qwen3.8-27B": {"id": "Qwen/Qwen3.8-27B"},
+    "qwen/qwen3.8-27b": {"id": "qwen/qwen3.8-27b"}
+  },
+  "providers": {
+    "groq": {"omniroute_id": "groq"}
+  },
+  "routes": {
+    "r": {"legs": ["groq/qwen/qwen3.8-27b"]}
+  }
+}
+'@ | Set-Content -LiteralPath $fixture -Encoding utf8
+    try {
+        $registry = Get-AutoOSProviderMap $fixture
+        Assert-Equal $registry.Map['groq'] 'groq'
+        Assert-True ($registry.Skipped -notcontains 'groq') 'groq (has a live leg) was wrongly skipped'
+        # Case-sensitivity at the parse: the exact-case key keeps its spelling
+        # and the later case-only duplicate does not replace it. PSObject names
+        # are case-insensitive by construction, so first-wins is the documented
+        # policy - the colliding section (models) is not read by the launcher.
+        $doc = ConvertFrom-AutoOSRegistryJson -Text (Get-Content -LiteralPath $fixture -Raw -Encoding utf8)
+        $modelNames = @($doc.models.PSObject.Properties.Name)
+        Assert-True ($modelNames -ccontains 'Qwen/Qwen3.8-27B') "exact-case model key lost: $($modelNames -join ',')"
+        Assert-True ($modelNames -cnotcontains 'qwen/qwen3.8-27b') "case-only duplicate replaced the first key: $($modelNames -join ',')"
+    } finally {
+        Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
     }
 }
 
