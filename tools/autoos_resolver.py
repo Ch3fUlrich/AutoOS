@@ -1037,6 +1037,17 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     critical_untethered = holds and bool(card.get("critical"))
     unavailable = route.get("unavailable_legs") or {}
 
+    # T0-PAID-3 P3: a review card names its author, and a leg of the author's
+    # own family can never review that diff (REVROUTE S2 -- it agrees with
+    # itself). Resolve the fenced family once; legs of it are skipped below
+    # so the route falls through to a cross-family leg instead of scoring a
+    # same-family head the reviewer walk must then refuse. An author the
+    # registry cannot place fences nothing (fail open here -- reviewer_for
+    # still fails that card closed at the review decision).
+    fenced_family = None
+    if card.get("kind") == "review" and card.get("author"):
+        fenced_family, _fence_why = author_family(card["author"], registry)
+
     legs = []
     leg_names = []
     skipped = {}
@@ -1105,6 +1116,15 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if bound:
             reasons.append("client_bound: %s/%s needs %s"
                            % (provider_id, model_id, bound))
+
+        # T0-PAID-3 P3 (see the fenced_family note above): the author's own
+        # family is fenced for this review card. Skipped, not merely
+        # discounted from holdback health -- a fenced free leg left usable
+        # would both block a paid cross-family leg and score a head leg the
+        # reviewer walk refuses, leaving the review with nobody.
+        if (fenced_family is not None
+                and family_key(_model_family(leg, registry)) == fenced_family):
+            reasons.append("same family as author (%s)" % fenced_family)
 
         # Brief OR1f (2026-09-27): the gateway renders only legs
         # policy.leg_rules allows (registry.gateway_legs drops every denied

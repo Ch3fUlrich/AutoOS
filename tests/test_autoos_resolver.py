@@ -4452,6 +4452,39 @@ class PaidLastResortTests(unittest.TestCase):
         blob = " ".join(sum(skipped.values(), []))
         self.assertIn("subscription", blob)
 
+    def test_review_card_paid_cross_family_reviewer_allowed_as_last_resort(self):
+        # T0-PAID-3 P3: writer family meta; the reviewer route's healthy free
+        # legs are all meta and its only non-meta leg is paid. A free leg of
+        # the fenced writer family is not healthy for this card, so the paid
+        # cross-family leg is allowed as a last resort -- never reviewer-less.
+        providers = {"meta-p": {"id": "meta-p", "tier": "free",
+                                "trains_on_prompts": False},
+                     "paid-p": {"id": "paid-p", "tier": "paid",
+                                "trains_on_prompts": False}}
+        models = {"writer-model": {"id": "writer-model", "family": "meta",
+                                   "reasoning": False, "effort_ladder": [],
+                                   "tool_calls": "proven", "price_in": 0.0,
+                                   "price_out": 0.0, "output_max": 1000,
+                                   "context_usable": {"tokens": 100000,
+                                                      "source": "default"}}}
+        for model_id, family, price in (("meta-model", "meta", 0.0),
+                                       ("paid-model", "otherfam", 1e-5)):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": price, "price_out": 2 * price,
+                "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        reg = self.fixture(legs=("paid-p/paid-model", "meta-p/meta-model"),
+                           extra_models=models, extra_providers=providers)
+        card = self.card("review", author="writer-model")
+        plan = self.run_plan(reg, card)
+        self.assertEqual(plan["leg"], "paid-p/paid-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("last_resort", blob)
+        self.assertIn("meta-p/meta-model", blob)
+
+
 if __name__ == "__main__":
     unittest.main()
 
