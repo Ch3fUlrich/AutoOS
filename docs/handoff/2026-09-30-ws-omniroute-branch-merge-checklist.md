@@ -176,7 +176,7 @@ parallel off f2d8d607:
   `ba0c707f`; the gemini `combos.json` fix must be applied on top of the pins doc tip
   (or vice-versa) — `combos.json` is resolved once, at the very end.
 
-### Branch table — all 59 `L1-backlog/*` branches (three-dot vs `eae75811`)
+### Branch table — all 58 `L1-backlog/*` branches (three-dot vs `eae75811`)
 
 `ov` = files that also changed on `origin/main` since `d08f7f2` (conflict candidates).
 
