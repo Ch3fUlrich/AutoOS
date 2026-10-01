@@ -47,8 +47,10 @@ deferred). All 18 branch SHAs verified against git by the reviewer.
 wrapped skill rules + documented opencode mem_limit exemption"). All SHAs re-measured
 this session with the **merge-base-safe three-dot form** `git diff --stat
 origin/main...<branch>` (never two-dot). Branch list: `git branch --list
-'L1-backlog/*'` = **59 branches**, none landed in `origin/main` yet
-(`git rev-list --count <branch>..origin/main` ≠ 0 for all).
+'L1-backlog/*'` = **58 branches** (measured; a moving target while alpha's TORDER lane
+commits), none landed in `origin/main` (`git rev-list --count <branch> ^origin/main`
+≠ 0 for all). *Review fix 2026-10-01: an earlier draft said 59 and omitted three
+branches — corrected below.*
 
 **Base warning (updated).** Local `main` = `08bd972f`, now **86 commits behind**
 `origin/main` (`main..origin/main` = 86; `d08f7f2..origin/main` = 86 too). **Rebase
@@ -118,6 +120,10 @@ ws-providers-rescue `2ffad433`). All are additive bullets → likely auto-mergea
 
 ### Pre-flight gate — alpha's combo-contract lane (IN FLIGHT) — BLOCKS the combos wave
 
+**UPDATE 2026-10-01 10:1xZ:** the lane is now landing as `L1-backlog/ws-tier-order-20261001`
+(TORDER TASK1–TASK6 + TORDER-OR free-only openrouter). The gate below **still holds**:
+do not merge the combos lineage until TORDER's live apply lands and the gates are green.
+
 **Do not merge any combos-lineage branch until alpha's tier-order live-apply lane
 lands and the combo-contract gates are green.** Rationale (operator urgent
 2026-10-01): alpha is re-ordering every tier to `trial → free → credits → paid` with
@@ -153,8 +159,14 @@ parallel off f2d8d607:
   49697ffa (changelog)
 ```
 
-- `ws-tier-order-20261001` and `ws-gemini-restore-20260930` are the **same commit
-  `e3436a4d`** (alias — merge once).
+- `ws-gemini-restore-20260930` = `e3436a4d` is the **gemini-reversal tip**.
+  `ws-tier-order-20261001` **descends from it** and is now the live **TORDER lane**
+  (head moved `018438ed` → `b9229fff` while this doc was being written: TASK1 t1-band
+  1M, TASK2 t2/t3 trial→free→credits→paid DeepSeek last, TASK3 gemini 1M/65536,
+  TASK4 four credit singles, TASK5 combos render fixpoint, TASK6 re-render, plus
+  TORDER-OR free-only openrouter). It is **NOT an alias** — the earlier "same commit
+  `e3436a4d`" note was true at measurement and is now stale; merge the TORDER head,
+  not `e3436a4d`.
 - `ws-nebius-20260930` and `ws-ovh-finish-20260930` are the **same commit
   `a975d48b`** (alias).
 - `ws-nebiuswave2` (beta, `ai-registry.json`) and `ws-nebius2-combos` (alpha,
@@ -172,13 +184,15 @@ parallel off f2d8d607:
 |---|---|---|---|---|
 | ws-ovh-20260930 | `89a9024b` | 11 | combos | **canonical** (spine head 1; OVH credit tier) |
 | ws-ovh-finish-20260930 | `a975d48b` | 15 | combos | **canonical** (OVH pass; carries `158818e` context fix). alias of ws-nebius |
+| ws-providers-rescue-20260930 | `2ffad433` | 4 | CHANGELOG | **ready** (20 missing providers, all `available:false`; D1 ovhcloud stub removed) |
 | ws-freewire-20260930 | `efb50ed9` | 22 | combos, spawner | **canonical** (wiring wave; review doc tip) |
+| ws-free-probe-20260930 | `6e978dd2` | 18 | — | **ready** (free-leg probe evidence; FREEWIRE's proof lane) |
 | ws-nebius2-combos-20260930 | `92a98af4` | 24 | combos, spawner | **canonical** (alpha combos nebius removal) |
 | ws-nebiuswave2-20260930 | `2aceb008` | 24 | combos, spawner, CHANGELOG | **canonical** (beta registry nebius removal — land with nebius2-combos as ONE wave) |
 | ws-invariant-fix-20260930 | `f2d8d607` | 26 | combos, spawner | **canonical** |
 | ws-combos-pins-20260930 | `8a862361` | 28 | combos, spawner | **canonical** (pins carried) |
 | ws-gemini-restore-20260930 | `e3436a4d` | 28 | combos, spawner | **canonical tip** (gemini reversal) |
-| ws-tier-order-20261001 | `e3436a4d` | 28 | combos, spawner | **alias of gemini-restore** (merge once) |
+| ws-tier-order-20261001 | `b9229fff` (moving) | 29 | combos, spawner | **IN FLIGHT — TORDER lane** (alpha combo-contract gate; TASK1–TASK6+) |
 | ws-resilience-env-20260930 | `afdcb11b` | 14 | — | **canonical** (429 policy; needs gateway restart to load) |
 | ws-admission-fix-20260930 | `5e977087` | 6 | — | **ready** |
 | ws-applyjson-20260930 | `6a4c2c00` | 9 | CHANGELOG | **ready** |
@@ -201,6 +215,7 @@ parallel off f2d8d607:
 | ws-freereads-20260930 | `73ebf4ad` | 23 | combos, spawner | **ready** (docs rider) |
 | ws-revround-20260930 | `1d9e00db` | 23 | combos, spawner | **ready** (docs rider; holds the patch-fix FAIL verdict) |
 | ws-merge-map-20260930 | `9e9c39b7` | 2 | — | **ready** (docs) |
+| ws-mergecheck-20260930 | `30dddca0` | 1 | — | **this doc** (checklist; refresh `30dddca0`, then re-review fix) |
 | ws-failures-doc-20260930 | `741b5cca` | 2 | — | **ready** (docs) |
 | ws-hygiene-main-20260930 | `4ba83ed0` | 1 | handoff | **ready** (docs redaction) |
 | ws-review-20260930 | `8b2a28c1` | 2 | — | **ready** (docs redaction) |
@@ -239,7 +254,8 @@ parallel off f2d8d607:
 5. **Registry (no main conflict):** ws-providers-rescue → ws-ovh → ws-ovh-finish.
 6. **Combos + nebius wave — LAST, only after the pre-flight gate above:** spine
    `89a9024 → 2ff537a → 92a98af4` **with** `nebiuswave2 2aceb008` as ONE wave →
-   `f2d8d607` → `ba0c707f/8a862361` + `e3436a4d` → resolve `combos.json` once.
+   `f2d8d607` → `ba0c707f/8a862361` + `e3436a4d` → **TORDER head (ws-tier-order)**
+   → resolve `combos.json` once.
 
 ## Branch table
 
