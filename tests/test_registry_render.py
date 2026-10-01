@@ -1264,8 +1264,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # measured plan), so the combo is now exactly the one live leg — and the
         # combo survives, which is what the invariant in tests/test_registry.py
         # requires of a route that still serves traffic.
+        # L1-CLEAN 2026-10-01 supersedes the DSBACK single-leg shape: the trial
+        # credits lead and the native DeepSeek leg is the last paid fallback.
         self.assertEqual(
-            combos["t2-worker-clean"]["models"], ["deepseek/deepseek-flash"])
+            combos["t2-worker-clean"]["models"],
+            ["ovh/gpt-oss-120b", "ovh/Qwen3.8-27B", "vertex/gemini-3.8-flash",
+             "deepseek/deepseek-flash"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes.
         # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
@@ -1310,9 +1314,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("ovhcloud/Qwen3.8-27B", rendered["t3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
-        row = row_for(registry.render_models_doc(real_registry()), "t2-worker-clean")
+        # L1-CLEAN (2026-10-01): the -clean twins no longer carry a gated leg
+        # (their trial-first legs are all servable), so the stale OVH coder leg
+        # kept in t2-worker's legs and marked unavailable_legs is the example.
+        row = row_for(registry.render_models_doc(real_registry()), "t2-worker")
         self.assertIn(
-            "~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable)", row)
+            "~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable)", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
