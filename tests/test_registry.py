@@ -2981,14 +2981,24 @@ class CreditSpendGuardTests(unittest.TestCase):
 
     def test_a_credit_tier_is_not_the_free_tier(self):
         # private_safe() and probe_common._skip_reason both branch on tier: a
-        # credit row is never probed by the standing free probes and never
-        # called clean, so `-clean` work cannot land on a finite grant.
+        # credit row is never probed by the standing free probes, so a `-clean`
+        # route can never land on a finite grant by accident.
+        # T1-CLEAN-4 K1 (2026-10-01) re-states the contract the lane moved:
+        # `credit` is now ADMITTED to a clean route, but only a grant whose
+        # no-training claim is cited (K2: a valid `privacy` block). An
+        # unverified grant (trains_on_prompts null) still fails - and fails on
+        # the TRAINING check, not on the tier, which is why the old
+        # `assertIn("credit", reason)` is gone.
         reg = load_registry()
         for pid in ("morph", "deepinfra", "together_ai"):
             self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
             safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
             self.assertFalse(safe, pid)
-            self.assertIn("credit", reason, pid)
+            self.assertIn("trains on prompts", reason, pid)
+        for pid in ("vertex_ai", "ovhcloud"):
+            self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
+            safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
 
     # --- the validator -----------------------------------------------------
 
@@ -3729,5 +3739,111 @@ class ModelKeyCaseHygieneTests(unittest.TestCase):
         self.assertEqual(dupes, {})
 
 
+
+class CreditPrivacyEvidenceGateTests(unittest.TestCase):
+    """T1-CLEAN-4 K2 (2026-10-01): the registry's own words - "a credit leg is
+    admitted because its provider now proves no-training with a cited
+    ``privacy`` block" (private_safe's docstring and the schema's tier
+    description) - must be ENFORCED, not documented. Before this the only gate
+    was `trains_on_prompts is False`, so a credit row that merely asserted the
+    flag passed as clean with no evidence behind it, and check_registry was
+    silent about it too."""
+
+    def test_a_credit_provider_without_a_privacy_block_is_not_private_safe(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+
+    def test_a_credit_provider_with_an_incomplete_block_is_not_private_safe(self):
+        # an evidence row whose url is not https is no evidence at all
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["url"] = "http://x.test/terms"
+        safe, reason = registry.private_safe("vertex_ai", "gemini-3.8-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_cited_credit_provider_is_private_safe(self):
+        reg = load_registry()
+        for pid, model in (("ovhcloud", "gpt-oss-120b"), ("vertex_ai", "gemini-3.8-flash")):
+            safe, reason = registry.private_safe(pid, model, reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
+
+    def test_a_paid_provider_needs_no_block(self):
+        # the gate is credit-only: a paid leg was never asked to cite terms.
+        reg = load_registry()
+        self.assertNotIn("privacy", reg["providers"]["deepseek"])
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertTrue(safe, reason)
+
+    def test_check_registry_flags_a_credit_provider_with_no_privacy_block(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_check_registry_flags_a_credit_provider_with_an_empty_block(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"] = []
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.vertex_ai" in p], problems)
+
+    def test_the_committed_registry_needs_no_credit_privacy_fix(self):
+        self.assertEqual(registry._check_privacy_evidence(load_registry()), [])
+
+
+class ResolveLegFoldTests(unittest.TestCase):
+    """T1-CLEAN-4 K3 (2026-10-01): resolve_leg()'s case-fold fallback (T1-CLEAN-3)
+    had no direct test - the mutant `len(folded) >= 1` survived, i.e. nothing
+    pinned that an AMBIGUOUS fold is refused rather than silently decided."""
+
+    def _reg(self, *model_keys):
+        return {"providers": {"p": {"omniroute_id": "p", "tier": "paid",
+                                    "trains_on_prompts": False}},
+                "models": {k: {"id": k, "family": "test"} for k in model_keys}}
+
+    def test_an_exact_key_wins_over_a_fold_match(self):
+        reg = self._reg("Some-Model", "some-model")
+        self.assertEqual(registry.resolve_leg("p/Some-Model", reg), ("p", "Some-Model"))
+        self.assertEqual(registry.resolve_leg("p/some-model", reg), ("p", "some-model"))
+
+    def test_two_fold_matches_are_ambiguous_never_a_silent_pick(self):
+        reg = self._reg("Some-Model", "some-MODEL")
+        with self.assertRaises(ValueError) as ctx:
+            registry.resolve_leg("p/SOME-model", reg)
+        self.assertIn("SOME-model", str(ctx.exception))
+
+    def test_exactly_one_fold_match_resolves(self):
+        reg = self._reg("Qwen3-Coder-30B-A3B-Instruct")
+        self.assertEqual(
+            registry.resolve_leg("p/qwen3-coder-30b-a3b-instruct", reg),
+            ("p", "Qwen3-Coder-30B-A3B-Instruct"))
+
+    def test_no_fold_match_raises(self):
+        reg = self._reg("Some-Model")
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("p/nothing-here", reg)
+
+    def test_a_real_leg_folds_to_the_canonical_key(self):
+        reg = load_registry()
+        self.assertEqual(
+            registry.resolve_leg("ovhcloud/qwen3-coder-30b-a3b-instruct", reg),
+            ("ovhcloud", "Qwen3-Coder-30B-A3B-Instruct"))
+
+
+class CleanCreditHeadPricedTests(unittest.TestCase):
+    """T1-CLEAN-4, out-of-scope pin (2026-10-01): the clean routes' credit HEAD
+    legs are unpriced right now, which is the state the resolver refuses them
+    for. Pinned so the CREDIT lane's change is a visible diff, not a surprise.
+    Priced by T1-CREDIT provider_prices at train integration."""
+
+    def test_the_clean_credit_head_legs_are_unpriced_today(self):
+        reg = load_registry()
+        for leg in ("ovhcloud/gpt-oss-120b", "vertex/gemini-3.8-flash"):
+            provider_id, model_id = registry.resolve_leg(leg, reg)
+            self.assertEqual(reg["providers"][provider_id]["tier"], "credit", leg)
+            self.assertFalse(resolver.credit_leg_priced(model_id, reg), leg)
 if __name__ == "__main__":
     unittest.main()

@@ -585,8 +585,10 @@ def private_safe(provider_id, model_id, registry) -> tuple:
       - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
         ``providers.<id>.tier`` -- is ``"paid"``, ``"subscription"`` or
         (L1-CLEAN, 2026-10-01) ``"credit"``. A credit leg is admitted because
-        its provider now proves no-training with a cited ``privacy`` block and
-        the resolver's own spend guard prices/caps it; a free pool is still
+        its provider now proves no-training with a cited ``privacy`` block
+        (L1-CLEAN-4 K2, 2026-10-01: that block is ENFORCED here, via
+        ``_privacy_block_problems``, not merely documented) and the resolver's
+        own spend guard prices/caps it; a free pool is still
         never private-safe, even one whose own
         ``trains_on_prompts`` is ``false`` (the found bug: groq/cerebras/
         sambanova free legs, and mistral's own ``mistral-code-latest`` free
@@ -627,6 +629,14 @@ def private_safe(provider_id, model_id, registry) -> tuple:
         return False, "effective tier %r is not paid, subscription or credit" % (effective_tier,)
     if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
         return False, "trains on prompts"
+    if effective_tier == "credit":
+        # L1-CLEAN-4 K2 (2026-10-01): the credit half of the admission is the
+        # CITED block, not the bare flag - the same predicate check_registry
+        # reports with, so a leg is never clean here and a defect there.
+        problems = _privacy_block_problems(provider_id, provider)
+        if problems:
+            return False, ("credit tier without cited privacy evidence (%s)"
+                           % problems[0].split("privacy evidence: ", 1)[-1])
     if "trains_on_prompts" in model and model["trains_on_prompts"] is not False:
         return False, "model trains on prompts"
     return True, None
@@ -696,9 +706,79 @@ def privacy_exemption_lines(registry) -> list:
     return lines
 
 
+def _privacy_block_problems(provider_id: str, provider: dict) -> list:
+    """Rule 3b defects for ONE `providers.<id>` row, as ``"privacy evidence: ..."``
+    lines (T1-CLEAN-4 K2, 2026-10-01).
+
+    This is the single reading of "a cited no-training block", shared by
+    `_check_privacy_evidence()` (which reports every defect) and
+    `private_safe()` (which gates a `credit` leg), so the report and the gate can
+    never disagree about what counts as evidence. Two shapes are problems:
+
+      - a present block that is not an object, disagrees with the provider's own
+        ``trains_on_prompts``, or (for a no-training claim) carries no evidence,
+        or an evidence row without an https ``url``, a non-empty ``quote`` and an
+        ISO ``accessed`` date;
+      - a ``credit`` provider that asserts ``trains_on_prompts: false`` with NO
+        block at all — the schema and `private_safe()`'s docstring both say a
+        credit leg is admitted *because* its grant cites its terms, and until
+        this fix nothing enforced it.
+
+    A row that is neither (no block, no credit grant) returns ``[]``.
+    """
+    problems = []
+    if "privacy" not in provider:
+        if (provider.get("tier") == "credit"
+                and provider.get("trains_on_prompts") is False):
+            problems.append(
+                "privacy evidence: providers.%s is tier credit with "
+                "trains_on_prompts false and no privacy block - a credit leg "
+                "admitted to a -clean route must cite the terms that say so"
+                % provider_id)
+        return problems
+    block = provider.get("privacy")
+    if not isinstance(block, dict):
+        return ["privacy evidence: providers.%s.privacy is not an object"
+                % provider_id]
+    if block.get("trains_on_prompts") is not provider.get("trains_on_prompts"):
+        problems.append(
+            "privacy evidence: providers.%s.privacy.trains_on_prompts %r "
+            "disagrees with the provider flag %r"
+            % (provider_id, block.get("trains_on_prompts"),
+               provider.get("trains_on_prompts")))
+    if block.get("trains_on_prompts") is not False:
+        return problems  # only a no-training claim needs evidence
+    evidence = block.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        problems.append("privacy evidence: providers.%s.privacy has no evidence"
+                        % provider_id)
+        return problems
+    for i, row in enumerate(evidence):
+        if not isinstance(row, dict):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "is not an object" % (provider_id, i))
+            continue
+        url = row.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "url is not https" % (provider_id, i))
+        quote = row.get("quote")
+        if not isinstance(quote, str) or not quote.strip():
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "quote is empty" % (provider_id, i))
+        accessed = row.get("accessed")
+        if not isinstance(accessed, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$",
+                                                         accessed):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "accessed is not YYYY-MM-DD" % (provider_id, i))
+    return problems
+
+
 def _check_privacy_evidence(registry) -> list:
     """Rule 3b (L1-CLEAN, 2026-10-01): a providers.<id>.privacy block must be
-    complete and consistent with the provider's own trains_on_prompts flag.
+    complete and consistent with the provider's own trains_on_prompts flag, and
+    a `credit` grant that relies on `false` must carry such a block at all
+    (T1-CLEAN-4 K2).
 
     A provider asking to be trusted on a privacy=sensitive route cannot just
     assert `false` - the block must cite its authority: non-empty evidence,
@@ -708,44 +788,9 @@ def _check_privacy_evidence(registry) -> list:
     "never guess false to make a row look clean", spec 3.1)."""
     problems = []
     for provider_id, provider in sorted(_section(registry, "providers").items()):
-        if not isinstance(provider, dict) or "privacy" not in provider:
+        if not isinstance(provider, dict):
             continue
-        block = provider.get("privacy")
-        if not isinstance(block, dict):
-            problems.append("privacy evidence: providers.%s.privacy is not an object"
-                            % provider_id)
-            continue
-        if block.get("trains_on_prompts") is not provider.get("trains_on_prompts"):
-            problems.append(
-                "privacy evidence: providers.%s.privacy.trains_on_prompts %r "
-                "disagrees with the provider flag %r"
-                % (provider_id, block.get("trains_on_prompts"),
-                   provider.get("trains_on_prompts")))
-        if block.get("trains_on_prompts") is not False:
-            continue  # only a no-training claim needs evidence
-        evidence = block.get("evidence")
-        if not isinstance(evidence, list) or not evidence:
-            problems.append("privacy evidence: providers.%s.privacy has no evidence"
-                            % provider_id)
-            continue
-        for i, row in enumerate(evidence):
-            if not isinstance(row, dict):
-                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
-                                "is not an object" % (provider_id, i))
-                continue
-            url = row.get("url")
-            if not isinstance(url, str) or not url.startswith("https://"):
-                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
-                                "url is not https" % (provider_id, i))
-            quote = row.get("quote")
-            if not isinstance(quote, str) or not quote.strip():
-                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
-                                "quote is empty" % (provider_id, i))
-            accessed = row.get("accessed")
-            if not isinstance(accessed, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$",
-                                                             accessed):
-                problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
-                                "accessed is not YYYY-MM-DD" % (provider_id, i))
+        problems.extend(_privacy_block_problems(provider_id, provider))
     return problems
 
 
