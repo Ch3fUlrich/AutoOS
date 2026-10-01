@@ -8,7 +8,9 @@ webpack/turbopack chunks to also strip trailing role:"model" contents.
 AutoOS lane F1-vertex  |  2026-09-30
 """
 import os
+import shutil
 import sys
+from datetime import datetime
 
 BASE = os.path.join(
     os.environ.get("APPDATA", ""),
@@ -73,12 +75,14 @@ def main():
     applied = 0
     skipped = 0
     errors = 0
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backed_up = set()
 
     for fname, old, new in patches:
         fpath = os.path.join(BASE, fname)
-        if not os.path.exists(fpath):
-            print(f"SKIP  {fname}: file not found")
-            skipped += 1
+        if not os.path.isfile(fpath):
+            print(f"ERROR {fname}: file not found")
+            errors += 1
             continue
 
         content = open(fpath, encoding="utf-8").read()
@@ -99,9 +103,13 @@ def main():
                 print(f"ERROR {fname}: pattern not found")
                 errors += 1
         elif count == 1:
+            bak = f"{fpath}.autoos-backup-{stamp}"
+            if fpath not in backed_up:
+                shutil.copy2(fpath, bak)
+                backed_up.add(fpath)
             content = content.replace(old, new, 1)
             open(fpath, "w", encoding="utf-8", newline="").write(content)
-            print(f"PATCH {fname}: 1 replacement applied")
+            print(f"PATCH {fname}: 1 replacement applied (backup: {os.path.basename(bak)})")
             applied += 1
         else:
             print(f"ERROR {fname}: {count} matches (expected 1)")

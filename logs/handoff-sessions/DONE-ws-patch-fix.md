@@ -1,7 +1,7 @@
 # DONE — lane `patch-fix` (ws-patch-fix) — 2026-09-30
 
 **Lane:** `patch-fix`
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-f1`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-f1`
 **Branch:** `L1-backlog/ws-f1-vertex-20260930`
 **Predecessor:** `patch-backups-3` (`9e643e3`, `docs/handoff/2026-09-30-lanePatchBackups.md`)
 **Status:** DONE. Worktree clean at end (quoted below). No live package file changed; no
@@ -83,13 +83,13 @@ doc, this file), followed by one docs-only follow-up commit on
 
 ## Refusals (verbatim, as given, all honoured)
 
-> Never work or commit in `C:\Users\mauls\Documents\Code\AutoOS` (main).
+> Never work or commit in `C:\Users\<user>\Documents\Code\AutoOS` (main).
 > Never push/merge/rebase/checkout.
 
 Start guard:
 ```
 $ git rev-parse --show-toplevel
-C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-f1
+C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-f1
 $ git status --short --branch
 ## L1-backlog/ws-f1-vertex-20260930
 ```

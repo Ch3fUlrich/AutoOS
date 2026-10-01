@@ -50,10 +50,22 @@ Set-StrictMode -Version Latest
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$backedUpFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-if (-not (Test-Path -LiteralPath (Join-Path $Path 'package.json'))) {
+$pkgJsonPath = Join-Path $Path 'package.json'
+if (-not (Test-Path -LiteralPath $pkgJsonPath)) {
   Write-Host "ERROR: omniroute package not found at: $Path"
   Write-Host "Pass -Path <path> to override."
+  exit 1
+}
+try {
+  $pkgJson = Get-Content -LiteralPath $pkgJsonPath -Raw | ConvertFrom-Json
+  if ($pkgJson.name -ne 'omniroute') {
+    Write-Host "ERROR: package at $Path has name '$($pkgJson.name)', expected 'omniroute'"
+    exit 1
+  }
+} catch {
+  Write-Host "ERROR: failed to parse $pkgJsonPath : $_"
   exit 1
 }
 
@@ -62,7 +74,15 @@ $results = [System.Collections.Generic.List[string]]::new()
 function Backup-File([string]$p) {
   if ($NoBackup) { return '<no-backup>' }
   $bak = "$p.autoos-backup-$stamp"
-  Copy-Item -LiteralPath $p -Destination $bak -Force
+  if ($backedUpFiles.Contains($p)) {
+    # File already backed up in pristine state earlier during this run; do not overwrite!
+    return (Split-Path -Leaf $bak)
+  }
+  if (Test-Path -LiteralPath $bak) {
+    throw "Backup destination already exists: $bak"
+  }
+  Copy-Item -LiteralPath $p -Destination $bak
+  [void]$backedUpFiles.Add($p)
   return (Split-Path -Leaf $bak)
 }
 

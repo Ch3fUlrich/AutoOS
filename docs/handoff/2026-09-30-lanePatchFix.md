@@ -1,7 +1,7 @@
 # Lane `patch-fix` — the four patch-backup discrepancies, resolved
 
 **Lane:** `patch-fix` (ws-patch-fix) under L1-backlog
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-f1`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-f1`
 **Branch:** `L1-backlog/ws-f1-vertex-20260930`
 **Date:** 2026-09-30
 **Predecessor:** `patch-backups-3` (commit `9e643e3`, branch
@@ -12,9 +12,9 @@ gateway was restarted, no push/merge/rebase/checkout.
 
 All tarball content below was streamed/extracted member-by-member from the published
 `omniroute@3.8.50` npm tarball
-(`C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`,
+(`C:\Users\<user>\AppData\Local\Temp\opencode\packbackups\omniroute-3.8.50.tgz`,
 121369534 B), never from the volatile Temp extraction tree. Live root:
-`C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute` (`package.json` version
+`C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute` (`package.json` version
 `3.8.50`). Throwaway dirs: `…\Temp\opencode\patchfix\{pristine,proof}`.
 
 ---
@@ -256,7 +256,7 @@ _1xkpq2s     False False
 ```
 
 **Producer identified.** The qwen-clamp worktree keeps an *untracked* diagnostic script
-`C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-qwenclamp\logs\patch_dist.py`
+`C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-qwenclamp\logs\patch_dist.py`
 (1523 B, LastWriteTime `30.09.2026 16:49:36` local = 14:49 UTC — inside the lane's
 "14:37–14:51Z live-apply window"; worktree branch
 `L1-backlog/ws-qwenclamp-20260930`). It targets exactly these six chunks:
@@ -312,11 +312,11 @@ backup files were written into the live install.
 Honoured: all patching was proved on the throwaway `…\patchfix\proof` copy; the live
 install was read-only.
 
-> Never work or commit in `C:\Users\mauls\Documents\Code\AutoOS` (main).
+> Never work or commit in `C:\Users\<user>\Documents\Code\AutoOS` (main).
 > Never push/merge/rebase/checkout.
 
 Honoured: cwd guard —
-`git rev-parse --show-toplevel` → `C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-f1`
+`git rev-parse --show-toplevel` → `C:/Users/<user>/Documents/Code/AutoOS-worktrees/AutoOS-ws-f1`
 and `git status --short --branch` → `## L1-backlog/ws-f1-vertex-20260930` (clean) at
 start; the only git writes were commits on this branch. No push/merge/rebase/checkout.
 
@@ -356,3 +356,33 @@ commands quoted throughout this document.
 ## 9. Rate-limit / admission events
 
 None observed during this lane (no `chat_admission_busy`, no `Rate limit exceeded`).
+
+---
+
+## 9. Fix-worker repair (2026-10-01) - closes the `1d9e00db` FAIL
+
+Review `1d9e00db` FAILed this lane on AGENTS.md hard rule 5: `tools/vertex-trailing-turn-reapply.ps1`
+issued a second `Copy-Item -Force` at the same `$stamp` backup path for the second `Try-Replace`
+on a file, overwriting the pristine backup with the already half-patched file (6 of 7 files).
+
+Repairs on this branch:
+- `tools/vertex-trailing-turn-reapply.ps1`: `Backup-File` records each backed-up path in a
+  `HashSet` and returns the existing backup for a repeat call, throws if a backup destination
+  already exists, and drops `-Force`; a `package.json` name==`omniroute` guard was added.
+- `tools/apply-vertex-patch.py`: one backup per file before its first write (`shutil.copy2`,
+  guarded by a `backed_up` set); a missing chunk file is now an ERROR (exit 1), not a SKIP.
+- Username paths redacted from `lanePatchFix.md`, `DONE-ws-patch-fix.md`,
+  `2026-09-30-workstation-omniroute-handoff.md`, `vertex-trailing-turn-README.md`,
+  `tools/start-isolated-gateway.ps1` (also `host.docker.internal`-style path cleanup).
+- `laneF1-vertex.md`: the "13 patched" anchor-count claim corrected to 12 chunk replacements.
+
+Behavioural proof on a throwaway fake package (no install; each target carries BOTH anchors,
+so two `Try-Replace` run per file):
+- ps1 run 1 = `Done: 13 patched, 0 skipped, 0 errors`; each of the 7 files has exactly ONE
+  backup, byte-identical (SHA256) to its pre-run original; run 2 = `13 skipped, 0 errors`;
+  total backups = 7 (no run-2 additions). VERDICT: PASS.
+- py run 1 = `Done: 12 patched, 0 skipped, 0 errors` (6 backups, one per file); run 2 =
+  `0 patched, 12 skipped, 0 errors` (idempotent); missing dir = `12 errors`, exit 1.
+- `[System.Management.Automation.Language.Parser]::ParseFile` clean; `python -m py_compile` clean.
+
+Status: ready for re-review (the patch-fix FAIL is resolved on this branch).

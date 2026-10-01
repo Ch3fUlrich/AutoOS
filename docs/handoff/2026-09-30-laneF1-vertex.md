@@ -68,9 +68,9 @@ The reapply script is `tools/vertex-trailing-turn-reapply.ps1`. It:
 3. Is idempotent — a second run reports every file `SKIP` and exits 0.
 
 `tools/apply-vertex-patch.py` is the equivalent chunk-only patcher (the same `old`/`new`
-anchor pairs). Proof on a pristine tarball copy (throwaway dir): run 1 =
-`Done: 13 patched, 0 skipped, 0 errors`; run 2 =
-`Done: 0 patched, 13 skipped, 0 errors`. The patched `.ts` is byte-identical to the
+anchor pairs across 12 chunk replacements). Proof on a pristine tarball copy (throwaway dir):
+run 1 = `Done: 12 patched, 0 skipped, 0 errors` (or 13 actions under `vertex-trailing-turn-reapply.ps1`
+including the .ts source); run 2 = `Done: 0 patched, 12 skipped, 0 errors`. The patched `.ts` is byte-identical to the
 live file (SHA256 `B913F3CA…12B4`).
 
 ## Cross-Family Reviews

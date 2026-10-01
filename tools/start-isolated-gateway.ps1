@@ -12,8 +12,8 @@ $ErrorActionPreference = 'Stop'
 
 $port = '20138'
 $nodeExe = 'C:\Program Files\nodejs\node.exe'
-$launcher = 'C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute\bin\omniroute.mjs'
-$logDir = 'C:\Users\mauls\AppData\Local\Temp\opencode\omniroute-iso-logs'
+$launcher = Join-Path $env:APPDATA 'npm\node_modules\omniroute\bin\omniroute.mjs'
+$logDir = Join-Path ([System.IO.Path]::GetTempPath()) 'opencode\omniroute-iso-logs'
 New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 
 # Start the gateway via the launcher — same DATA_DIR, different PORT.

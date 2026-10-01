@@ -46,14 +46,14 @@ other providers or models.
 
 - OmniRoute v3.8.50
 - Node.js 20.x or later
-- Windows 10/11 or Linux/macOS with PowerShell 7.4 or later
+- Windows 10/11 with Windows PowerShell 5.1 or PowerShell 7.x
 
 ## Notes
 
 The patch is applied to the global OmniRoute package at:
 
 ```powershell
-C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute
+%APPDATA%\npm\node_modules\omniroute
 ```
 
-The script creates backups of modified files with a `.autoos-backup-<timestamp>` suffix.
+The script creates backups of modified files with a `.autoos-backup-<timestamp>` suffix (preserving pristine originals without intra-run overwrites).
