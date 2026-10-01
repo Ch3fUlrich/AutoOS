@@ -202,9 +202,10 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # ids); the paid openrouter deepseek leg stays route-gated.
         self.assertNotIn("openrouter/deepseek/deepseek-v4.1-flash",
                          combos_by_name["t2-worker"]["models"])
-        # FREEWIRE: the gemini/gemini-3.8-flash head was removed from every combo.
-        self.assertNotIn("gemini/gemini-3.8-flash",
-                         combos_by_name["t2-worker"]["models"])
+        # RENDERFIX 2026-10-01: FREEWIRE's head removal was REVERSED by the
+        # operator (GEMRESTORE) - the gemini/gemini-3.8-flash free head is served.
+        self.assertIn("gemini/gemini-3.8-flash",
+                      combos_by_name["t2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
         # t2-worker-paid/t3-driver-paid (LiteLLM-only) and
@@ -237,14 +238,28 @@ class GatewayRefTests(unittest.TestCase):
     stays live for providers that genuinely diverge (scaleway -> scw)."""
 
     def test_render_omniroute_renders_antigravity_by_its_canonical_id(self):
-        rendered = registry.render_omniroute(real_registry())
-        by_name = {c["name"]: c for c in rendered["combos"]}
+        # AGYCANON (2026-09-30): antigravity renders under its canonical
+        # antigravity/* id, never the retired agy/* prefix. RENDERFIX 2026-10-01:
+        # the provider is now unavailable (rate-limited for days, revisit
+        # 2026-10-15) and its legs were removed from every route, so the rule is
+        # exercised on a copy that re-opens the provider and restores one leg.
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["antigravity"]["available"] = True
+        reg["routes"]["t2-worker"]["legs"] = (
+            ["antigravity/gemini-3.7-flash-high"]
+            + real_registry()["routes"]["t2-worker"]["legs"])
+        reg["routes"]["opus-4-6"]["legs"] = ["antigravity/claude-opus-4-6-thinking"]
+        by_name = {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
         self.assertIn("antigravity/gemini-3.7-flash-high",
                       by_name["t2-worker"]["models"])
         self.assertNotIn("agy/gemini-3.7-flash-high",
                          by_name["t2-worker"]["models"])
         self.assertIn("antigravity/claude-opus-4-6-thinking",
                       by_name["opus-4-6"]["models"])
+        # and the real registry carries no retired agy/* spelling anywhere
+        for combo in registry.render_omniroute(real_registry())["combos"]:
+            for model in combo["models"]:
+                self.assertFalse(model.startswith("agy/"), model)
 
     def test_render_omniroute_still_applies_a_declared_model_prefix(self):
         # The mechanism AGYID added (and this AGYCANON change must not break):
@@ -270,12 +285,15 @@ class GatewayRefTests(unittest.TestCase):
                       by_name["t2-worker-clean"]["models"])
 
     def test_registry_legs_keep_their_own_spelling(self):
-        self.assertIn("antigravity/gemini-3.7-flash-high",
+        # RENDERFIX 2026-10-01: antigravity's legs were removed from the routes
+        # (provider unavailable), so the rule is pinned on a leg that still
+        # declares; resolve_leg still splits the spelling at the first '/'.
+        self.assertIn("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
                       real_registry()["routes"]["t2-worker"]["legs"])
-        # resolve_leg still splits the registry spelling at the first '/'.
         self.assertEqual(
-            registry.resolve_leg("antigravity/gemini-3.7-flash-high", real_registry()),
-            ("antigravity", "gemini-3.7-flash-high"))
+            registry.resolve_leg("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                                 real_registry()),
+            ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"))
 
     def test_gateway_ref_returns_the_leg_when_there_is_no_model_prefix(self):
         self.assertEqual(
@@ -430,16 +448,20 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
                          registry.render_litellm_blocks(reg, real_litellm_config()))
 
     def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
-        # routes.t2-worker.legs carries antigravity/gemini-3.7-flash-high (a
-        # real registry leg) but antigravity has no LiteLLM transport or key
-        # (tools/sync-router-tiers.py GATEWAY_ONLY) - today's config.yaml
-        # never mirrors it, and the render must match: this leg's model name
-        # absent, a real sibling leg present. (FREEWIRE 2026-09-30: the sibling
-        # was gemini-3.8-flash until the gemini head was removed; use the
-        # scaleway grant that is still mirrored.)
-        legs = real_registry()["routes"]["t2-worker"]["legs"]
+        # antigravity has no LiteLLM transport or key (tools/sync-router-tiers.py
+        # GATEWAY_ONLY = {antigravity, agy, cc}), so a leg reached through it is
+        # never mirrored into the block while a real sibling leg is. RENDERFIX
+        # 2026-10-01: the provider is unavailable and its legs were removed from
+        # every route, so the rule is exercised on a copy that re-opens
+        # antigravity and restores the declared leg.
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["antigravity"]["available"] = True
+        reg["routes"]["t2-worker"]["legs"] = (
+            ["antigravity/gemini-3.7-flash-high"]
+            + real_registry()["routes"]["t2-worker"]["legs"])
+        legs = reg["routes"]["t2-worker"]["legs"]
         self.assertIn("antigravity/gemini-3.7-flash-high", legs)
-        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        rendered = registry.render_litellm_blocks(reg, real_litellm_config())
         self.assertNotIn("gemini-3.7-flash-high", rendered["t2-worker"])
         self.assertIn("scaleway/mistral-small-3.2-24b-instruct-2506",
                       rendered["t2-worker"])
@@ -1066,10 +1088,12 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # individually now - see
         # test_leg_flagged_unavailable_in_its_own_route_is_marked).
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t2-orchestrator"]["unavailable_legs"] = {}
+        # RENDERFIX 2026-10-01: t2-orchestrator's paid openrouter leg was removed
+        # (openrouter has no credits), so the rule is pinned on t2-worker, which
+        # still declares openrouter ':free' legs.
         reg["providers"]["openrouter"]["available"] = False
         rendered = registry.render_models_doc(reg)
-        row = row_for(rendered, "t2-orchestrator")
+        row = row_for(rendered, "t2-worker")
         self.assertIn("~~openrouter", row)
         self.assertIn("(unavailable)", row)
 
@@ -1109,9 +1133,11 @@ class ChangedLegAvailabilityFailsModelsDocCheckTests(unittest.TestCase):
 
     def test_marking_a_leg_unavailable_exits_one_and_names_the_route(self):
         reg = copy.deepcopy(real_registry())
-        # opus-4-6 has no unavailable legs today - flip one off.
-        reg["routes"]["opus-4-6"]["unavailable_legs"] = {
-            "antigravity/claude-opus-4-6-thinking": {"available": False},
+        # RENDERFIX 2026-10-01: opus-4-6 lost its antigravity leg (that provider
+        # is unavailable) and is omitted, so the flip is made on a leg
+        # t2-worker really declares and serves.
+        reg["routes"]["t2-worker"]["unavailable_legs"] = {
+            "groq/qwen/qwen3.8-27b": {"available": False},
         }
         path = write_registry(reg)
         try:
@@ -1119,7 +1145,7 @@ class ChangedLegAvailabilityFailsModelsDocCheckTests(unittest.TestCase):
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("routes.opus-4-6", proc.stdout)
+        self.assertIn("routes.t2-worker", proc.stdout)
 
     def test_a_class_change_exits_one_and_names_the_route(self):
         reg = copy.deepcopy(real_registry())
@@ -1294,8 +1320,9 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
         self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
-        # FREEWIRE 2026-09-30: the gemini head was removed from every route.
-        self.assertNotIn("gemini-3.8-flash", rendered["t2-worker"])
+        # RENDERFIX 2026-10-01: the FREEWIRE head removal was reversed
+        # (GEMRESTORE), so the gemini free head mirrors into the block again.
+        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
         # t3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
         # client-bound. FREEWIRE re-opened the groq qwen3.8-27b and openrouter
         # ':free' qwen3.8-27b legs, so the lowercase spelling is now present.
@@ -1599,30 +1626,40 @@ class FreeAiRenderTests(unittest.TestCase):
         # stays last. The combo uses the omniroute_id spelling
         # (D: model_prefix free-ai).
         models = combos["t3-driver-free-only"]["models"]
-        self.assertEqual(models[-1], "free-ai/qwen7b")
-        # FREEWIRE 2026-09-30: the probe-passed free band now leads (huggingface,
-        # openrouter ':free', groq) and the scaleway/nebius grants follow; the
-        # self-hosted free_ai stays last.
-        self.assertEqual(models[:5],
-                         ["huggingface/zai-org/GLM-5.2",
-                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-                          "groq/qwen/qwen3.8-27b",
-                          "huggingface/Qwen/Qwen3.8-27B",
-                          "openrouter/poolside/laguna-s-2.1:free"])
+        # RENDERFIX 2026-10-01: the RESTORED gemini free head leads, the
+        # probe-passed free band follows, and the scaleway credit legs come after
+        # (the operator's trial -> free -> credits -> paid order), so free_ai is
+        # mid-band rather than last.
+        self.assertEqual(models[0], "gemini/gemini-3.8-flash")
+        self.assertEqual(models[1:3],
+                         ["groq/qwen/qwen3.8-27b",
+                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free"])
+        self.assertIn("openrouter/poolside/laguna-s-2.1:free", models)
+        self.assertIn("free-ai/qwen7b", models)
+        self.assertNotEqual(models[0], "free-ai/qwen7b")
 
-    def test_free_ai_is_last_in_the_free_only_combos(self):
+    def test_free_ai_is_a_mid_band_stopgap_in_the_free_only_combos(self):
+        # RENDERFIX 2026-10-01: the operator's order keeps the scaleway credit
+        # legs AFTER the free band, so the self-hosted stopgap is no longer last.
+        # Its intent survives: it is a free leg that always answers, and it is
+        # never the head.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
-            self.assertEqual(combos[route_id]["models"][-1],
-                             "free-ai/qwen7b", route_id)
+            models = combos[route_id]["models"]
+            self.assertIn("free-ai/qwen7b", models, route_id)
+            self.assertNotEqual(models[0], "free-ai/qwen7b", route_id)
 
-    def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
-        # T2FREE 2026-09-28: the stopgap leg reaches the gateway render with
-        # the provider's own spelling (model_prefix free-ai), last in order.
+    def test_t2_worker_combo_carries_the_free_ai_stopgap_leg(self):
+        # T2FREE 2026-09-28: the stopgap leg reaches the gateway render with the
+        # provider's own spelling (model_prefix free-ai). RENDERFIX 2026-10-01:
+        # it sits in the free band, not last - the ovh credits and the paid legs
+        # follow it, deepseek last of all.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        self.assertEqual(combos["t2-worker"]["models"][-1], "free-ai/qwen7b")
+        models = combos["t2-worker"]["models"]
+        self.assertIn("free-ai/qwen7b", models)
+        self.assertEqual(models[-1], "deepseek/deepseek-flash")
 
     def test_free_ai_never_enters_a_clean_combo(self):
         # PROV finding 11: neither spelling may appear - the rendered omniroute_id
@@ -1780,10 +1817,12 @@ class RouteContextCapTests(unittest.TestCase):
     def test_the_real_t1_combo_does_not_promise_more_than_gemini_takes(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        # gemini/gemini-3.8-flash is a servable leg of every t1 combo and the
-        # registry records 131072 for it, so no t1 combo may declare 1M.
-        self.assertEqual(combos["t1-orchestrator"]["context"], "128k")
-        self.assertEqual(combos["t1-orchestrator-free-only"]["context"], "128k")
+        # RENDERFIX 2026-10-01 (D-TORDER-1b): every servable t1 leg now records
+        # >= 600000 - gemini/gemini-3.8-flash and vertex/gemini-3.8-flash and
+        # free_ai/google/gemini-3.8-flash 1048576, meta_api muse-spark 1048576,
+        # deepseek/deepseek-flash 1048576 - so t1 legitimately declares 1M.
+        self.assertEqual(combos["t1-orchestrator"]["context"], "1M")
+        self.assertEqual(combos["t1-orchestrator-free-only"]["context"], "1M")
         # spark-1.3-contributor's only servable leg is the 1M contributor model,
         # so its promise is not clamped.
         self.assertEqual(combos["spark-1.3-contributor"]["context"], "1M")
@@ -1807,9 +1846,11 @@ class RouteContextCapTests(unittest.TestCase):
                     % (combo["name"], combo["context"], declared, ref, window))
 
     def test_docs_promise_carries_the_clamped_window(self):
+        # RENDERFIX 2026-10-01 (D-TORDER-1b): t1 keeps only legs >= 600000, so
+        # its promise is the honest 1M every servable leg can take.
         promise = registry._route_context_promise(
             real_registry()["routes"]["t1-orchestrator"], real_registry())
-        self.assertEqual(promise, "128k")
+        self.assertEqual(promise, "1M")
 
 
 class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
@@ -1838,8 +1879,12 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         return {m["id"]: m for m in registry.render_ide(reg)["models"]}[route_id]
 
     def test_the_real_t1_picker_window_is_clamped(self):
+        # RENDERFIX 2026-10-01 (D-TORDER-1b): t1's servable legs are all
+        # >= 600000, so the picker carries the honest 1M window - still a clamp
+        # (never above the model's own 1048576), no longer a 128k clamp.
         entry = self._ide_entry(real_registry(), "t1-orchestrator")
-        self.assertLessEqual(entry["context"], 131_072)
+        self.assertEqual(entry["context"], 1_000_000)
+        self.assertLessEqual(entry["context"], 1_048_576)
 
     def test_effort_ladder_comes_from_the_first_servable_leg(self):
         entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
@@ -1868,20 +1913,23 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertIn("xhigh", entry["effort_ladder"])
 
     def test_the_real_free_head_keeps_its_own_default(self):
-        # FREEWIRE 2026-09-30: with the gemini head removed, the head the real
-        # registry serves is the scaleway grant scaleway/qwen3-235b-a22b-instruct-2507,
-        # whose model row carries NO declared effort ladder. render_ide()'s rule
-        # for a served head with no ladder is to forward the surface default
-        # (the `not head_ladder` branch), so t1's "xhigh" still reaches the
-        # picker even though the head declares no rungs.
+        # RENDERFIX 2026-10-01: the real served head is the RESTORED
+        # gemini/gemini-3.8-flash, whose model row declares the ladder
+        # low/medium/high. The surface default "xhigh" is not one of its rungs,
+        # so render_ide() drops it rather than forwards an effort the head
+        # rejects (combos.json's own rule); the head's own ladder is forwarded.
         entry = self._ide_entry(real_registry(), "t1-orchestrator")
-        self.assertEqual(entry.get("reasoning_effort"), "xhigh")
+        self.assertNotIn("reasoning_effort", entry)
+        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_openhands_max_input_tokens_is_clamped(self):
         tiers = {t["id"]: t for t in
                  registry.render_openhands(real_registry())["tiers"]}
         for tier_id in ("omniroute-t1-orchestrator", "litellm-t1-orchestrator"):
-            self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 131_072, tier_id)
+            # RENDERFIX 2026-10-01 (D-TORDER-1b): t1's legs are all >= 600000, so
+            # the profile window is the honest 1M - a clamp, not an overshoot.
+            self.assertEqual(tiers[tier_id]["max_input_tokens"], 1_000_000, tier_id)
+            self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 1_048_576, tier_id)
 
 
 if __name__ == "__main__":
