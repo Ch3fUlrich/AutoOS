@@ -1642,6 +1642,11 @@ def _combo_of(model: str) -> str:
 
 
 GEMINI_ALLOWED_RE = re.compile(r"gemini-3\.[678]-flash(?:-[a-z0-9]+)*\Z", re.I)
+# The variant tail above happily accepts `-pro` as one more suffix, which would
+# let a Pro model (D-255 bans every one of them) in wearing a Flash name. A
+# '-'-delimited segment that starts with 'pro' — glued spellings like `-promax`
+# included, so the rule is conservative — refuses the id whatever else matched.
+GEMINI_PRO_SEGMENT_RE = re.compile(r"(?:^|-)pro", re.I)
 
 
 def gemini_model_allowed(model_id) -> bool:
@@ -1661,7 +1666,8 @@ def gemini_model_allowed(model_id) -> bool:
     part = model_id.lower().rsplit("/", 1)[-1]
     if "gemini" not in part:
         return True
-    return bool(GEMINI_ALLOWED_RE.fullmatch(part[part.index("gemini"):]))
+    tail = part[part.index("gemini"):]
+    return bool(GEMINI_ALLOWED_RE.fullmatch(tail)) and not GEMINI_PRO_SEGMENT_RE.search(tail)
 
 
 def gemini_spawn_refusal(model, combo, registry, cfg=None, explicit=False) -> str:

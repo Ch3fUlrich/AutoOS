@@ -18586,6 +18586,23 @@ class GeminiAllowListTests(unittest.TestCase):
                      "openrouter/google/gemini-3.8-flash", "vertex-gemini-3.8-flash",
                      "free_ai/google/gemini-3.8-flash")
 
+    def test_a_pro_token_hidden_in_a_variant_suffix_is_refused(self):
+        # G1 (RWP3, cross-family seat): the variant tail of the allow pattern
+        # reads `-pro` as just another suffix, so `gemini-3.6-flash-pro` — a Pro
+        # model D-255 bans — full-matched it. A '-'-delimited segment that starts
+        # with 'pro' refuses the id whatever else matches, in any case spelling
+        # and behind any path prefix.
+        self.refused("gemini-3.6-flash-pro", "gemini-3.8-flash-pro-preview",
+                     "gemini-3.7-flash-promax", "vertex/gemini-3.6-flash-pro",
+                     "models/gemini-3.8-flash-pro", "google/gemini-3.1-pro-preview",
+                     "GEMINI-3.6-FLASH-PRO", "Vertex/Gemini-3.8-Flash-Pro-Preview")
+
+    def test_the_allowed_versions_and_variants_are_unchanged(self):
+        self.allowed("gemini-3.8-flash", "gemini-3.7-flash-high",
+                     "gemini-3.7-flash-medium", "gemini-3.6-flash",
+                     "gemini-3.8-flash-preview", "gemini-3.6-flash-high-preview",
+                     "vertex/gemini-3.8-flash", "models/gemini-3.7-flash-medium")
+
     def test_every_pro_model_is_refused(self):
         self.refused("gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3-pro",
                      "vertex/gemini-3.1-pro-preview", "google/gemini-2.5-pro",
