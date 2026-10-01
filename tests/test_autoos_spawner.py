@@ -124,8 +124,36 @@ def claude_env(**extra):
                      **extra)
 
 
-def run_agent(*args, env=None):
-    return subprocess.run([sys.executable, str(AGENT), *args], capture_output=True,
+def budget_on_root():
+    """A throwaway ROOT whose catalog/ai-registry.json has the Claude budget ON.
+
+    The shipped registry is `mode: normal` since the operator's 2026-10-01
+    routing-00 decision (the weekly limit reset), so the spawn-path tests that
+    prove the ON refusal must supply their own registry instead of reading the
+    shipped value. Every top-level entry is symlinked so the CLI still sees the
+    real `opencode.jsonc` and `tools/`; only `catalog/` is replaced with a copy
+    of the shipped registry carrying `mode == 'budget'`. The CLI resolves ROOT
+    from `os.path.abspath(__file__)`, which does not follow the `tools` symlink,
+    so it reads the copy.
+    """
+    tmp = tempfile.mkdtemp(prefix="autoos-budget-on-")
+    for entry in os.scandir(str(ROOT)):
+        if entry.name == "catalog":
+            continue
+        os.symlink(entry.path, os.path.join(tmp, entry.name))
+    os.makedirs(os.path.join(tmp, "catalog"))
+    registry = json.loads((ROOT / "catalog" / "ai-registry.json")
+                          .read_text(encoding="utf-8"))
+    registry["policy"]["claude_budget"]["mode"] = "budget"
+    with io.open(os.path.join(tmp, "catalog", "ai-registry.json"), "w",
+                 encoding="utf-8") as fh:
+        json.dump(registry, fh)
+    return tmp
+
+
+def run_agent(*args, env=None, root=None):
+    agent = str(AGENT) if root is None else os.path.join(root, "tools", "autoos-agent.py")
+    return subprocess.run([sys.executable, agent, *args], capture_output=True,
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
 
 
@@ -12735,9 +12763,17 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
     CARD = "role=implement"
     CRITICAL = "CI is red on main and only this run can close it"
 
+    def setUp(self):
+        # The shipped registry is budget OFF now (operator 2026-10-01), so run
+        # the CLI against a throwaway ROOT whose registry has mode=budget: these
+        # tests prove the ON refusal, not the shipped value.
+        self.root = budget_on_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
     def run_(self, *args, env=None):
         return run_agent("run", *args, "--dry-run", "--card", self.CARD,
-                         "reply with exactly: ack", env=env or clean_env())
+                         "reply with exactly: ack", env=env or clean_env(),
+                         root=self.root)
 
     def test_run_client_claude_is_refused_in_budget_mode(self):
         r = self.run_("--client", "claude")
@@ -12755,7 +12791,8 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
         # The whole point of item 1: the card is written by the worker that wants
         # the model, so it cannot be the thing that authorises the spend.
         r = run_agent("run", "--client", "claude", "--dry-run",
-                      "--card", self.CARD + ",critical=true", "t")
+                      "--card", self.CARD + ",critical=true", "t",
+                      root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
 
@@ -12816,7 +12853,7 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
                       "claude-sonnet-5", "opus"):
             r = run_agent("run", "--client", "opencode", "--model", model,
                           "--dry-run", "--card", self.CARD, "t",
-                          env=clean_env())
+                          env=clean_env(), root=self.root)
             self.assertNotEqual(r.returncode, 0, "%s: %s%s" % (model, r.stdout, r.stderr))
             self.assertIn("claude_budget", r.stderr, model)
 
@@ -12831,26 +12868,42 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
         # card asks for no capability, and the run gets to the budget gate.
         r = run_agent("run", "--client", "agy", "--dry-run",
                       "--card", "role=review", "reply with exactly: ack",
-                      env=clean_env())
+                      env=clean_env(), root=self.root)
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("claude_budget", r.stderr)
         self.assertIn("claude-opus", r.stderr)
+
+    def test_the_shipped_registry_is_budget_off_and_allows_claude(self):
+        # B1 pin of the shipped behaviour as it is now: operator 2026-10-01
+        # (routing-00) reset the weekly limit and set mode=normal, so the same
+        # `--client claude` spawn this class refuses under ON is allowed and
+        # prints no `claude_budget` refusal.
+        r = run_agent("run", "--client", "claude", "--dry-run", "--card",
+                      self.CARD, "reply with exactly: ack", env=clean_env())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # The allowed path cites the OFF gate as `claude-budget: ... off`, not a
+        # `claude_budget:` refusal.
+        self.assertIn("claude-budget:", r.stderr)
+        self.assertIn("would run:", r.stdout)
 
     def test_the_orchestrator_declaration_unlocks_a_claude_defaulted_client(self):
         cli = load_agent()
         refusal, note = cli.claude_spawn_refusal(
             "agy", {cli.resolver.CLAUDE_CRITICAL_ENV: self.CRITICAL},
-            self.shipped_budget())
+            self.budget_on())
         self.assertIsNone(refusal, refusal)
         self.assertIn(self.CRITICAL, note)
 
-    def shipped_budget(self):
-        # The operator's shipped registry, budget and all: this is the gate as the
-        # host runs it, not a fixture that flatters the code under test.
+    def budget_on(self):
+        # A copy of the shipped registry with the budget forced ON. The shipped
+        # value is mode=normal now (operator 2026-10-01), and these tests prove
+        # the ON gate, not the shipped setting.
         import json
         import pathlib
         path = pathlib.Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
-        return json.loads(path.read_text(encoding="utf-8"))
+        registry = json.loads(path.read_text(encoding="utf-8"))
+        registry["policy"]["claude_budget"]["mode"] = "budget"
+        return registry
 
     def test_a_named_client_on_a_non_claude_model_is_never_gated(self):
         # qoder's own default is Qwen3.8-Flash: the name check must not become a
@@ -12905,10 +12958,10 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
         # resolver; the same card planned for opencode never mentions it.
         claude = run_agent("route", "--client", "claude", "--card",
                            "kind=implement,mode=balanced,risk=normal,"
-                           "paths=README.md")
+                           "paths=README.md", root=self.root)
         opencode = run_agent("route", "--client", "opencode", "--card",
                              "kind=implement,mode=balanced,risk=normal,"
-                             "paths=README.md")
+                             "paths=README.md", root=self.root)
         blob = lambda r: (r.stdout or "") + (r.stderr or "")
         self.assertIn("client claude held for finals", blob(claude),
                       blob(claude))
@@ -12917,6 +12970,36 @@ class ClaudeBudgetSpawnTests(unittest.TestCase):
 
 class ClaudeBudgetMcpSpawnTests(unittest.TestCase):
     """Item 3(e): the MCP `spawn` tool is a spawn path too."""
+
+    def setUp(self):
+        # The shipped registry is budget OFF now (operator 2026-10-01), so point
+        # both halves of the MCP gate at a throwaway ROOT whose registry has
+        # mode=budget: spawn()'s in-process `claude_spawn_refusal` reads
+        # `agent.REGISTRY_PATH`, and its preflight subprocess runs `AGENT`.
+        self.root = budget_on_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.shipped_registry_path = str(ROOT / "catalog" / "ai-registry.json")
+        self.real_agent = str(AGENT)
+        on_registry = os.path.join(self.root, "catalog", "ai-registry.json")
+        on_agent = os.path.join(self.root, "tools", "autoos-agent.py")
+        for target, name, value in ((mcp_server.agent, "REGISTRY_PATH", on_registry),
+                                    (mcp_server, "AGENT", on_agent)):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_the_shipped_registry_is_budget_off_and_allows_claude(self):
+        # B1 pin of the shipped behaviour: mode=normal, so the MCP spawn gate
+        # does not reject `client: claude`. Point both halves back at the real
+        # shipped registry/agent for this one case.
+        with mock.patch.object(mcp_server.agent, "REGISTRY_PATH",
+                               self.shipped_registry_path), \
+                mock.patch.object(mcp_server, "AGENT", self.real_agent):
+            out = mcp_server.spawn({"client": "claude", "task": "t",
+                                    "card": {"role": "implement"},
+                                    "dry_run": True})
+        self.assertNotEqual(out.get("state"), "rejected", out)
+        self.assertNotIn("claude_budget", out.get("error", ""), out)
 
     def test_spawn_refuses_the_claude_client_in_budget_mode(self):
         out = mcp_server.spawn({"client": "claude", "task": "t",
@@ -12997,14 +13080,34 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
     def setUp(self):
         self.agent = load_agent()
         self.real_cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        # A registry file with the budget forced ON, for the one test that drives
+        # the CLI in-process: cmd_run reads REGISTRY_PATH at call time, so the
+        # patch below makes it independent of the shipped mode=normal value.
+        import copy
+        fd, self.on_registry_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        self.addCleanup(os.unlink, self.on_registry_path)
+        on = copy.deepcopy(SHIPPED_REGISTRY)
+        on["policy"]["claude_budget"]["mode"] = "budget"
+        with io.open(self.on_registry_path, "w", encoding="utf-8") as fh:
+            json.dump(on, fh)
 
     def cli(self):
         return self.agent
 
     def shipped(self, **row):
-        """A deep copy of the shipped registry, optionally with a clients row."""
+        """A deep copy of the shipped registry with the budget forced ON,
+        optionally with a clients row.
+
+        The shipped value is `mode: normal` since the operator's 2026-10-01
+        routing-00 decision, and this class proves the gate's ON behaviour, so
+        it supplies the ON value rather than trusting the shipped one. The OFF
+        behaviour is pinned by the shipped-value tests in ClaudeBudgetSpawnTests
+        and ClaudeBudgetRealRegistryTests; use `self.off()` for an OFF fixture.
+        """
         import copy
         registry = copy.deepcopy(SHIPPED_REGISTRY)
+        registry["policy"]["claude_budget"]["mode"] = "budget"
         for name, value in row.items():
             registry.setdefault("clients", {}).setdefault(name, {}).update(value)
         return registry
@@ -13123,7 +13226,8 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         env = clean_env()
         env.pop("AUTOOS_OMNIROUTE_KEY", None)
-        with mock.patch.dict(os.environ, env, clear=True), \
+        with mock.patch.object(cli, "REGISTRY_PATH", self.on_registry_path), \
+                mock.patch.dict(os.environ, env, clear=True), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = cli.cmd_run(self.args(tier=2, card=None), self.claude_tier_cfg())
         self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())

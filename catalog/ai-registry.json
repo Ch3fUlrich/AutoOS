@@ -2626,7 +2626,7 @@
       "mode": "normal",
       "weekly_share_left": 0.9,
       "budget_below": 0.25,
-      "source": "operator 2026-10-01 via routing-00, weekly limit reset;operator D-102 2026-09-28; operator 2026-10-01 via routing-00: budget mode flipped to normal"
+      "source": "operator 2026-10-01 via routing-00, weekly limit reset; operator D-102 2026-09-28; operator 2026-10-01 via routing-00: budget mode flipped to normal"
     }
   },
   "providers": {
