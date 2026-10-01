@@ -13,8 +13,10 @@ No secrets below: env/key names and relative paths only. The one machine-local p
 
 ## 0. What this lane did and did not do
 
-- Applied the **rotation** env family (and one provider-breaker knob) to every
-  tracked gateway-spawn site, respect-set and exactly once.
+- Applied the **rotation** env family (and one provider-breaker knob) to **every** tracked
+  native gateway-spawn / env site — six launchers plus the systemd unit's `~/.omniroute/.env`
+  writer — respect-set and exactly once. Two sites (`Start-AutoOSStack.sh`, the unit) were
+  added after the first review flagged them (§7).
 - **Did NOT** restart the shared gateway: the running process predates the change and
   keeps its old env until the next start (see §6.7).
 - **Did NOT** touch the docker compose surface (§8).
@@ -58,8 +60,13 @@ Supporting lines:
 - `75-78` buildClass: `threshold: envInt(thresholdEnv, 1, 1)` (default **1** = hop on the
   first error) and `windowMs: envInt(windowEnv, DEFAULT_WINDOW_MS / 1000, 1) * 1000`
   (default **120** s).
-- `119-125: getGlobalRotationConfig()` parses once and stores the result on `globalThis` —
-  a process-env read at startup, **no `.env` file load** for these keys.
+- `119-125: getGlobalRotationConfig()` parses once and stores the result on `globalThis`.
+  The gateway process gets these keys from **either** its launch environment **or** an
+  `.env` file: `bin/omniroute.mjs:102-169` `loadEnvFile()` (called at import, line 169)
+  reads `$DATA_DIR/.env`, `~/.omniroute/.env` (`getDefaultDataDir()`), `cwd/.env` and
+  `ROOT/.env`, and fills `process.env[key]` **only when it is `undefined`** (line 140) — so
+  the **launch env wins** over any `.env`, and a `.env` is the surface a process that carries
+  no `Environment=` (the systemd unit) falls back to. Both surfaces are handled below.
 
 ### 1.2 Provider-breaker family — `open-sse/config/constants.ts`
 
@@ -145,9 +152,24 @@ also assemble it:
 - `configuration/omniroute/apply.sh:449`
 
 The docker stack assembles its env separately (`configuration/docker/ai-stack/compose.yml` +
-`stack.env`); it is out of scope here (§8). **Conclusion:** for a native host the launcher is
-the only in-repo surface, so the four named files **plus** the autostart helper (the same
-spawn class, already treated by `tests/run-tests.ps1`'s launcher test) must carry the policy.
+`stack.env`); it is out of scope here (§8).
+
+**Complete native site list** (every tracked process that can end up `serve`-ing the
+gateway, found by grepping every `--no-open --port 20128` / `serve --no-open` occurrence):
+
+| Site | How it passes the env | Covered by |
+|---|---|---|
+| `configuration/start-stack.ps1:132` | `Start-Process` inherits the host env | the six `if (-not $env:X)` guards |
+| `configuration/omniroute/apply.ps1:110` | `Start-Process` (gateway-down branch) | same |
+| `configuration/autostart/Start-AutoOSStack.ps1:66` | `Start-Process` | same |
+| `configuration/start-stack.sh:80` | `nohup` inherits the shell env | the six `export X="${X:-…}"` |
+| `configuration/omniroute/apply.sh:449` | `nohup` | same |
+| `configuration/autostart/Start-AutoOSStack.sh:67` | `nohup` fallback + hand run | same (added after the review, §7) |
+| `configuration/autostart/autoos-omniroute.service:31` | `ExecStart=… serve` — **no `Environment=` by design** (it would shadow the operator's `.env`); reads `~/.omniroute/.env` | `register-autostart.sh:301-363` appends the six keys to that file (added after the review, §7) |
+
+`configuration/healthcheck.{ps1,sh}` mention the command only in a human-fallback help
+string (not a spawn). **Conclusion:** for a native host the policy is assembled in six
+launcher sites plus one `.env` writer; all seven carry it.
 
 ---
 
@@ -175,8 +197,11 @@ All six are respect-set: an operator value already in the environment or process
 | `configuration/autostart/Start-AutoOSStack.ps1` | 44–66 | same block |
 | `configuration/start-stack.sh` | 80–91 | comment + six `export X="${X:-v}"` |
 | `configuration/omniroute/apply.sh` | 449–460 | same block |
+| `configuration/autostart/Start-AutoOSStack.sh` | 67–77 | same six exports (nohup/hand path) — review finding |
+| `configuration/autostart/register-autostart.sh` | 301–363 | `~/.omniroute/.env` writer: appends each missing policy key (one append + one backup), operator value wins — review finding |
 | `tests/run-tests.ps1` | 9809–9844 | new `Test-Case` (fail-first) |
-| `tests/linux/17-ai-routing.sh` | 2526–2551 | new `it` case |
+| `tests/linux/17-ai-routing.sh` | 2526–2558 | new `it` case (3 sh launchers + register-autostart) |
+| `tests/linux/34-ai-services.sh` | 2395–2420 | new `it` case (register-autostart `.env` defaults) |
 
 ---
 
@@ -198,8 +223,11 @@ Exited with code 1
 $ pwsh -NoProfile -File tests\run-tests.ps1 -Filter 'repeated-429'
   passed 49   failed 0   skipped 0      # 48 assertions + 1 Pass
 
-$ bash tests/run-tests.sh --filter '429 rotation policy'
-  passed 1   failed 0   skipped 0
+$ bash tests/run-tests.sh --filter 'rotation policy'
+  passed 2   failed 0   skipped 0      # 17-ai-routing + 34-ai-services cases
+
+$ bash tests/run-tests.sh --filter 'register-autostart'
+  passed 11   failed 0   skipped 0     # REQUIRE_API_KEY + backup cases still green
 
 $ pwsh -NoProfile -File tests\run-tests.ps1 -Filter 'chat admission without clobbering'
   passed 27   failed 0   skipped 0      # the neighbouring admission case still green
@@ -217,9 +245,13 @@ PowerShell Parser::ParseFile, errors:
 bash -n:
   start-stack.sh: 0
   apply.sh: 0
+  configuration/autostart/Start-AutoOSStack.sh: 0
+  configuration/autostart/register-autostart.sh: 0
   17-ai-routing.sh: 0
+  34-ai-services.sh: 0
 
-$ shellcheck configuration/start-stack.sh configuration/omniroute/apply.sh
+$ shellcheck configuration/start-stack.sh configuration/omniroute/apply.sh \
+      configuration/autostart/Start-AutoOSStack.sh configuration/autostart/register-autostart.sh
 shellcheck: clean
 ```
 
@@ -281,11 +313,37 @@ gateway was forbidden by the directive and was not done.
 tracked file this lane touched (`git diff | Select-String 'C:\\Users|sk-…|192.168.|100.70.'`
 → no match).
 
+### 6.9 The review-found sites (round 2)
+
+`configuration/autostart/Start-AutoOSStack.sh` — the same child-process dump as §6.4, pointed
+at this file (`export lines extracted: 6`): clean env → the six defaults; operator preset
+`OMNIROUTE_ROTATE_429_THRESHOLD=9` → `9` kept.
+
+`configuration/autostart/register-autostart.sh` — driven through the suite's own sandbox with
+`OMNIROUTE_ROTATE_429_THRESHOLD=7` preset: it appends the **five** missing keys in one append
+(one backup), leaves `7` and the pre-existing `STORAGE_ENCRYPTION_KEY` alone, and a second run
+prints `= 429 rotation policy already set in … (skipped)`. Asserted by the new
+`tests/linux/34-ai-services.sh` case (`--filter 'register-autostart'` → `passed 11 failed 0`,
+which includes the pre-existing REQUIRE_API_KEY and same-second-backup cases).
+
 ---
 
 ## 7. Review (item 5)
 
-_Filled after the nonce-gated reviewer verdict — see the DONE note for the verdict line._
+Reviewer: `t3-reviewer` subagent, session `ses_f09b55003ffeunIYKJ0bwlsRZ9`, configured model
+`omniroute/t3-driver-clean` (`opencode.jsonc:375`) — a **different family** from this writer
+(`deepseek-v4.1-flash`). It quoted the nonce `RESENV-NONCE-lYoqt1JPO3` verbatim.
+
+**Verdict 1 (first pass): FAIL.** It found two tracked native gateway-spawn sites the lane
+missed — `configuration/autostart/Start-AutoOSStack.sh:67` and the `autoos-omniroute` systemd
+unit, whose env surface is `~/.omniroute/.env` — and contradicted this doc's then-claim of
+"no `.env` file load" with `bin/omniroute.mjs:102-169`. Both findings were correct.
+
+**Fixed** in commit `a80625c`: `Start-AutoOSStack.sh` now exports the six keys;
+`register-autostart.sh:301-363` defaults them in `~/.omniroute/.env` (one append + one backup
+per run, operator value wins); the tests cover all seven sites; §1.1/§3/§5/§6 were corrected.
+
+**Verdict 2 (re-review): pending** — recorded in the DONE note after the second review.
 
 ---
 
