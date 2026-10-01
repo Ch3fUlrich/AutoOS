@@ -406,7 +406,7 @@ below resolve.
 - **Findings:** Both proposal documents are internally consistent; anchors spot-verified. Item (g) is the only contract-changing proposal (explicitly flagged); researcher tier definitions change no contracts but carry no pre-merge review record.
 
 ### 8.3 Task 3 — Mechanical redaction verification
-- **Method:** Raw `git grep -n -I -i 'mauls'` and `git grep -n -I 'ses_f0'` across tracked files on all active branches.
+- **Method:** Raw `git grep -n -I -i '<user>'` and `git grep -n -I 'ses_f0'` across tracked files on all active branches.
 - **Verdict:** **REDACTION DID NOT HOLD OUTSIDE THE TWO ADMISSION BRANCHES**.
 - **Hit counts:**
   - `main`: 1 username hit (`docs/handoff/2026-09-30-workstation-omniroute-handoff.md:19`), 5 `ses_f0` hits.
