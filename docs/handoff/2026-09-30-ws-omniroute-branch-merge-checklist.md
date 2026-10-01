@@ -29,6 +29,13 @@ deferred). All 18 branch SHAs verified against git by the reviewer.
 - **Reviewers added since:** `ws-ovh` — Qwen `ses_f0bf9a076ffe2brWjEa2YBtCGG` APPROVED-WITH-NOTES (BLOCKER: NONE); `ws-leghealth2` — Qwen PASS, Nvidia PASS, Cohere spurious-FAIL (refuted), Poolside strict-FAIL (findings fixed in `1ad452b`).
 - **Reliability:** delegated lanes run on `omniroute/t3-driver-clean` (the `t2-worker` combo degenerates).
 
+## Refresh 2026-10-01 (L1-beta, post-FREEWIRE + nebius wave)
+
+- **Wiring wave LANDED + FINISHED:** `ws-freewire-20260930` @ `2ff537a` (FREEWIRE: 10 probe-proven free legs — 3 huggingface / 3 groq / 4 openrouter `:free`; `gemini/*` removed from every combo; DONE note + 3 reviews; `4cb49b4` fixed the pinned tests). Evidence/proposal lane: `ws-free-probe-20260930` @ `6e978dd`.
+- **Nebius removal DONE:** `L1-backlog/ws-nebiuswave2-20260930` @ `7eaf91a` — `providers.nebius` + 6 `nebius/` legs + 1 `policy.reviewers` entry removed on the FREEWIRE base; surfaces re-rendered; consumers fixed (`tests/test_autoos_resolver.py`, `tests/linux/34-ai-services.sh`). L1-verified gates: `test_registry.py` 300 → 1 failure (the pre-existing `test_a_credit_leg_is_last_and_gated_until_priced`, present at base `2ff537a`); `test_registry_render.py` OK; `check`/`validate` ok (32 routes / 80 models / 33 providers). Reviews: Cohere PASS, Longcat PASS, Mimo PASS, Poolside FAIL (real `34-ai-services` regression — fixed). **Merge AFTER `ws-freewire`.** Superseded — do not merge: `ws-nebiuswave` `f08c974` (stale base), `ws-nebius2` `172a92b` (pre-FREEWIRE).
+- **Must-not-lose fix RESOLVED:** the `158818e` gemini-3.8-flash context fix (131072→1048576) is already in FREEWIRE's ancestry (`2ff537a`) — no separate carry needed.
+- **Base warning stands:** everything here is based on `d08f7f2`; `origin/main` is `6ec0605` (76 ahead) — rebase + re-verify conflicts before merge.
+
 ## Branch table
 
 18 local `L1-backlog/*` branches enumerated. 5 at base (`d08f7f2`, no commits);
