@@ -5935,9 +5935,12 @@ class IsolateContainmentTests(unittest.TestCase):
         root, stub, state = self.make_root(), self.make_fake_agy(), self.make_state()
         self.run_isolated(root, stub, state, "noop")
         sb = self.lone_sandbox(state)
-        push_url = subprocess.run(["git", "-C", sb, "remote", "get-url", "--push", "origin"],
-                                  capture_output=True, text=True).stdout.strip()
-        self.assertIn("DISABLED-autoos-isolate", push_url)
+        # T2-ISOLATE-SECRETS: the archive sandbox carries no remotes (plus the
+        # accident-guard hook), so there is no URL-addressed push to disable —
+        # a push fails because there is nowhere to push to.
+        remotes = subprocess.run(["git", "-C", sb, "remote"],
+                                 capture_output=True, text=True).stdout.strip()
+        self.assertEqual(remotes, "")
         branch = subprocess.run(["git", "-C", sb, "branch", "--show-current"],
                                 capture_output=True, text=True).stdout.strip()
         push = subprocess.run(["git", "-C", sb, "push", "origin", branch],
@@ -10314,13 +10317,30 @@ class IsolateCloneCarriesNoSecretsTests(unittest.TestCase):
             ["git", "-C", clone, "status", "--porcelain", "--ignored",
              "--untracked-files=all"], capture_output=True, text=True, check=True).stdout
         self.assertEqual(listing.strip(), "", listing)
-        self.assertEqual(base, subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+        # T2-ISOLATE-SECRETS: the sandbox base is its own one-commit history,
+        # so it differs from the source HEAD — which rides along in the commit
+        # message and in autoos.sandboxSource instead.
+        self.assertEqual(base, subprocess.run(["git", "-C", clone, "rev-parse",
+                                              "HEAD"],
                                               capture_output=True, text=True,
                                               check=True).stdout.strip())
-        # The same step still disables the push, so the clone cannot write back.
-        url = subprocess.run(["git", "-C", clone, "remote", "get-url", "--push", "origin"],
-                             capture_output=True, text=True).stdout.strip()
-        self.assertEqual(url, self.cli.ISOLATE_PUSH_DISABLED)
+        source_head = subprocess.run(
+            ["git", "-C", root, "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.assertNotEqual(base, source_head)
+        mapped = subprocess.run(
+            ["git", "-C", clone, "config", "autoos.sandboxSource"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        self.assertEqual(mapped, source_head)
+        # The same step still blocks the push: the archive sandbox carries no
+        # remotes at all (nothing to push through), plus the accident-guard
+        # pre-push hook, so the clone cannot write back.
+        remotes = subprocess.run(["git", "-C", clone, "remote"],
+                                 capture_output=True, text=True,
+                                 check=True).stdout.strip()
+        self.assertEqual(remotes, "")
+        self.assertTrue(os.access(os.path.join(clone, ".git", "hooks",
+                                               "pre-push"), os.X_OK))
 
     def test_a_leaf_grep_finds_no_key_because_the_file_is_absent(self):
         # The fence cannot match a pattern search for "sk-"; the clone's absence

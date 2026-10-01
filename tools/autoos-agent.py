@@ -622,7 +622,7 @@ _ISOLATE_SECRET_EXEMPT = (".example.", ".sample", ".template")
 
 def _isolate_exempt_name(rel: str) -> bool:
     base = os.path.basename(rel)
-    if ".example." in base:
+    if ".example" in base:
         return True
     return base.endswith(".sample") or base.endswith(".template") or \
         ".template." in base or ".sample." in base
