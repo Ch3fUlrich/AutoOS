@@ -102,23 +102,25 @@ def find_keys_file() -> Path | None:
     return next((c for c in cands if c.is_file()), None)
 
 
-def read_key(path: Path, name: str) -> str | None:
-    # Same parse as AutoOS tools/autoos-agent.py client_key().
-    for line in io.open(path, encoding="utf-8"):
-        m = re.match(r"^%s\s*:\s*(.+?)\s*$" % re.escape(name), line)
-        if m:
-            val = m.group(1).strip("\"'")
-            return None if val.startswith("REPLACE_WITH_") else val
-    return None
-
-
 def load_key() -> str:
-    # Use the new gateway-named key resolution from tools/autoos_gateway_key.py
+    """The OmniRoute client key, by the one rule in tools/autoos_gateway_key.py.
+
+    The keys file is the one find_keys_file() locates (AUTOOS_API_KEYS, AUTOOS_ROOT, the main
+    checkout): a lane worktree has no git-ignored api-keys.yml of its own. Whether the gateway is
+    local decides which field is read, and that comes from the URL this script is about to call
+    (DSR_OMNIROUTE_URL), not from an unrelated AUTOOS_OMNIROUTE_URL in the environment.
+    """
     from autoos_gateway_key import resolve_client_key
+    keys = find_keys_file()
+    env = dict(os.environ)
+    env["AUTOOS_OMNIROUTE_URL"] = gateway()
+    if keys is None and not env.get("AUTOOS_OMNIROUTE_KEY"):
+        raise KeyError_("no configuration/api-keys.yml found (set AUTOOS_API_KEYS or AUTOOS_ROOT, "
+                        "or AUTOOS_OMNIROUTE_KEY)")
     try:
-        return resolve_client_key(os.environ)
+        return resolve_client_key(env, keys)
     except KeyError as e:
-        raise KeyError_(str(e))
+        raise KeyError_(str(e.args[0]) if e.args else str(e))
 
 
 # ── policy (catalog/ai-registry.json) ──────────────────────────────────────────

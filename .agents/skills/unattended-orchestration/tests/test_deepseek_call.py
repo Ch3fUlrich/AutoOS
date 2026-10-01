@@ -118,6 +118,37 @@ def test_no_file_and_no_env_names_where_it_looked(tmp_path):
     assert "api-keys.yml" in str(e.value)
 
 
+def test_the_gateway_url_this_script_calls_decides_the_field(tmp_path, monkeypatch):
+    p = keys_file(tmp_path, "omniroute_server: key-for-the-server\nomniroute_testhost: key-for-this-host\n")
+    monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
+    monkeypatch.setenv("AUTOOS_HOST_NAME", "testhost")
+    # a remote DSR url with nothing in AUTOOS_OMNIROUTE_URL must still read the server field
+    monkeypatch.setenv("DSR_OMNIROUTE_URL", "https://gw.example.test")
+    assert dc.load_key() == "key-for-the-server"
+    # a stale remote AUTOOS_OMNIROUTE_URL must not flip a local call to the server key
+    monkeypatch.delenv("DSR_OMNIROUTE_URL")
+    monkeypatch.setenv("AUTOOS_OMNIROUTE_URL", "https://gw.example.test")
+    assert dc.load_key() == "key-for-this-host"
+
+
+def test_a_worktree_without_its_own_keys_file_uses_the_located_one(tmp_path, monkeypatch):
+    # AUTOOS_ROOT stands for the main checkout; the script lives elsewhere (a lane worktree)
+    main = tmp_path / "main"
+    keys_file(main, "omniroute_testhost: key-from-the-main-checkout\n")
+    monkeypatch.setenv("AUTOOS_ROOT", str(main))
+    monkeypatch.setenv("AUTOOS_HOST_NAME", "testhost")
+    assert dc.load_key() == "key-from-the-main-checkout"
+
+
+def test_a_missing_field_names_the_expected_one(tmp_path, monkeypatch):
+    p = keys_file(tmp_path, "other: x\n")
+    monkeypatch.setenv("AUTOOS_API_KEYS", str(p))
+    monkeypatch.setenv("AUTOOS_HOST_NAME", "testhost")
+    with pytest.raises(dc.KeyError_) as e:
+        dc.load_key()
+    assert "omniroute_testhost" in str(e.value)
+
+
 # ── model guard ────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("m", ["", "deepseek-v4.1-flash"])
