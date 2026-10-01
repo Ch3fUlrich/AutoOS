@@ -583,7 +583,8 @@ Our wave has started merging: `L1-backlog/reviewgate-2fam` `d0f70f1` and
   researcher, revaudit, review, revround, sweep, sweep-review, verify-activate.
 - `ws-verify-activate` code paths (`TARBALL`/`LIVE`/`launcher`) were **env-derived** (`%TEMP%`,
   `%APPDATA%`) and `.py` compile-checked, not blind-replaced.
-- **Residual:** `L1-backlog/ws-tier-order-20261001` — 4 hits incl. `tools/combo-contract.py`
-  (code). alpha's in-flight lane; flagged for TORDER, not touched.
+- **Residual:** `L1-backlog/ws-tier-order-20261001` - 7 hits (grows with the lane) incl.
+  `tools/combo-contract.py:176` hardcoding an `api-keys.yml` path in code. alpha's in-flight
+  lane; flagged for TORDER (env-derive the code path before that lane merges).
 - Replacement: every occurrence of the workstation username replaced with `<user>`; a `(?!er)`
   guard keeps the git author address intact; no `<user>er` over-replacement.
