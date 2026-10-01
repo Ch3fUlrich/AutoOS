@@ -18401,5 +18401,226 @@ class WinshimMcpJobTests(unittest.TestCase):
         self.assertEqual(mcp_server.status(run_id)["state"], "failed")
 
 
+class HandEntryPricingTests(unittest.TestCase):
+    """D5 (lane trial-direct, 2026-10-01): an opencode.jsonc hand entry is a direct
+    passthrough, not a combo, and the budget gate benched every one of them —
+    `cannot be priced -- the model ... is no route the registry carries` — so a
+    `--model omniroute/vertex-3.8-flash` spawn was refused while the budget was on.
+    The name is priceable after all: its modelID is a `<gateway provider>/<model>`
+    leg, and `registry_ref()` turns the gateway spelling back into the registry leg
+    whose model row says what family answers. An id that resolves to nothing is
+    still refused: this teaches the gate to read the config, not to guess free."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def spends(self, model, cfg=None, source="--model"):
+        return self.agent.spawn_spends_claude("opencode", model, SHIPPED_REGISTRY,
+                                              source, cfg or self.cfg)
+
+    def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
+        for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
+                     "omniroute/ovh-direct-qwen3-coder-30b",
+                     "omniroute/ovh-direct-qwen3.8-27b"):
+            self.assertIs(self.spends(name), False, name)
+
+    def test_hand_entry_leg_is_the_registry_spelling_of_the_modelid(self):
+        # The gateway spells OVH's ids `ovh/*`; the registry keys the provider
+        # `ovhcloud` and declares model_prefix 'ovh', so the leg only resolves
+        # through registry_ref — the one inverse of gateway_ref.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-gpt-oss-120b",
+                                                   SHIPPED_REGISTRY, self.cfg),
+                         "ovhcloud/gpt-oss-120b")
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.8-flash",
+                                                   SHIPPED_REGISTRY, self.cfg),
+                         "vertex/gemini-3.8-flash")
+
+    def test_a_managed_region_entry_is_not_read_as_a_hand_entry(self):
+        # Its modelID is the route id itself, so the passthrough shape is absent
+        # and the route half of the gate keeps answering for it.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/t2-worker",
+                                                   SHIPPED_REGISTRY, self.cfg), "")
+
+    def test_an_unknown_hand_id_is_still_refused(self):
+        self.assertIsNone(self.spends("omniroute/no-such-hand-entry"))
+
+    def test_a_hand_entry_whose_modelid_has_no_registry_row_is_refused(self):
+        # vertex-3.6/3.7-flash are smoked live before their rows land; until a
+        # registry model describes the leg, nothing can say what answers.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.6-flash",
+                                                   SHIPPED_REGISTRY, self.cfg), "")
+        self.assertIsNone(self.spends("omniroute/vertex-3.6-flash"))
+
+    def test_a_hand_entry_on_an_anthropic_leg_is_claude(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "own-claude": {"modelID": "anthropic/claude-opus-4-8"}}}}}
+        self.assertIs(self.spends("omniroute/own-claude", cfg), True)
+
+    def test_a_hand_entry_on_a_claude_named_leg_is_claude(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "own-claude": {"modelID": "cc/claude-opus-4-6"}}}}}
+        self.assertIs(self.spends("omniroute/own-claude", cfg), True)
+
+    def test_run_dry_named_hand_entry_is_not_benched_as_unpriceable(self):
+        # The budget is on in the shipped registry, so before D5 this exact
+        # command refused with "cannot be priced"; now it reaches the gate that
+        # is actually about the run (tier-2 isolation).
+        r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
+                      "--dry-run", "--card", "role=implement", "reply with exactly: ack")
+        self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+
+class GeminiAllowListTests(unittest.TestCase):
+    """D-255 (operator 2026-10-01): no Gemini *Pro* model anywhere, and only
+    Gemini 3.6 / 3.7 / 3.8 Flash — every other Gemini version, including the
+    older flash tiers, is off the list."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def allowed(self, *ids):
+        for model_id in ids:
+            self.assertTrue(self.agent.gemini_model_allowed(model_id), model_id)
+
+    def refused(self, *ids):
+        for model_id in ids:
+            self.assertFalse(self.agent.gemini_model_allowed(model_id), model_id)
+
+    def test_the_allowed_versions(self):
+        self.allowed("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                     "gemini-3.7-flash-high", "gemini-3.7-flash-medium",
+                     "gemini-3.6-flash-preview",
+                     "vertex/gemini-3.8-flash", "antigravity/gemini-3.7-flash-high",
+                     "openrouter/google/gemini-3.8-flash", "vertex-gemini-3.8-flash",
+                     "free_ai/google/gemini-3.8-flash")
+
+    def test_every_pro_model_is_refused(self):
+        self.refused("gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3-pro",
+                     "vertex/gemini-3.1-pro-preview", "google/gemini-2.5-pro",
+                     "antigravity/gemini-3-pro")
+
+    def test_no_hand_entry_in_the_shipped_config_is_off_the_list(self):
+        # The name of a hand entry says nothing about what answers; its modelID
+        # does. vertex-pro / vertex-flash / vertex-flash-lite / gemini-2.5-flash
+        # were all in opencode.jsonc and are gone (D-255 a and b).
+        cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        offenders = []
+        for provider in (cfg.get("providers") or {}).values():
+            for name, entry in (provider.get("models") or {}).items():
+                model_id = (entry or {}).get("modelID")
+                if (isinstance(model_id, str) and "/" in model_id and model_id != name
+                        and not self.agent.gemini_model_allowed(model_id)):
+                    offenders.append("%s -> %s" % (name, model_id))
+        self.assertEqual(offenders, [])
+
+    def test_other_gemini_versions_are_refused(self):
+        self.refused("gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.5-flash",
+                     "gemini-3.1-flash-lite", "vertex/gemini-3-flash-preview",
+                     "deepinfra/google/gemini-3.1-flash-lite", "gemini/gemini-2.5-flash")
+
+    def test_non_gemini_ids_are_unaffected(self):
+        self.allowed("ovh/Qwen3.8-27B", "gpt-oss-120b", "meta_api/muse-spark-1.3-contributor",
+                     "cc/claude-opus-4-6", "gemini/gpt-oss-120b", None, "")
+
+    def refusal(self, model, combo, cfg=None, explicit=True):
+        return self.agent.gemini_spawn_refusal(model, combo, SHIPPED_REGISTRY,
+                                               cfg or self.real_cfg(), explicit=explicit)
+
+    def real_cfg(self):
+        return self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def test_an_explicit_pro_hand_entry_is_refused(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-pro": {"modelID": "vertex/gemini-3.1-pro-preview"}}}}}
+        out = self.refusal("omniroute/vertex-pro", "vertex-pro", cfg)
+        self.assertIn("gemini allow-list", out)
+        self.assertIn("vertex/gemini-3.1-pro-preview", out)
+
+    def test_a_hand_entry_with_no_registry_row_is_still_read_by_its_name(self):
+        # The modelID alone says which model answers, so an entry the registry
+        # cannot price cannot slip past the allow-list either.
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-2.5": {"modelID": "vertex/gemini-2.5-flash"}}}}}
+        self.assertIn("gemini allow-list", self.refusal("omniroute/vertex-2.5",
+                                                        "vertex-2.5", cfg))
+
+    def test_an_allowed_hand_entry_is_not_refused(self):
+        self.assertEqual(self.refusal("omniroute/vertex-3.8-flash", "vertex-3.8-flash"), "")
+        self.assertEqual(self.refusal("omniroute/ovh-direct-gpt-oss-120b",
+                                      "ovh-direct-gpt-oss-120b"), "")
+
+    def test_naming_a_combo_with_an_off_list_leg_is_refused(self):
+        # t2-worker's registry data still carries deepinfra/google/gemini-3.1-flash-lite
+        # (reported for the orchestrator to remove); naming it explicitly is a
+        # deliberate aim at that route, so D-255 refuses it.
+        self.assertIn("gemini-3.1-flash-lite", self.refusal("omniroute/t2-worker",
+                                                            "t2-worker"))
+
+    def test_a_router_picked_combo_keeps_its_on_list_legs(self):
+        # The same route reached through a card: one fall-through leg that only
+        # answers when the legs ahead of it are down must not bench every tier-2
+        # spawn, so the router's pick is refused only when NO leg is on the list.
+        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker",
+                                      explicit=False), "")
+
+    def test_run_named_pro_hand_entry_is_refused_at_the_door(self):
+        args = argparse.Namespace(
+            tier=2, card="role=implement", allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False, model="omniroute/vertex-2.5",
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=True,
+            auto=True, lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        cfg = {"providers": {"omniroute": {"models": {
+            "t2-worker": {"modelID": "t2-worker"},
+            "vertex-2.5": {"modelID": "vertex/gemini-2.5-flash"}}}}}
+        with mock.patch.object(self.agent, "resolve_route_unchecked",
+                               lambda *a, **k: {"tier": 2, "model": "omniroute/vertex-2.5",
+                                                "combo": "vertex-2.5", "privacy": "public",
+                                                "card": {}}):
+            with self.assertRaises(self.agent.GeminiRefused) as caught:
+                self.agent.resolve_route(args, cfg, self.agent.clients.CLIENTS["opencode"])
+        self.assertIn("gemini allow-list", str(caught.exception))
+
+
+class SensitiveHandEntryPrivacyTests(unittest.TestCase):
+    """D3: ovhcloud's `trains_on_prompts` is null on main — unverified — so a
+    privacy=sensitive card must never land on an `ovh-direct-*` hand entry. The
+    existing PRIV3 door already covers a name that is no registry route: nothing
+    proves it private-safe. This pins that the door holds for the ovh-direct ids
+    too, against the real opencode.jsonc rather than a synthetic one."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def run_cmd(self, model):
+        ns = argparse.Namespace(
+            tier=None, card="privacy=sensitive", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=model,
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(ns, self.cfg)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_sensitive_card_on_an_ovh_direct_hand_entry_is_refused(self):
+        for name in ("omniroute/ovh-direct-gpt-oss-120b",
+                     "omniroute/ovh-direct-qwen3-coder-30b",
+                     "omniroute/ovh-direct-qwen3.8-27b"):
+            rc, out, err = self.run_cmd(name)
+            self.assertEqual(rc, 2, name + out + err)
+            self.assertIn("privacy", err, name)
+
+    def test_the_ovh_provider_is_still_unverified(self):
+        # The refusal above rests on this registry fact: null is not false, and
+        # private_safe fails closed on it. If a row ever says false, the -clean
+        # routes open and this test says so here, not in a comment elsewhere.
+        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
+                                               SHIPPED_REGISTRY)
+        self.assertFalse(safe, why)
+
+
+
 if __name__ == "__main__":
     unittest.main()
