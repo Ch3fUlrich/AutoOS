@@ -192,7 +192,7 @@ parallel off f2d8d607:
 | ws-invariant-fix-20260930 | `f2d8d607` | 26 | combos, spawner | **canonical** |
 | ws-combos-pins-20260930 | `8a862361` | 28 | combos, spawner | **canonical** (pins carried) |
 | ws-gemini-restore-20260930 | `e3436a4d` | 28 | combos, spawner | **canonical tip** (gemini reversal) |
-| ws-tier-order-20261001 | `b9229fff` (moving) | 29 | combos, spawner | **IN FLIGHT — TORDER lane** (alpha combo-contract gate; TASK1–TASK6+) |
+| ws-tier-order-20261001 | `4fd66091` (moving) | 29 | combos, spawner | **IN FLIGHT — TORDER lane** (alpha combo-contract gate; TASK1–TASK6+, TORDER-OR, CREDIGNORE) |
 | ws-resilience-env-20260930 | `afdcb11b` | 14 | — | **canonical** (429 policy; needs gateway restart to load) |
 | ws-admission-fix-20260930 | `5e977087` | 6 | — | **ready** |
 | ws-applyjson-20260930 | `6a4c2c00` | 9 | CHANGELOG | **ready** |
@@ -201,7 +201,7 @@ parallel off f2d8d607:
 | ws-remote-20260930 | `266677ca` | 20 | autoos-agent.py | **ready** (P2 remote fallback) |
 | ws-fixes-20260930 | `9cb8055b` | 21 | .gitignore | **ready** |
 | ws-gw-admission-20260930 | `1bb1175a` | 5 | handoff | **ready** |
-| ws-f1-vertex-20260930 | `9c444e40` | 13 | — | **HOLD — review FAIL** (`1d9e00db`: backup overwrite, rule 5; fix-worker needed) |
+| ws-f1-vertex-20260930 | `0dd39587` | 13 | — | **ready** (fix-worker: one pristine backup per file; free-family review APPROVED — closes `1d9e00db`) |
 | ws-verify-activate-20260930 | `c2316180` | 15 | — | **ready** (live-probe GO for :20128 restart) |
 | ws-qwenclamp-20260930 | `e4bb58b0` | 6 | — | **ready** |
 | ws-researcher-20260930 | `c60a6c8e` | 11 | combos | **ready** (proposal only) |
@@ -256,6 +256,55 @@ parallel off f2d8d607:
    `89a9024 → 2ff537a → 92a98af4` **with** `nebiuswave2 2aceb008` as ONE wave →
    `f2d8d607` → `ba0c707f/8a862361` + `e3436a4d` → **TORDER head (ws-tier-order)**
    → resolve `combos.json` once.
+
+## Refresh 2026-10-01 (c) — base `origin/main` = `88359146` (operator: merge continues)
+
+**Merging has started; part of our wave is already IN `origin/main`.**
+
+- `eae75811` = "Take L1-backlog/**redclear** f93aee3" (our wrapped skill rules + opencode mem_limit exemption).
+- `88359146` = "Take L1-backlog/**reviewgate-2fam** d0f70f1" (our REVIEWGATE-2FAM: 2+ cross-family seats). `d0f70f1` is confirmed an ancestor of `origin/main`.
+- The local no-commit branches whose tip is already in main's history (`ws-gw-vertex`, `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`, `ws-providers` at `d08f7f2`; `ws-patchlive` at `e58274a8`) carry nothing to merge.
+
+### (a) Main's improvements vs `d08f7f2` that overlap our files — carry/pull on rebase
+
+Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — the reviewgate take only edited files already in that set). The ones that touch our branches:
+
+| main change (commit) | file | our branches it hits | carry / pull rule |
+|---|---|---|---|
+| `24a98228` fleet pins (deepseek effort ladder, vertex leaves, stack no-OOM) + `87342237` operator combos (1M + AGYCANON) | `configuration/omniroute/combos.json` | whole combos lineage + ws-ovh/-finish, ws-researcher, ws-nebius | **carry** the `24a98228` pins; combos-pins already did, **TORDER supersedes**; resolve `combos.json` **once, last** |
+| `24a98228` + `d0f70f1` (REVIEWGATE-2FAM) | `tests/test_autoos_spawner.py` | combos lineage (FREEWIRE touched it) | re-verify hunks post-rebase; our records must satisfy 2 seats |
+| `f93aee3` redclear wrapped skill rules | `.agents/skills/unattended-orchestration/SKILL.md` | ws-incident (only) | **pull** — orthogonal to the coord section (C6) |
+| `0d0da8d9` / `77bc8fb5` PREPUSH gate (+`8f7eb01`) | `SKILL.md`, `tools/prepush.py`, `tests/test_prepush.py` | ws-incident | main owns **`R-coord-12`**; ws-incident must **renumber** (C6) |
+| `d0f70f1` REVIEWGATE-2FAM | `CHANGELOG.md`, `tools/autoos-agent.py` | ws-remote (`autoos-agent.py`), changelog lanes (`CHANGELOG.md`) | re-verify; new policy: 2 cross-family review seats |
+| `1ddcff16` redaction | `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` | ws-gw-admission, ws-hygiene-main, ws-p0, ws-records | **pull the redacted version** (C9) |
+| main-only (no overlap) | `tools/affected-tests.py`, `tools/memory_*`, `tools/launch_profiles.py`, `configuration/launch-profiles/*`, `tests/test_memory*`, `tests/test_launch_profiles.py`, `tests/helpers/*`, `docs/plans/*` | none | nothing to carry |
+
+**Net carry list on rebase:** (1) the `24a98228` combos pins, (2) the redacted workstation handoff, (3) main's `R-coord-12` (PREPUSH) stays, (4) REVIEWGATE-2FAM's two-seat requirement, (5) `combos.json` resolved once.
+
+### (b) Status map — delta from Refresh (b)
+
+| Branch | Head | Status |
+|---|---|---|
+| ws-f1-vertex-20260930 | `0dd39587` | **ready** (was HOLD-FAIL): fix-worker landed — one pristine backup per file; free-family review **APPROVED** |
+| ws-records-20260930 | `6a608c47` | **ready** (added §12 paid openrouter legs, §13 fallback probes) |
+| ws-mergecheck-20260930 | `aeeab4aa` | **this doc** |
+| ws-fallback-20261001 | `6a83bb72` | **ready** (fallback ladder; docs + CHANGELOG) |
+| ws-tier-order-20261001 | `4fd66091` | **IN FLIGHT** (TORDER TASK1–6 + TORDER-OR + **CREDIGNORE**) |
+| branch count | 59 | measured 2026-10-01 |
+
+### (c) Taken into `origin/main`
+
+- `L1-backlog/reviewgate-2fam` → `d0f70f1` (in `88359146`).
+- `L1-backlog/redclear` → `f93aee3` (in `eae75811`).
+- Nothing else of ours is taken yet; every other commit-bearing `ws-*` branch still needs rebase/merge.
+
+### Operational facts folded in (operator 2026-10-01)
+
+- **Vertex WORKS** — operator fixed the creds; `tools/probe-vertex.py` re-run this session: `vertex/gemini-3.8-flash` Tests 1–4 **all 200** (incl. the trailing-model-turn + tool_calls case) at `2026-10-01T09:05Z`. Live, not inferred.
+- **HuggingFace unusable** → the combos removal is **in flight** (FREEWIRE's HF legs are being dropped).
+- **Antigravity rate-limited → parked for days.**
+- **t1 fallback latency 22556 ms** is being fixed.
+- **Vertex credential file `.gitignore` rule** — LANDED on TORDER `4fd66091` ("fix(secrets): ignore vertex credential JSONs + red-first gate test (CREDIGNORE)").
 
 ## Branch table
 
