@@ -339,9 +339,9 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
 **The merge is well advanced.** `origin/main` is now `11757db4`. **Pre-flight gate RESOLVED:**
 the combos-wave carrier `L1-backlog/ws-tier-order-20261001` (TORDER1–6 + TORDER-OR +
 CREDIGNORE + the CREDROW corrections) is **taken** at `bd0ad278`; the earlier combos HOLD
-no longer applies. *Live caveat:* re-probe at `09:54Z` shows **OVH credit legs serve** but the
-**vertex credit leg is quota-exhausted / skipped** (records §16.3) — an operational issue, not a
-merge one.
+no longer applies. *Live check:* **OVH credit legs serve** (log-named); the **vertex credit leg is
+intermittent** — quota-skipped at `09:54Z`, then **serving** (`200`, `3.4 s`) at the independent
+re-review — so both serve (records §16.3). Operational, not a merge issue.
 
 ### Taken into `origin/main` (16 branch tips are ancestors of main)
 
