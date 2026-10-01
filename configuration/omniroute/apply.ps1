@@ -10,6 +10,12 @@
   4. Prunes the combos listed there as "retired" or "omitted" from the store
      (only those).
 
+  B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
+  file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+  content is the credential, NOT a plain API key; git-ignored), not from
+  api-keys.yml. Credential-store repair (two vertex/meta connections, one
+  undecryptable 401) is L0's, not apply's.
+
   Safe to re-run: providers are add-or-update, combos are replaced in place,
   and a managed orphan (retired/omitted) that is already gone is simply not
   found again.

@@ -10,6 +10,12 @@
 #   3. (re)creates the tier combos from configuration/omniroute/combos.json
 #   4. prunes the combos listed there as "retired" from the store (only those)
 #
+# B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
+# file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+# content is the credential, NOT a plain API key; git-ignored), not from
+# api-keys.yml. Credential-store repair (two vertex/meta connections, one
+# undecryptable 401) is L0's, not apply's.
+#
 # Safe to re-run: providers are add-or-update, a combo the store already holds
 # unchanged is left alone, and a retired combo that is already gone is simply
 # not found again. Model refs the live catalog does not know are skipped with a
