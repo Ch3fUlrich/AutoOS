@@ -241,12 +241,20 @@ function Get-AutoOSClientKey {
     return $null
 }
 
-$Key = Get-AutoOSClientKey -KeysFile $keysFile
+# BEGIN key-block
+# This launcher talks to $Gateway, so THAT url (not a stale AUTOOS_OMNIROUTE_URL left in the environment) decides
+# local vs remote: a remote omniroute_server key must never be exported to apps that talk to the local gateway.
+# The variable is set around the resolver call only and restored afterwards.
+$savedGatewayUrl = $env:AUTOOS_OMNIROUTE_URL
+$env:AUTOOS_OMNIROUTE_URL = $Gateway
+try { $Key = Get-AutoOSClientKey -KeysFile $keysFile }
+finally { if ($null -eq $savedGatewayUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $savedGatewayUrl } }
 if ($null -eq $Key) { exit 1 }
 # Export so the launched apps inherit it: opencode.jsonc and the Zed settings
 # carry no key by design ("key via env"), so without this the apps the script
 # launches would start unauthenticated.
 $env:AUTOOS_OMNIROUTE_KEY = $Key
+# END key-block
 
 function New-FileBackup {
     # <file>.autoos-backup-<stamp>, and the path it returns. The stamp has

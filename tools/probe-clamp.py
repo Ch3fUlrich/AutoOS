@@ -125,20 +125,31 @@ def utc_now():
 # Key plumbing: env first, then api-keys.yml in memory. Never printed.
 # ---------------------------------------------------------------------------
 
-def _read_keys_from_file(path):
-    """(value, label) pairs from api-keys.yml: the field the one resolver would pick first, then the
-    other known client-key fields (omniroute_server, omniroute_<host>, legacy omniroute).
+def _read_keys_from_file(path, gateway=None, try_all=False):
+    """(value, label) pairs from api-keys.yml for the SAME class of gateway as `gateway`.
 
-    All are returned because the label is a guess about which one is the client key: on the
-    2026-10-01 workstation gateway the ``omniroute`` field authenticates while ``omniroute_server``
-    401s, so the caller must try them rather than trust the first. Values are never printed - only
-    the label.
+    A local gateway gets the local field (omniroute_<host>, then the legacy `omniroute`); a remote
+    one gets omniroute_server (then the legacy omniroute_client_<host>). A key of the other class is
+    never offered, because a remote gateway must not receive the local key and vice versa. On the
+    2026-10-01 workstation gateway the legacy ``omniroute`` field authenticates while ``omniroute_server``
+    401s, which is why more than one field of the right class is returned and the caller tries them in order.
+    ``try_all`` (the explicit --try-all-key-fields flag) offers every known field regardless of class.
+    Values are never printed, only the label.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from autoos_gateway_key import client_key_field, host_name
+    from autoos_gateway_key import client_key_field, host_name, is_local_gateway
     from keys_file import read_keys
     keys = {k.lower(): v for k, v in read_keys(path).items()}
-    fields = [client_key_field(os.environ), "omniroute_server", "omniroute_" + host_name(os.environ), "omniroute"]
+    env = dict(os.environ)
+    if gateway:
+        env["AUTOOS_OMNIROUTE_URL"] = gateway
+    host = host_name(env)
+    if try_all:
+        fields = [client_key_field(env), "omniroute_server", "omniroute_" + host, "omniroute"]
+    elif is_local_gateway(env.get("AUTOOS_OMNIROUTE_URL", "")):
+        fields = ["omniroute_" + host, "omniroute"]
+    else:
+        fields = ["omniroute_server", "omniroute_client_" + host]
     found = []
     seen = set()
     for field in fields:
@@ -168,8 +179,11 @@ def _git_common_root():
     return None
 
 
-def candidate_keys(keys_file):
-    """Ordered (key, label) candidates: env first, then api-keys.yml fields."""
+def candidate_keys(keys_file, gateway=None, try_all=False):
+    """Ordered (key, label) candidates: env first, then api-keys.yml fields of the gateway's own class.
+
+    AUTOOS_KEYS_FILE, when set, is the ONLY file read (after an explicit --keys-file): nothing walks to the
+    primary checkout's real api-keys.yml then, which keeps a test or a sandbox away from the real keys."""
     candidates = []
     seen = set()
     env = os.environ.get("AUTOOS_OMNIROUTE_KEY")
@@ -182,12 +196,13 @@ def candidate_keys(keys_file):
     env_file = os.environ.get("AUTOOS_KEYS_FILE")
     if env_file:
         paths.append(env_file)
-    paths.append(os.path.join(ROOT, "configuration", "api-keys.yml"))
-    main = _git_common_root()
-    if main:
-        paths.append(os.path.join(main, "configuration", "api-keys.yml"))
+    else:
+        paths.append(os.path.join(ROOT, "configuration", "api-keys.yml"))
+        main = _git_common_root()
+        if main:
+            paths.append(os.path.join(main, "configuration", "api-keys.yml"))
     for path in paths:
-        for value, label in _read_keys_from_file(path):
+        for value, label in _read_keys_from_file(path, gateway, try_all):
             if value not in seen:
                 seen.add(value)
                 candidates.append((value, label))
@@ -330,6 +345,8 @@ def main(argv=None):
                         help="retries on a rate-limit/admission response")
     parser.add_argument("--retry-sleep", type=float, default=90.0,
                         help="seconds to back off per retry (the 60-120 s band)")
+    parser.add_argument("--try-all-key-fields", action="store_true",
+                        help="offer the key fields of BOTH gateway classes (default: only the class of --gateway)")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -338,7 +355,7 @@ def main(argv=None):
     result = {"gateway": args.gateway, "max_tokens": args.max_tokens,
               "cap": CAP, "verdict": None, "reason": None}
 
-    candidates = candidate_keys(args.keys_file)
+    candidates = candidate_keys(args.keys_file, args.gateway, args.try_all_key_fields)
     if not candidates:
         result["verdict"] = "SKIP"
         result["reason"] = ("no gateway key found (AUTOOS_OMNIROUTE_KEY or "

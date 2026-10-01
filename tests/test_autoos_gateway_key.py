@@ -575,5 +575,69 @@ class TestRound4g(unittest.TestCase):
             self.assertTrue(is_local_gateway(url), url)
 
 
+class TestProbeClampKeyCandidates(unittest.TestCase):
+    """tools/probe-clamp.py must offer a gateway only keys of ITS class, and must not walk to the real checkout's keys."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        path = Path(__file__).resolve().parent.parent / "tools" / "probe-clamp.py"
+        spec = importlib.util.spec_from_file_location("probe_clamp_under_test", path)
+        cls.pc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.pc)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.keys = Path(self.tmp.name) / "api-keys.yml"
+        self.keys.write_text("omniroute_server: K-server\nomniroute_ws: K-local\nomniroute: K-legacy\n", encoding="utf-8")
+        self.env = patch.dict(os.environ, {"AUTOOS_HOST_NAME": "ws", "AUTOOS_HOST_CONFIG": str(Path(self.tmp.name) / "none.yml")})
+        self.env.start()
+        for name in ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_OMNIROUTE_URL", "AUTOOS_KEYS_FILE"):
+            os.environ.pop(name, None)
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def labels(self, gateway, **kw):
+        return [label for _value, label in self.pc._read_keys_from_file(str(self.keys), gateway, **kw)]
+
+    def test_a_local_gateway_is_offered_only_local_class_fields(self):
+        self.assertEqual(self.labels("http://127.0.0.1:20128"), ["api-keys.yml:omniroute_ws", "api-keys.yml:omniroute"])
+
+    def test_a_remote_gateway_is_never_offered_the_local_key(self):
+        got = self.pc._read_keys_from_file(str(self.keys), "https://gw.example.test")
+        self.assertEqual([label for _v, label in got], ["api-keys.yml:omniroute_server"])
+        self.assertNotIn("K-local", [v for v, _l in got])
+        self.assertNotIn("K-legacy", [v for v, _l in got])
+
+    def test_try_all_key_fields_is_the_explicit_opt_in(self):
+        self.assertEqual(sorted(self.labels("https://gw.example.test", try_all=True)),
+                         ["api-keys.yml:omniroute", "api-keys.yml:omniroute_server", "api-keys.yml:omniroute_ws"])
+
+    def test_keys_file_env_is_the_only_file_read_and_nothing_walks_to_the_main_checkout(self):
+        os.environ["AUTOOS_KEYS_FILE"] = str(self.keys)
+        read = []
+        real = self.pc._read_keys_from_file
+
+        def spy(path, *a, **kw):
+            read.append(str(path))
+            return real(path, *a, **kw)
+
+        def must_not_walk():
+            raise AssertionError("walked to the primary checkout")
+
+        with patch.object(self.pc, "_read_keys_from_file", spy), patch.object(self.pc, "_git_common_root", must_not_walk):
+            got = self.pc.candidate_keys(None, "http://127.0.0.1:20128")
+        self.assertEqual(read, [str(self.keys)])
+        self.assertEqual([l for _v, l in got], ["api-keys.yml:omniroute_ws", "api-keys.yml:omniroute"])
+
+    def test_the_explicit_env_key_still_comes_first_for_any_gateway(self):
+        os.environ["AUTOOS_OMNIROUTE_KEY"] = "K-env"
+        os.environ["AUTOOS_KEYS_FILE"] = str(self.keys)
+        got = self.pc.candidate_keys(None, "https://gw.example.test")
+        self.assertEqual(got[0], ("K-env", "env AUTOOS_OMNIROUTE_KEY"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -364,3 +364,10 @@ are fine — chains skip what they cannot authenticate.
   config change, just the new value + restart.
 - Free tiers churn monthly (this page already needed corrections 3 weeks
   after writing). Re-check `/dashboard/free-tiers` before trusting a number.
+
+## Repeated names, comments and placeholders
+
+Every reader of `configuration/api-keys.yml` (Python, the bash launchers through the resolver CLI, PowerShell) follows the
+rules of `tools/keys_file.py`: when a name appears twice, the FIRST filled-in value wins (`run-opencode-serve.sh` used to take the
+last line); an unquoted ` #` starts a comment (quote a value that contains one); a value containing `REPLACE` is a placeholder and
+is skipped, so a later real value of the same name is used.

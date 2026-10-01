@@ -17,8 +17,10 @@ if ([string]::IsNullOrWhiteSpace($Key)) {
   $keysFile = Join-Path $PSScriptRoot 'configuration\api-keys.yml'
   $resolver = Join-Path $PSScriptRoot 'tools\autoos_gateway_key.py'
   if ((Test-Path $keysFile) -and (Test-Path $resolver)) {
+    $savedUrl = $env:AUTOOS_OMNIROUTE_URL
     $env:AUTOOS_OMNIROUTE_URL = $Gateway
-    $Key = ((& python $resolver resolve --optional --no-notice $keysFile) -join '').Trim()
+    try { $Key = ((& python $resolver resolve --optional --no-notice $keysFile) -join '').Trim() }
+    finally { if ($null -eq $savedUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $savedUrl } }
   }
 }
 if ([string]::IsNullOrWhiteSpace($Key)) {
