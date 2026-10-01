@@ -2531,9 +2531,12 @@ Test-Case 'verified download: a stalled endpoint fails within the wall-clock bou
         try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/stall.bin" -Destination $out | Out-Null }
         catch { $threw = $true; $msg = $_.Exception.Message }
         $sw.Stop()
-        # 30 s is generous: the injected bound is 2 s (plus curl's own bounded
-        # retries); the unfixed behaviour is unbounded.
-        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
+        # Two-sided window: >= 1 s proves the stall actually happened (a
+        # connection-refused or DNS failure returns in well under a second and
+        # would otherwise satisfy the assertion without exercising the bound);
+        # < 30 s is generous for the injected 2 s bound plus curl's bounded
+        # retries, where the unfixed behaviour is unbounded.
+        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -ge 1 -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
             ("threw={0} elapsed={1:N1}s part={2} msg=[{3}]" -f $threw, $sw.Elapsed.TotalSeconds, (Test-Path -LiteralPath "$out.part"), $msg)
     } finally {
         if ($null -eq $prev) { Remove-Item Env:\AUTOOS_DOWNLOAD_TIMEOUT_SEC -ErrorAction SilentlyContinue } else { $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = $prev }
@@ -2548,6 +2551,12 @@ Test-Case 'every production network fetch in lib\windows carries a wall-clock bo
     # Invoke-WebRequest/Invoke-RestMethod invocation needs -TimeoutSec, and every
     # direct curl invocation needs --max-time. Comment lines are skipped; only
     # invocation lines are judged.
+    #
+    # It is a tripwire, not a proof: it matches '-Uri' on the same line as the
+    # verb, so a splatted, aliased (iwr/irm) or line-continued invocation, or a
+    # bare 'curl'/'--output', would slip past. That is the deliberate trade for
+    # a zero-dependency, readable guard; the behavioural stall test above is
+    # what actually exercises the bound.
     $dir = Join-Path $Root 'lib\windows'
     $bad = @()
     foreach ($file in Get-ChildItem -Path $dir -Filter '*.psm1') {

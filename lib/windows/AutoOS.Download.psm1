@@ -34,17 +34,21 @@ Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 # nor Invoke-WebRequest bounds a transfer by default, so a server that
 # accepted the connection and then sent nothing left the fetch parked with
 # nothing to break it. 30 s to establish a connection kills a dead host fast;
-# the total-transfer ceiling stays generous because this one helper also
-# streams multi-GB installer ISOs (a 6 GB image is recorded in this module's
-# own history), where a 300 s cap would abort a legitimate transfer on any
-# link slower than ~160 Mbit/s. AUTOOS_DOWNLOAD_TIMEOUT_SEC lowers the ceiling
-# for tests and for an operator on a link slower still.
+# the transfer ceiling stays generous because this one helper also streams
+# multi-GB installer ISOs (a 6 GB image is recorded in this module's own
+# history), where a 300 s cap would abort a legitimate transfer on any link
+# slower than ~160 Mbit/s. curl's --max-time is per attempt, so with --retry 3
+# the worst case is ~4 attempts plus retry delays - still bounded. The
+# AUTOOS_DOWNLOAD_TIMEOUT_SEC seam lowers the ceiling for tests and for an
+# operator on a link slower still.
 $script:AutoOSDownloadConnectTimeoutSec = 30
 $script:AutoOSDownloadTimeoutSec = 3600
 
-# The effective total-transfer bound: the constant above unless the env seam
-# lowers it (same shape as AUTOOS_FAKE_NO_UNCACHED further down). Validated
-# here so a typo is a clear error, never a silently absent bound.
+# The effective transfer bound: the constant above unless the env seam lowers
+# it (same shape as AUTOOS_FAKE_NO_UNCACHED further down). It is curl's
+# --max-time (per attempt) and Invoke-WebRequest's -TimeoutSec (its single
+# attempt). Validated here so a typo is a clear error, never a silently absent
+# bound.
 function Get-AutoOSDownloadTimeoutSec {
     if ($env:AUTOOS_DOWNLOAD_TIMEOUT_SEC) {
         $configured = 0
