@@ -1,7 +1,7 @@
 # Lane: patch-backups-2 — tarball pristine-source gate
 
 **Lane:** `patch-backups-2` under L1-alpha
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchbackups-2`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchbackups-2`
 **Branch:** `L1-backlog/ws-patchbackups-2-20260930` (cut from `main` @ `d08f7f2`)
 **Date:** 2026-09-30
 
@@ -30,7 +30,7 @@ HEAD is now at d08f7f2 fix(router): workstation combos 1M + AGYCANON + apply aut
 
 ```powershell
 # step 1 — fetch + extract the published package
-$d = "C:\Users\mauls\AppData\Local\Temp\opencode\packbackups"
+$d = "C:\Users\<user>\AppData\Local\Temp\opencode\packbackups"
 New-Item -ItemType Directory -Force -Path $d | Out-Null
 cd $d
 npm pack omniroute@3.8.50          # -> omniroute-3.8.50.tgz (121.4 MB)
@@ -50,8 +50,8 @@ Get-ChildItem <live chunks> -Filter "*.autoos-backup-*"
 `shasum: d7b4fce4f1b00e5e826b76855665dfae42aab97a`,
 `integrity: sha512-qK6REDWQYGh8l[...]vl+az0lvyt0Mg==`, `total files: 21898`.
 
-Live path: `C:\Users\mauls\AppData\Roaming\npm\node_modules\omniroute\dist\.build\next\server\chunks\`
-Tarball path: `C:\Users\mauls\AppData\Local\Temp\opencode\packbackups\package\dist\.build\next\server\chunks\`
+Live path: `C:\Users\<user>\AppData\Roaming\npm\node_modules\omniroute\dist\.build\next\server\chunks\`
+Tarball path: `C:\Users\<user>\AppData\Local\Temp\opencode\packbackups\package\dist\.build\next\server\chunks\`
 
 Both `package.json` files report `name: omniroute`, `version: 3.8.50`.
 

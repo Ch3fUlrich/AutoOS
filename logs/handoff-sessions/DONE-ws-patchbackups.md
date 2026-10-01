@@ -2,12 +2,12 @@
 
 **Status:** STOPPED at gate (3a) — no backups installed.
 **Branch:** `L1-backlog/ws-patchbackups-2-20260930` (base `main` @ `d08f7f2`)
-**Worktree:** `C:\Users\mauls\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchbackups-2`
+**Worktree:** `C:\Users\<user>\Documents\Code\AutoOS-worktrees\AutoOS-ws-patchbackups-2`
 **Date:** 2026-09-30
 
 ## What was done
 
-1. `npm pack omniroute@3.8.50` in `C:\Users\mauls\AppData\Local\Temp\opencode\packbackups`
+1. `npm pack omniroute@3.8.50` in `C:\Users\<user>\AppData\Local\Temp\opencode\packbackups`
    → `omniroute-3.8.50.tgz` (121.4 MB, shasum `d7b4fce4f1b00e5e826b76855665dfae42aab97a`).
 2. `tar -xzf omniroute-3.8.50.tgz` → `package/` (21898 files).
 3. Located chunks under `package/dist/.build/next/server/chunks/`:
