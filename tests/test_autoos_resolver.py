@@ -4419,9 +4419,7 @@ class PaidLastResortTests(unittest.TestCase):
             shipped, overlay, "opencode", self.now())
         self.assertTrue(legs)
         provider_id, model_id = legs[0]
-        model = shipped["models"][model_id]
-        tier = model.get("tier",
-                         shipped["providers"][provider_id].get("tier"))
+        tier = r.leg_tier("%s/%s" % (provider_id, model_id), shipped)
         self.assertIn(tier, ("free", "trial", "credit"))
 
     def unknown_tier_fixture(self):

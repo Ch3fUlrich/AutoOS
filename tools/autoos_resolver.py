@@ -903,8 +903,8 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
 
     Fail closed on tier (T0-PAID-3 P1): only the known free-ish tiers
     (`_FREEISH_TIERS`) count as free or as healthy blockers. A leg whose tier
-    is missing (None) or unrecognised -- "subscription" (the Claude Code /
-    antigravity seats, gated elsewhere by the budget and leg rules) included --
+    is missing (None) or unrecognised -- "subscription" (the Claude Code
+    seat, gated elsewhere by the budget and leg rules) included --
     is NON-free: held back exactly like paid while a free-ish leg is usable,
     never counted as healthy, allowed with a last_resort line when every
     free-ish leg is down. The registry's own effective-tier reader fails
