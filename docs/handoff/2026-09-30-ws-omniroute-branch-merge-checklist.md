@@ -308,7 +308,7 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
 
 ### (d) Redaction sweep (Hard Rule 1) — 2026-10-01
 
-- `origin/main` `88359146` is **clean** (0 `mauls` hits): the inherited
+- `origin/main` `88359146` is **clean** (0 `<user>` hits): the inherited
   `docs/handoff/2026-09-30-workstation-omniroute-handoff.md` leak is already redacted on main
   (`1ddcff16`), so a rebase fixes it on every branch.
 - Sweep across the lane worktrees redacted and committed **30 branches** (one
@@ -328,7 +328,7 @@ Main changed **53 files** since `d08f7f2` (unchanged count from `eae75811` — t
   `ws-omniroute`, `ws-ovh-review-2`, `ws-patchbackups`, `ws-patchlive`) retain only the
   inherited `workstation-omniroute-handoff.md` line; their tips are superseded or already
   ancestors of main, whose tip is clean.
-- Method: `git grep -n -I -i 'mauls'`; replacement `(?i)mauls(?!er)` → `<user>` (the `(?!er)`
+- Method: `git grep -n -I -i '<user>'`; replacement `(?i)<user>(?!er)` → `<user>` (the `(?!er)`
   guard preserves `maulser@…`); code paths env-derived. No `<user>er` over-replacement anywhere.
 
 ## Branch table
