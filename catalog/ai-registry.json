@@ -2673,7 +2673,34 @@
       "monthly_cap_usd": 250,
       "monthly_cap_source": "operator-stated grant (handoff, unverified)",
       "monthly_warn_fraction": 0.8,
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "privacy": {
+        "trains_on_prompts": false,
+        "evidence": [
+          {
+            "url": "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention",
+            "quote": "Google won't use your data to train or fine-tune any AI/ML models without your prior permission or instruction. This applies to all managed models on Gemini Enterprise Agent Platform, including GA and pre-GA models.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/abuse-monitoring",
+            "quote": "Google may log customer prompts solely for the purpose of examining whether a violation of the AUP or Prohibited Use Policy has occurred. This data won't be used to train or fine-tune any AI/ML models. This data is stored securely for up to 90 days in the same region or multi-region selected by the customer for their project",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://ai.google.dev/gemini-api/terms",
+            "quote": "When you use Unpaid Services, including, for example, Google AI Studio and the unpaid quota on Gemini API, Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products and services and machine learning technologies",
+            "accessed": "2026-10-01"
+          }
+        ],
+        "caveats": [
+          "flagged prompts logged up to 90 days (opt-out form available)",
+          "in-memory and implicit prompt cache 24 h by default: disable at project level",
+          "never use Grounding with Google Search for private work",
+          "partner / Model-as-a-Service models are NOT covered and cannot use the trial credit",
+          "trial-specific terms and the Service Specific Terms clause not verified"
+        ]
+      }
     },
     "cc": {
       "$comment": [
@@ -3273,15 +3300,40 @@
       "litellm_prefix": null,
       "api_base": null,
       "provider_data": null,
-
       "tier": "credit",
       "credit_usd": 200,
-      "trains_on_prompts": null,
+      "trains_on_prompts": false,
       "available": true,
       "monthly_cap_usd": 200,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
-      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%)."
+      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%).",
+      "privacy": {
+        "trains_on_prompts": false,
+        "evidence": [
+          {
+            "url": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+            "quote": "Your data will never be used to train or improve our AI models; one of our many security guarantees.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-capabilities",
+            "quote": "Data is not stored or shared during or after model use, providing users with peace of mind that their data is secure and protected.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://storage.gra.cloud.ovh.net/v1/AUTH_325716a587c64897acbef9a4a4726e38/contracts/043c367-Conditions_particulieres_OVH_Stack-IE-25.0.pdf",
+            "quote": "OVHcloud has no knowledge of Inputs and Outputs, and OVHcloud does not reuse them in any way. OVHcloud does not carry out any backups of Inputs or Outputs. This does not apply for the AI Endpoint Batch API Service.",
+            "accessed": "2026-10-01"
+          }
+        ],
+        "caveats": [
+          "abuse-monitoring log retention NOT VERIFIED",
+          "Batch API stores data: never use it for site data",
+          "authenticated key on a paid or credited Public Cloud project only (anonymous playground tier and Discovery-mode projects excluded)",
+          "EU region (Gravelines, France)"
+        ]
+      }
     },
     "api_airforce": {
       "id": "api_airforce",
@@ -3291,7 +3343,6 @@
       "litellm_prefix": null,
       "api_base": null,
       "provider_data": null,
-
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
@@ -4147,7 +4198,9 @@
       "class": "frontier",
       "id": "t2-orchestrator",
       "legs": [
-        "cc/claude-opus-4-6",
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
@@ -4262,6 +4315,10 @@
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
+        },
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
+          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
+          "available": false
         }
       }
     },
@@ -4270,8 +4327,10 @@
       "class": "mid",
       "id": "t2-worker-clean",
       "legs": [
-        "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4469,6 +4528,10 @@
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
+        },
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
+          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
+          "available": false
         }
       }
     },
@@ -4477,8 +4540,10 @@
       "class": "cheap",
       "id": "t3-driver-clean",
       "legs": [
-        "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {

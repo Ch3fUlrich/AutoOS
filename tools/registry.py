@@ -200,7 +200,11 @@ DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "month
                     # the schema's price_source asks for a DATED attribution by
                     # name ("gateway /v1/models 2026-09-28"); rule 5 must not
                     # fight rule-for-field honesty (SB-C2 item 4)
-                    "price_source")
+                    "price_source",
+                    # providers.<id>.privacy.evidence[].accessed is the schema's
+                    # own YYYY-MM-DD field (L1-CLEAN 2026-10-01) - a citation
+                    # date, not a stale value rule 5 should flag.
+                    "accessed")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"

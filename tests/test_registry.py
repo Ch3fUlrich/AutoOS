@@ -2230,14 +2230,16 @@ class DeepSeekBackTests(unittest.TestCase):
             registry._leg_is_unavailable("deepseek/deepseek-flash",
                                          reg["routes"]["t2-worker-clean"], reg))
 
-    def test_t2_worker_clean_starts_with_the_native_deepseek_leg(self):
-        # The render, not the registry list, is what the gateway serves: the
-        # -clean route's head must be back at the front of the combo.
+    def test_t2_worker_clean_ends_with_the_native_deepseek_leg(self):
+        # L1-CLEAN (2026-10-01) replaced the DSBACK head: the trial credits
+        # lead the -clean twins and the native DeepSeek leg is the last paid
+        # fallback. The render, not the registry list, is what the gateway
+        # serves.
         rendered = {c["name"]: c for c in
                     registry.render_omniroute(self.reg)["combos"]}
-        self.assertEqual(rendered["t2-worker-clean"]["models"][0],
+        self.assertEqual(rendered["t2-worker-clean"]["models"][-1],
                          "deepseek/deepseek-flash")
-        self.assertEqual(rendered["t3-driver-clean"]["models"][0],
+        self.assertEqual(rendered["t3-driver-clean"]["models"][-1],
                          "deepseek/deepseek-flash")
 
     def test_the_deepseek_route_is_servable_again(self):
@@ -2657,13 +2659,11 @@ class MistralPlanLimitsTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_the_clean_twins_head_on_native_deepseek(self):
-        # DSBACK (2026-09-28) put the native DeepSeek leg back at the head of
-        # both -clean twins; with the Mistral leg gone it is the only head.
-        # Checked here because the invariant below is only interesting while
-        # this head is live.
+    def test_the_clean_twins_keep_the_native_deepseek_leg(self):
+        # L1-CLEAN (2026-10-01): the trial credits now lead both -clean twins
+        # and the native DeepSeek leg is the last paid fallback - still live.
         for route_id in ("t2-worker-clean", "t3-driver-clean"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
                              "deepseek/deepseek-flash", route_id)
             self.assertEqual(
                 registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
@@ -2761,14 +2761,15 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertFalse(safe, route_id)
             self.assertEqual(reason, "model trains on prompts", route_id)
 
-    def test_the_clean_twins_keep_their_head_live_leg(self):
-        # One live leg, and it is the native DeepSeek head: the twins still
-        # serve, which is what the route-liveness invariant needs.
+    def test_the_clean_twins_keep_a_live_native_deepseek_fallback(self):
+        # L1-CLEAN (2026-10-01): both twins now lead with the trial credits and
+        # keep the native DeepSeek leg live as the last fallback - the twins
+        # still serve, which is what the route-liveness invariant needs.
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertEqual(live_legs(reg, route_id),
-                             ["deepseek/deepseek-flash"], route_id)
-            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+            self.assertIn("deepseek/deepseek-flash", live_legs(reg, route_id),
+                          route_id)
+            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
                              "deepseek/deepseek-flash", route_id)
 
     # -- the registered tested alternative ----------------------------------
