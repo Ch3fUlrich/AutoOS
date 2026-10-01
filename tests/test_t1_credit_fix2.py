@@ -245,11 +245,19 @@ class C5MissingGuardIsNamed(unittest.TestCase):
 
 
 class C6ClassFilterLatentBug(unittest.TestCase):
-    """T1-CREDIT-FIX-3: the class filter must not drop routes whose class is
-    present in one map when the other map is empty."""
+    """T1-CREDIT-FIX-4: a class missing from EITHER scoring map is unscorable.
 
-    def test_only_latency_seed_nonempty_credit_class_survives(self):
-        """When only latency_seed has entries, a 'credit' class route should survive."""
+    latency_minutes() and track.p_success() both need the class in
+    policy.latency_seed AND policy.seed_priors, so a route whose class is
+    present in only one map is removed by the filter with the gap named --
+    never left to crash the whole plan in step 4."""
+
+    def test_only_latency_seed_nonempty_credit_class_is_removed(self):
+        """CREDIT-FIX-4: a class missing from either map is unscorable.
+
+        With only latency_seed populated the class is absent from
+        seed_priors, so track.p_success would raise; the route is removed
+        with the named reason instead."""
         reg = {
             "providers": {
                 "ovhcloud": {"id": "ovhcloud", "tier": "credit",
@@ -277,11 +285,18 @@ class C6ClassFilterLatentBug(unittest.TestCase):
             {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
             reg, {}, credit_guards=guards)
-        self.assertIn("r-credit", survivors, "credit class should survive when only latency_seed has entries")
-        self.assertNotIn("r-credit", removed)
+        self.assertNotIn("r-credit", survivors)
+        self.assertIn("r-credit", removed)
+        self.assertTrue(any("no scoring priors for class" in reason
+                            for reason in removed["r-credit"]),
+                        removed["r-credit"])
 
-    def test_only_seed_priors_nonempty_credit_class_survives(self):
-        """When only seed_priors has entries, a 'credit' class route should survive."""
+    def test_only_seed_priors_nonempty_credit_class_is_removed(self):
+        """CREDIT-FIX-4: a class missing from either map is unscorable.
+
+        With only seed_priors populated the class is absent from latency_seed,
+        so latency_minutes would raise; the route is removed with the named
+        reason instead."""
         reg = {
             "providers": {
                 "ovhcloud": {"id": "ovhcloud", "tier": "credit",
@@ -309,8 +324,11 @@ class C6ClassFilterLatentBug(unittest.TestCase):
             {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
             reg, {}, credit_guards=guards)
-        self.assertIn("r-credit", survivors, "credit class should survive when only seed_priors has entries")
-        self.assertNotIn("r-credit", removed)
+        self.assertNotIn("r-credit", survivors)
+        self.assertIn("r-credit", removed)
+        self.assertTrue(any("no scoring priors for class" in reason
+                            for reason in removed["r-credit"]),
+                        removed["r-credit"])
 
     def test_both_maps_nonempty_credit_class_survives(self):
         """When both maps have credit entries, the route should survive."""
@@ -433,7 +451,11 @@ class C7NaNAndDateValidation(unittest.TestCase):
         self.assertIsNone(as_of)
 
     def test_manual_credit_spend_rejects_negative(self):
-        """Negative credit_spent_usd is rejected."""
+        """Negative credit_spent_usd is rejected.
+
+        CREDIT-FIX-4: this pins the pre-existing manual-credit rule; it passed
+        before any fix, so it is a regression guard, not proof of a change."""
+
         reg = {
             "providers": {
                 "ovhcloud": {"id": "ovhcloud", "tier": "credit",

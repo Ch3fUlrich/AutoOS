@@ -1286,17 +1286,21 @@ def filter_routes(card, features, client_state, registry, overlay,
         # checked when the policy maps exist at all: a registry with no policy
         # section is a unit-test synthetic exercising the leg filters, not a
         # data gap, and scoring never ran on it either way.
-        # T1-CREDIT-FIX-3: if only one map is non-empty, only check that map.
+        # T1-CREDIT-FIX-4: the class must be present in BOTH maps. Round 3
+        # skipped an empty map, which let a class present in only one of
+        # latency_seed / seed_priors survive filtering and then crash the
+        # plan in step 4 (latency_minutes and track.p_success both raise
+        # ValueError on the missing entry). The real catalog now carries
+        # `credit` in both maps (round 3), so no relaxation is needed.
         policy = registry.get("policy") or {}
         seeds = policy.get("latency_seed") or {}
         priors = policy.get("seed_priors") or {}
         route_class = route.get("class")
         if route_class and (seeds or priors):
-            missing = []
-            if seeds and route_class not in seeds:
-                missing.append("policy.latency_seed")
-            if priors and route_class not in priors:
-                missing.append("policy.seed_priors")
+            missing = [name for name, mapping in
+                       (("policy.latency_seed", seeds),
+                        ("policy.seed_priors", priors))
+                       if route_class not in mapping]
             if missing:
                 reasons.append("no scoring priors for class %r (%s) - add the "
                                "class entries before this route can plan"
