@@ -41,7 +41,7 @@ function ConvertFrom-AutoOSKeyValue {
 
 function Read-AutoOSKeyMap {
     # Mirrors tools/keys_file.py read_keys: name=value and name: value, names keep their case,
-    # empty values and REPLACE* placeholders are skipped, the first filled-in value wins.
+    # empty values and values containing REPLACE are skipped, the first filled-in value wins.
     param([string]$Path)
     $map = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $map }
@@ -55,7 +55,7 @@ function Read-AutoOSKeyMap {
         $rawVal = $row.Substring($cut + 1).Trim()
         if (-not $name -or -not $rawVal) { continue }
         $value = ConvertFrom-AutoOSKeyValue $rawVal
-        if ($value -and -not $value.StartsWith('REPLACE', [StringComparison]::Ordinal) -and -not $map.ContainsKey($name)) {
+        if ($value -and -not $value.Contains('REPLACE') -and -not $map.ContainsKey($name)) {
             $map[$name] = $value
         }
     }

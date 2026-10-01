@@ -23,10 +23,9 @@ import re
 import sys
 from pathlib import Path
 
-# Placeholder prefixes that mark a value as "not filled in".
-# Tracked .example files use REPLACE_WITH_..., but some tests use bare REPLACE.
-# A value starting with either is treated as empty.
-PLACEHOLDER_PREFIXES = ("REPLACE_WITH_", "REPLACE")
+# A value that contains this anywhere is a placeholder, not a key: REPLACE_WITH_X, sk-REPLACE_ME,
+# <REPLACE_WITH_X>. (It was a prefix test for a while; that read sk-REPLACE_ME as a real key.)
+PLACEHOLDER = "REPLACE"
 
 
 def read_keys(path) -> dict:
@@ -34,15 +33,18 @@ def read_keys(path) -> dict:
 
     Missing or unreadable files read as no keys: a machine with nothing
     configured is the common case, not an error. Values carrying the
-    ``REPLACE_WITH_`` placeholder (the shape every tracked ``.example`` uses) are
+    ``REPLACE`` placeholder (the shape every tracked ``.example`` uses) are
     dropped — they are truthy and would be written into a client config as if
     they were real keys.
 
-    Parsing rules (matching the original bash keys_value):
-    - Lines starting with # are comments
-    - Format: name=value or name: value
-    - Quoted values (single or double): content between first and matching quote
-    - Unquoted values: cut at first # preceded by space or tab, then trim
+    Parsing rules:
+    - Lines starting with # are comments; format is name=value or name: value
+    - Quoted values (single or double): the content between the first and the matching quote
+    - Unquoted values: cut at the first # preceded by a space or tab (an inline comment), then
+      trimmed. This is a change from the plain strip the file used to do: ``key  # note`` is
+      ``key``, and a value that really contains " #" must be quoted.
+    - A name that appears twice: the FIRST filled-in value wins. The bash launchers that used to
+      take the last line (``tail -n1``) now read through this function, so they agree with it.
     """
     out: dict[str, str] = {}
     try:
@@ -62,7 +64,7 @@ def read_keys(path) -> dict:
         if not name or not raw_val:
             continue
         value = parse_value(raw_val)
-        if value and not value.startswith(PLACEHOLDER_PREFIXES):
+        if value and PLACEHOLDER not in value:
             out.setdefault(name, value)
     return out
 

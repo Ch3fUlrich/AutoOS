@@ -7082,6 +7082,8 @@ Test-Case 'gwkey: key file rules match tools/keys_file.py (case, comments, place
             @{ Text = "omniroute_testhost: inline-key # rotated"; Want = 'inline-key'; Desc = 'an inline comment is cut' }
             @{ Text = "omniroute_testhost: 'quoted-key'  # note"; Want = 'quoted-key'; Desc = 'quoted value with a comment after it' }
             @{ Text = "omniroute_testhost: REPLACE_WITH_KEY`nomniroute_testhost: second-key"; Want = 'second-key'; Desc = 'a placeholder is skipped and the next value used' }
+            @{ Text = "omniroute_testhost: sk-REPLACE_ME`nomniroute_testhost: third-key"; Want = 'third-key'; Desc = 'a placeholder anywhere in the value is skipped' }
+            @{ Text = "omniroute_testhost: <REPLACE_WITH_X>"; Want = ''; Desc = 'an angle-bracket placeholder is not a key' }
             @{ Text = "omniroute_testhost: first-key`nomniroute_testhost: second-key"; Want = 'first-key'; Desc = 'the first filled-in duplicate wins' }
         )
         $failures = @()
