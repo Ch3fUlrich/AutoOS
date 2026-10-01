@@ -16,6 +16,12 @@ scripts/public-scrub/patterns.private.txt
 # otherwise reach into infra/mcp-servers/.
 # backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
 configuration/api-keys.yml.*
+# GCP Vertex service-account JSONs (real credentials). The file the operator
+# drops in to authenticate `vertex` is a secret even though its name does not
+# read like one: on 2026-10-01 it sat in the tree untracked-but-UNIGNORED,
+# one `git add -A` away from a public commit.
+configuration/vertex-credentials-*.json
+configuration/*-credentials*.json
 
 # ─── Downloaded installers and vendor binaries ──────────────────────────────
 installs/
