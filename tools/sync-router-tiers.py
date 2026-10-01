@@ -399,9 +399,15 @@ def combos_refs(combos_path, tiers=None, registry=None):
             refs = list(combo.get("models", []))
             if registry is not None:
                 refs = [_registry_module().registry_ref(m, registry) for m in refs]
+            no_key = no_litellm_key_providers(registry) if registry is not None else set()
             by_name[name] = [
                 m for m in refs
                 if m.split("/", 1)[0] not in GATEWAY_ONLY
+                and m.split("/", 1)[0] not in no_key
+            ]
+            SKIPPED_BY_TIER[name] = [
+                m for m in refs
+                if isinstance(m, str) and m.split("/", 1)[0] in no_key
             ]
     if tiers is None:
         tiers = tuple(name for name, refs in by_name.items() if refs)
