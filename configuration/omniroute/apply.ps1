@@ -128,9 +128,71 @@ if (Test-Gateway) { Write-Host "Gateway OK on $Gateway" }
 # (routes.<id>.unavailable_legs, providers.<id>.available: false) is skipped
 # too - registering a connection nothing can ever route to proves nothing
 # and just leaves a dead entry.
+#
+# --- Case-sensitive, duplicate-tolerant registry parse ------------------------
+# A registry may carry two keys differing only by casing - model ids are vendor
+# spellings (`Qwen/Qwen3.8-27B` beside `qwen/qwen3.8-27b`), and the same class
+# of collision is already handled that way in the infra scripts. ConvertFrom-Json
+# maps JSON objects to a case-INSENSITIVE PSObject and THROWS on such a pair
+# (DuplicateKeysInJsonString on Windows PowerShell 5.1, "keys with different
+# casing" on pwsh). Because the throw is inside Get-AutoOSProviderMap, provider
+# registration failed open: connections stayed, combos applied, and every
+# provider in this file was silently never registered. Parse into a case-
+# sensitive tree first, then project it onto the PSObject shape the callers
+# already use. PSObject member names are case-insensitive by construction, so a
+# case-only pair cannot both survive the projection - the first wins, and the
+# collision is confined to the section this launcher never reads (models).
+# Provider and route ids are lower-case by contract, so no registration decision
+# rides on a case collision.
+function ConvertTo-AutoOSRegistryObject {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [System.Collections.IDictionary]) {
+        $obj = New-Object System.Management.Automation.PSObject
+        foreach ($key in $Value.Keys) {
+            $name = [string]$key
+            # Case-only duplicate: keep the first rather than let Add-Member
+            # throw and lose the whole document.
+            if ($null -ne $obj.PSObject.Properties[$name]) { continue }
+            Add-Member -InputObject $obj -NotePropertyName $name -NotePropertyValue (ConvertTo-AutoOSRegistryObject $Value[$key])
+        }
+        return $obj
+    }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $list = New-Object System.Collections.ArrayList
+        foreach ($item in $Value) { [void]$list.Add((ConvertTo-AutoOSRegistryObject $item)) }
+        # Leading comma: a one-element array must stay an array; a bare return
+        # would unroll it and turn one route leg into a plain string.
+        return , $list.ToArray()
+    }
+    return $Value
+}
+
+function ConvertFrom-AutoOSRegistryJson {
+    <#  Registry JSON -> case-sensitive parse -> PSObject, on 5.1 and 7 both.
+
+        -AsHashtable exists only on pwsh 7; Windows PowerShell 5.1 falls back to
+        the .NET Framework JavaScriptSerializer, whose Dictionary is case-
+        sensitive and does not throw on a case-only duplicate. Both trees then
+        take the same projection, so the two shells see one shape.  #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('AsHashtable')) {
+        $tree = $Text | ConvertFrom-Json -AsHashtable
+    } else {
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        # The default 2 MB cap is under the registry's headroom; a silently
+        # truncated parse is the same fail-open this helper exists to stop.
+        $ser.MaxJsonLength = [int]::MaxValue
+        $tree = $ser.DeserializeObject($Text)
+    }
+    return ConvertTo-AutoOSRegistryObject $tree
+}
+
 function Get-AutoOSProviderMap {
     param([string]$CatalogPath)
-    $doc = Get-Content $CatalogPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $doc = ConvertFrom-AutoOSRegistryJson -Text (Get-Content $CatalogPath -Raw -Encoding utf8)
     $providers = $doc.providers
     $routes = if ($doc.PSObject.Properties['routes']) { $doc.routes } else { $null }
 
@@ -275,7 +337,7 @@ function Invoke-AutoOSGateway {
 # from the registry - the map above only carries what registration needs.
 $ProviderBase = @{}
 try {
-    $regDoc = Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $regDoc = ConvertFrom-AutoOSRegistryJson -Text (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw -Encoding utf8)
     foreach ($p in $regDoc.providers.PSObject.Properties) {
         $e = $p.Value
         if ($e.PSObject.Properties['omniroute_id'] -and $e.omniroute_id -and
