@@ -289,6 +289,48 @@ once no combo needs it (all green today).
   claude-opus-4.6-thinking, gpt-oss-120b-medium. NO Opus 4.7 (that's the
   Devin bridge, separate connection).
 
+### Probed 2026-09-30 (t2 sweep — 15 legs, 11 combos; `tools/probe-sweep.py`)
+
+Full leg + combo sweep through the live gateway (`:20128`). Each leg probed
+with an ack test (16-token chat) and a tool-call test (single tool-call round,
+2048 tokens). Measured 2026-09-30T14:33–14:50Z.
+
+| Leg | Ack | Tool | Ack ms | Tool ms | Ctx | Error |
+|---|---|---|---|---|---|---|
+| `nebius/zai-org/GLM-5.2` | **ok** | **ok** | 297 | 1 219 | 128k | — |
+| `deepseek/deepseek-flash` | **ok** | **ok** | 1 047 | 2 843 | 1M | — (V4.1 Flash, 1M ctx) |
+| `mistral/mistral-code-latest` | **ok** | **ok** | 2 297 | 2 280 | 128k | — |
+| `groq/openai/gpt-oss-120b` | **ok** | **ok** | 609 | 967 | 131k | — |
+| `free-ai/qwen7b` | **ok** | FAIL | 782 | 3 000 | 128k | no tool-call support ("got 0") |
+| `gemini/gemini-3.8-flash` | FAIL | FAIL | 96 250 | 0 | 1M | HTTP 429 (rate limit) |
+| `antigravity/gemini-3.7-flash-high` | FAIL | FAIL | 15 | 0 | — | HTTP 401 |
+| `antigravity/gemini-3.7-flash-medium` | FAIL | FAIL | 15 | 0 | — | HTTP 401 |
+| `scw/qwen3-235b-a22b-instruct-2507` | FAIL | FAIL | 0 | 0 | 128k | HTTP 401 |
+| `scw/mistral-small-3.2-24b-instruct-2506` | FAIL | FAIL | 15 | 0 | 128k | HTTP 401 |
+| `nebius/zai-org/GLM-5.3-Flash` | FAIL | FAIL | 125 047 | 0 | 128k | HTTP 504 (125 s timeout) |
+| `meta-api/muse-spark-1.3-contributor` | FAIL | FAIL | 5 827 | 0 | 1M | HTTP 502 |
+| `cerebras/gpt-oss-120b` | FAIL | FAIL | 219 | 0 | 400k | HTTP 402 (payment) |
+| `morph/morph-dsv4flash` | FAIL | FAIL | 15 | 0 | — | HTTP 401 |
+| `morph/morph-glm52-744b` | FAIL | FAIL | 15 | 0 | — | HTTP 401 |
+
+**4/15 fully working** (GLM-5.2, deepseek-flash, mistral-code-latest, gpt-oss-120b).
+1/15 ack-only (qwen7b — no tool support). 10/15 failed (6× 401, 1× 402, 1×
+429, 1× 502, 1× 504, 1× tool-fail).
+
+**Deepseek V4.1 Flash fallback:** `deepseek/deepseek-flash` is leg 6/8 in
+`t2-worker` and leg 5/6 in `t3-driver`, but `nebius/zai-org/GLM-5.2` (positioned
+before it in both) succeeds first (297 ms) → deepseek never fires unless
+GLM-5.2 is also down. The `-clean` twins and `deepseek-v4.1-flash` pin it as
+the sole leg (working, <1 s). `t1-orchestrator`, `t1-orchestrator-paid`, and
+`t2-orchestrator` have **no deepseek leg** and can fail entirely — proposal:
+append `deepseek/deepseek-flash` as a final fallback. Full analysis in
+`docs/handoff/2026-09-30-laneSweep-t2-models.md`. **These proposals are for
+operator review only — P1-combos owns `combos.json`.**
+
+**Qwen CLI path:** `omniroute run qwen --model deepseek-v4.1-flash -- --prompt
+"…"` returns the expected response end-to-end (measured 2026-09-30T14:50Z).
+Standalone `qwen` CLI returns 401 (connects to Alibaba Cloud, not the gateway).
+
 ### CLI Code vs CLI Agents vs ACP (OmniRoute CLI-TOOLS.md, v3.8.50)
 
 - **CLI Code** (26 tools): coding CLIs pointed AT OmniRoute
