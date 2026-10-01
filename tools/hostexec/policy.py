@@ -1307,7 +1307,7 @@ def _path_hijack_problem(argv0: str, policy: Policy) -> str | None:
 
 def _resolved_extra_heads(heads: list[list[str]]) -> list[list[str]]:
     """G/Qoder-3: for every absolute head, re-apply basename rules to the
-    realpath target (e.g. /home/op/bin/id -> /usr/bin/sudo denies as
+    realpath target (e.g. /home/user/bin/id -> /usr/bin/sudo denies as
     no-sudo even though the spelled basename is `id`)."""
     extra: list[list[str]] = []
     seen = {tuple(h) for h in heads}
