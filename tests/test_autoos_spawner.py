@@ -8975,16 +8975,20 @@ class GatewayCooldownStopTests(unittest.TestCase):
                               want, line)
 
     def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
-        # The real t2-worker route serves gpt-oss-120b from cerebras AND
-        # sambanova: the stop line names the model, not the provider, so neither
-        # may be benched on a 50/50 guess (and picking one silently starves it).
+        # CIGREEN: expectation moved by 7e329c7e (OVH legs added to t2-worker):
+        # the real t2-worker route serves gpt-oss-120b from ovhcloud AND
+        # cerebras AND SambaNova now (the groq leg spells it openai/gpt-oss-120b,
+        # a different token). The verdict holds -- the stop line names the
+        # model, not the provider, so NOBODY may be benched on a three-way
+        # guess (and picking one silently starves it) -- only the pinned name
+        # list grows by one.
         pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
         self.assertIsNone(pid)
         # The names are the registry's own provider ids — the spelling every
         # other read of this registry keys on, so a message is never the only
         # place a made-up lowercase name appears.
         self.assertEqual(printed.strip(),
-                         "ambiguous stop: gpt-oss-120b served by cerebras, "
+                         "ambiguous stop: gpt-oss-120b served by ovhcloud, cerebras, "
                          "SambaNova - not benched")
 
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
