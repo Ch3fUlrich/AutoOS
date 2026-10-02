@@ -505,5 +505,44 @@ class VerdictParseTests(unittest.TestCase):
         self.assertEqual(self.verdict(""), "VERDICT: missing")
 
 
+class IndentedAndEmphasisVerdictTests(unittest.TestCase):
+    """review_verdict() called DIRECTLY (the raw word or None): the RC-2 seat
+    fixes - an indented line is a CommonMark code block, never a verdict; a
+    single-emphasis label is a verdict. No gateway, no subprocess."""
+
+    def raw(self, text):
+        return review_call.review_verdict(text)
+
+    def test_four_space_indented_verdict_is_a_paste(self):
+        self.assertIsNone(self.raw("    VERDICT: pass\n"))
+
+    def test_tab_indented_verdict_is_a_paste(self):
+        self.assertIsNone(self.raw("\tVERDICT: pass\n"))
+
+    def test_indented_fence_paste_is_never_a_verdict(self):
+        # The reported shape: an indented (fence) block reads as code, and
+        # its inner VERDICT line is a pasted sample, not the reviewer's word.
+        self.assertIsNone(self.raw("    ```\n    VERDICT: pass\n    ```\n"))
+
+    def test_an_indented_pass_never_flips_a_real_fail(self):
+        # Last-wins must not let an indented paste overwrite the real verdict.
+        text = ("VERDICT: fail-with-findings\n"
+                "    VERDICT: pass\n")
+        self.assertEqual(self.raw(text), "fail-with-findings")
+
+    def test_single_asterisk_emphasis_round_the_label(self):
+        self.assertEqual(self.raw("*VERDICT*: pass"), "pass")
+
+    def test_single_underscore_emphasis_round_the_label(self):
+        self.assertEqual(self.raw("_Verdict_: fail-with-findings"),
+                         "fail-with-findings")
+
+    def test_unbalanced_emphasis_stays_missing(self):
+        self.assertIsNone(self.raw("*VERDICT: pass\n"))
+
+    def test_list_item_bold_verdict_still_counts(self):
+        self.assertEqual(self.raw("- **Verdict:** pass"), "pass")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

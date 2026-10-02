@@ -115,15 +115,19 @@ CORRELATION_HEADER_NAMES = (
 # replicated instead of imported, see the header) - so the needed logic is
 # copied verbatim, changing only the value set: a review call answers `pass` /
 # `fail-with-findings`, never the runner's `ready` / `fix-first` / `not-ready`.
+# tools/autoos_agent_mcp.py has the same indented-line gap (follow-up)
 
 # The verdict line a review answer states, anchored at the line start so a
-# sentence that merely mentions a verdict does not read as one. The decoration
-# it tolerates is what a markdown-speaking reviewer wraps a real decision in:
-# a heading, a bullet, or bold on the label - both `**VERDICT**: pass` and the
-# colon-inside form `**Verdict:** pass` (the closing `**` sits before the
-# colon, which the optional `\*\*` in front of `:` accepts).
+# sentence that merely mentions a verdict does not read as one. The
+# decoration it tolerates is what a markdown-speaking reviewer wraps a real
+# decision in: a heading, a bullet, or emphasis on the label - single `*`/`_`
+# or double `**`/`__`, closing either before the colon (`*VERDICT*: pass`)
+# or after it (`*Verdict:* pass`, with `_verdict_value` checking that the
+# decoration balances - an unbalanced `*VERDICT: pass` stays missing, the
+# safe default).
 _VERDICT_LINE_RE = re.compile(
-    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(\S.*)$")
+    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?P<dec>[*_]{1,2})?VERDICT"
+    r"(?:\s*(?P<dec2>[*_]{1,2})\s*:|\s*:)\s*(?P<value>\S.*)$")
 
 # What a verdict IS for a review call. A line that opens with the label and
 # then says something else (`VERDICT: pass, but the ref is never read`) is a
@@ -273,14 +277,20 @@ def _verdict_value(stripped: str) -> str | None:
     table row), and the value has to be the bare word - `pass, but ...` is a
     reviewer *talking* and reads as NO verdict. Bold/italic decoration and one
     trailing `. ! ?` (`VERDICT: pass.`) are stripped before the test, so
-    `**Verdict:** pass` and `**VERDICT**: pass` both land on `pass`.
+    `**Verdict:** pass` and `**VERDICT**: pass` both land on `pass`. RC-2
+    seat B: single `*`/`_` emphasis counts too, but only when it BALANCES -
+    `*VERDICT*: pass` and `*Verdict:* pass` are a wrapped label, while an
+    opening or closing mark on its own (`*VERDICT: pass`, `VERDICT*: pass`)
+    is punctuation in prose and stays missing.
     """
     if stripped.startswith(">") or "<" in stripped or "|" in stripped:
         return None
     m = _VERDICT_LINE_RE.match(stripped)
     if not m:
         return None
-    value = m.group(1)
+    dec, dec2, value = m.group("dec"), m.group("dec2"), m.group("value")
+    if dec != dec2 and not (dec and dec2 is None and value.startswith(dec)):
+        return None  # unbalanced emphasis: a label nobody wrapped
     # Twice: `pass.` needs the punctuation then the decorators, while
     # `**pass**.` needs a decorator round after the punctuation falls off.
     for _ in range(2):
@@ -289,6 +299,20 @@ def _verdict_value(stripped: str) -> str | None:
             value = value[:-1]
     value = value.strip().lower()
     return value if value in _VERDICT_VALUES else None
+
+
+def _indent_columns(line: str) -> int:
+    """The line's leading indent in CommonMark columns: a tab advances to the
+    next multiple of 4, so a line starting with a tab indents 4 columns."""
+    col = 0
+    for ch in line:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - (col % 4)
+        else:
+            break
+    return col
 
 
 def review_verdict(text: str) -> str | None:
@@ -300,6 +324,11 @@ def review_verdict(text: str) -> str | None:
     the reviewer's own word, a fence still open at the END of the text fails
     CLOSED (ignore everything from the first fence marker on: the answer was
     cut mid-block, so nothing in it is trusted), and fences follow CommonMark.
+
+    RC-2 seat A: a line indented by >= 4 columns (a tab counts as 4) is a
+    CommonMark indented code block - a pasted sample, not the reviewer's own
+    word - so it is never a verdict, whatever it says and whatever last-wins
+    would otherwise do with it.
     """
     raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
     found = None               # last verdict outside fences and hunks
@@ -346,6 +375,11 @@ def review_verdict(text: str) -> str | None:
             fence = (m.group(1)[0], len(m.group(1)))
             if first_marker is None:
                 first_marker = i
+            continue
+        # RC-2 seat A: >= 4 columns of leading whitespace is an indented code
+        # block in CommonMark - a paste, not the reviewer's verdict - so it
+        # never counts, not even as the "last wins" line.
+        if _indent_columns(raw) >= 4:
             continue
         stripped = raw.strip()
         if not stripped:
