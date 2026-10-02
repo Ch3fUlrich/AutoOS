@@ -741,6 +741,10 @@ if it "t1-credit fix17: present-but-unusable balance entries + overlay except wr
     out="$(python3 tests/test_t1_credit_fix17.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "t2-record-pin: record pin round-trip and conflict resolution (unit tests)"; then
+    out="$(python3 tests/test_t2_record_pin.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "debtcap nebius: provider excluded from free/trial tiers (unit tests)"; then
     out="$(python3 tests/test_debtcap_nebius.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

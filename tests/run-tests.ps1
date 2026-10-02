@@ -5141,6 +5141,15 @@ Test-Case 't1-credit fix17: present-but-unusable balance entries + overlay excep
     Assert-Equal $rc 0 "t1-credit fix17 unit tests failed: $out"
 }
 
+Test-Case 't2-record-pin: record pin round-trip and conflict resolution (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t2_record_pin.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t2-record-pin unit tests failed: $out"
+}
+
 Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
