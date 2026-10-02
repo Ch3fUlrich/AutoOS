@@ -287,6 +287,50 @@ class BHelperFallbackTests(unittest.TestCase):
         self.assertIn("ValueError", guards["deepseek"]["note"])
         self.assertNotEqual(guards.get("ovhcloud", {}).get("state"), "refuse")
 
+    def test_r3_guard_error_raise_still_refuses_every_paid(self):
+        # CREDIT-16 R3 (D-274): _credit_guard_error raising leaves guards
+        # empty -- paid refusals are built from the registry paid ids.
+        reg = self._reg()
+        def _boom_fetch(*a, **k):
+            raise usage.UsageError("down (UsageError)")
+        def _boom_helper(*a, **k):
+            raise usage.UsageError("helper down (UsageError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(usage, "apply_paid_local_cap",
+                                   side_effect=RuntimeError("kaput")), \
+                 mock.patch.object(agent, "_credit_guard_error",
+                                   side_effect=OSError("no guard")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=_boom_fetch, env=env,
+                    helper=_boom_helper)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("RuntimeError", guards["deepseek"]["note"])
+        self.assertNotIn("kaput", guards["deepseek"]["note"])
+
+    def test_r3_refuse_raise_never_crashes(self):
+        # CREDIT-16 R3 (D-274): refuse_paid_on_overlay_error raising
+        # inside the handler must not crash the plan; paid still refuses.
+        # Non-helper branch keeps the probe on the handler (no ledger
+        # re-assert path).
+        reg = self._reg()
+        def _boom_fetch(*a, **k):
+            raise usage.UsageError("down (UsageError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(usage, "apply_paid_local_cap",
+                                   side_effect=RuntimeError("kaput")), \
+                 mock.patch.object(usage, "refuse_paid_on_overlay_error",
+                                   side_effect=TypeError("refuse boom")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=_boom_fetch, env=env, helper=None)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("RuntimeError", guards["deepseek"]["note"])
+
 
 class CMinorTests(unittest.TestCase):
     def test_c1_bad_since_is_stale_with_placeholder(self):

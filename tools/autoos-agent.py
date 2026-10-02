@@ -4801,8 +4801,30 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
                         guards = _credit_guard_error(registry, _tn)
                     except Exception:
                         guards = {}
-                    guards = usage_mod.refuse_paid_on_overlay_error(
-                        registry, guards, _tn)
+                    try:
+                        guards = usage_mod.refuse_paid_on_overlay_error(
+                            registry, guards, _tn)
+                    except Exception:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                    # CREDIT-16 R3 (D-274): cover every paid provider even
+                    # when guards is empty; the refuse call only mutates
+                    # existing entries and must never crash the plan.
+                    try:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                        for _pid in _paid_guard_ids(registry):
+                            _g = guards.get(_pid)
+                            if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                                _cap = _warn = 0.0
+                                try:
+                                    _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                    _warn = usage_mod.spend_warn_usd(registry, _pid)
+                                except Exception:
+                                    pass
+                                guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                    except Exception:
+                        pass
         else:
             # CREDIT-16 B (D-274): same explicit fail-closed fallback.
             try:
@@ -4816,8 +4838,30 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
                     guards = _credit_guard_error(registry, _tn)
                 except Exception:
                     guards = {}
-                guards = usage_mod.refuse_paid_on_overlay_error(
-                    registry, guards, _tn)
+                try:
+                    guards = usage_mod.refuse_paid_on_overlay_error(
+                        registry, guards, _tn)
+                except Exception:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                # CREDIT-16 R3 (D-274): cover every paid provider even when
+                # guards is empty; the refuse call only mutates existing
+                # entries and must never crash the plan.
+                try:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                    for _pid in _paid_guard_ids(registry):
+                        _g = guards.get(_pid)
+                        if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                            _cap = _warn = 0.0
+                            try:
+                                _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                _warn = usage_mod.spend_warn_usd(registry, _pid)
+                            except Exception:
+                                pass
+                            guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                except Exception:
+                    pass
         if use_helper and rows_source is None:
             # T1-CREDIT-FIX-14 rework M2 (D-274): the rows read failed, so
             # the overlay above never ran -- consult the ledger OUTSIDE the
