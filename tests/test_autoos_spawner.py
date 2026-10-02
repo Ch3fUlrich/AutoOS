@@ -10289,13 +10289,18 @@ class EffortRungPlumbingTests(unittest.TestCase):
     # --- never invent a rung the answering config cannot honour -------------
 
     def test_a_model_without_the_rung_declared_gets_no_invented_variant(self):
-        # t3-driver's served head leg has an empty ladder, so the render
-        # declares no variants for it — a resolver rung must not bolt a #high
-        # onto a model whose config has no such variant (PROVFIX3 finding 8 is
-        # exactly this class of forwarded effort the leg rejects).
-        self.assertEqual(self.plan_of_resolver("high", combo="t3-driver")["model"],
-                         "omniroute/t3-driver")
-        self.assertEqual(self.variants_of("omniroute/t3-driver"), {})
+        # CIGREEN: expectation moved by 266e16da (render follows the head leg's
+        # ladder, tools/registry.py:1603): t3-driver's head is now
+        # gemini-3.8-flash with a [low, medium, high] ladder, so the render
+        # declares those variants and #high is correctly appended. The intent
+        # stands -- a rung the config declares no variant for is dropped, never
+        # invented -- pinned here on groq-qwen3.8-27b, a single-provider route
+        # whose head leg carries no effort ladder, so the render declares no
+        # variants for it (PROVFIX3 finding 8 is exactly this class of
+        # forwarded effort the leg rejects).
+        self.assertEqual(self.plan_of_resolver("high", combo="groq-qwen3.8-27b")["model"],
+                         "omniroute/groq-qwen3.8-27b")
+        self.assertEqual(self.variants_of("omniroute/groq-qwen3.8-27b"), {})
 
     def test_an_explicit_model_variant_wins_over_the_resolvers_rung(self):
         # --model omniroute/deepseek-v4.1-flash#low is an operator choice; the
