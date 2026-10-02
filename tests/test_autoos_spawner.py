@@ -8231,14 +8231,34 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(review["reviewer"]["family"], "meta")
 
     def test_the_reviewer_is_cross_family_and_the_walk_stops_at_the_first_usable(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (T0-PAID-4 Q1 paid-last-resort
+        # two-pass walk, operator rule D-212/D-219): reviewer_for tries every
+        # non-paid entry first (registry order), then the paid ones. The only
+        # free entries here are gem-flash (paid by LEG tier -- gem_api is a paid
+        # provider, so _reviewer_is_paid holds it to the paid pass) and qwen
+        # (same family as the author), so no free reviewer is usable and the
+        # paid muse entry wins as last resort with the passed-over qwen entry in
+        # skipped. The intent stands: the reviewer is cross-family to the author.
         review = self.route()["review_plan"]
         self.assertNotEqual(review["reviewer"]["family"], review["author_family"])
-        self.assertEqual(review["skipped"], [],
-                         "the head of the list was usable, nothing was passed over")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["model"], "omniroute/muse")
+        self.assertEqual([s["model"] for s in review["skipped"]], ["qwen3.8-flash"])
+        self.assertIn("same family as author (qwen)", review["skipped"][0]["reasons"])
+        self.assertIn("last resort", review["reason"],
+                      "a paid reviewer picked over free entries must say so")
 
     def test_a_same_family_reviewer_is_skipped_with_the_reason_exposed(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (same two-pass + leg-tier-paid
+        # rule; b7c276d8 is the same flag-vs-tier validation direction):
+        # author=meta now resolves to the FREE qoder/qwen entry, not the paid
+        # gem entry -- gem says paid:false but its gem_api/gem-flash leg sits
+        # under a paid provider, so _reviewer_is_paid is True and it waits for
+        # the paid pass. The intent stands: the same-family entry is skipped
+        # with the reason exposed.
         review = self.route(card="kind=review,author=meta,paths=tools/registry.py")["review_plan"]
-        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual(review["reviewer"]["family"], "qwen")
+        self.assertEqual(review["reviewer"]["model"], "qwen3.8-flash")
         self.assertEqual([s["model"] for s in review["skipped"]], ["omniroute/muse"])
         self.assertIn("same family as author (meta)", review["skipped"][0]["reasons"])
 
@@ -8251,11 +8271,24 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(review["reviewer"]["family"], "meta")
 
     def test_a_sensitive_card_walks_past_the_training_reviewer(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (the walk now surfaces EVERY
+        # rejection in registry order; the legless-privacy fail-closed rule in
+        # _reviewer_rejections predates it): privacy=sensitive rejects muse
+        # (muse_api trains on prompts) AND the two legless entries -- qwen (also
+        # same-family here) and haiku ("privacy: no registry leg to check
+        # training against": unknown is not safe). The intent stands: the walk
+        # passes the training reviewer and lands cross-family on gem-flash,
+        # whose gem_api leg does not train.
         route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
                                 "paths=tools/registry.py")
         self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
         skipped = route["review_plan"]["skipped"]
-        self.assertEqual([s["model"] for s in skipped], ["omniroute/muse"])
+        self.assertEqual([s["model"] for s in skipped],
+                         ["omniroute/muse", "qwen3.8-flash", "haiku"])
+        for entry in skipped:
+            self.assertTrue([r for r in entry["reasons"] if r.startswith("privacy:")],
+                            "every skipped entry must name privacy, not just "
+                            "availability: %r" % (entry,))
         self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
                         "the reason must name privacy, not availability")
 
@@ -8906,19 +8939,24 @@ class GatewayCooldownStopTests(unittest.TestCase):
         self.assertEqual(list(self.state()["providers"]), ["scaleway"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
-        # t2-worker-clean has no gemini leg; naming a model the route does not
-        # serve falls back to the first servable leg, as an unnamed stop does.
-        # The fallback leg is registry data, so the expectation is read from it
-        # rather than pinned to one provider's name (DSBACK 2026-09-28 moved it
-        # from opencode-zen/… to deepseek/deepseek-flash).
+        # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
+        # the trial-first clean routes): t2-worker-clean HAS a gemini leg now,
+        # vertex/gemini-3.8-flash serves gemini-3.8-flash alone, and naming it
+        # correctly benches vertex_ai. The intent stands -- naming a model the
+        # route does not serve falls back to the first live leg, as an unnamed
+        # stop does -- pinned here on gemini-3.7-flash-high, which no clean leg
+        # serves. The fallback leg is registry data, so the expectation is read
+        # from it rather than pinned to one provider's name (DSBACK 2026-09-28
+        # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
+        # it to the ovhcloud head leg).
         legs = self.registry["routes"]["t2-worker-clean"]["legs"]
         named = self.agent.stop_provider_id(
-            "Error: [429] All credentials for model gemini-3.8-flash are "
+            "Error: [429] All credentials for model gemini-3.7-flash-high are "
             "cooling down (reset after 37s)", self.registry, legs)
         unnamed = self.agent.stop_provider_id(
             "Error: [429] All credentials are cooling down (reset after 37s)",
             self.registry, legs)
-        self.assertEqual(named, "deepseek")
+        self.assertEqual(named, "ovhcloud")
         self.assertEqual(named, unnamed,
                          "an unmatched model name must attribute exactly as an "
                          "unnamed stop does, to the route's first live leg")
@@ -8970,16 +9008,20 @@ class GatewayCooldownStopTests(unittest.TestCase):
                               want, line)
 
     def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
-        # The real t2-worker route serves gpt-oss-120b from cerebras AND
-        # sambanova: the stop line names the model, not the provider, so neither
-        # may be benched on a 50/50 guess (and picking one silently starves it).
+        # CIGREEN: expectation moved by 7e329c7e (OVH legs added to t2-worker):
+        # the real t2-worker route serves gpt-oss-120b from ovhcloud AND
+        # cerebras AND SambaNova now (the groq leg spells it openai/gpt-oss-120b,
+        # a different token). The verdict holds -- the stop line names the
+        # model, not the provider, so NOBODY may be benched on a three-way
+        # guess (and picking one silently starves it) -- only the pinned name
+        # list grows by one.
         pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
         self.assertIsNone(pid)
         # The names are the registry's own provider ids — the spelling every
         # other read of this registry keys on, so a message is never the only
         # place a made-up lowercase name appears.
         self.assertEqual(printed.strip(),
-                         "ambiguous stop: gpt-oss-120b served by cerebras, "
+                         "ambiguous stop: gpt-oss-120b served by ovhcloud, cerebras, "
                          "SambaNova - not benched")
 
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
@@ -8992,12 +9034,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
                          "an ambiguous stop must not write a provider-state file")
 
     def test_a_model_one_provider_serves_still_benches_that_provider(self):
-        # The other half of the same line: gemini-3.7-flash-high is antigravity's
-        # alone in t2-worker, so the ambiguity rule must not swallow clean stops.
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the antigravity
+        # leg): gemini-3.7-flash-high is served by NO t2-worker leg now, so
+        # naming it falls back to the first live leg instead of benching
+        # antigravity. The intent stands -- the ambiguity rule must not swallow
+        # a clean single-served stop -- pinned here on scaleway's mistral-small
+        # grant, which exactly one t2-worker leg serves.
         pid, printed = self.stop(
-            "Error: [429] All credentials for model gemini-3.7-flash-high are "
+            "Error: [429] All credentials for model "
+            "mistral-small-3.2-24b-instruct-2506 are "
             "cooling down (reset after 37s)", "t2-worker")
-        self.assertEqual(pid, "antigravity", printed)
+        self.assertEqual(pid, "scaleway", printed)
         self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
@@ -10289,13 +10336,18 @@ class EffortRungPlumbingTests(unittest.TestCase):
     # --- never invent a rung the answering config cannot honour -------------
 
     def test_a_model_without_the_rung_declared_gets_no_invented_variant(self):
-        # t3-driver's served head leg has an empty ladder, so the render
-        # declares no variants for it — a resolver rung must not bolt a #high
-        # onto a model whose config has no such variant (PROVFIX3 finding 8 is
-        # exactly this class of forwarded effort the leg rejects).
-        self.assertEqual(self.plan_of_resolver("high", combo="t3-driver")["model"],
-                         "omniroute/t3-driver")
-        self.assertEqual(self.variants_of("omniroute/t3-driver"), {})
+        # CIGREEN: expectation moved by 266e16da (render follows the head leg's
+        # ladder, tools/registry.py:1603): t3-driver's head is now
+        # gemini-3.8-flash with a [low, medium, high] ladder, so the render
+        # declares those variants and #high is correctly appended. The intent
+        # stands -- a rung the config declares no variant for is dropped, never
+        # invented -- pinned here on groq-qwen3.8-27b, a single-provider route
+        # whose head leg carries no effort ladder, so the render declares no
+        # variants for it (PROVFIX3 finding 8 is exactly this class of
+        # forwarded effort the leg rejects).
+        self.assertEqual(self.plan_of_resolver("high", combo="groq-qwen3.8-27b")["model"],
+                         "omniroute/groq-qwen3.8-27b")
+        self.assertEqual(self.variants_of("omniroute/groq-qwen3.8-27b"), {})
 
     def test_an_explicit_model_variant_wins_over_the_resolvers_rung(self):
         # --model omniroute/deepseek-v4.1-flash#low is an operator choice; the
@@ -13294,18 +13346,22 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
 
     def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
         cli = self.cli()
-        # An operator-written clients row is the client's *default*, and a tier
-        # replaces it -- reading the row first is what let a Claude tier agent
-        # walk past the gate wearing a free model's name.
+        # CIGREEN: expectation moved by 60191348 (B2-PRUNE withdrew opus-4-6 as
+        # none servable) + 266e16da (rerender dropped the opus-4-6 section), so a
+        # tier agent still naming omniroute/opus-4-6 is undeclared and
+        # resolve_model raises BEFORE the budget gate runs. The intent stands:
+        # the tier model is what the gate judges -- it must never be silently
+        # priced as the free client default. The resolution fails closed naming
+        # the tier model, and the budget refusal names it too.
         registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
-        model, source = cli.effective_spawn_model(
-            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
-        self.assertEqual(model, "omniroute/opus-4-6")
-        self.assertIn("t2-worker", source)
+        with self.assertRaisesRegex(ValueError, "omniroute/opus-4-6"):
+            cli.effective_spawn_model(
+                "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
         refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
                                                  cfg=self.claude_tier_cfg(), tier=2)
         self.assertIsNotNone(refusal, note)
         self.assertIn("claude_budget", refusal)
+        self.assertIn("opus-4-6", refusal)
 
     def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
         # The same fixture through `cmd_run`: the budget's own refusal, not a
@@ -15808,14 +15864,25 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
     def test_a_real_spawn_carries_the_fence_to_the_cli(self):
         """No mock on the launch: the runner is really started (dry run), so an
         argv that dropped a flag shows up as the CLI's own answer instead of as a
-        passing assertion about a list this process built for itself."""
+        passing assertion about a list this process built for itself.
+
+        CIGREEN: expectation moved by 7eff6020 (FREEWIRE wired nemotron legs
+        into t3-driver/t2-worker): fencing nvidia now trips the documented
+        fail-closed _fence_check_route refusal (any leg in the fence fences the
+        combo), because the review card's combo carries an nvidia leg. The
+        intent stands -- the fence reaches the CLI argv -- pinned here by
+        fencing anthropic, a family the registry carries but the review card's
+        combo serves no leg of, so the run proceeds and the argv carries the
+        fence. OPEN QUESTION (analyst unsure, needs an operator decision, no
+        code changed here): whether v1 select_combo should become fence-aware
+        instead of refusing fail-closed."""
         out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
-                                "card": {"role": "review"}, "not_family": ["nvidia"]})
+                                "card": {"role": "review"}, "not_family": ["anthropic"]})
         self.assertNotIn("error", out, out)
         job = mcp_server._read_json(os.path.join(mcp_server.state_root(), out["id"],
                                                  "job.json"))
         self.assertIn("--not-family", job["argv"])
-        self.assertIn("nvidia", job["argv"])
+        self.assertIn("anthropic", job["argv"])
         st = self.wait_done(out["id"])
         self.assertEqual(st["state"], "completed",
                          mcp_server.result(out["id"]).get("text"))
@@ -20362,12 +20429,56 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
             self.assertIn("privacy", err, name)
 
     def test_the_ovh_provider_is_still_unverified(self):
-        # The refusal above rests on this registry fact: null is not false, and
-        # private_safe fails closed on it. If a row ever says false, the -clean
-        # routes open and this test says so here, not in a comment elsewhere.
+        # CIGREEN: expectation moved by 35148c5c (L1-CLEAN D1+D2, part of the
+        # fcecae85 CLEAN merge; comment rework 587f465e): ovhcloud's
+        # trains_on_prompts went null -> false with a 3-citation privacy block
+        # (OVH AI Endpoints terms, docs and contract quotes, accessed
+        # 2026-10-01). The name above is kept for continuity but the intent is
+        # inverted: a sensitive hand entry reaches ovh ONLY through that cited
+        # verification -- private_safe is True, and the privacy block carries
+        # evidence with a url and a quote, as the registry validator
+        # (_privacy_block_problems) requires. The still-unverified half moved
+        # to test_a_null_trains_provider_is_still_refused below.
+        provider = SHIPPED_REGISTRY["providers"]["ovhcloud"]
+        self.assertIs(provider["trains_on_prompts"], False)
         safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
                                                SHIPPED_REGISTRY)
+        self.assertTrue(safe, why)
+        block = provider.get("privacy") or {}
+        self.assertIs(block.get("trains_on_prompts"), False)
+        evidence = block.get("evidence") or []
+        self.assertGreaterEqual(len(evidence), 1,
+                                "a credit leg is admitted because it cites its terms")
+        for row in evidence:
+            self.assertTrue(str(row.get("url") or "").startswith("https://"), row)
+            self.assertTrue(str(row.get("quote") or "").strip(), row)
+        rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_null_trains_provider_is_still_refused(self):
+        # CIGREEN companion to the test above (same 35148c5c/587f465e move):
+        # the fail-closed half. A registry copy with ovhcloud's own
+        # verification stripped (flag back to null, privacy block removed) is
+        # refused by private_safe AND by a sensitive run aimed at its route
+        # (rc 2) -- unknown is unsafe, and removing the citation closes the
+        # door the citation opened. api_airforce ships in exactly that
+        # unverified state (trains_on_prompts null), pinned here as the live
+        # example.
+        import copy
+        self.assertIsNone(
+            SHIPPED_REGISTRY["providers"]["api_airforce"].get("trains_on_prompts"))
+        neutered = copy.deepcopy(SHIPPED_REGISTRY)
+        neutered["providers"]["ovhcloud"]["trains_on_prompts"] = None
+        neutered["providers"]["ovhcloud"].pop("privacy", None)
+        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b", neutered)
         self.assertFalse(safe, why)
+        self.assertIn("trains on prompts", why)
+        agent = self.agent
+        with mock.patch.object(agent, "load_registry", lambda path: neutered), \
+                mock.patch.object(agent, "load_live_registry", lambda *a, **k: neutered):
+            rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("privacy", err)
 
 
 
