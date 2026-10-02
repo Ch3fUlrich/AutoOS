@@ -13338,35 +13338,67 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
     # --- item 2: the tier agent model is consulted before any client default ---
 
     def claude_tier_cfg(self):
-        """opencode.jsonc whose t2-worker agent answers on an all-Claude route."""
+        """opencode.jsonc whose t2-worker agent answers on an all-Claude route.
+
+        TEST-LOCAL declaration (the shipped opencode.jsonc no longer declares
+        opus-4-6): mirrors the neighbouring `_cfg` fixtures that declare models
+        under providers.omniroute.models so resolve_model resolves.
+        """
         import copy
         cfg = copy.deepcopy(self.real_cfg)
         cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        cfg.setdefault("providers", {}).setdefault(
+            "omniroute", {}).setdefault("models", {})["opus-4-6"] = {}
         return cfg
+
+    def test_an_undeclared_tier_model_still_fails_closed(self):
+        # CIGREEN companion (same 60191348+266e16da move): without the
+        # test-local declaration above, a tier agent naming
+        # omniroute/opus-4-6 is undeclared and resolve_model raises BEFORE the
+        # budget gate runs; the gate answers the routing error fail-closed.
+        import copy
+        cli = self.cli()
+        cfg = copy.deepcopy(self.real_cfg)
+        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
+        with self.assertRaisesRegex(ValueError, "omniroute/opus-4-6"):
+            cli.effective_spawn_model(
+                "opencode", registry=registry, cfg=cfg, tier=2)
+        refusal, _note = cli.claude_spawn_refusal("opencode", {}, registry,
+                                                  cfg=cfg, tier=2)
+        self.assertIsNotNone(refusal)
+        self.assertTrue(refusal.startswith("routing error:"), refusal)
+        self.assertIn("opus-4-6", refusal)
 
     def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
         cli = self.cli()
         # CIGREEN: expectation moved by 60191348 (B2-PRUNE withdrew opus-4-6 as
-        # none servable) + 266e16da (rerender dropped the opus-4-6 section), so a
-        # tier agent still naming omniroute/opus-4-6 is undeclared and
-        # resolve_model raises BEFORE the budget gate runs. The intent stands:
-        # the tier model is what the gate judges -- it must never be silently
-        # priced as the free client default. The resolution fails closed naming
-        # the tier model, and the budget refusal names it too.
+        # none servable) + 266e16da (rerender dropped the opus-4-6 section), so
+        # the shipped opencode.jsonc no longer declares omniroute/opus-4-6.
+        # Strengthened after the pinned Sonnet review seat: this test uses the
+        # TEST-LOCAL claude_tier_cfg above (which re-declares opus-4-6 the way
+        # the neighbouring fixtures declare models) so the tier model resolves
+        # through the Claude-pricing path instead of failing at declaration.
+        # The intent stands: the tier model is what the gate judges -- it must
+        # never be silently priced as the free client default.
         registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
-        with self.assertRaisesRegex(ValueError, "omniroute/opus-4-6"):
-            cli.effective_spawn_model(
-                "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
+        model, source = cli.effective_spawn_model(
+            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
+        self.assertEqual(model, "omniroute/opus-4-6")
+        self.assertIn("t2-worker", source)
         refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
                                                  cfg=self.claude_tier_cfg(), tier=2)
         self.assertIsNotNone(refusal, note)
+        self.assertFalse(refusal.startswith("routing error:"), refusal)
         self.assertIn("claude_budget", refusal)
         self.assertIn("opus-4-6", refusal)
 
     def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
-        # The same fixture through `cmd_run`: the budget's own refusal, not a
-        # route error further down, and it names the Claude model the tier agent
-        # carries. The live registry on this host is the shipped one (budget ON).
+        # CIGREEN: expectation moved by 60191348+266e16da (see the test above);
+        # strengthened after the pinned Sonnet review seat to run through the
+        # TEST-LOCAL declared cfg so the tier model resolves to
+        # omniroute/opus-4-6 and the CLI refusal is the budget's own refusal
+        # (not a declaration routing error), naming the Claude model.
         cli = self.agent
         out, err = io.StringIO(), io.StringIO()
         env = clean_env()
@@ -13376,6 +13408,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             rc = cli.cmd_run(self.args(tier=2, card=None), self.claude_tier_cfg())
         self.assertNotEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertNotIn("routing error:", err.getvalue())
         self.assertIn("claude_budget", err.getvalue())
         self.assertIn("opus-4-6", err.getvalue())
 
@@ -20399,11 +20432,12 @@ class GeminiAllowListTests(unittest.TestCase):
 
 
 class SensitiveHandEntryPrivacyTests(unittest.TestCase):
-    """D3: ovhcloud's `trains_on_prompts` is null on main — unverified — so a
-    privacy=sensitive card must never land on an `ovh-direct-*` hand entry. The
-    existing PRIV3 door already covers a name that is no registry route: nothing
-    proves it private-safe. This pins that the door holds for the ovh-direct ids
-    too, against the real opencode.jsonc rather than a synthetic one."""
+    """D3: ovhcloud's `trains_on_prompts` is verified false on main (CIGREEN:
+    587f465e) -- so a privacy=sensitive card may land on an `ovh-direct-*`
+    hand entry only through that cited verification. The existing PRIV3 door
+    already covers a name that is no registry route: nothing proves it
+    private-safe. This pins that the door holds for the ovh-direct ids too,
+    against the real opencode.jsonc rather than a synthetic one."""
 
     def setUp(self):
         self.agent = load_agent()
