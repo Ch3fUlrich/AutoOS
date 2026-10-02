@@ -527,7 +527,6 @@ class StaleOutsideRowsGateTests(unittest.TestCase):
             self.assertEqual(g2["state"], "refuse")  # still refuse, m4:
             # the retry is an hour later but the ORIGINAL since is kept
             self.assertIn("balance stale since %s" % since1, g2["note"])
-            self.assertIn("balance stale since %s" % since1, g2["note"])
             self.assertNotIn("(D-240)", g2["note"])  # not the estimate
             calls["n"] = 2
             agent.CREDIT_GUARD_CACHE.clear()
@@ -815,10 +814,13 @@ class UnstampedReadingFailsClosedTests(unittest.TestCase):
                 fail, env, SINCE_MONTH, NOW)
             since1 = usage.load_balance_stale(_ledger_path(env))
             self.assertIsNotNone(since1)
+            # The retry runs an hour later: a 'clear then re-mark' mutant
+            # would stamp the new hour, so the unchanged `since` pins it.
+            later = NOW + datetime.timedelta(hours=1)
             out = usage.overlay_balance_guards(
                 _reg_paid(), _guards_ok(), "http://127.0.0.1:1",
                 lambda u, h, t: (200, self._missing_stamp_body()),
-                env, SINCE_MONTH, NOW)
+                env, SINCE_MONTH, later)
             g = out["deepseek"]
             self.assertEqual(g["state"], "refuse")
             self.assertIn("balance stale since %s" % since1, g["note"])
@@ -961,6 +963,71 @@ class GuardErrorPathFailsClosedTests(unittest.TestCase):
             self.assertIn("TypeError", g["note"])
             self.assertNotIn("bad key", g["note"])
             self.assertNotIn("leg kept", g["note"])
+
+
+def _reg_credit_paid(cap=25.0):
+    reg = _reg_paid(cap)
+    reg["providers"]["vertex_ai"] = {"id": "vertex_ai", "tier": "credit",
+                                     "monthly_cap_usd": 250.0}
+    return reg
+
+
+def _guards_credit_paid_ok(note="ledger ok"):
+    out = _guards_ok(0.0, note)
+    out["vertex_ai"] = {"provider": "vertex_ai", "state": "unknown",
+                        "spend_usd": 0.0, "spend_unknown": True,
+                        "cap_usd": 250.0, "warn_usd": 200.0,
+                        "models_unpriced": 0,
+                        "note": "SPEND UNKNOWN: vertex_ai credit leg kept"}
+    return out
+
+
+class CreditStaysFailOpenTests(unittest.TestCase):
+    """MINOR-3 rework 3 (D-274): each new fail-closed path refuses paid
+    only -- the credit (trial grant) guard stays fail-open, untouched."""
+
+    def test_overlay_error_refuses_paid_only(self):
+        guards = _guards_credit_paid_ok()
+        before = dict(guards["vertex_ai"])
+        usage.refuse_paid_on_overlay_error(
+            _reg_credit_paid(), guards, "RuntimeError")
+        g = guards["deepseek"]
+        self.assertEqual(g["state"], "refuse")
+        self.assertIn("balance overlay failed (RuntimeError) (D-274)",
+                      g["note"])
+        self.assertEqual(before, guards["vertex_ai"])
+
+    def test_no_balance_read_refuses_paid_only(self):
+        guards = _guards_credit_paid_ok()
+        before = dict(guards["vertex_ai"])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.refuse_paid_without_balance_read(
+                _reg_credit_paid(), guards, env, NOW)
+            g = guards["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("balance stale since", g["note"])
+            self.assertIn("(D-274)", g["note"])
+            since = usage.load_balance_stale(_ledger_path(env))
+            self.assertIsNotNone(since)
+            self.assertIn(since, g["note"])
+        self.assertEqual(before, guards["vertex_ai"])
+
+    def test_overlay_stale_refuses_paid_only(self):
+        def fail(url, headers, timeout):
+            raise OSError("down")
+        guards = _guards_credit_paid_ok()
+        before = dict(guards["vertex_ai"])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            out = usage.overlay_balance_guards(
+                _reg_credit_paid(), guards, "http://127.0.0.1:1",
+                fail, env, SINCE_MONTH, NOW)
+            g = out["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("balance stale since", g["note"])
+            self.assertIn("(D-274)", g["note"])
+            self.assertEqual(before, out["vertex_ai"])
 
 
 if __name__ == "__main__":
