@@ -32,6 +32,16 @@
       "target": "vertex/gemini-3.8-flash",
       "context": 1048576,
       "$comment": "Gemini 3.8 Flash (Vertex, enabled in the operator's project 2026-09-30): 1M window. Serves the opencode hand entry vertex-3.8-flash."
+    },
+    {
+      "target": "vertex/gemini-3.7-flash",
+      "context": 1048576,
+      "$comment": "Gemini 3.7 Flash (Vertex, on the D-255 allow-list): 1M window. Serves the opencode hand entry vertex-3.7-flash."
+    },
+    {
+      "target": "vertex/gemini-3.6-flash",
+      "context": 1048576,
+      "$comment": "Gemini 3.6 Flash (Vertex, on the D-255 allow-list): 1M window. Serves the opencode hand entry vertex-3.6-flash."
     }
   ]
 }

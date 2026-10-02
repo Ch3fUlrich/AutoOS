@@ -18517,10 +18517,9 @@ class VertexFlashRegistryRowsTests(unittest.TestCase):
     modelID to the gateway verbatim, so with no row for the model behind
     `vertex/gemini-3.<6,7>-flash` the spawn gate could say nothing about what
     answers and refused the run. The rows are shaped like the `gemini-3.8-flash`
-    head they sit beside, and carry no invented price: no source was reachable
-    from this lane, so the price stays in the 0.0 unpriced form the 3.8 row uses
-    and the $comment says the Vertex cost is trial credit priced by T1-CREDIT
-    `provider_prices` at train integration."""
+    head they sit beside. RWP1 left their price unpriced (no source reachable from
+    that lane); the 2026-10-02 pass cites the Vertex list price per each row's
+    `price_source`, and `tool_calls` stays unproven — no leg probe was run."""
 
     FLASH = ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
 
@@ -18554,14 +18553,19 @@ class VertexFlashRegistryRowsTests(unittest.TestCase):
                                  head["context_advertised"], model_id)
             self.assertLessEqual(row["output_max"], head["output_max"], model_id)
 
-    def test_the_two_new_rows_carry_no_invented_price_and_say_so(self):
+    def test_the_two_new_rows_carry_the_cited_vertex_list_price(self):
+        # TRIAL-DIRECT final docs pass (2026-10-02): the Vertex price was sourced,
+        # so the 0.0 unpriced form RWP1 left here is gone. Pinned to the cited
+        # list price and its dated price_source, never to a guessed figure.
         for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
             row = self.models[model_id]
-            self.assertEqual((row["price_in"], row["price_out"]), (0.0, 0.0), model_id)
+            self.assertEqual((row["price_in"], row["price_out"], row["price_cache_read"]),
+                             (1.5e-06, 7.5e-06, 1.5e-07), model_id)
+            self.assertIn("vertex-ai/generative-ai/pricing", row["price_source"], model_id)
+            self.assertIn("accessed 2026-10-02", row["price_source"], model_id)
             comment = row["$comment"].lower()
-            self.assertIn("price not sourced", comment, model_id)
-            self.assertIn("trial credit", comment, model_id)
-            self.assertIn("t1-credit", comment, model_id)
+            self.assertNotIn("price not sourced", comment, model_id)
+            self.assertIn("tool_calls stay unproven", comment, model_id)
 
     def test_the_shipped_registry_still_validates(self):
         self.assertEqual(registry_tool.check_registry(SHIPPED_REGISTRY), [])
