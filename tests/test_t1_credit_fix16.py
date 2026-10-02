@@ -356,6 +356,11 @@ class CMinorTests(unittest.TestCase):
             _seed(path, [
                 {"provider": "deepseek", "fetched_at": "2026-10-15T10:00:00Z",
                  "remaining": 40.0},
+                # CREDIT-16 R5 (D-274): credit-tier ovhcloud holds the SAME
+                # condition (in-month series, no reading in this payload)
+                # yet stays fail-open while paid refuses.
+                {"provider": "ovhcloud", "fetched_at": "2026-10-15T10:00:00Z",
+                 "remaining": 150.0},
             ])
             guards = {"deepseek": _ok("deepseek"),
                       "ovhcloud": {"provider": "ovhcloud", "state": "unknown",
