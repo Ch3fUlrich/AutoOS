@@ -273,28 +273,36 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # FREEWIRE 2026-09-30: t1-orchestrator-free-only's served head is now the
-        # free scaleway grant (no declared ladder), so it carries no variants.
+        # CIGREEN: expectation moved by 35148c5c (trial-first clean routes head
+        # ovh gpt-oss-120b, ladder low/medium/high) + e1da4f7a (the render
+        # follows the served head): the -clean twins now carry low/medium/high,
+        # and t1-orchestrator-free-only's served head is the gemini free leg
+        # (ladder low/medium/high), so it carries variants too; t3-driver's
+        # served head likewise carries low/medium/high now.
         # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
-        # ladder is low/medium/high) and is the low/medium/high case now.
+        # ladder is low/medium/high) and stays the low/medium/high case.
         free = oc["providers"]["omniroute"]["models"]["gemini-3.8-flash"]
         self.assertEqual([v["id"] for v in free["variants"]],
                          ["low", "medium", "high"])
         for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertNotIn(
-            "variants",
-            oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"])
+        self.assertEqual(
+            [v["id"] for v in
+             oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]["variants"]],
+            ["low", "medium", "high"])
         clean = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
         self.assertEqual([v["id"] for v in clean["variants"]],
-                         ["low", "high", "max"])
+                         ["low", "medium", "high"])
         for v in clean["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         self.assertEqual(
             [v["id"] for v in
              oc["providers"]["omniroute"]["models"]["t3-driver-clean"]["variants"]],
-            ["low", "high", "max"])
-        self.assertNotIn("variants", oc["providers"]["omniroute"]["models"]["t3-driver"])
+            ["low", "medium", "high"])
+        self.assertEqual(
+            [v["id"] for v in
+             oc["providers"]["omniroute"]["models"]["t3-driver"]["variants"]],
+            ["low", "medium", "high"])
 
 
 class CommaDisciplineTests(SandboxCase):
