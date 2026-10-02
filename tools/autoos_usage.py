@@ -93,7 +93,6 @@ import datetime
 import json
 import math
 import os
-import posixpath
 import re
 import subprocess
 import sys
@@ -1578,8 +1577,10 @@ def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
     same (status, body bytes) page `fetch_window` consumes, so either
     transport feeds the same paging loop.
 
-    Only ``/api/usage/`` paths are fetched, only with method GET (the method
-    is hardcoded in the script, never taken from the caller). `headers` is
+    Only the two fixed ``/api/usage/`` paths the code itself builds are
+    fetched (``fetch_window``'s call-logs page, the provider-limits balance
+    read), only with method GET (the method is hardcoded in the script,
+    never taken from the caller). `headers` is
     accepted so this is a drop-in for the HTTP fetch signature, and IGNORED:
     the helper handles auth inside the container, so no caller key is ever
     read, printed or passed -- the subprocess gets no `env` override and the
@@ -1599,18 +1600,54 @@ def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
         raise UsageError("gateway helper cannot parse the request URL (%s)"
                          % type(exc).__name__)
     try:
-        decoded = urllib.parse.unquote(parts.path or "")
-        if ".." in decoded.split("/"):
-            raise ValueError("dot-dot path")
-        if "\\" in decoded or "?" in decoded or "#" in decoded:
-            raise ValueError("bad path character")
-        norm = posixpath.normpath(decoded)
-        if not norm.startswith("/api/usage/"):
+        # T1-CREDIT-FIX-13 (D-269): WHITELIST BUILD. The forwarded
+        # path+query is assembled from whitelist constants plus validated
+        # ints -- never from the caller string. The RAW path (before any
+        # decoding) must equal one of the two exact strings, so encoded,
+        # dot-dot, trailing-slash and case variants cannot smuggle in.
+        raw = url if isinstance(url, str) else ""
+        for char in raw:
+            # Any control (< 0x20), DEL/non-ASCII (>= 0x7f), or structural
+            # char rejects first: urlsplit strips \t\r\n and splits off
+            # #fragments, so only the raw string still shows them all.
+            # '%' is refused outright, so no percent (single- or
+            # double-encoded) form of a rejected shape can pass.
+            if ord(char) < 0x20 or ord(char) >= 0x7f or char in "%\\#;":
+                raise ValueError("bad request character")
+        path = parts.path or ""
+        if path == "/api/usage/provider-limits":
+            # No query at all: a bare trailing '?' leaves parts.query
+            # empty, so the raw string (whose scheme/host never hold '?')
+            # is what proves no query was sent.
+            if "?" in raw or parts.query or parts.fragment:
+                raise ValueError("unexpected query")
+            path_query = "/api/usage/provider-limits"
+        elif path == "/api/usage/call-logs":
+            # Hand split on '&' only (';' never separates here): each
+            # field must be key=value exactly once, with exactly the
+            # allowed key set. Strict ^[0-9]{1,9}$ ints (no bool, sign,
+            # space or exponent) and excludeTests exactly '1'.
+            seen = {}
+            for field in (parts.query or "").split("&"):
+                key, eq, value = field.partition("=")
+                if not eq or not key or key in seen:
+                    raise ValueError("bad query field")
+                seen[key] = value
+            if set(seen) != {"limit", "offset", "excludeTests"}:
+                raise ValueError("bad query keys")
+            if re.fullmatch(r"[0-9]{1,9}", seen["limit"]) is None:
+                raise ValueError("bad limit")
+            if re.fullmatch(r"[0-9]{1,9}", seen["offset"]) is None:
+                raise ValueError("bad offset")
+            if seen["excludeTests"] != "1":
+                raise ValueError("bad excludeTests")
+            path_query = ("/api/usage/call-logs?limit=%s&offset=%s"
+                          "&excludeTests=1" % (seen["limit"], seen["offset"]))
+        else:
             raise ValueError("non-usage path")
     except ValueError as exc:
         raise UsageError("gateway helper refuses a non-usage path (%s)"
                          % type(exc).__name__)
-    path_query = norm + (("?" + parts.query) if parts.query else "")
     script = ("import { apiFetch } from %s;\n"
               "const r = await apiFetch(%s, { method: 'GET' });\n"
               "const t = await r.text();\n"
