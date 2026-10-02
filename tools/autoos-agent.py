@@ -5885,6 +5885,7 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         # ValueError already covers JSON decode errors: fetch_window rewraps
         # bad pages as UsageError, and JSONDecodeError subclasses ValueError.
         first_failure = exc
+        _fallback_overlay_type = None
         if use_helper:
             # T1-CREDIT-FIX-10 M1 (D-250): the manage-key read did not answer
             # 200 -- try the read-only helper transport before giving up on a
@@ -5898,13 +5899,81 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
                 rows_source = "measured via gateway helper"
                 guards = _tag_source(_measured(rows, truncated), rows_source)
             except (usage_mod.UsageError, OSError, ValueError) as exc2:
-                guards = _credit_guards_unreadable(
-                    registry, usage_mod.spend_failure_note(exc2))
-                usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+                # CREDIT-16 B (D-274): explicit fail-closed helper fallback.
+                # An exception inside this handler is NOT caught by the
+                # sibling `except Exception` -- a crash is not a guard.
+                try:
+                    guards = _credit_guards_unreadable(
+                        registry, usage_mod.spend_failure_note(exc2))
+                    usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+                except Exception as exc_fb:  # noqa: BLE001 - fail closed
+                    _tn = type(exc_fb).__name__
+                    _fallback_overlay_type = _tn
+                    try:
+                        guards = _credit_guard_error(registry, _tn)
+                    except Exception:
+                        guards = {}
+                    try:
+                        guards = usage_mod.refuse_paid_on_overlay_error(
+                            registry, guards, _tn)
+                    except Exception:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                    # CREDIT-16 R3 (D-274): cover every paid provider even
+                    # when guards is empty; the refuse call only mutates
+                    # existing entries and must never crash the plan.
+                    try:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                        for _pid in _paid_guard_ids(registry):
+                            _g = guards.get(_pid)
+                            if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                                _cap = _warn = 0.0
+                                try:
+                                    _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                    _warn = usage_mod.spend_warn_usd(registry, _pid)
+                                except Exception:
+                                    pass
+                                guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                    except Exception:
+                        pass
         else:
-            guards = _credit_guards_unreadable(
-                registry, usage_mod.spend_failure_note(first_failure))
-            usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+            # CREDIT-16 B (D-274): same explicit fail-closed fallback.
+            try:
+                guards = _credit_guards_unreadable(
+                    registry, usage_mod.spend_failure_note(first_failure))
+                usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+            except Exception as exc_fb:  # noqa: BLE001 - fail closed
+                _tn = type(exc_fb).__name__
+                _fallback_overlay_type = _tn
+                try:
+                    guards = _credit_guard_error(registry, _tn)
+                except Exception:
+                    guards = {}
+                try:
+                    guards = usage_mod.refuse_paid_on_overlay_error(
+                        registry, guards, _tn)
+                except Exception:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                # CREDIT-16 R3 (D-274): cover every paid provider even when
+                # guards is empty; the refuse call only mutates existing
+                # entries and must never crash the plan.
+                try:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                    for _pid in _paid_guard_ids(registry):
+                        _g = guards.get(_pid)
+                        if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                            _cap = _warn = 0.0
+                            try:
+                                _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                _warn = usage_mod.spend_warn_usd(registry, _pid)
+                            except Exception:
+                                pass
+                            guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                except Exception:
+                    pass
         if use_helper and rows_source is None:
             # T1-CREDIT-FIX-14 rework M2 (D-274): the rows read failed, so
             # the overlay above never ran -- consult the ledger OUTSIDE the
@@ -5922,6 +5991,12 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
             except Exception as exc2:  # noqa: BLE001 - fail closed per D-274
                 guards = usage_mod.refuse_paid_on_overlay_error(
                     registry, guards, type(exc2).__name__)
+            # CREDIT-16 B: a fallback crash already refused paid with its
+            # TYPE -- the ledger consult above must not overwrite it with a
+            # generic stale reason. Re-assert the fallback TYPE last.
+            if _fallback_overlay_type is not None:
+                guards = usage_mod.refuse_paid_on_overlay_error(
+                    registry, guards, _fallback_overlay_type)
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
         # surface as its own `guard error` state -- kept for credit, kept for

@@ -1322,13 +1322,17 @@ def _stale_state(path):
             if not isinstance(pid, str) or not pid:
                 pid = None
             if obj.get("stale") is True:
-                if not isinstance(obj.get("since"), str):
-                    continue
+                since_val = obj.get("since")
+                if not isinstance(since_val, str):
+                    # CREDIT-16 C1 (D-274): a `stale: true` marker whose
+                    # `since` is not a string is still STALE (fail closed),
+                    # with a placeholder since -- never skipped (fail open).
+                    since_val = "unknown"
                 if pid is None:
                     if global_since is None:
-                        global_since = obj["since"]
+                        global_since = since_val
                 else:
-                    per.setdefault(pid, obj["since"])
+                    per.setdefault(pid, since_val)
             elif obj.get("stale") is False:
                 if pid is None:
                     global_since = None
@@ -1388,7 +1392,12 @@ def _mark_balance_stale(path, candidate_since, now=None, provider=None):
             return glob
     elif per.get(provider) is not None:
         return per[provider]
-    since = candidate_since or _utc_iso_z(now)
+    # CREDIT-16 C3 (D-274): a per-provider marker created while a GLOBAL
+    # marker is active keeps the global since (not now) -- one window.
+    if provider is not None and glob is not None and not candidate_since:
+        since = glob
+    else:
+        since = candidate_since or _utc_iso_z(now)
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     marker = {"since": since, "stale": True}
@@ -1441,7 +1450,7 @@ def _stale_paid_refuse(registry, provider, guard, since, detail):
 
 
 def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
-                                 since, now):
+                                 since, now, all_readings=None):
     """STALE the paid providers this successful parse did NOT read (D-274).
 
     A parse that yields readings is a successful read -- but only for the
@@ -1470,7 +1479,16 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
     # out (month rollover) -- only that provider's own usable reading
     # clears its marker, so a marked provider missing from this payload
     # stays refused with its ORIGINAL since, series or no series.
-    _, already_stale = _stale_state(path)
+    # CREDIT-16 (D-274): `readings` is the FRESH set (see
+    # `overlay_balance_guards`); `all_readings` (when given) is the full
+    # stamped payload, so a provider present-but-not-fresh (replayed/old
+    # stamp or past-month) refuses as an old reading, not as missing.
+    glob_before, already_stale = _stale_state(path)
+    if all_readings is None:
+        present_ids = set(fresh_ids)
+    else:
+        present_ids = {r.get("provider") for r in (all_readings or [])
+                       if isinstance(r, dict) and _reading_ts(r) is not None}
     newly = []
     for pid, guard in (guards or {}).items():
         if not isinstance(guard, dict):
@@ -1480,12 +1498,33 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
             continue
         if pid in fresh_ids:
             continue
-        if pid not in series_ids and pid not in already_stale:
+        # CREDIT-16 R1 (D-274): a provider PRESENT in the payload but NOT
+        # fresh (old/past-month stamp) never governs -- it stales even with
+        # no in-month series. Only a provider absent from the payload AND
+        # without series stays untouched.
+        if pid not in series_ids and pid not in already_stale and pid not in present_ids:
             continue
         since_ts = _mark_balance_stale(path, None, now, pid)
+        # CREDIT-16 C4 (D-274): when global and per-provider markers both
+        # apply, the reason names the OLDEST applicable since.
+        _glob_now, _per_now = _stale_state(path)
+        candidates = [since_ts]
+        if glob_before is not None:
+            candidates.append(glob_before)
+        per_now = _per_now.get(pid)
+        if per_now is not None:
+            candidates.append(per_now)
+        try:
+            since_ts = sorted(candidates)[0]
+        except TypeError:
+            pass
+        if pid in present_ids:
+            detail = "old reading for provider balance, paid leg refused"
+        else:
+            detail = "no provider balance reading, paid leg refused"
         guards[pid] = _stale_paid_refuse(
             registry, pid, guard, since_ts,
-            "no provider balance reading, paid leg refused")
+            detail)
         newly.append(pid)
     return newly
 
@@ -1776,37 +1815,109 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
     try:
+        # CREDIT-16 A (D-274): previous latest per provider BEFORE append.
+        # A payload reading is FRESH only when its stamp is NOT older than
+        # that previous latest AND in the current month (stamp >= since).
+        # Equal stamp is fresh (idempotent re-read). Future never fresh.
+        prev_latest = {}
+        for _r in load_balance_readings(path):
+            if not isinstance(_r, dict):
+                continue
+            _ts = _reading_ts(_r)
+            _pid = _r.get("provider")
+            if _ts is None or not isinstance(_pid, str):
+                continue
+            if _pid not in prev_latest or _ts > prev_latest[_pid]:
+                prev_latest[_pid] = _ts
         record_balance_readings(path, readings)
     except OSError:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
     ledger = load_balance_readings(path)
     horizon = now + datetime.timedelta(seconds=BALANCE_CLOCK_SKEW_S)
-    future = sorted(
-        (r for r in ledger
-         if isinstance(r, dict) and _reading_ts(r) is not None
-         and _reading_ts(r) > horizon),
-        key=_reading_ts)
-    if future:
-        return _refuse_stale(
-            future[0].get("fetched_at")
-            if isinstance(future[0].get("fetched_at"), str) else None,
-            "future-dated provider balance reading, paid leg refused")
+    # CREDIT-16 A: fresh set shields from STALE and clears markers.
+    fresh_usable = []
+    for _r in usable:
+        if not isinstance(_r, dict):
+            continue
+        _ts = _reading_ts(_r)
+        _pid = _r.get("provider")
+        if _ts is None or not isinstance(_pid, str):
+            continue
+        if _ts > horizon:
+            continue
+        if _ts < since:
+            continue
+        _prev = prev_latest.get(_pid)
+        if _prev is not None and _ts < _prev:
+            continue
+        fresh_usable.append(_r)
+    # CREDIT-16 C5 (D-274): a far-future stamp stales THAT provider only
+    # (per-provider marker), never the whole ledger.
+    _future_by_pid = {}
+    for _r in ledger:
+        if not isinstance(_r, dict):
+            continue
+        _ts = _reading_ts(_r)
+        _pid = _r.get("provider")
+        if _ts is None or not isinstance(_pid, str):
+            continue
+        if _ts > horizon:
+            _future_by_pid.setdefault(_pid, []).append(_r)
+    _future_stale = set()
+    _future_saved = {}
+    for _pid in sorted(_future_by_pid):
+        _entry = ((registry or {}).get("providers") or {}).get(_pid)
+        if not isinstance(_entry, dict) or _entry.get("tier") != "paid":
+            continue
+        _lst = sorted(_future_by_pid[_pid], key=_reading_ts)
+        _stamp = _lst[0].get("fetched_at")
+        if not isinstance(_stamp, str):
+            _stamp = None
+        try:
+            _since_ts = _mark_balance_stale(path, _stamp, now, _pid)
+        except OSError:
+            try:
+                _since_ts = (load_balance_stale(path, _pid)
+                             or _stamp or _utc_iso_z(now))
+            except Exception:
+                _since_ts = _stamp or _utc_iso_z(now)
+        _glob_now, _per_now = _stale_state(path)
+        _cands = [_since_ts]
+        if _glob_now is not None:
+            _cands.append(_glob_now)
+        if _per_now.get(_pid) is not None:
+            _cands.append(_per_now[_pid])
+        try:
+            _since_ts = sorted(_cands)[0]
+        except TypeError:
+            pass
+        _g = guards.get(_pid)
+        if isinstance(_g, dict):
+            guards[_pid] = _stale_paid_refuse(
+                registry, _pid, _g, _since_ts,
+                "future-dated provider balance reading, paid leg refused")
+            _future_stale.add(_pid)
+            _future_saved[_pid] = guards[_pid]
     try:
         newly_stale = _mark_missing_provider_reads(
-            registry, guards, path, usable, ledger, since, now)
+            registry, guards, path, fresh_usable, ledger, since, now,
+            usable)
     except OSError:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
+    for _pid, _g in _future_saved.items():
+        guards[_pid] = _g
+        if _pid not in newly_stale:
+            newly_stale.append(_pid)
     try:
-        # A reading arrived: the read succeeded, so the global marker (when
-        # set) clears -- while a provider this payload did not name keeps its
-        # own mark until THAT provider reads (see above). Only a USABLE
-        # (stamped) reading clears its provider's mark (MAJOR-1).
-        _clear_balance_stale(path, now)
-        for r in usable:
-            if isinstance(r, dict) and isinstance(r.get("provider"), str):
-                _clear_balance_stale(path, now, r["provider"])
+        # Only a FRESH reading clears: an old/past-month replay never
+        # clears global or per-provider STALE (CREDIT-16 A).
+        if fresh_usable:
+            _clear_balance_stale(path, now)
+            for r in fresh_usable:
+                if isinstance(r, dict) and isinstance(r.get("provider"), str):
+                    _clear_balance_stale(path, now, r["provider"])
     except OSError:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
