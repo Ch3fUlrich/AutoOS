@@ -4088,18 +4088,32 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                              "opencode", self.NOW, env)
 
     def test_a_critical_card_is_held_by_the_budget_now(self):
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity leg from t2-orchestrator, which now offers no Claude leg
+        # at all). Retargeted to opus-4-6, the one route that still offers a
+        # Claude leg: with its provider flipped servable in a copy (shipped cc
+        # available=false), a self-declared-critical card without the
+        # orchestrator declaration is still budget-held, not kept.
         # CLAUDEBUDGET-b item 1 rewrote this test: on the shipped registry, a
         # card that only carries its own `critical` field keeps NO Claude leg.
         # It was the self-grantable override, and the operator's D-102 answer is
         # that the orchestrator, not the card, declares a critical path.
-        kept, skipped, _ = self.legs_of_card(
+        import copy
+        registry = copy.deepcopy(self.registry)
+        registry["policy"]["claude_budget"].update(self.ON)
+        registry["providers"]["cc"]["available"] = True
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in registry["clients"]}
+        kept, skipped, _ = r.usable_legs(
+            registry["routes"]["opus-4-6"],
             {"kind": "review", "privacy": "public", "critical": True},
-            "t2-orchestrator", env={})
+            {"need_tokens": 1000}, state, registry, {},
+            "opencode", self.NOW, {})
         self.assertEqual([leg for leg, reasons in skipped.items()
                           if any(x.startswith("claude_budget:")
                                  for x in reasons)],
-                         ["antigravity/claude-opus-4-6-thinking"])
-        self.assertNotIn(("antigravity", "claude-opus-4-6-thinking"), kept)
+                         ["cc/claude-opus-4-6"])
+        self.assertNotIn(("cc", "claude-opus-4-6"), kept)
 
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
         # The same card, same route, with the declaration set by the spawner.
