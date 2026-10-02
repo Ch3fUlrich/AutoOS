@@ -1624,36 +1624,52 @@ class FreeAiRenderTests(unittest.TestCase):
         self.assertNotIn("t3-driver-free-only", rendered["omitted"])
         combos = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("t3-driver-free-only", combos)
-        # FREEKEYS-2c (D-141) gave this route a servable free band ahead of
-        # free_ai, so groq/cerebras being unavailable no longer leaves free_ai
-        # as the ONLY servable leg: the band leads, the self-hosted free_ai
-        # stays last. The combo uses the omniroute_id spelling
-        # (D: model_prefix free-ai).
+        # CIGREEN (ba73f1cf TORDER TASK2): the trial-free-credits-paid band
+        # leads and the self-hosted free_ai rides mid-list under its
+        # omniroute_id spelling (D: model_prefix free-ai).
         models = combos["t3-driver-free-only"]["models"]
-        self.assertEqual(models[-1], "free-ai/qwen7b")
-        # FREEWIRE 2026-09-30: the probe-passed free band now leads (huggingface,
-        # openrouter ':free', groq) and the scaleway/nebius grants follow; the
-        # self-hosted free_ai stays last.
+        # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
+        # trial-free-credits-paid order - gemini trial head, free band, the
+        # self-hosted free_ai mid-list, scaleway grants trail it, deepseek
+        # last where present). The T2FREE-era free-ai-last invariant is
+        # superseded; the band head and tail below pin the new order.
+        self.assertEqual(models[-1], "scw/qwen3-235b-a22b-instruct-2507")
+        self.assertIn("free-ai/qwen7b", models)
         self.assertEqual(models[:5],
-                         ["huggingface/zai-org/GLM-5.2",
-                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                         ["gemini/gemini-3.8-flash",
                           "groq/qwen/qwen3.8-27b",
-                          "huggingface/Qwen/Qwen3.8-27B",
-                          "openrouter/poolside/laguna-s-2.1:free"])
+                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                          "openrouter/poolside/laguna-s-2.1:free",
+                          "groq/openai/gpt-oss-20b"])
 
     def test_free_ai_is_last_in_the_free_only_combos(self):
+        # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
+        # trial-free-credits-paid, free_ai middle, scaleway grants trail it).
+        # Pins the new band tails: free-ai/qwen7b rides third-from-last with
+        # the scw grants behind it - the T2FREE-era free-ai-last invariant is
+        # superseded, so a future reorder back to last fails loudly here.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
-            self.assertEqual(combos[route_id]["models"][-1],
-                             "free-ai/qwen7b", route_id)
+        self.assertEqual(combos["t2-worker-free-only"]["models"][-3:],
+                         ["free-ai/qwen7b",
+                          "scw/qwen3-235b-a22b-instruct-2507",
+                          "scw/mistral-small-3.2-24b-instruct-2506"])
+        self.assertEqual(combos["t3-driver-free-only"]["models"][-3:],
+                         ["free-ai/qwen7b",
+                          "scw/mistral-small-3.2-24b-instruct-2506",
+                          "scw/qwen3-235b-a22b-instruct-2507"])
 
     def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
-        # T2FREE 2026-09-28: the stopgap leg reaches the gateway render with
-        # the provider's own spelling (model_prefix free-ai), last in order.
+        # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:
+        # paid last, deepseek last). The T2FREE-era last-leg invariant is
+        # superseded - free_ai rides mid-list under the provider's own
+        # spelling (model_prefix free-ai) and deepseek closes the combo.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        self.assertEqual(combos["t2-worker"]["models"][-1], "free-ai/qwen7b")
+        models = combos["t2-worker"]["models"]
+        self.assertEqual(models[-1], "deepseek/deepseek-flash")
+        self.assertIn("free-ai/qwen7b", models)
+        self.assertLess(models.index("free-ai/qwen7b"), len(models) - 1)
 
     def test_free_ai_never_enters_a_clean_combo(self):
         # PROV finding 11: neither spelling may appear - the rendered omniroute_id
