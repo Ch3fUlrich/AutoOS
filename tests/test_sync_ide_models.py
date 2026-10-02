@@ -189,10 +189,10 @@ class WriteTests(SandboxCase):
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
-        # FREEWIRE 2026-09-30: t2-worker-clean's committed context is 1048576
-        # (CTXFIX 2026-09-30 set the -clean twins to deepseek's 1M window); the
-        # drift here only changes output.
-        self.assertEqual(t1["limit"], {"context": 1048576, "output": 40000})
+        # CIGREEN: expectation moved by e1da4f7a (L1-CLEAN D2 render moved the
+        # -clean twins from deepseek's 1M window to the 128k trial-first head;
+        # 35148c5c made ovh the head) - the drift here only changes output.
+        self.assertEqual(t1["limit"], {"context": 128000, "output": 40000})
         self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
