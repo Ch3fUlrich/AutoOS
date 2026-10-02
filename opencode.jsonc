@@ -454,6 +454,11 @@
           "name": "ovh-direct-qwen3.8-27b — direct OVH AI Endpoints (trial credit, public work only until T1-CLEAN cites privacy)",
           "limit": { "context": 128000, "output": 32768 }
         },
+        "deepinfra-mimo-v2.6-flash": {
+          "modelID": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
+          "name": "deepinfra-mimo-v2.6-flash — direct DeepInfra (prepaid $5, hard stop; public work only, not private-safe)",
+          "limit": { "context": 262144, "output": 32768 }
+        },
         "vertex-3.8-flash": {
           "modelID": "vertex/gemini-3.8-flash",
           "name": "vertex-3.8-flash - direct Gemini 3.8 Flash (Vertex AI, no combo); trial credit; site data only after T1-CLEAN",

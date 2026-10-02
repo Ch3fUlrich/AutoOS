@@ -1443,6 +1443,23 @@
       "price_out": 0,
       "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731', which is why providers.deepinfra.model_prefix is 'deepinfra'. context_advertised/output_max are what the gateway's own GET /v1/models row reporteddeepinfra. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
     },
+    "XiaomiMiMo/MiMo-V2.6-Flash": {
+      "id": "XiaomiMiMo/MiMo-V2.6-Flash",
+      "display_name": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
+      "family": "xiaomi",
+      "context_advertised": 262144,
+      "context_usable": {
+        "source": "default",
+        "tokens": 131072
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "unproven",
+      "price_in": 0,
+      "price_out": 0,
+      "$comment": "DEEPINFRA-WIRE-MIN (operator D-366/D-381, 2026-10-02): DeepInfra's MiMo-V2.6-Flash as an opencode writer pin through the gateway, served as 'deepinfra/XiaomiMiMo/MiMo-V2.6-Flash' (call-log status 200 on 2026-09-30). Price unsourced; prepaid hard stop caps spend: price_in/price_out are 0 because no DeepInfra price is on file, so a dollar estimate reads this leg as free - the $5 prepaid balance (auto top-up removed, providers.deepinfra.monthly_cap_usd) is the real stop. tool_calls stays unproven until a live multi-turn smoke proves it. The 262144 window and 32768 output are the opencode.jsonc hand-entry numbers, not measured here. trains_on_prompts is unset and inherits providers.deepinfra (null = unverified), so private_safe() fails closed and this leg reaches no -clean route. Not on any route's legs yet."
+    },
     "inclusionAI/Ling-3.0-flash": {
       "id": "inclusionAI/Ling-3.0-flash",
       "display_name": "deepinfra/inclusionAI/Ling-3.0-flash",
@@ -3384,7 +3401,7 @@
       "available": true,
       "monthly_cap_usd": 5,
       "monthly_warn_fraction": 0.8,
-      "monthly_cap_source": "operator 2026-09-28 DeepInfra USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
+      "monthly_cap_source": "operator 2026-09-28 DeepInfra USD vendor grant (brief FREEKEYS-1, D-132/D-141); operator 2026-10-02: $5 prepaid, auto top-up removed, so the $5 cap is a hard stop (D-366)",
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'deepinfra' is registered and active, its catalog exposes 235 canonical model id(s) under prefix 'deepinfra', 6 answered a tool-call trial end to end. Statuses measured: 200 x6. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): deepinfra/deepseek-ai/DeepSeek-V4-Flash-0731, deepinfra/google/gemini-2.5-flash, deepinfra/google/gemini-3.1-flash-lite, deepinfra/google/gemini-3.5-flash, deepinfra/google/gemini-3.7-flash, deepinfra/inclusionAI/Ling-3.0-flash."
     },
     "together_ai": {
