@@ -4263,3 +4263,43 @@ Export-ModuleMember -Function `
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
     Install-AutoOSOterm
+
+# NOTE: defined after the Export-ModuleMember list above on purpose - new code is
+# appended at the end of this file, and a function defined after an export is not
+# exported until a later Export-ModuleMember names it (see the trailing call below).
+function Set-AutoOSZcodeGatewayEnv {
+    <#
+      .SYNOPSIS Report where the ZCode server bundle lives; installs nothing here.
+
+      .DESCRIPTION
+        zcode-gateway is detect-only on every platform. The ZCode server bundle
+        (~/.zcode/server) ships as Linux packages only
+        (ZCode-<ver>-linux-<x64|arm64>.<deb|rpm|AppImage> from https://zcode.z.ai),
+        so Windows cannot host it: where lib/linux/install.sh records a non-default
+        bundle location in an env file, this hook only reports it and writes nothing.
+
+        No file, no environment variable, no credentials: the ~/.zcode login stays
+        on the host where it was made and is never copied here. Safe to run twice.
+    #>
+    param(
+        # Bundle root on the host that actually runs it; empty means %USERPROFILE%\.zcode.
+        [string]$ServerRoot = ''
+    )
+    $profileHome = $env:USERPROFILE
+    if ([string]::IsNullOrEmpty($profileHome)) { $profileHome = $env:HOME }
+    if ([string]::IsNullOrEmpty($profileHome)) { $profileHome = '~' }
+    $defaultRoot = Join-Path $profileHome '.zcode'
+    if ([string]::IsNullOrEmpty($ServerRoot)) { $ServerRoot = $defaultRoot }
+    $bundle = Join-Path $ServerRoot 'server'
+
+    Write-AutoOSLine "ZCode gateway: $bundle" -Level info
+    Write-AutoOSLine 'zcode-server is POSIX-only: Windows cannot host it (the vendor ships .deb/.rpm/AppImage).' -Level warn
+    if ($ServerRoot -eq $defaultRoot) {
+        Write-AutoOSLine 'Reach it on a Linux/macOS/WSL host: add that host as an SSH remote in the ZCode desktop app and connect once - it installs ~/.zcode/server there and syncs the login, then OmniRoute calls it through the gateway.' -Level muted
+    } else {
+        Write-AutoOSLine "Reach it on the host whose bundle root is ${ServerRoot} - add that host as an SSH remote in the ZCode desktop app and connect once, then point OmniRoute at it through the gateway." -Level muted
+    }
+    Write-AutoOSLine 'Nothing was changed on this Windows host: no file, no environment variable, no credentials copied.' -Level muted
+}
+
+Export-ModuleMember -Function Set-AutoOSZcodeGatewayEnv

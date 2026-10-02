@@ -646,6 +646,40 @@
           "postInstall": "Install-AutoOSOmniRouteRouting"
         },
         {
+          "id": "zcode",
+          "name": "ZCode (Z.ai)",
+          "description": "Z.ai coding agent app (GLM models)",
+          "provider": "winget",
+          "package": "ZhipuAI.ZCode",
+          "installedNames": [
+            "ZCode"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://zcode.z.ai",
+          "notes": "Log in inside the app with the GLM account. No version pin: the winget manifest lags the vendor."
+        },
+        {
+          "id": "zcode-gateway",
+          "name": "ZCode gateway link",
+          "description": "Check OmniRoute can use the ZCode server bundle",
+          "provider": "custom",
+          "package": "zcode-gateway",
+          "requires": [
+            "omniroute"
+          ],
+          "postInstall": "Set-AutoOSZcodeGatewayEnv",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "powershell -NoProfile -Command if (Test-Path \"$env:USERPROFILE\\.zcode\\server\\zcode-server.cjs\") { exit 0 } else { exit 1 }",
+          "homepage": "https://zcode.z.ai",
+          "notes": "Needs the ZCode server bundle: in the ZCode desktop app add this host as an SSH remote and connect once (installs ~/.zcode/server, syncs the login). Detect-only: nothing is installed or changed by this step except two env lines when the bundle sits in a non-default place. The dashboard connection test for zcode always fails (zcode:// is not http): only a real chat call proves it."
+        },
+        {
           "id": "opencode-cli",
           "name": "OpenCode CLI",
           "description": "Terminal AI coding agent (TUI) on the tier router",

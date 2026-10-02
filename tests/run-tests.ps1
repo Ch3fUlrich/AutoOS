@@ -10734,6 +10734,61 @@ Test-Case 'omniroute gateway launchers default the repeated-429 rotation policy,
 }
 
 
+# ─── ZCode (GLM) gateway link ───────────────────────────────────────────────
+Describe-Group 'zcode gateway'
+
+Test-Case 'zcode and zcode-gateway sit next to omniroute in the windows catalog' {
+    $z = Get-AutoOSWinComponent 'zcode'
+    $g = Get-AutoOSWinComponent 'zcode-gateway'
+    Assert-True ($null -ne $z -and $null -ne $g) 'missing zcode / zcode-gateway row'
+    Assert-Equal "$($z.provider)|$($z.package)" 'winget|ZhipuAI.ZCode'
+    Assert-Equal $z.homepage 'https://zcode.z.ai'
+    # No version pin on purpose: the winget manifest lags the vendor.
+    Assert-True (-not $z.PSObject.Properties.Name.Contains('version')) 'zcode grew a version pin'
+    Assert-Equal "$($g.provider)|$($g.package)" 'custom|zcode-gateway'
+    Assert-Equal $g.postInstall 'Set-AutoOSZcodeGatewayEnv'
+    Assert-Equal $g.homepage 'https://zcode.z.ai'
+    Assert-Contains $g.requires 'omniroute'
+    Assert-Contains $g.profiles 'workstation'
+    Assert-Contains $g.profiles 'ai-coding'
+}
+
+Test-Case 'the ZCode gateway postInstall is exported like its neighbours' {
+    # postInstall is NOT schema-validated, so the catalog name has to resolve
+    # from outside the module or the hook can never run.
+    foreach ($fn in @('Set-AutoOSZcodeGatewayEnv', 'Set-AutoOSOpenCodeConfig', 'Invoke-AutoOSPostInstall')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn is not an exported command"
+    }
+    Pass
+}
+
+Test-Case 'the ZCode gateway postInstall writes nothing into an empty home' {
+    # POSIX-only by design: the hook reports and returns, so an empty HOME plus
+    # an empty USERPROFILE must come back byte-identical - no ~/.zcode, no
+    # ~/.omniroute, no file at all.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-zcode-$([Guid]::NewGuid().ToString('N'))"
+    $empty = Join-Path $scratch 'home'
+    $log = Join-Path $scratch 'ui.log'
+    $null = New-Item -ItemType Directory -Path $empty -Force
+    $realHome = $env:HOME
+    $realUserProfile = $env:USERPROFILE
+    try {
+        $env:HOME = $empty
+        $env:USERPROFILE = $empty
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZcodeGatewayEnv
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'POSIX-only') 'the hook did not report that the bundle is POSIX-only'
+        Assert-Equal (@(Get-ChildItem -LiteralPath $empty -Force -Recurse -ErrorAction SilentlyContinue)).Count 0 `
+            'the hook wrote into the home it was given'
+    } finally {
+        $env:HOME = $realHome
+        $env:USERPROFILE = $realUserProfile
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

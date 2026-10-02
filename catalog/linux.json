@@ -770,6 +770,25 @@
           "postInstall": "route_detected_clis_to_gateway"
         },
         {
+          "id": "zcode-gateway",
+          "name": "ZCode gateway link",
+          "description": "Check OmniRoute can use the ZCode server bundle",
+          "provider": "custom",
+          "package": "zcode-gateway",
+          "requires": [
+            "omniroute"
+          ],
+          "postInstall": "setup_zcode_gateway_env",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "test -f \"$HOME/.zcode/server/zcode-server.cjs\"",
+          "homepage": "https://zcode.z.ai",
+          "notes": "Needs the ZCode server bundle: in the ZCode desktop app add this host as an SSH remote and connect once (installs ~/.zcode/server, syncs the login). Detect-only: nothing is installed or changed by this step except two env lines when the bundle sits in a non-default place. The dashboard connection test for zcode always fails (zcode:// is not http): only a real chat call proves it."
+        },
+        {
           "id": "opencode-cli",
           "name": "OpenCode CLI",
           "description": "Terminal AI coding agent (TUI) on the tier router",

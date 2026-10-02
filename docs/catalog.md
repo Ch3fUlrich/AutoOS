@@ -21,7 +21,7 @@ Run `--list` for the current set. The headline items:
 | Area | Includes |
 |---|---|
 | Terminal | Windows Terminal, PowerShell 7, Oh My Posh, zsh + Powerlevel10k, Nerd Fonts |
-| Coding & AI | Claude Code CLI, OpenCode CLI, Qoder CLI, Qoder, Claude autostart (reopens your sessions after a reboot), Herdr sessions (Linux-only, opt-in; snapshots and restores Herdr panes across a reboot instead — mutually exclusive with Claude autostart), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
+| Coding & AI | ZCode (Z.ai app, Windows via winget; GLM models), ZCode gateway link (detect-only: checks the ZCode server bundle OmniRoute needs; see docs/web-services.md), Claude Code CLI, OpenCode CLI, Qoder CLI, Qoder, Claude autostart (reopens your sessions after a reboot), Herdr sessions (Linux-only, opt-in; snapshots and restores Herdr panes across a reboot instead — mutually exclusive with Claude autostart), Claude Desktop, Antigravity, Zed, VS Code, Docker, Herdr, Node.js, OmniRoute gateway, LiteLLM fallback router |
 | Input | Handy — offline speech-to-text, so you can dictate prompts instead of typing them |
 | MCP stack | Wires the complete MCP stack (Graphify, Serena, Playwright, Context7, Omnigraph) using AutoOS's vendored skills — no external clone needed. Registers Graphify with Claude Code, Antigravity and Qoder CLI, and approves Omnigraph per-repo — asking for your Omnigraph URL rather than hardcoding one, and naming what is still missing rather than pretending it is wired |
 | Desktop (Windows) | Windhawk with the Explorer file-size and taskbar-clock mods, PowerToys |
