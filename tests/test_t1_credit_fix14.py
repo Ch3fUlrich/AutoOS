@@ -627,6 +627,68 @@ class PerProviderStaleTests(unittest.TestCase):
                              out["deepseek"].get("note") or "")
 
 
+class MonthRolloverKeepsPerProviderMarkerTests(unittest.TestCase):
+    """MAJOR (D-274): a persisted per-provider STALE marker is honoured on
+    the overlay SUCCESS path even after that provider's in-month series
+    ages out (month rollover)."""
+
+    def test_rollover_payload_without_provider_still_refuses(self):
+        sept = datetime.datetime(2026, 9, 1, 0, 0,
+                                 tzinfo=datetime.timezone.utc)
+        mark_day = datetime.datetime(2026, 9, 29, 12, 0,
+                                     tzinfo=datetime.timezone.utc)
+        october = datetime.datetime(2026, 10, 1, 0, 0,
+                                    tzinfo=datetime.timezone.utc)
+        oct2 = datetime.datetime(2026, 10, 2, 12, 0,
+                                 tzinfo=datetime.timezone.utc)
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-09-05T01:00:00Z", "remaining": 50.0},
+                {"provider": "acme",
+                 "fetched_at": "2026-09-05T01:00:00Z", "remaining": 9.0}]
+        sept_acme_only = _limits_body([("c9", "acme", 8.0,
+                                        "2026-09-29T11:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.record_balance_readings(_ledger_path(env), seed)
+            # September: a payload holding acme only refuses deepseek and
+            # writes its per-provider marker with the 09-29 stamp.
+            out1 = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, sept_acme_only), env, sept, mark_day)
+            self.assertEqual(out1["deepseek"]["state"], "refuse")
+            since1 = usage.load_balance_stale(_ledger_path(env), "deepseek")
+            self.assertEqual("2026-09-29T12:00:00Z", since1)
+            # October: the September series has aged out, but the marker
+            # persists -- an acme-only payload must still refuse deepseek
+            # with the ORIGINAL since, never ok from the call ledger.
+            oct_acme_only = _limits_body([("c9", "acme", 7.0,
+                                            "2026-10-02T11:00:00Z")])
+            out2 = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, oct_acme_only), env, october, oct2)
+            ds = out2["deepseek"]
+            self.assertEqual(ds["state"], "refuse")
+            self.assertIn("balance stale since 2026-09-29T12:00:00Z",
+                          ds["note"])
+            self.assertEqual(
+                since1,
+                usage.load_balance_stale(_ledger_path(env), "deepseek"))
+            ac = out2["acme"]
+            self.assertNotIn("balance stale since", ac.get("note") or "")
+            # Only deepseek's own usable reading clears its marker.
+            both = _limits_body([("c1", "deepseek", 49.0,
+                                  "2026-10-02T11:30:00Z"),
+                                 ("c9", "acme", 7.0,
+                                  "2026-10-02T11:30:00Z")])
+            out3 = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, both), env, october, oct2)
+            self.assertIsNone(
+                usage.load_balance_stale(_ledger_path(env), "deepseek"))
+            self.assertNotIn("balance stale since",
+                             out3["deepseek"].get("note") or "")
+
+
 class ClearFailureStaysClosedTests(unittest.TestCase):
     """m5: an unwritable clear marker refuses, never opens."""
 

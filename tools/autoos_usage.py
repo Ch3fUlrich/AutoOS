@@ -1465,6 +1465,12 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
         ts = _reading_ts(r)
         if ts is not None and ts >= since:
             series_ids.add(r.get("provider"))
+    # T1-CREDIT-FIX-14 rework 3 MAJOR (D-274): a persisted per-provider
+    # marker is honoured even after that provider's in-month series ages
+    # out (month rollover) -- only that provider's own usable reading
+    # clears its marker, so a marked provider missing from this payload
+    # stays refused with its ORIGINAL since, series or no series.
+    _, already_stale = _stale_state(path)
     newly = []
     for pid, guard in (guards or {}).items():
         if not isinstance(guard, dict):
@@ -1472,7 +1478,9 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
         entry = ((registry or {}).get("providers") or {}).get(pid)
         if not isinstance(entry, dict) or entry.get("tier") != "paid":
             continue
-        if pid in fresh_ids or pid not in series_ids:
+        if pid in fresh_ids:
+            continue
+        if pid not in series_ids and pid not in already_stale:
             continue
         since_ts = _mark_balance_stale(path, None, now, pid)
         guards[pid] = _stale_paid_refuse(
