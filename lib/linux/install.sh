@@ -6637,3 +6637,109 @@ autoos_undo() {
     done
     return "$failed"
 }
+
+# ─── ZCode gateway bundle (detect only) ─────────────────────────────────────
+# setup_zcode_gateway_env: reports whether the ZCode remote-server bundle that
+# OmniRoute's zcode provider spawns ("<node> <zcode-server.cjs>") is on this
+# host. The ZCode desktop app installs it at $SYS_HOME/.zcode/server when this
+# machine is added as an SSH remote and connected to once - this function never
+# installs, repairs or creates any of it, so a missing bundle is ONE line and
+# return 0 (skipped), never a failure: only a human with the ZCode app can fix
+# it, and a failed check here would just be noise in a run that touched nothing.
+# OmniRoute already assumes the default paths, so a default-location hit writes
+# nothing at all; only an arrangement env could diverge from that default (a
+# relocated bundle, explicit ZCODE_SERVER_NODE/ZCODE_SERVER_ENTRY) is worth two
+# lines in $SYS_HOME/.omniroute/.env, and those go in exactly once - an
+# existing key, whatever value it holds, is reported by KEY and never touched.
+setup_zcode_gateway_env() {
+    local root_env="${ZCODE_SERVER_RUNTIME_ROOT:-}"
+    local node_env="${ZCODE_SERVER_NODE:-}"
+    local entry_env="${ZCODE_SERVER_ENTRY:-}"
+    local custom=0 root node entry
+    if [[ -n "$root_env$node_env$entry_env" ]]; then custom=1; fi
+
+    # Root D first, then the two files hanging off it: a relocated root moves
+    # both with it, while an explicit NODE/ENTRY wins outright - the same
+    # precedence OmniRoute reads with.
+    root="${root_env:-$SYS_HOME/.zcode/server}"
+    node="${node_env:-$root/node}"
+    entry="${entry_env:-$root/zcode-server.cjs}"
+
+    if [[ ! -f "$node" || ! -x "$node" || ! -f "$entry" ]]; then
+        ui_line "ZCode server bundle missing ($root/node, zcode-server.cjs) - in the ZCode desktop app add this host as an SSH remote and connect once; it installs the bundle and syncs the login. Nothing was changed."
+        return 0
+    fi
+
+    if (( custom == 0 )); then
+        # Nothing to record: the invisible default is exactly what OmniRoute
+        # looks for, and an env line pinning it would only freeze it in place.
+        ui_line 'ZCode server bundle found (default location) - OmniRoute uses it with no env lines'
+        return 0
+    fi
+
+    local env_file="$SYS_HOME/.omniroute/.env"
+    local -a add_keys=() add_vals=()
+    local pair key val line existing found i
+    for pair in "ZCODE_SERVER_NODE=$node" "ZCODE_SERVER_ENTRY=$entry"; do
+        key="${pair%%=*}"
+        val="${pair#*=}"
+        found=0
+        existing=""
+        if [[ -f "$env_file" ]]; then
+            # Last line counts too: a file that ends without a newline still
+            # holds a complete key there, and appending blindly would fuse.
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                case "$line" in
+                    "$key="*)        found=1; existing="${line#"$key="}" ;;
+                    "export $key="*) found=1; existing="${line#*"$key="}" ;;
+                esac
+                if (( found )); then break; fi
+            done <"$env_file"
+        fi
+        if (( ! found )); then
+            add_keys+=("$key")
+            add_vals+=("$val")
+        elif [[ "$existing" != "$val" ]]; then
+            # The line is the operator's to keep, and its value is not ours to
+            # echo into logs: name the KEY alone so the disagreement is visible
+            # without printing anything out of the env file.
+            ui_line "$key is already present in $env_file with a different value - left unchanged"
+        fi
+    done
+
+    if (( ${#add_keys[@]} == 0 )); then
+        return 0
+    fi
+
+    if (( ${AUTOOS_DRY_RUN:-0} )); then
+        # Before any mkdir or touch, not after: a dry run must leave no
+        # directory behind either (the rule the neighbouring setup_* steps keep).
+        for i in "${!add_keys[@]}"; do
+            ui_line "would add ${add_keys[$i]}=${add_vals[$i]} to $env_file"
+        done
+        return 0
+    fi
+
+    if [[ -f "$env_file" ]]; then
+        # ONE backup per run, immediately before the first change; a run that
+        # would add nothing already returned above and backs up nothing.
+        if ! backup_file_before_write "$env_file" >/dev/null; then
+            ui_warn "could not back up ${env_file} - nothing was changed"
+            return 1
+        fi
+    else
+        mkdir -p "${env_file%/*}"
+        ( umask 077; : >"$env_file" )
+    fi
+
+    # A line appended under a file with no trailing newline would fuse onto the
+    # last existing one and both entries would read as one broken line.
+    if [[ -s "$env_file" && -n "$(tail -c 1 "$env_file")" ]]; then
+        printf '\n' >>"$env_file"
+    fi
+    for i in "${!add_keys[@]}"; do
+        printf '%s=%s\n' "${add_keys[$i]}" "${add_vals[$i]}" >>"$env_file"
+        ui_muted "added ${add_keys[$i]} to $env_file"
+    done
+    return 0
+}
