@@ -4793,6 +4793,17 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
             guards = _credit_guards_unreadable(
                 registry, usage_mod.spend_failure_note(first_failure))
             usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+        if use_helper and rows_source is None:
+            # T1-CREDIT-FIX-14 rework M2 (D-274): the rows read failed, so
+            # the overlay above never ran -- consult the ledger OUTSIDE the
+            # rows gate. A persisted STALE marker refuses paid here (it beats
+            # the D-240 estimate just applied), and with the helper down no
+            # balance read was possible at all, so a first-failure marker is
+            # recorded with the current stamp. Credit guards keep their
+            # fail-open fallback; only paid refuses. (Unforeseen-bug rows
+            # failures take the `guard error` path below, untouched.)
+            guards = usage_mod.refuse_paid_without_balance_read(
+                registry, guards, env, now)
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
         # surface as its own `guard error` state -- kept for credit, kept for
@@ -4803,13 +4814,16 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         guards = _credit_guard_error(registry, type(exc).__name__)
     if use_helper and rows_source is not None:
         # T1-CREDIT-FIX-10 M4 (D-253): the scheduled provider balances are
-        # the paid meter ... (see `usage_mod.overlay_balance_guards`). This
-        # never fails the plan -- a balance read is a meter, not a gate.
+        # the paid meter ... (see `usage_mod.overlay_balance_guards`).
+        # T1-CREDIT-FIX-14 rework M1b (D-274): the overlay is a gate, not a
+        # meter -- ANY exception from it (expected or not) refuses every
+        # paid guard with the exception TYPE named, never `ok`.
         try:
             guards = usage_mod.overlay_balance_guards(
                 registry, guards, gateway, helper_fetch_fn, env, cutoff, now)
-        except Exception:  # noqa: BLE001 - the meter must never break the map
-            pass
+        except Exception as exc:  # noqa: BLE001 - fail closed per D-274
+            guards = usage_mod.refuse_paid_on_overlay_error(
+                registry, guards, type(exc).__name__)
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 

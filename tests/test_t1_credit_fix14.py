@@ -20,6 +20,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import autoos_resolver as r
 import autoos_usage as usage
 
+import importlib.util
+from pathlib import Path
+_ROOT = Path(__file__).resolve().parent.parent
+_spec = importlib.util.spec_from_file_location(
+    "autoos_agent", _ROOT / "tools" / "autoos-agent.py")
+agent = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(agent)
+
 NOW = datetime.datetime(2026, 10, 1, 12, 0, tzinfo=datetime.timezone.utc)
 SINCE_MONTH = datetime.datetime(2026, 10, 1, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -343,6 +351,309 @@ class StaleResolverTests(unittest.TestCase):
             blob = " ".join(blob_parts)
             self.assertIn("balance stale since", blob)
             self.assertIn("(D-274)", blob)
+
+
+def _reg_two_paid(cap=25.0):
+    reg = _reg_paid(cap)
+    reg["providers"]["acme"] = {"id": "acme", "tier": "paid",
+                                "monthly_cap_usd": cap,
+                                "monthly_warn_fraction": 0.8}
+    return reg
+
+
+def _guards_two_ok(spend=0.0, note="ledger ok"):
+    out = _guards_ok(spend, note)
+    out["acme"] = {"provider": "acme", "state": "ok",
+                   "spend_usd": spend, "spend_unknown": False,
+                   "cap_usd": 25.0, "warn_usd": 20.0,
+                   "models_unpriced": 0, "note": note}
+    return out
+
+
+def _keyed_env(tmp):
+    cfg = os.path.join(tmp, "ai-stack")
+    os.makedirs(cfg, exist_ok=True)
+    with open(os.path.join(cfg, "manage.key"), "w") as fh:
+        fh.write("test-key-not-a-secret\n")
+    return {"AUTOOS_AI_STACK_CONFIG": cfg,
+            "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+            "AUTOOS_STATE_DIR": os.path.join(tmp, "state"),
+            "HOME": tmp}
+
+
+def _bare_env(tmp):
+    state = os.path.join(tmp, "state")
+    os.makedirs(state, exist_ok=True)
+    return {"AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+            "AUTOOS_STATE_DIR": state,
+            "HOME": tmp}
+
+
+class NonUtf8LedgerTests(unittest.TestCase):
+    """M1a (D-274): a non-UTF-8 ledger file never raises, never fails open."""
+
+    def _write_raw(self, path, chunks):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            for chunk in chunks:
+                fh.write(chunk)
+
+    def test_garbage_bytes_are_skipped_like_bad_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _ledger_path(_env(tmp))
+            good = {"provider": "deepseek",
+                    "fetched_at": "2026-10-01T08:00:00Z",
+                    "remaining": 50.0}
+            self._write_raw(path, [b"\xff\xfe\n",
+                                   json.dumps(good).encode() + b"\n"])
+            readings = usage.load_balance_readings(path)  # must not raise
+            self.assertEqual(len(readings), 1)
+            self.assertEqual(readings[0]["provider"], "deepseek")
+
+    def test_stale_reader_survives_garbage_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _ledger_path(_env(tmp))
+            self._write_raw(path, [b"\xff\xfe\n"])
+            self.assertIsNone(usage.load_balance_stale(path))  # no raise
+
+    def test_failed_read_with_garbage_ledger_still_refuses(self):
+        def fail(url, headers, timeout):
+            raise OSError("down")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            self._write_raw(_ledger_path(env), [b"\xff\xfe\n"])
+            out = usage.overlay_balance_guards(
+                _reg_paid(), _guards_ok(), "http://127.0.0.1:1",
+                fail, env, SINCE_MONTH, NOW)  # must not raise
+            g = out["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("balance stale since", g["note"])
+            self.assertIn("(D-274)", g["note"])
+
+
+class OverlayExceptionFailsClosedTests(unittest.TestCase):
+    """M1b (D-274): ANY overlay exception refuses paid, names the TYPE only."""
+
+    def setUp(self):
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+
+    def test_patched_overlay_runtimeerror_refuses_paid(self):
+        import unittest.mock as mock
+        ok_fetch = lambda u, h, t: (200, b"[]")  # noqa: E731
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                    usage, "overlay_balance_guards",
+                    side_effect=RuntimeError("super-secret-message")):
+                guards = agent.plan_credit_guards(
+                    _reg_paid(), now=NOW, fetch=ok_fetch,
+                    env=_keyed_env(tmp),
+                    helper=lambda u, h, t: (200, b"{}"))
+        g = guards["deepseek"]
+        self.assertEqual(g["state"], "refuse")
+        self.assertIn("balance overlay failed (RuntimeError) (D-274)",
+                      g["note"])
+        self.assertNotIn("super-secret-message", g["note"])
+
+    def test_helper_runtimeerror_on_limits_refuses_paid(self):
+        def helper(url, headers, timeout):
+            if "provider-limits" in url:
+                raise RuntimeError("super-secret-message")
+            return 200, b"[]"
+        with tempfile.TemporaryDirectory() as tmp:
+            guards = agent.plan_credit_guards(
+                _reg_paid(), now=NOW, env=_bare_env(tmp), helper=helper)
+        g = guards["deepseek"]
+        self.assertEqual(g["state"], "refuse")
+        self.assertIn("balance overlay failed (RuntimeError) (D-274)",
+                      g["note"])
+        self.assertNotIn("super-secret-message", g["note"])
+
+
+class StaleOutsideRowsGateTests(unittest.TestCase):
+    """M2 (D-274): STALE is consulted outside the rows_source gate."""
+
+    def setUp(self):
+        agent.CREDIT_GUARD_CACHE.clear()
+        self.addCleanup(agent.CREDIT_GUARD_CACHE.clear)
+
+    def _fresh_reg(self):
+        return _reg_paid()
+
+    def test_dead_helper_with_clean_ledger_marks_stale_and_refuses(self):
+        def dead(url, headers, timeout):
+            raise OSError("container down")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _bare_env(tmp)
+            guards = agent.plan_credit_guards(
+                self._fresh_reg(), now=NOW, env=env, helper=dead)
+            g = guards["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("balance stale since", g["note"])
+            self.assertIn("(D-274)", g["note"])
+            self.assertNotIn("(D-240)", g["note"])
+            since = usage.load_balance_stale(_ledger_path(env))
+            self.assertIsNotNone(since)
+            self.assertIn(since, g["note"])
+
+    def test_stale_survives_dead_helper_then_clears_on_success(self):
+        calls = {"n": 0}
+
+        def flaky(url, headers, timeout):
+            if calls["n"] == 1:
+                raise OSError("container down")  # run 2: helper fully dead
+            if "provider-limits" in url:
+                if calls["n"] == 0:
+                    return 200, b"{}"  # run 1: empty limits -> stale
+                return 200, _limits_body(  # run 3: healthy readings
+                    [("c1", "deepseek", 50.0, "2026-10-01T08:00:00Z"),
+                     ("c2", "deepseek", 49.0, "2026-10-01T11:59:00Z")])
+            return 200, b"[]"
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _bare_env(tmp)
+            agent.CREDIT_GUARD_CACHE.clear()
+            run1 = agent.plan_credit_guards(
+                self._fresh_reg(), now=NOW, env=env, helper=flaky)
+            self.assertEqual(run1["deepseek"]["state"], "refuse")
+            self.assertIn("balance stale since", run1["deepseek"]["note"])
+            since1 = usage.load_balance_stale(_ledger_path(env))
+            self.assertIsNotNone(since1)
+            calls["n"] = 1
+            agent.CREDIT_GUARD_CACHE.clear()
+            run2 = agent.plan_credit_guards(
+                self._fresh_reg(), now=NOW, env=env, helper=flaky)
+            g2 = run2["deepseek"]
+            self.assertEqual(g2["state"], "refuse")  # still refuse, m4:
+            self.assertIn("balance stale since %s" % since1, g2["note"])
+            self.assertNotIn("(D-240)", g2["note"])  # not the estimate
+            calls["n"] = 2
+            agent.CREDIT_GUARD_CACHE.clear()
+            run3 = agent.plan_credit_guards(
+                self._fresh_reg(), now=NOW, env=env, helper=flaky)
+            g3 = run3["deepseek"]
+            self.assertIsNone(usage.load_balance_stale(_ledger_path(env)))
+            self.assertNotIn("balance stale since", g3.get("note") or "")
+            self.assertIn("measured via provider balance", g3["note"])
+
+
+class PerProviderStaleTests(unittest.TestCase):
+    """M3 (D-274): STALE is per provider; other providers are unaffected."""
+
+    def test_payload_missing_a_series_provider_stales_only_it(self):
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T01:00:00Z",  # 11 h old
+                 "remaining": 2.00}]
+        body = _limits_body([("c9", "acme", 40.0,
+                              "2026-10-01T11:00:00Z")])  # only the other
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.record_balance_readings(_ledger_path(env), seed)
+            out = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            ds = out["deepseek"]
+            self.assertEqual(ds["state"], "refuse")
+            self.assertIn("balance stale since", ds["note"])
+            self.assertIn("(D-274)", ds["note"])
+            ac = out["acme"]
+            self.assertNotIn("balance stale since", ac.get("note") or "")
+
+    def test_payload_with_that_reading_clears_it(self):
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T01:00:00Z",
+                 "remaining": 2.00}]
+        body = _limits_body([("c1", "deepseek", 50.0,
+                              "2026-10-01T11:30:00Z"),
+                             ("c9", "acme", 40.0,
+                              "2026-10-01T11:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.record_balance_readings(_ledger_path(env), seed)
+            out = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            self.assertIsNone(
+                usage.load_balance_stale(_ledger_path(env)))
+            ds = out["deepseek"]
+            self.assertNotIn("balance stale since", ds.get("note") or "")
+            self.assertIn("measured via provider balance", ds["note"])
+
+    def test_old_global_marker_still_stales_everyone_until_a_reading(self):
+        def fail(url, headers, timeout):
+            raise OSError("down")
+        body = _limits_body([("c9", "acme", 40.0,
+                              "2026-10-01T11:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                fail, env, SINCE_MONTH, NOW)
+            self.assertIsNotNone(
+                usage.load_balance_stale(_ledger_path(env)))
+            out = usage.overlay_balance_guards(
+                _reg_two_paid(), _guards_two_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            self.assertIsNone(
+                usage.load_balance_stale(_ledger_path(env)))
+            self.assertNotIn("balance stale since",
+                             out["deepseek"].get("note") or "")
+
+
+class ClearFailureStaysClosedTests(unittest.TestCase):
+    """m5: an unwritable clear marker refuses, never opens."""
+
+    def test_clear_oserror_stays_refuse(self):
+        import unittest.mock as mock
+        body = _limits_body([("c1", "deepseek", 50.0,
+                              "2026-10-01T08:00:00Z"),
+                             ("c2", "deepseek", 49.0,
+                              "2026-10-01T11:00:00Z")])
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            with mock.patch.object(
+                    usage, "_clear_balance_stale",
+                    side_effect=OSError("disk full")):
+                out = usage.overlay_balance_guards(
+                    _reg_paid(), _guards_ok(), "http://127.0.0.1:1",
+                    lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            g = out["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("(D-274)", g["note"])
+
+
+class SkewBoundaryTests(unittest.TestCase):
+    """m5: fetched_at == now+SKEW is fresh; +1 s is stale."""
+
+    def test_exact_skew_is_fresh(self):
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0}]
+        body = _limits_body([("c1", "deepseek", 49.0,
+                              "2026-10-01T12:05:00Z")])  # NOW + 300 s
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.record_balance_readings(_ledger_path(env), seed)
+            out = usage.overlay_balance_guards(
+                _reg_paid(), _guards_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            g = out["deepseek"]
+            self.assertNotIn("balance stale since", g.get("note") or "")
+            self.assertIn("measured via provider balance", g["note"])
+
+    def test_one_second_past_skew_is_stale(self):
+        seed = [{"provider": "deepseek",
+                 "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0}]
+        body = _limits_body([("c1", "deepseek", 49.0,
+                              "2026-10-01T12:05:01Z")])  # NOW + 301 s
+        with tempfile.TemporaryDirectory() as tmp:
+            env = _env(tmp)
+            usage.record_balance_readings(_ledger_path(env), seed)
+            out = usage.overlay_balance_guards(
+                _reg_paid(), _guards_ok(), "http://127.0.0.1:1",
+                lambda u, h, t: (200, body), env, SINCE_MONTH, NOW)
+            g = out["deepseek"]
+            self.assertEqual(g["state"], "refuse")
+            self.assertIn("balance stale since", g["note"])
+            self.assertIn("(D-274)", g["note"])
 
 
 if __name__ == "__main__":
