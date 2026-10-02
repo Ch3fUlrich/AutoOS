@@ -83,8 +83,22 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         return ns
 
     def _cfg(self):
-        return {"providers": {"omniroute": {"models": {
-            "t2-worker": {}, "t3-driver": {}}}},
+        return {"providers": {
+            "omniroute": {"name": "AutoOS OmniRoute gateway",
+                          "env": ["AUTOOS_OMNIROUTE_KEY"],
+                          "package": "@opencode/ai/providers/openai-compatible",
+                          "settings": {"baseURL": "http://127.0.0.1:20128/v1"},
+                          "models": {"t2-worker": {}, "t3-driver": {}}},
+            "litellm": {"name": "AutoOS LiteLLM",
+                        "env": ["AUTOOS_LITELLM_KEY"],
+                        "settings": {"baseURL": "http://127.0.0.1:4000/v1"},
+                        "models": {"lite-a": {}}}},
+                "permissions": [
+                    {"action": "shell", "resource": "git status *", "effect": "allow"},
+                    {"action": "shell", "resource": "git push *", "effect": "deny"}],
+                "mcp": {"serena": {"command": ["serena"]}},
+                "experimental": {"subagent_depth": 2},
+                "model": "omniroute/t1-orchestrator",
                 "agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator",
                                                "description": "orchestrator"},
                            "t2-worker": {"model": "omniroute/t2-worker",
@@ -196,6 +210,14 @@ class FleetSandboxAgentsTests(unittest.TestCase):
                     _check(item, "%s[%d]" % (path, i))
 
         _check(overlay)
+        # FLEET-AGENTS-2: the providers block holds env var NAMES only.
+        self.assertEqual(overlay["providers"]["omniroute"]["env"],
+                         ["AUTOOS_OMNIROUTE_KEY"])
+        for prov in overlay["providers"].values():
+            for item in prov.get("env", []):
+                self.assertRegex(item, r"^[A-Z][A-Z0-9_]*$")
+        for forbidden in ("mcp", "experimental", "model", "tools"):
+            self.assertNotIn(forbidden, overlay)
 
     # --- (6) --free foreign plan keeps definition keys -----------------------
 
@@ -225,6 +247,79 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         self.assertIn("description", overlay["agents"]["t2-worker"])
         self.assertEqual(overlay["agents"]["t2-worker"]["description"], "worker")
 
+    # --- FLEET-AGENTS-2: providers + permission fence ------------------------
+
+    def test_foreign_keyed_plan_has_root_providers(self):
+        overlay = self._overlay(self._build())
+        omni = overlay["providers"]["omniroute"]
+        self.assertIn("t2-worker", omni["models"])
+        self.assertEqual(omni["env"], ["AUTOOS_OMNIROUTE_KEY"])
+        self.assertEqual(omni["package"],
+                         "@opencode/ai/providers/openai-compatible")
+        self.assertIn("lite-a", overlay["providers"]["litellm"]["models"])
+
+    def test_foreign_plan_keeps_per_run_headers_and_root_models(self):
+        overlay = self._overlay(self._build())
+        omni = overlay["providers"]["omniroute"]
+        self.assertTrue(omni.get("headers"), "per-run session headers lost")
+        self.assertIn("t2-worker", omni["models"])
+        self.assertIn("t3-driver", omni["models"])
+        self.assertEqual(omni["settings"]["baseURL"],
+                         "http://127.0.0.1:20128/v1")
+
+    def test_foreign_plan_permissions_root_first_spawn_gate_last(self):
+        plan = self._build()
+        perms = self._overlay(plan)["permissions"]
+        root_perms = self._cfg()["permissions"]
+        self.assertEqual(perms[:len(root_perms)], root_perms)
+        gate = self.agent.spawn_gate_rules(2)
+        self.assertEqual(perms[-len(gate):], gate)
+        # none dropped: root + outside fence + spawn gate
+        fence = self.agent.outside_fence(plan["env"]["XDG_DATA_HOME"],
+                                         os.environ.get("AUTOOS_TASK_DIR"))
+        self.assertEqual(perms, root_perms + fence + gate)
+
+    def test_autoos_source_overlay_gets_no_providers_or_root_permissions(self):
+        args = self._args()
+        with mock.patch.object(self.agent, "resolve_route",
+                               lambda *a, **k: self._route()):
+            with mock.patch.object(self.agent, "isolate_source",
+                                   return_value=os.path.abspath(self.agent.ROOT)):
+                plan = self.agent.build_plan(args, self._cfg())
+        overlay = self._overlay(plan)
+        # only the per-run OR3 headers; nothing from ROOT's provider definition
+        self.assertEqual(list(overlay["providers"]), ["omniroute"])
+        self.assertEqual(list(overlay["providers"]["omniroute"]), ["headers"])
+        for rule in self._cfg()["permissions"]:
+            self.assertNotIn(rule, overlay["permissions"])
+        gate = self.agent.spawn_gate_rules(2)
+        self.assertEqual(overlay["permissions"][-len(gate):], gate)
+        self.assertNotIn("agents", overlay)
+
+    def test_foreign_keyed_plan_through_stamp_keeps_models_gets_base_url(self):
+        plan = self._build()
+        env = dict(plan["env"])
+        with mock.patch.object(self.agent, "gateway_base_url",
+                               return_value="http://gw.example.invalid:1/v1"):
+            self.assertTrue(self.agent.stamp_worker_gateway(env))
+        omni = json.loads(env["OPENCODE_CONFIG_CONTENT"])["providers"]["omniroute"]
+        self.assertEqual(omni["settings"]["baseURL"],
+                         "http://gw.example.invalid:1/v1")
+        self.assertIn("t2-worker", omni["models"])
+        self.assertEqual(omni["env"], ["AUTOOS_OMNIROUTE_KEY"])
+        self.assertTrue(omni.get("headers"))
+
+    def test_root_cfg_is_not_mutated_by_a_foreign_plan(self):
+        cfg = self._cfg()
+        before = json.dumps(cfg, sort_keys=True)
+        args = self._args()
+        with mock.patch.object(self.agent, "resolve_route",
+                               lambda *a, **k: self._route()):
+            with mock.patch.object(self.agent, "isolate_source",
+                                   return_value=self.foreign_repo):
+                self.agent.build_plan(args, cfg)
+        self.assertEqual(json.dumps(cfg, sort_keys=True), before)
+
 
 class RootAgentsBlockTests(unittest.TestCase):
     """The root_agents_block helper extracts only agent definitions."""
@@ -244,6 +339,24 @@ class RootAgentsBlockTests(unittest.TestCase):
 
     def test_empty_when_no_agents(self):
         self.assertEqual(self.agent.root_agents_block({}), {})
+
+
+class RootOverlayBlocksTests(unittest.TestCase):
+    """root_overlay_blocks copies only providers + permissions."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_returns_only_providers_and_permissions(self):
+        cfg = {"agents": {"a": {}}, "providers": {"p": {"env": ["X"]}},
+               "permissions": [{"action": "shell", "effect": "deny"}],
+               "mcp": {"m": {}}, "tools": {}, "experimental": {}, "model": "m"}
+        self.assertEqual(sorted(self.agent.root_overlay_blocks(cfg)),
+                         ["permissions", "providers"])
+
+    def test_empty_when_absent(self):
+        self.assertEqual(self.agent.root_overlay_blocks({}), {})
 
 
 if __name__ == "__main__":

@@ -234,6 +234,7 @@ rule, 2 the file is unreadable.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime
 import io
 import json
@@ -2096,6 +2097,46 @@ def root_agents_block(cfg: dict) -> dict:
     even though the foreign clone's own tree has no opencode.jsonc.
     """
     return dict(cfg.get("agents") or {})
+
+
+def root_overlay_blocks(cfg: dict) -> dict:
+    """ROOT's ``providers`` and top-level ``permissions`` (via ``cfg``).
+
+    FLEET-AGENTS-2: a foreign-repo sandbox lacks these two blocks as well, so
+    opencode stops with ``Model unavailable: omniroute/t2-worker`` and the
+    worker runs without the shell/tool fence every AutoOS worker gets. Only
+    these two keys are copied (deep copies, so a merge never mutates ``cfg``);
+    never mcp / tools / experimental / model. ``providers`` carries env var
+    NAMES (``AUTOOS_OMNIROUTE_KEY``), never a key value.
+    """
+    blocks = {}
+    if isinstance(cfg.get("providers"), dict):
+        blocks["providers"] = copy.deepcopy(cfg["providers"])
+    if isinstance(cfg.get("permissions"), list):
+        blocks["permissions"] = copy.deepcopy(cfg["permissions"])
+    return blocks
+
+
+def merge_root_providers(root_providers: dict, overlay_providers: dict) -> dict:
+    """Per provider: ROOT's definition first, the overlay's per-run keys on top.
+
+    A dict value present on both sides (``settings``, ``headers``) merges ONE
+    level deep, so the per-run session headers and the stamped
+    ``settings.baseURL`` keep winning while ROOT's package / name / env /
+    models stay. Any other overlay value replaces ROOT's.
+    """
+    merged = copy.deepcopy(root_providers)
+    for name, prov in (overlay_providers or {}).items():
+        base = merged.get(name)
+        if not isinstance(base, dict) or not isinstance(prov, dict):
+            merged[name] = prov
+            continue
+        for key, value in prov.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                base[key] = {**base[key], **value}
+            else:
+                base[key] = value
+    return merged
 
 
 def free_overlay(model: str) -> dict:
@@ -5011,6 +5052,19 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                 overlay["agents"] = merged_agents
             else:
                 overlay["agents"] = root_agents
+            # FLEET-AGENTS-2: the same sandbox also lacks ROOT's providers and
+            # permission fence. Providers: ROOT's definition first, the per-run
+            # keys (OR3 headers, free/lean overlays) on top, one level deep.
+            # Permissions: ROOT's rules FIRST, then whatever the overlay holds
+            # (the outside fence); the spawn gate below is appended after this
+            # and stays LAST ("last matching wins").
+            root_blocks = root_overlay_blocks(cfg)
+            if "providers" in root_blocks:
+                overlay["providers"] = merge_root_providers(
+                    root_blocks["providers"], overlay.get("providers"))
+            if root_blocks.get("permissions"):
+                overlay["permissions"] = (root_blocks["permissions"]
+                                          + overlay.get("permissions", []))
         # KEYDENY3b item 1: the spawn gate is re-asserted in the overlay, which
         # opencode merges after the checkout's own rules — a leaf cannot spawn an
         # unfenced child even in a checkout whose opencode.jsonc drifted. The
