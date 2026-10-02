@@ -17,6 +17,6 @@
   "max_output_tokens": 393216,
   "input_cost_per_token": 3e-07,
   "output_cost_per_token": 1.2e-06,
-  "cache_read_cost_per_token": 6e-09,
+  "cache_read_cost_per_token": 3e-08,
   "reasoning_effort": "high"
 }
