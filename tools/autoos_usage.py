@@ -1907,7 +1907,7 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
     try:
         newly_stale = _mark_missing_provider_reads(
             registry, guards, path, fresh_usable, ledger, since, now,
-            usable)
+            readings)
     except OSError:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")

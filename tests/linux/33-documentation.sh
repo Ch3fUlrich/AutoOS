@@ -737,6 +737,10 @@ if it "t1-credit fix16: never govern from old data + fail-closed fallbacks (unit
     out="$(python3 tests/test_t1_credit_fix16.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "t1-credit fix17: present-but-unusable balance entries + overlay except wrap (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix17.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "debtcap nebius: provider excluded from free/trial tiers (unit tests)"; then
     out="$(python3 tests/test_debtcap_nebius.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
