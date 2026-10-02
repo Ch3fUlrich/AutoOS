@@ -4055,20 +4055,40 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         self.assertTrue(line.startswith("claude_budget: off (mode=normal"), line)
 
     def test_a_non_final_card_holds_every_claude_leg_it_offers(self):
-        # The hold is a resolver rule, not the shipped number: the shipped
-        # registry is mode=normal now, so this builds the ON case from a copy
-        # (deepcopy + mutate) and proves the hold there.
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity legs) and 60191348 (B2-PRUNE: cc unavailable, so the one
+        # surviving Claude leg never reaches the hold). The hold is a resolver
+        # rule, not the shipped number: the shipped registry is mode=normal
+        # now, so this builds the ON case from a copy (deepcopy + mutate).
+        # Post-prune, neither route budget-holds anything on shipped data; the
+        # hold itself is then proven alive on a copy with cc flipped servable.
+        import copy
         on = self.on_registry()
         for route_id in ("opus-4-6", "t2-orchestrator"):
             _kept, skipped, _ = self.legs("implement", route_id, registry=on)
             held = [leg for leg, reasons in skipped.items()
                     if any(x.startswith("claude_budget:") for x in reasons)]
-            self.assertTrue(held, route_id)
-            for leg in held:
-                self.assertEqual(
-                    [x for x in skipped[leg] if x.startswith("claude_budget:")],
-                    ["claude_budget: %s held for finals" % leg],
-                    "%s of %s" % (leg, route_id))
+            self.assertEqual(held, [], route_id)
+        self.assertEqual(
+            [x for x in
+             self.legs("implement", "opus-4-6", registry=on)[1]
+             ["cc/claude-opus-4-6"] if not x.startswith("claude_budget:")],
+            ["unavailable"], "opus-4-6")
+        self.assertEqual(
+            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
+             if r.is_claude_leg(leg, on)], [])
+        servable = copy.deepcopy(on)
+        servable["providers"]["cc"]["available"] = True
+        _kept, skipped, _ = self.legs("implement", "opus-4-6",
+                                      registry=servable)
+        held = [leg for leg, reasons in skipped.items()
+                if any(x.startswith("claude_budget:") for x in reasons)]
+        self.assertEqual(held, ["cc/claude-opus-4-6"], "opus-4-6")
+        for leg in held:
+            self.assertEqual(
+                [x for x in skipped[leg] if x.startswith("claude_budget:")],
+                ["claude_budget: %s held for finals" % leg],
+                "%s of %s" % (leg, "opus-4-6"))
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
         on = self.on_registry()
