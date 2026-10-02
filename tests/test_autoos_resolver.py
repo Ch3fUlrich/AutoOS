@@ -2684,12 +2684,11 @@ class UnavailableUntilResolverTests(unittest.TestCase):
     # that the caller is told WHEN, not just that nothing served.
 
     REAL_UNTILS = {
-        # FREEWIRE 2026-09-30: the gemini head left t2-worker, so the cooling
-        # provider whose earliest return the reason must name is now
-        # antigravity (still a t2-worker free leg); google_ai_studio is kept
-        # cooled too (it is now provider-unavailable anyway). Every provider a
-        # t2-worker combo can still be served by is cooled, so the premise
-        # "every leg of the t2-worker routes is cooling" holds.
+        # FREEWIRE 2026-09-30 cooled every provider a t2-worker combo could
+        # still be served by. CIGREEN (aced9915, B2-AGY): antigravity is kept
+        # cooled too but backs no leg anywhere since the removal (and reads
+        # provider-unavailable anyway), so the earliest return a reason can
+        # name is now google_ai_studio, the earliest still-legged entry here.
         "antigravity": "2026-09-28T12:00:37Z",
         "google_ai_studio": "2026-09-28T12:30:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
@@ -2729,13 +2728,16 @@ class UnavailableUntilResolverTests(unittest.TestCase):
                          "is how the next task gets the same 429: %s"
                          % result["reason"])
         # The reason names the cooldown, and names the EARLIEST return as the
-        # retry -- a caller reading it must not wait for the last one. FREEWIRE
-        # 2026-09-30: the earliest cooled provider is now antigravity.
-        self.assertIn("unavailable: antigravity until 2026-09-28T12:00:37Z",
+        # retry -- a caller reading it must not wait for the last one.
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity legs, so no reason can name an antigravity cooldown).
+        # The earliest cooled provider still legged anywhere is now
+        # google_ai_studio.
+        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
                       result["reason"], result["reason"])
         dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
                            result["reason"])
-        self.assertEqual(min(dates), "2026-09-28T12:00:37Z", result["reason"])
+        self.assertEqual(min(dates), "2026-09-28T12:30:00Z", result["reason"])
 
     def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
