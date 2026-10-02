@@ -185,6 +185,39 @@ line on stderr — never a traceback, never the environment or the key — and e
 `127` when the command was not found and `126` when it could not be run, per
 shell convention.
 
+### The sanctioned gateway review call
+
+`tools/review-call.py` is the one sanctioned single gateway review call: one
+tool-less chat completion (`stream: false`, no `tools`, no `temperature`
+unless `--temperature F` is given, one user message) whose key comes **only**
+from the `AUTOOS_OMNIROUTE_KEY` that `exec` puts in its environment — the tool
+never reads a keys file, and a missing key is exit 2 with
+`run me via autoos_gateway_key.py exec -- ...`:
+
+```bash
+python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py --model ovh/gpt-oss-120b --prompt-file prompt.md --out-dir out
+```
+
+Optional: `--title <slug>` (the session tag becomes `review/<title>`, else
+`review/<prompt-sha12>`), `--max-tokens N` (default 4096), `--temperature F`
+(off by default — measured 2026-10-02 on the central gateway, a
+`temperature: 0` request is cut at 64 completion tokens with an empty answer)
+and `--gateway-url
+URL` (otherwise `AUTOOS_OMNIROUTE_URL`, otherwise `http://127.0.0.1:20128/v1`;
+a URL with no path gains `/v1`). The call is stamped with the spawner's own
+`x-omniroute-session-id` / `X-AutoOS-Run-Id` headers, so the gateway call log
+attributes it like a run. It writes `review.txt` and `evidence.json`
+(requested/served model, status, `finish_reason`, correlation id, response
+header **names** only, session tag, run id, prompt sha256, token usage, UTC
+start/finish) into
+`--out-dir`, or `error.json` and exit 3 on a non-200, and prints only the two
+paths, the served model and the answer's last `VERDICT:` line (or `VERDICT:
+missing`) — never the key, the request headers or the prompt. Exit **4** also
+covers a truncated or empty answer (`finish_reason: length`, or no answer
+text): `evidence.json` is still written with its `finish_reason`, and
+`review-call: answer truncated/empty (finish_reason=<x>)` goes to stderr
+instead of a `VERDICT: missing` success line.
+
 ### Example
 
 ```yaml

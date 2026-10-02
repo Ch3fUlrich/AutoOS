@@ -757,6 +757,10 @@ if it "gateway-key exec: child runs with the key in its env only (unit tests)"; 
     out="$(python3 tests/test_gateway_key_exec.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "review-call: one tool-less gateway review call, key only via exec (unit tests)"; then
+    out="$(python3 tests/test_review_call.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "debtcap nebius: provider excluded from free/trial tiers (unit tests)"; then
     out="$(python3 tests/test_debtcap_nebius.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
