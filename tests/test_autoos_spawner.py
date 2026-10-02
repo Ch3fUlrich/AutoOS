@@ -8231,14 +8231,34 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(review["reviewer"]["family"], "meta")
 
     def test_the_reviewer_is_cross_family_and_the_walk_stops_at_the_first_usable(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (T0-PAID-4 Q1 paid-last-resort
+        # two-pass walk, operator rule D-212/D-219): reviewer_for tries every
+        # non-paid entry first (registry order), then the paid ones. The only
+        # free entries here are gem-flash (paid by LEG tier -- gem_api is a paid
+        # provider, so _reviewer_is_paid holds it to the paid pass) and qwen
+        # (same family as the author), so no free reviewer is usable and the
+        # paid muse entry wins as last resort with the passed-over qwen entry in
+        # skipped. The intent stands: the reviewer is cross-family to the author.
         review = self.route()["review_plan"]
         self.assertNotEqual(review["reviewer"]["family"], review["author_family"])
-        self.assertEqual(review["skipped"], [],
-                         "the head of the list was usable, nothing was passed over")
+        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["model"], "omniroute/muse")
+        self.assertEqual([s["model"] for s in review["skipped"]], ["qwen3.8-flash"])
+        self.assertIn("same family as author (qwen)", review["skipped"][0]["reasons"])
+        self.assertIn("last resort", review["reason"],
+                      "a paid reviewer picked over free entries must say so")
 
     def test_a_same_family_reviewer_is_skipped_with_the_reason_exposed(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (same two-pass + leg-tier-paid
+        # rule; b7c276d8 is the same flag-vs-tier validation direction):
+        # author=meta now resolves to the FREE qoder/qwen entry, not the paid
+        # gem entry -- gem says paid:false but its gem_api/gem-flash leg sits
+        # under a paid provider, so _reviewer_is_paid is True and it waits for
+        # the paid pass. The intent stands: the same-family entry is skipped
+        # with the reason exposed.
         review = self.route(card="kind=review,author=meta,paths=tools/registry.py")["review_plan"]
-        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual(review["reviewer"]["family"], "qwen")
+        self.assertEqual(review["reviewer"]["model"], "qwen3.8-flash")
         self.assertEqual([s["model"] for s in review["skipped"]], ["omniroute/muse"])
         self.assertIn("same family as author (meta)", review["skipped"][0]["reasons"])
 
@@ -8251,11 +8271,24 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(review["reviewer"]["family"], "meta")
 
     def test_a_sensitive_card_walks_past_the_training_reviewer(self):
+        # CIGREEN: expectation moved by 9a7ebd1b (the walk now surfaces EVERY
+        # rejection in registry order; the legless-privacy fail-closed rule in
+        # _reviewer_rejections predates it): privacy=sensitive rejects muse
+        # (muse_api trains on prompts) AND the two legless entries -- qwen (also
+        # same-family here) and haiku ("privacy: no registry leg to check
+        # training against": unknown is not safe). The intent stands: the walk
+        # passes the training reviewer and lands cross-family on gem-flash,
+        # whose gem_api leg does not train.
         route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
                                 "paths=tools/registry.py")
         self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
         skipped = route["review_plan"]["skipped"]
-        self.assertEqual([s["model"] for s in skipped], ["omniroute/muse"])
+        self.assertEqual([s["model"] for s in skipped],
+                         ["omniroute/muse", "qwen3.8-flash", "haiku"])
+        for entry in skipped:
+            self.assertTrue([r for r in entry["reasons"] if r.startswith("privacy:")],
+                            "every skipped entry must name privacy, not just "
+                            "availability: %r" % (entry,))
         self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
                         "the reason must name privacy, not availability")
 
