@@ -3609,6 +3609,8 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         self.assertFalse(r.is_claude_provider("antigravity", registry))
 
     def test_the_real_registry_has_exactly_the_known_claude_legs(self):
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity leg); the post-AGY registry carries only the cc leg.
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
@@ -3617,8 +3619,7 @@ class ClaudeBudgetLegTests(unittest.TestCase):
             for leg in route.get("legs") or []:
                 if r.is_claude_leg(leg, registry):
                     claude.add(leg)
-        self.assertEqual(claude, {"cc/claude-opus-4-6",
-                                  "antigravity/claude-opus-4-6-thinking"})
+        self.assertEqual(claude, {"cc/claude-opus-4-6"})
 
     # --- the hold ----------------------------------------------------------
 
