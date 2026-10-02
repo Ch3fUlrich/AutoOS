@@ -2227,12 +2227,7 @@ cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 oc = cfg.get("language_models", {}).get("openai_compatible", {})
 omni = oc.get("autoos-omniroute", {})
 lit = oc.get("autoos-litellm", {})
-# The model lists are catalog/ide-models.json projected at run time (ids,
-# display names, windows, membership, order). PROVFIX3 finding 1 re-pins the
-# t1 window: a route may only promise what its smallest servable leg takes.
-# FREEKEYS-2/2c (D-141) put the free band ahead of gemini in t1-orchestrator,
-# and the scaleway/nebius grants advertise 128,000 (gemini itself takes
-# 131,072), so the promise the catalog may now make is 128,000.
+# SHARDB: expectation moved by b9229fff (ide re-render to 1M after 20c4a816 moved gemini legs to 1048576; every servable t1 leg now advertises 1048576 so 1000000 is the honest promise).
 cat = json.load(open("catalog/ide-models.json", encoding="utf-8"))["models"]
 def want(gateway):
     out = []
@@ -2246,7 +2241,17 @@ def want(gateway):
 got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
 bad = [g for g in got_models if got_models[g] != want(g)]
 t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "t1-orchestrator"]
-models = "catalog-ok" if not bad and t1 == [128000] else "MISMATCH:%s t1=%s" % (",".join(bad), t1)
+# PROVFIX3 finding 1 still binds: the promise may only be as big as the smallest servable leg window (tools/registry.py clamp_route_context idea, as in the test_sync_ide_models wide-tier clamp).
+sys.path.insert(0, "tools")
+import registry as _shardb_reg
+_shardb_doc = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+_shardb_route = _shardb_doc["routes"]["t1-orchestrator"]
+_shardb_serv = _shardb_reg.gateway_legs(_shardb_route, _shardb_doc)
+_shardb_caps = [c for c in (_shardb_reg.leg_advertised_context(leg, _shardb_doc) for leg in _shardb_serv) if c is not None]
+_shardb_cat = [m["context"] for m in cat if m["id"] == "t1-orchestrator"]
+_shardb_min = min(_shardb_caps) if _shardb_caps else None
+_shardb_ok = (not bad and len(t1) == 1 and len(_shardb_cat) == 1 and len(_shardb_serv) > 0 and _shardb_min is not None and t1 == _shardb_cat and _shardb_cat[0] <= _shardb_min)
+models = "catalog-ok" if _shardb_ok else "MISMATCH:%s t1=%s cat=%s minleg=%s" % (",".join(bad), t1, _shardb_cat, _shardb_min)
 # Keys never land in settings.json (Zed docs: keychain/UI or env).
 # Pins come from the harness at runtime, never as literals in lib/.
 h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
