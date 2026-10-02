@@ -37,6 +37,21 @@ def load_agent():
     return module
 
 
+def load_evidence():
+    """tools/seat-model-evidence.py, imported for its attribution functions.
+
+    D-426: the header a run stamps and its record's tag are only worth as much
+    as the match the evidence tool applies to both, so the test asserts THROUGH
+    `tag_matches` / `read_run_record_session_tag` rather than re-deriving the
+    comparison here.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "seat_model_evidence_under_test", TOOLS / "seat-model-evidence.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _WORKERS_TMP = None
 
 
@@ -319,6 +334,103 @@ class FleetSandboxAgentsTests(unittest.TestCase):
                                    return_value=self.foreign_repo):
                 self.agent.build_plan(args, cfg)
         self.assertEqual(json.dumps(cfg, sort_keys=True), before)
+
+    # --- D-426: a foreign run's gateway headers carry the RECORD's tag --------
+
+    def test_foreign_plan_headers_carry_the_record_session_tag(self):
+        """The OR3 stamp must equal what the run record stores (D-426).
+
+        The S4 rewrite retitles a foreign run's tag from the AutoOS lane name
+        to the target repo's slug AFTER the OR3 block stamped the header, so
+        the gateway logged `<AutoOS-lane>/<title>/<run-id>` while the record
+        said `<repo>/<title>` - and the evidence gate's exact match found no
+        row. The header is checked the way the evidence tool itself decides:
+        `tag_matches(row, record_tag, run_id)`, with the record tag read back
+        from a workers record as read_run_record_session_tag would read it.
+        """
+        plan = self._build(route=self._route(tier=3, review=True, read_only=True,
+                                             combo="t3-driver",
+                                             model="omniroute/ovh-direct-gpt-oss-120b"))
+        overlay = self._overlay(plan)
+        headers = overlay["providers"]["omniroute"]["headers"]
+        self.assertEqual(headers[self.agent.RUN_ID_HEADER], plan["run_id"])
+        # the record's tag names the foreign repo, not the AutoOS checkout
+        slug = self.agent.sandbox_repo_slug(self.foreign_repo)
+        self.assertEqual(plan["session_tag"], "%s/t3-do-it" % slug)
+        self.assertEqual(
+            headers[self.agent.SESSION_TAG_HEADER],
+            self.agent.session_header_value(plan["session_tag"], plan["run_id"]),
+            "gateway header and run record must name the same session tag")
+
+        logs = tempfile.mkdtemp(prefix="autoos-evtag-logs-")
+        try:
+            workers = Path(logs) / "workers"
+            workers.mkdir()
+            (workers / ("%s.json" % plan["run_id"])).write_text(
+                json.dumps({"session_tag": plan["session_tag"],
+                            "run_id": plan["run_id"]}), encoding="utf-8")
+            evidence = load_evidence()
+            record_tag = evidence.read_run_record_session_tag(plan["run_id"], logs)
+            self.assertEqual(record_tag, plan["session_tag"])
+            self.assertTrue(evidence.tag_matches(
+                headers[self.agent.SESSION_TAG_HEADER], record_tag, plan["run_id"]),
+                "the evidence gate would refuse this run's only gateway row")
+        finally:
+            shutil.rmtree(logs, ignore_errors=True)
+
+    def test_foreign_and_autoos_headers_sit_in_the_same_shape_and_place(self):
+        """D-426: same key, same two headers, same value rule as an AutoOS run.
+
+        The foreign merge (FLEET-AGENTS-2) must keep ROOT's provider
+        definition AND the per-run `headers` exactly where an AutoOS-source
+        overlay puts them - provider level, under `headers` (the key opencode
+        v2 reads), not ROOT's `settings`, and no ROOT block may introduce a
+        second, empty one.
+        """
+        foreign_plan = self._build()
+        args = self._args()
+        with mock.patch.object(self.agent, "resolve_route",
+                               lambda *a, **k: self._route()):
+            with mock.patch.object(self.agent, "isolate_source",
+                                   return_value=os.path.abspath(self.agent.ROOT)):
+                autoos_plan = self.agent.build_plan(args, self._cfg())
+        foreign_omni = self._overlay(foreign_plan)["providers"]["omniroute"]
+        autoos_omni = self._overlay(autoos_plan)["providers"]["omniroute"]
+        self.assertEqual(list(autoos_omni), ["headers"],
+                         "an AutoOS-source overlay must stay byte-identical")
+        self.assertIn("headers", foreign_omni,
+                      "the merged ROOT providers block lost the per-run headers")
+        for key in (self.agent.SESSION_TAG_HEADER, self.agent.RUN_ID_HEADER):
+            self.assertIn(key, foreign_omni["headers"])
+            self.assertIn(key, autoos_omni["headers"])
+        self.assertEqual(set(foreign_omni["headers"]), set(autoos_omni["headers"]))
+        for plan, omni in ((foreign_plan, foreign_omni),
+                           (autoos_plan, autoos_omni)):
+            self.assertEqual(
+                omni["headers"][self.agent.SESSION_TAG_HEADER],
+                self.agent.session_header_value(plan["session_tag"],
+                                                plan["run_id"]))
+            self.assertEqual(omni["headers"][self.agent.RUN_ID_HEADER],
+                             plan["run_id"])
+
+    def test_foreign_headers_survive_stamp_worker_gateway(self):
+        """D-426: the loopback stamp must not move or drop the session pair."""
+        plan = self._build()
+        env = dict(plan["env"])
+        with mock.patch.object(self.agent, "gateway_base_url",
+                               return_value="http://gw.example.invalid:1/v1"):
+            self.assertTrue(self.agent.stamp_worker_gateway(env))
+        omni = json.loads(env["OPENCODE_CONFIG_CONTENT"])["providers"]["omniroute"]
+        self.assertEqual(
+            omni["headers"][self.agent.SESSION_TAG_HEADER],
+            self.agent.session_header_value(plan["session_tag"], plan["run_id"]))
+        self.assertEqual(omni["headers"][self.agent.RUN_ID_HEADER], plan["run_id"])
+        # the plan's own copy is stamped only from the worker env onward, and
+        # keeps the same pair
+        self.assertEqual(
+            json.loads(plan["env"]["OPENCODE_CONFIG_CONTENT"])
+            ["providers"]["omniroute"]["headers"],
+            omni["headers"])
 
 
 class RootAgentsBlockTests(unittest.TestCase):

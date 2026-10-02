@@ -5006,6 +5006,20 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                 _slug = sandbox_repo_slug(_sandbox_source)
                 tag = "%s/%s" % (_slug, tag.split("/", 1)[1]) if "/" in tag \
                     else _slug
+                # D-426: the OR3 headers above were stamped BEFORE this rewrite,
+                # so the gateway logged the AutoOS lane prefix while the run
+                # record (and `ps`, the printed `session-tag:` line) stores the
+                # repo one - and tools/seat-model-evidence.py matches a row's
+                # sessionTag against the RECORD's tag with exact equality only,
+                # so every foreign run read "no status-200 row carries this
+                # seat's session tag". Re-stamp the pair with the tag the record
+                # carries, in the same provider block the OR3 stamp wrote. Only
+                # when OR3 actually stamped (omniroute gate): a `--free` overlay
+                # or a non-gateway client has no such block, and an AutoOS
+                # source never enters this branch, so its overlay is untouched.
+                _prov = (overlay.get("providers") or {}).get("omniroute")
+                if isinstance(_prov, dict) and isinstance(_prov.get("headers"), dict):
+                    _prov["headers"].update(gateway_headers(tag, run_id))
         if client.name == "opencode":
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
