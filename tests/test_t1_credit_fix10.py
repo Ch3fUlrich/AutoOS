@@ -163,7 +163,7 @@ class M1HelperTransportTests(unittest.TestCase):
     def test_helper_never_reads_or_passes_a_key(self):
         runner = FakeRunner()
         runner.add("/api/usage/call-logs", stdout=b"200\n[]")
-        usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0",
+        usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0&excludeTests=1",
                            {"Authorization": "Bearer SUPER-SECRET-KEY"},
                            15, _run=runner)
         call = runner.calls[0]
@@ -189,7 +189,7 @@ class M1HelperTransportTests(unittest.TestCase):
         runner = FakeRunner()
         runner.add("/api/usage/", exc=FileNotFoundError("docker"))
         with self.assertRaises(usage.UsageError):
-            usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0",
+            usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0&excludeTests=1",
                                None, 15, _run=runner)
 
     def test_helper_nonzero_exit_raises_without_key_text(self):
@@ -197,7 +197,7 @@ class M1HelperTransportTests(unittest.TestCase):
         runner.add("/api/usage/", stdout=b"boom",
                    returncode=1)
         try:
-            usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0",
+            usage.helper_fetch("http://x/api/usage/call-logs?limit=1&offset=0&excludeTests=1",
                                {"Authorization": "Bearer K"}, 15, _run=runner)
         except usage.UsageError as exc:
             self.assertNotIn("K", str(exc))
@@ -773,6 +773,133 @@ class T1CreditFix12N3BadLinesExactTests(unittest.TestCase):
             self.assertEqual(out["deepseek"]["spend_usd"], 10.0)
             self.assertIn("measured via provider balance",
                           out["deepseek"]["note"])
+
+
+class HelperWhitelistTests(unittest.TestCase):
+    """T1-CREDIT-FIX-13 (D-269): helper_fetch is a WHITELIST BUILD.
+
+    Only the two fixed relative paths the code itself builds are fetched,
+    and the forwarded path+query is built from validated ints, never from
+    the caller string. The fake runner records calls; every rejection must
+    raise UsageError BEFORE any subprocess runs.
+    """
+
+    def assert_rejected(self, url):
+        def _fail(*args, **kwargs):
+            raise AssertionError("subprocess must not run for %r" % (url,))
+        with self.assertRaises(usage.UsageError, msg=url) as ctx:
+            usage.helper_fetch(url, None, 5, _run=_fail)
+        self.assertIn("(ValueError)", str(ctx.exception), url)
+        self.assertNotIn("127.0.0.1", str(ctx.exception), url)
+
+    def test_accepted_call_logs_forwards_exact(self):
+        runner = FakeRunner()
+        runner.add("/api/usage/call-logs?limit=500&offset=0&excludeTests=1",
+                   stdout=b"200\n[]")
+        status, body = usage.helper_fetch(
+            "http://127.0.0.1:9/api/usage/call-logs"
+            "?limit=500&offset=0&excludeTests=1", None, 5, _run=runner)
+        self.assertEqual((status, body), (200, b"[]"))
+        script = runner.calls[0]["argv"][-1]
+        self.assertIn(
+            '"/api/usage/call-logs?limit=500&offset=0&excludeTests=1"',
+            script)
+
+    def test_accepted_provider_limits_forwards_bare_path(self):
+        runner = FakeRunner()
+        runner.add("/api/usage/provider-limits", stdout=b"200\n{}")
+        status, body = usage.helper_fetch(
+            "http://127.0.0.1:9/api/usage/provider-limits", None, 5,
+            _run=runner)
+        self.assertEqual((status, body), (200, b"{}"))
+        script = runner.calls[0]["argv"][-1]
+        self.assertIn('apiFetch("/api/usage/provider-limits",', script)
+        self.assertNotIn("provider-limits?", script)
+
+    def test_scheme_and_host_ignored(self):
+        # The transport is the container, not the host: any scheme/host
+        # with a whitelisted path still runs (ftp chosen here).
+        runner = FakeRunner()
+        runner.add("/api/usage/provider-limits", stdout=b"200\n{}")
+        status, _ = usage.helper_fetch(
+            "ftp://x/api/usage/provider-limits", None, 5, _run=runner)
+        self.assertEqual(status, 200)
+
+    def test_reordered_query_normalized_to_canonical(self):
+        runner = FakeRunner()
+        runner.add("/api/usage/call-logs", stdout=b"200\n[]")
+        usage.helper_fetch(
+            "http://127.0.0.1:9/api/usage/call-logs"
+            "?offset=7&limit=50&excludeTests=1", None, 5, _run=runner)
+        script = runner.calls[0]["argv"][-1]
+        self.assertIn(
+            '"/api/usage/call-logs?limit=50&offset=7&excludeTests=1"',
+            script)
+
+    def test_rejects_encoded_and_dotdot_paths(self):
+        for path in ("/api/usage/%252e%252e/keys",
+                     "/api/usage/%2e%2e/keys",
+                     "/api/usage/../keys"):
+            self.assert_rejected("http://127.0.0.1:9" + path)
+
+    def test_rejects_nul_cr_lf_raw_and_encoded(self):
+        base = "http://127.0.0.1:9/api/usage/call-logs"
+        good_qs = "?limit=1&offset=0&excludeTests=1"
+        self.assert_rejected(base + "\x00" + good_qs)  # NUL in path
+        self.assert_rejected(base + good_qs + "\x00")  # NUL in query
+        self.assert_rejected(base + "\r" + good_qs)  # CR in path
+        self.assert_rejected(base + good_qs + "\n")  # LF in query
+        self.assert_rejected(base + "?limit=1\r\n&offset=0&excludeTests=1")
+        self.assert_rejected(base + "?limit=1%0d%0a&offset=0&excludeTests=1")
+        self.assert_rejected(
+            "http://127.0.0.1:9/api/usage/provider-limits%0D%0A")
+
+    def test_rejects_any_query_on_provider_limits(self):
+        for url in ("http://127.0.0.1:9/api/usage/provider-limits?foo=1",
+                    "http://127.0.0.1:9/api/usage/provider-limits?limit=1",
+                    "http://127.0.0.1:9/api/usage/provider-limits?"):
+            self.assert_rejected(url)
+
+    def test_rejects_bad_call_logs_queries(self):
+        base = "http://127.0.0.1:9/api/usage/call-logs?"
+        for qs in ("limit=1&offset=0&excludeTests=1&admin=1",  # extra key
+                   "limit=1&limit=2&offset=0&excludeTests=1",  # duplicate
+                   "limit=-1&offset=0&excludeTests=1",
+                   "limit=1e3&offset=0&excludeTests=1",
+                   "limit=+5&offset=0&excludeTests=1",
+                   "limit= 5&offset=0&excludeTests=1",
+                   "limit=1&offset=0&excludeTests=0",
+                   "limit=1&offset=0",  # missing excludeTests
+                   "limit=1&excludeTests=1",  # missing offset
+                   "limit=&offset=0&excludeTests=1",
+                   "limit=1&offset=0&excludeTests=1&",  # trailing &
+                   "limit=1&&offset=0&excludeTests=1"):
+            self.assert_rejected(base + qs)
+
+    def test_rejects_fragment_backslash_tab_case_prefix(self):
+        self.assert_rejected(
+            "http://127.0.0.1:9/api/usage/provider-limits#frag")
+        self.assert_rejected(
+            "http://127.0.0.1:9/api/usage/call-logs"
+            "?limit=1&offset=0&excludeTests=1#frag")
+        self.assert_rejected("http://127.0.0.1:9/api/usage\\call-logs"
+                             "?limit=1&offset=0&excludeTests=1")
+        self.assert_rejected("http://127.0.0.1:9/api/usage/call-logs\t"
+                             "?limit=1&offset=0&excludeTests=1")
+        self.assert_rejected(
+            "http://127.0.0.1:9/api/usage/call-logs/"
+            "?limit=1&offset=0&excludeTests=1")
+        self.assert_rejected("http://127.0.0.1:9/api/usage/Call-Logs"
+                             "?limit=1&offset=0&excludeTests=1")
+        self.assert_rejected("http://127.0.0.1:9/api/admin/keys")
+        self.assert_rejected("http://127.0.0.1:9/api/usage/other")
+
+    def test_rejects_semicolon_and_non_ascii(self):
+        self.assert_rejected(
+            "http://127.0.0.1:9/api/usage/provider-limits;jsessionid=1")
+        self.assert_rejected("http://127.0.0.1:9/api/usage/call-logs"
+                             "?limit=1;offset=0&excludeTests=1")
+        self.assert_rejected("http://127.0.0.1:9/api/usage/café")
 
 
 if __name__ == "__main__":
