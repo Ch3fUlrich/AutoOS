@@ -1787,10 +1787,20 @@ class RouteContextCapTests(unittest.TestCase):
     def test_the_real_t1_combo_does_not_promise_more_than_gemini_takes(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        # gemini/gemini-3.8-flash is a servable leg of every t1 combo and the
-        # registry records 131072 for it, so no t1 combo may declare 1M.
-        self.assertEqual(combos["t1-orchestrator"]["context"], "128k")
-        self.assertEqual(combos["t1-orchestrator-free-only"]["context"], "128k")
+        # CIGREEN: expectation moved by 20c4a816 (TASK3 raised the twin
+        # gemini-3.8-flash rows 131072->1048576, so every servable t1 leg now
+        # advertises 1M). Pins the clamp RULE against the real data instead of
+        # the stale 128k: each combo promises exactly the min over its
+        # servable legs' advertised windows (usable defaults are D8 50%
+        # unprobed placeholders, never the clamp input - see
+        # route_context_cap). The 1048576 pin fails loudly if the band moves.
+        reg = real_registry()
+        for route_id in ("t1-orchestrator", "t1-orchestrator-free-only"):
+            route = reg["routes"][route_id]
+            cap = registry.route_context_cap(route, reg)
+            self.assertEqual(cap, 1048576, route_id)
+            self.assertEqual(combos[route_id]["context"],
+                             registry.context_tokens_to_label(cap), route_id)
         # spark-1.3-contributor's only servable leg is the 1M contributor model,
         # so its promise is not clamped.
         self.assertEqual(combos["spark-1.3-contributor"]["context"], "1M")
@@ -1814,9 +1824,18 @@ class RouteContextCapTests(unittest.TestCase):
                     % (combo["name"], combo["context"], declared, ref, window))
 
     def test_docs_promise_carries_the_clamped_window(self):
-        promise = registry._route_context_promise(
-            real_registry()["routes"]["t1-orchestrator"], real_registry())
-        self.assertEqual(promise, "128k")
+        # CIGREEN: expectation moved by 20c4a816 (same 1M window raise as the
+        # combo twin above: route cap is 1048576, so the declared "1M"
+        # survives the clamp). Pins the rule: the docs cell is the declared
+        # window clamped to the servable legs, not the raw declaration.
+        reg = real_registry()
+        route = reg["routes"]["t1-orchestrator"]
+        promise = registry._route_context_promise(route, reg)
+        self.assertEqual(
+            promise,
+            registry.clamp_route_context(
+                route, reg, route["surfaces"]["omniroute"]["context_declared"]))
+        self.assertEqual(promise, "1M")
 
 
 class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
@@ -1845,8 +1864,19 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         return {m["id"]: m for m in registry.render_ide(reg)["models"]}[route_id]
 
     def test_the_real_t1_picker_window_is_clamped(self):
-        entry = self._ide_entry(real_registry(), "t1-orchestrator")
-        self.assertLessEqual(entry["context"], 131_072)
+        # CIGREEN: expectation moved by 20c4a816 + 018438ed (1M band: every
+        # servable t1 leg advertises 1048576, so the clamp keeps the 1M surface
+        # context). Pins the rule: the picker window is the canonical surface
+        # context (IDE_GATEWAYS puts omniroute first) clamped to the servable
+        # legs, never above any leg's window.
+        reg = real_registry()
+        entry = self._ide_entry(reg, "t1-orchestrator")
+        route = reg["routes"]["t1-orchestrator"]
+        self.assertEqual(
+            entry["context"],
+            registry.clamp_route_context(
+                route, reg, route["surfaces"]["omniroute"]["context"]))
+        self.assertEqual(entry["context"], 1000000)
 
     def test_effort_ladder_comes_from_the_first_servable_leg(self):
         entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
@@ -1875,20 +1905,32 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertIn("xhigh", entry["effort_ladder"])
 
     def test_the_real_free_head_keeps_its_own_default(self):
-        # FREEWIRE 2026-09-30: with the gemini head removed, the head the real
-        # registry serves is the scaleway grant scaleway/qwen3-235b-a22b-instruct-2507,
-        # whose model row carries NO declared effort ladder. render_ide()'s rule
-        # for a served head with no ladder is to forward the surface default
-        # (the `not head_ladder` branch), so t1's "xhigh" still reaches the
-        # picker even though the head declares no rungs.
+        # CIGREEN: expectation moved by 018438ed (TASK1 put the gemini head
+        # first: ladder low/medium/high, no xhigh). render_ide()'s served-head
+        # rule drops a surface default the head rejects instead of forwarding
+        # it, so the picker is not offered a level the answering leg refuses.
         entry = self._ide_entry(real_registry(), "t1-orchestrator")
-        self.assertEqual(entry.get("reasoning_effort"), "xhigh")
+        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
+        self.assertNotIn("reasoning_effort", entry)
 
     def test_openhands_max_input_tokens_is_clamped(self):
+        # CIGREEN: expectation moved by 20c4a816 (TASK3 window raise) +
+        # 018438ed (TASK1 1M-only band): the min servable t1 window is 1M, so
+        # the clamp keeps the 1M profile value. Pins the rule: each tier
+        # carries its surface profile value clamped to the servable legs.
+        reg = real_registry()
         tiers = {t["id"]: t for t in
-                 registry.render_openhands(real_registry())["tiers"]}
+                 registry.render_openhands(reg)["tiers"]}
         for tier_id in ("omniroute-t1-orchestrator", "litellm-t1-orchestrator"):
-            self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 131_072, tier_id)
+            gw, route_id = tier_id.split("-", 1)
+            route = reg["routes"][route_id]
+            profile = route["surfaces"][gw]["openhands_profile"]
+            self.assertEqual(
+                tiers[tier_id]["max_input_tokens"],
+                registry.clamp_route_context(
+                    route, reg, profile["max_input_tokens"]),
+                tier_id)
+            self.assertEqual(tiers[tier_id]["max_input_tokens"], 1000000, tier_id)
 
 
 class VertexNoKeyLitellmSkipTests(unittest.TestCase):
