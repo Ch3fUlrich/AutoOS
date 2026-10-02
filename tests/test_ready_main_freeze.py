@@ -589,6 +589,7 @@ class Freeze4ScopedCiTests(MainCiStatusParserTests):
 class Freeze4WaiverLaneCharsTests(Freeze3WaiverLineTests):
     """T0-FREEZE-4 H3: the waiver lane is safe for the durable line."""
 
+    @unittest.skipIf(os.name == "nt", "a double quote is not a legal Windows ref name; the quote check is covered on POSIX")
     def test_quote_in_waiver_lane_is_refused(self):
         self.BRANCH = 'lane/a"b'
         rc, out, err, inbox, sha = self.ready_with_env(

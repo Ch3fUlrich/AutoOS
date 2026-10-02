@@ -18869,6 +18869,8 @@ def _t2_repo(git, files, dirpath):
     `files` maps a tracked path to text, bytes, ("symlink", target) or
     ("exec", text) - everything FAKE content, nothing real. Returns dirpath.
     """
+    if os.name == "nt":
+        raise unittest.SkipTest("POSIX exec bit/symlink only")
     subprocess.run(git + ["init", "-q", dirpath], check=True)
     for rel, val in files.items():
         full = os.path.join(dirpath, rel.replace("/", os.sep))
@@ -19227,6 +19229,7 @@ class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
                 self.cli.isolate_clone(root, dest, "agent/t2i11")
         self.assertFalse(os.path.lexists(dest))
 
+    @unittest.skipIf(os.name == "nt", "POSIX exec bit/symlink only")
     def test_symlink_and_exec_bit_are_materialised(self):
         root = _t2_repo(self.git, {"target.txt": "t\n",
                                     "link.txt": ("symlink", "target.txt"),
