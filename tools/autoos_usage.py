@@ -1483,12 +1483,19 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
     # `overlay_balance_guards`); `all_readings` (when given) is the full
     # stamped payload, so a provider present-but-not-fresh (replayed/old
     # stamp or past-month) refuses as an old reading, not as missing.
+    # CREDIT-17: a provider present in the payload but with an unparseable
+    # or missing stamp is present-but-unusable -- it must be treated as a
+    # failed read and staled (if paid with no series), not ignored.
     glob_before, already_stale = _stale_state(path)
     if all_readings is None:
         present_ids = set(fresh_ids)
     else:
+        # Present = any entry in the payload, regardless of stamp validity.
+        # Fresh = only entries with a valid stamp (fresh_ids).
+        # A provider present but not fresh (invalid/missing stamp or old
+        # stamp) must be treated as a failed read.
         present_ids = {r.get("provider") for r in (all_readings or [])
-                       if isinstance(r, dict) and _reading_ts(r) is not None}
+                       if isinstance(r, dict) and r.get("provider")}
     newly = []
     for pid, guard in (guards or {}).items():
         if not isinstance(guard, dict):
@@ -1864,7 +1871,6 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
             continue
         if _ts > horizon:
             _future_by_pid.setdefault(_pid, []).append(_r)
-    _future_stale = set()
     _future_saved = {}
     for _pid in sorted(_future_by_pid):
         _entry = ((registry or {}).get("providers") or {}).get(_pid)
@@ -1897,7 +1903,6 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
             guards[_pid] = _stale_paid_refuse(
                 registry, _pid, _g, _since_ts,
                 "future-dated provider balance reading, paid leg refused")
-            _future_stale.add(_pid)
             _future_saved[_pid] = guards[_pid]
     try:
         newly_stale = _mark_missing_provider_reads(
