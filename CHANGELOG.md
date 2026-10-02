@@ -15,6 +15,45 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **K8** the T1-CLEAN-3 case-merge dropped values are recorded in the merged rows' `$comment` (no provider-scoped price/context field exists yet): `mistral-small-3.2-24b-instruct-2506` lost OVH's `1e-07`/`3.1e-07` and its `price_source`, `qwen/qwen3.8-27b` kept groq's `131072`/`16384` over huggingface's `128000`/`32768` — both re-verified against `9e5ea48c^`.
   - **Out of scope, pinned**: `CleanCreditHeadPricedTests` records that the clean routes' credit heads (`ovhcloud/gpt-oss-120b`, `vertex/gemini-3.8-flash`) are `credit_leg_priced == False` today — priced by T1-CREDIT `provider_prices` at train integration.
   - **Investigated (no fix)**: a plan line `credit exhausted ovhcloud $0.00/$200.00` is not measured spend. `tools/autoos-agent.py:plan_credit_guards()` wraps the gateway usage read in `except Exception` and fails closed via `_credit_guards_unreadable()`, which returns `state: "refuse"` with `spend_usd: 0.0` and the registry cap; `tools/autoos_resolver.py:1065` prints only state/spend/cap, so "unreadable, no spend data" renders as "exhausted at zero". The guard's own `note` field carries the truth and the resolver never prints it.
+- T2-ISOLATE-SECRETS-4 (2026-10-01, lane `t2-isolate-secrets-4`, cross-family FAIL round on the `-3` tip):
+  **R6** `_isolate_materialise` refuses a *final* component that is already a symlink or any
+  non-regular file before opening it, and lets the first entry win a path two entries claim — the
+  old code vetted ancestors only and leaned on `O_NOFOLLOW`, which is `0` where the attribute does
+  not exist (Windows), so `[(120000,"evil"),(100644,"evil")]` or a planted `evil -> outside` wrote
+  straight through the link. **R7** `os.makedirs`/`os.unlink` are guarded: a tracked name that
+  collides with what an earlier entry created (`a/x` then a symlink `a` → `IsADirectoryError`, `p`
+  then `p/q` → `FileExistsError`) is one skipped entry with one stderr line, not an aborted clone.
+  **R8** the refusal reasons are constants (`could not create the link` / `could not open for
+  writing`) instead of `"link: %s" % exc`, which echoed an OSError's text — potentially the refused
+  bytes — to the terminal and the log; `_isolate_link_inside` now explicitly refuses an empty,
+  backslash-only or NUL-containing target (a NUL reached `os.symlink` and raised `ValueError`, no
+  OSError, killing the whole run). **R9** the canary scan gained `_escaping_links`: `_bytes_hits`
+  walks without `followlinks`, so an escaping *directory* symlink inside a sandbox passed assertion
+  (1) while leaving the host readable through it; the scan now fails on any symlink, file or
+  directory, whose realpath leaves the sandbox, with a hand-built negative control. **R10** the
+  remaining `git clone --local` wording in `lib/agent_harness.py` and the unattended-orchestration
+  skill now says what the sandbox is: a fresh repo holding one base commit of the allowed committed
+  files. 10 new tests in `T2IsolateSecretsS5PathSafetyTests` / `S5CanaryTests` (49 across the lane,
+  from 39).
+- T2-ISOLATE-SECRETS-3 (2026-10-01, lane `t2-isolate-secrets-3`, cross-family FAIL round):
+  **R1** `_isolate_materialise` no longer trusts a tracked *name* — a new
+  `_isolate_safe_path` refuses `..`, empty / `.` components, a leading `/`, a NUL,
+  a drive- or UNC-shaped name and any component spelling `.git`;
+  `_isolate_link_inside` refuses a tracked symlink whose target is absolute or
+  climbs out of the tree; `_isolate_clear_below` refuses a write whose ancestor
+  below the sandbox is a symlink or whose realpath parent is outside the sandbox.
+  An unsafe entry is skipped with one stderr line naming the path only, never its
+  content. **R2** the isolation claim is now stated and canary-tested: an
+  untracked, git-ignored fake key file in a checkout and in a `worktree` of it is
+  unreachable from either sandbox (`ISOLATION STATEMENT:` in `isolate_clone` names
+  what *is* isolated — the sandbox tree and its own `.git` for every --isolate
+  worker and reviewer — and what is *not*: an absolute path read outside the
+  sandbox, in-session Claude Code subagents, and any run without --isolate).
+  **R3** the dry-run plan says *one-commit materialisation of allowed HEAD files*
+  where it still said `git clone --local` (tests, docs/handoff.md included).
+  **R4/R5** the `.agentignore` negation drop and the cone-reconstruction fallback
+  of the sparse filter are covered by tests.
+- T2-ISOLATE-SECRETS (2026-10-01, lane `t2-isolate-secrets-2`, review round 2): `--isolate` no longer builds its sandbox with `git archive HEAD -- <paths>`. HEAD is now **materialised in Python** — `ls-tree -r -z --full-tree` names the entries, the allow filter is applied to names already in hand, and ONE `git cat-file --batch` streams their bytes into a fresh `git init` with a single `sandbox base (source <sha>)` commit (100755 keeps its exec bit, 120000 becomes a symlink that is never followed, 160000 gitlinks are skipped). That removes the whole class of failure the pathspec list carried: a tracked file named `*` or `secrets-*` is no longer re-read as a glob that pulls `secrets-generated/` back in (I1), 30k tracked files no longer overflow ARG_MAX (I2), and `.gitattributes` `export-ignore`/`export-subst` no longer silently rewrites or drops files (I3). Around it: `.agentignore` matches with real gitignore semantics instead of basename equality (I4), blobs are read as bytes so a binary secret cannot leak its own value through a `UnicodeDecodeError` traceback (I5), cone **and** non-cone sparse sources are honoured by asking git's own index (skip-worktree) rather than guessing from patterns (I6/I14), `*.example`-shaped exemption and secret-name matching are no longer fooled by `api.example.com.key`, `ID_RSA`, `.ENV` or a `.pub` (I7/I8), a SOPS blob must actually be SOPS — column-0 `sops:`, a top-level JSON `"sops"` key, or every value an `ENC[AES256_GCM,data:` (I9), `secrets-generated` is excluded as a path component at any depth and any case (I10), a build that fails half way leaves no sandbox directory behind (I11), the plaintext-secret refusal runs before `~/fleet/sandboxes/<repo>/` is created (I12), and the take-it hint names the cherry-pick range of the sandbox base, because the base shares no history with the source (I13). 28 tests in `tests/test_autoos_spawner.py` (`T2IsolateSecrets*`).
 - opencode-direct fallback ladder (2026-10-01, L0/operator): documented the no-gateway model ladder for lanes when the omniroute combos fail — openrouter `:free` only (NO credit; every paid openrouter leg is denied) → opencode Zen free → meta direct → litellm → ollama. In-opencode usage is not gateway proxying (no combos/admission/backoff). Live probes: `opencode/longcat-2.5-preview-free`, `opencode/space-bunny-free`, `opencode/mimo-v2.6-flash-free`, `openrouter/nvidia/nemotron-3-super-120b-a12b:free`, `openrouter/qwen/qwen3.8-27b:free` OK; `meta/muse-spark-1.3` DOWN (`META_API_KEY` unset); `litellm/t2-worker` rejected — the server serves `tier2` (use `litellm/tier2`); `ollama/qwen2.5-coder:7b` answers direct on `127.0.0.1:11434` (54 s cold) but the opencode ref refuses (per-user `baseURL: host.docker.internal`). Also records the 7 paid openrouter route legs TORDER-OR drops. See `docs/handoff/2026-10-01-opencode-direct-fallback-ladder.md`.
 - REVIEWGATE-2FAM (2026-09-30, operator): `review-status`/`ready` now count SEATS — a ready record needs at least two `kind=cross-family` entries, each READY, from distinct registry families, none the author's; the detail names missing/duplicated seats, an optional `family=` token is cross-checked against the registry, every counted seat prints as `seat N: <model> (<family>) verdict=<v>`, and more than 3 seats is a non-blocking note (no cap). One seat + the Sonnet final no longer reads as reviewed.
 - PROVIDERCOV (2026-09-30, ws-omniroute provider-coverage lane): 20 operator-listed providers added to `catalog/ai-registry.json` as `available:false` with measured `$comment` reasons (none can serve chat completions through the gateway); to avoid colliding with the `clients` section, rows renamed `opencode` → `opencode_gateway` and `qoder` → `qoder_ai`; `meta`/`meta_api` base URL `https://api.meta.ai/v1` re-checked and kept. The D1 reconcile drops this branch's `providers.ovhcloud` credit-tier stub (ws-ovh `f6f5e69` wins at merge), tests 20→19 missing. Gates: `python tests/test_registry.py` 305 OK; `python tools/registry.py check` ok 25 routes/71 models/53 providers (52 after D1).

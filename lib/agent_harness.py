@@ -398,7 +398,8 @@ def desired_opencode(user, harness, repo_root, skills_source):
     # guarantee that actually holds is upstream of the config: a spawned tier runs
     # only in an --isolate clone (tools/autoos-agent.py ISOLATE_TIERS — tiers 2 and
     # 3, plus any role whose catalog `leaf: true` flag is set, are refused in
-    # place), and `git clone --local` materialises committed files only, so a
+    # place), and the sandbox is a fresh repo holding one base commit of the
+    # allowed committed files (ISOLATION STATEMENT in `isolate_clone`), so a
     # git-ignored secret cannot be present in the directory it greps. Asserted by
     # tests/test_autoos_spawner.py (the clone carries no ignored file, an
     # in-place spawned tier is refused, and the MCP spawn forces the clone).

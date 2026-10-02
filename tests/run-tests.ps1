@@ -894,7 +894,8 @@ function Invoke-TombstoneSetup {
     $tree = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-$([Guid]::NewGuid().ToString('N'))"
     $null = New-Item -ItemType Directory -Path (Join-Path $tree 'catalog'), (Join-Path $tree 'logs'), (Join-Path $tree 'lib') -Force
     Copy-Item -LiteralPath (Join-Path $Root 'setup.ps1') -Destination (Join-Path $tree 'setup.ps1')
-    # $Lib is already lib\windows; the tree needs it under lib\windows.    Copy-Item -LiteralPath $Lib -Destination (Join-Path $tree 'lib') -Recurse
+    # $Lib is already lib\windows; the tree needs it under lib\windows.
+    Copy-Item -LiteralPath $Lib -Destination (Join-Path $tree 'lib') -Recurse
     $cat = Get-AutoOSCatalog -Path $tombstoneFixture
     if ($Mutate) { $null = & $Mutate $cat }
     $cat | ConvertTo-Json -Depth 100 |
@@ -4987,7 +4988,7 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
     try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }
     finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
-    Assert-True ($out -match 'git clone --local') 'isolation is not a clone'
+    Assert-True ($out -match 'one-commit materialisation of allowed HEAD files') 'isolation is not a materialisation'
     Assert-True ($out -notmatch 'worktree add|never-print-this-key') 'plan used a worktree or printed the key'
     # The refusal goes to stderr; under Stop, Windows PowerShell turns native
     # stderr into a terminating error (it failed CI on the windows runner).
