@@ -4336,11 +4336,21 @@ class ComboFallthroughTests(unittest.TestCase):
         return None
 
     def test_a_429_on_the_head_falls_through_to_another_provider(self):
+        # CIGREEN: expectation moved by 06d0e714 (D-TORDER-2 ACCEPT:
+        # t1-orchestrator-free-only is deliberately single-provider, so a head
+        # 429 there has nowhere to fall and fail-closes to None). Multi-leg
+        # combos still fall through to another provider.
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             head = combo["models"][0]
             chosen = self.fake_priority_walk(
                 combo["models"], {head.split("/", 1)[0]: 429})
+            if len(combo["models"]) == 1:
+                self.assertIsNone(chosen,
+                                  "%s: a single-provider combo must "
+                                  "fail closed, not pick the 429ing leg"
+                                  % route_id)
+                continue
             self.assertIsNotNone(chosen, "%s: every leg 429s" % route_id)
             self.assertNotEqual(chosen.split("/", 1)[0], head.split("/", 1)[0],
                                 "%s: the fall-through stayed on %s"
