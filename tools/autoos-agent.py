@@ -3612,6 +3612,30 @@ def _family_of_one_spelling(name, registry):
     return None
 
 
+def family_for_model(model) -> str | None:
+    """The family the registry declares for a model spelling, or None.
+
+    T2-RECORD-PIN item 2: the worker record says which family answered, so a
+    review can hold a family to account without re-deriving it from the pin.
+    The ONE lookup is `_family_of_one_spelling` (policy.reviewers' own spelling
+    first, then `models`, whole and after the last `/`), so a record and a
+    reviewer resolution can never name two families for one model.
+
+    An unreadable registry or a model the registry never heard of is None —
+    the record must not invent a family (an invented one would read as a
+    second, independent witness). Reading is the whole cost: this opens the
+    registry, so it is called at record time, never in a loop.
+    """
+    text = str(model or "").strip()
+    if not text:
+        return None
+    try:
+        registry = load_registry(REGISTRY_PATH)
+    except (OSError, ValueError):
+        return None
+    return _family_of_one_spelling(text, registry)
+
+
 # A client reports its own models by full id, so the Claude pass that policy
 # .reviewers spells "haiku" signs "claude-haiku-4-5" (SPAWNFIX3 (S3) item 5,
 # work/L1-routing/LEAKFP2.record.md). The vendor's prefix and the version tail
@@ -4589,6 +4613,52 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
             "review_plan": review, "reviewer_note": reviewer_note}
 
 
+# --- T2-RECORD-PIN item 2: what was asked, what would launch -----------------
+#
+# A record that only says which model the plan ended on cannot tell an ask from
+# a default, and a plan that silently answers on a model nobody pinned is the
+# bug this pair exists for. `requested_model` is the pin (or "" when the caller
+# pinned nothing), `launched_model` is what the argv would carry; when the two
+# name DIFFERENT models the run is refused with both spellings, instead of
+# launching one and recording the other.
+
+def _model_pin_key(value) -> str:
+    """The model a spelling denotes, with the launcher's own rewrites removed.
+
+    `model_route_id` drops the `omniroute/` prefix and the `#<effort>` suffix;
+    the `-clean` twin is dropped here because it is the same pin asked to run on
+    its paid variant. Without these three, every clean run, every effort rung
+    and every gateway spelling would read as a mismatch and refuse a plan that
+    launches exactly what was asked for.
+    """
+    text = model_route_id(value)
+    if text.endswith("-clean"):
+        text = text[: -len("-clean")]
+    return text
+
+
+def model_mismatch_text(requested, launched) -> str:
+    """The refusal line: both spellings, named as ask and as launch."""
+    return "model_mismatch requested=%s launched=%s" % (requested, launched)
+
+
+def model_mismatch_refusal(plan) -> str | None:
+    """Why this plan must not launch (T2 item 2), or None when it may.
+
+    Skipped when there was no ask (an unpinned run may launch whatever the
+    router picked), when the client picks its own model (`PLAN_MODEL_UNNAMED`
+    says exactly that and names no model), and when the two spellings denote
+    one model (`_model_pin_key`).
+    """
+    requested = str(plan.get("requested_model") or "")
+    launched = str(plan.get("launched_model") or "")
+    if not requested or not launched or launched == PLAN_MODEL_UNNAMED:
+        return None
+    if _model_pin_key(requested) == _model_pin_key(launched):
+        return None
+    return model_mismatch_text(requested, launched)
+
+
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                sandbox: dict | None = None,
                provider_cooldown: dict | None = None,
@@ -4805,12 +4875,25 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # inside the same git-ignored state tree; provisioning at the launch site
     # for the same reason as the runtime dir — a dry run writes nothing.
     env["XDG_CONFIG_HOME"] = os.path.join(clients.state_dir(), "configs", run_id)
+    # T2-RECORD-PIN item 2: the ask and the launch, kept beside `model` so a
+    # reader never re-derives one from the other. `requested_model` is the pin
+    # this caller typed ("" when it typed none — an unpinned run did not ask for
+    # any particular model); a `--free` run asked for the promo model by name,
+    # so that is its ask too. `launched_model` is what the argv above would hand
+    # the client.
+    _free_model = getattr(args, "free_model", None)
+    requested_model = args.model or (_free_model if args.free and _free_model else None) or ""
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             # FAMILYFENCE-b: the ask and its witness, kept beside the ask so a
             # reader never has to re-derive one from the other. `client_session_id`
             # is the join key into the client's own transcript; `model_source` is
             # where `model` came from before any transcript was read.
             "model_source": model_source, "client_session_id": client_session_id,
+            # T2-RECORD-PIN item 2: ask vs launch. Equal for every plan that
+            # launches what it was asked for; `model_mismatch_refusal` refuses
+            # the ones where they differ, and the worker record carries both.
+            "requested_model": requested_model,
+            "launched_model": model or "",
             # The text this run sends the client (containment prefix + task),
             # kept so the REPORT check can tell the worker's own words from its
             # brief echoed back at it (SPAWNFIX3c).
@@ -8703,6 +8786,14 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         # answered is not here — it lives in the runner-private record, which is
         # the only writer store a worker cannot edit (R-orch-17).
         "model_source": plan.get("model_source"),
+        # T2-RECORD-PIN item 2: the ask, the launch and the family, so a record
+        # answers "was this the model I pinned, and whose family wrote it"
+        # without a second read of the plan. `family` is the launched model's
+        # (what answered), None when the registry names no family for it — a
+        # record must not invent one.
+        "requested_model": plan.get("requested_model") or "",
+        "launched_model": plan.get("launched_model") or plan.get("model") or "",
+        "family": family_for_model(plan.get("launched_model") or plan.get("model")),
         "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
@@ -8712,6 +8803,13 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
         "scope": scope_decision(plan.get("run_id"), attempt),
         "route_plan": route.get("route_plan")})
+    # T2-RECORD-PIN item 2: a plan whose ask and launch disagree is refused at
+    # the launch site; the reason rides on the record it already wrote, so `ps`
+    # shows WHY the run stopped instead of a bare rc 2. Absent otherwise — a
+    # null `reason` on every record would read as a refusal nobody made.
+    mismatch = model_mismatch_refusal(plan)
+    if mismatch is not None:
+        record["reason"] = mismatch
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -9160,6 +9258,18 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    # T2-RECORD-PIN item 2: the plan may have rewritten the pin after the flags
+    # were checked (the reviewer override, a re-resolved route, a fenced free
+    # head) - a launch on a model nobody asked for is refused HERE, before the
+    # clone, the worker record and the client. Checked in a dry run too: that is
+    # exactly what the MCP spawn path preflights with, so a swap cannot slip
+    # past the server either.
+    # T2-RECORD-PIN item 2: a plan that would launch a model nobody asked for is
+    # refused before anything starts. Computed here, enforced after the leaf and
+    # tier verdicts (so the isolation refusal still speaks first) and announced
+    # by a --dry-run preview instead of failing it — a preview touches nothing,
+    # and the MCP preflight reads the note the same run would refuse on.
+    mismatch = model_mismatch_refusal(plan)
     route = plan["route"]
     # KEYDENY3b item 2 / KEYDENY3g: a spawned tier gets no option to work in the
     # caller's checkout. Read *after* build_plan because that is where a client
@@ -9449,6 +9559,22 @@ def cmd_run(args, cfg: dict) -> int:
         attempt_start = time.time()
         run_rc = None
         missing = None
+        # T2-RECORD-PIN item 2: the second net, for the one plan the check
+        # before the clone never saw — a fallthrough re-plan (next route, next
+        # free model) built AFTER the first attempt stopped. The record this
+        # attempt just wrote carries the reason and the rc, and the client is
+        # not started. The first attempt cannot get here: the same predicate on
+        # the same plan refused it before any clone existed.
+        mismatch = model_mismatch_refusal(plan)
+        if mismatch is not None:
+            if worker_id is not None:
+                try:
+                    _worker_record_end(workers, worker_id, worker_rec, 2)
+                except OSError:
+                    pass  # the reason is already on the record; rc 2 stands
+            print("autoos-agent: %s" % mismatch, file=sys.stderr)
+            rc = 2
+            break
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                                 capture=capture,
