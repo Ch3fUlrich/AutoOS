@@ -3669,6 +3669,48 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
         # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
 
 
+class ZcodeLocalProcessProviderTests(unittest.TestCase):
+    """GWDIAG 2026-10-02 (D-323 items 2 and 4): zcode://app-server/stdio is a
+    LOCAL process the gateway must spawn, not an HTTP provider. The app is not
+    installed on the gateway host (502 'spawn zcode ENOENT'), so the provider is
+    registered unavailable with no model, leg, route or combo reference; and the
+    bazaarlink credit note that motivated keeping its legs on auto:free is
+    pinned here. These tests can fail on purpose.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_zcode_is_registered_unavailable_with_the_diagnosis(self):
+        zcode = self.reg["providers"]["zcode"]
+        self.assertFalse(zcode["available"])
+        self.assertEqual(zcode["id"], "zcode")
+        self.assertIn("spawn zcode ENOENT", zcode["$comment"])
+        self.assertIn("OS-72", zcode["$comment"])
+
+    def test_zcode_is_referenced_nowhere_else(self):
+        # The only allowed home for the string is providers.zcode itself: every
+        # other top-level section (models, routes, policy, clients, version) and
+        # every other provider must be clean.
+        others = {k: v for k, v in self.reg.items() if k != "providers"}
+        self.assertNotIn("zcode", json.dumps(others, sort_keys=True))
+        other_providers = {k: v for k, v in self.reg["providers"].items()
+                           if k != "zcode"}
+        self.assertNotIn("zcode", json.dumps(other_providers, sort_keys=True))
+        # ... and, belt and braces, no rendered combo pins it.
+        rendered = registry.render_omniroute(self.reg)
+        self.assertNotIn("zcode", json.dumps(rendered["combos"], sort_keys=True))
+        # (the one allowed home really does carry the string)
+        self.assertIn("zcode", json.dumps(self.reg["providers"]["zcode"]))
+
+    def test_bazaarlink_probes_the_free_model_and_notes_the_credit_trap(self):
+        bzl = self.reg["providers"]["bazaarlink"]
+        self.assertEqual(bzl["provider_data"],
+                         {"validationModelId": "auto:free"})
+        self.assertIn("credits exhausted", bzl["$comment"])
+
+
 class ComboContractTests(unittest.TestCase):
     """TORDER 2026-10-01: tools/combo-contract.py gate runs in pytest (fail-closed)."""
 
