@@ -813,10 +813,12 @@ class T1CreditFix12N3BadLinesExactTests(unittest.TestCase):
                                    return_value=path):
                 # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
                 # (stale/refuse), so the exact-guard pin replays the
-                # already-recorded 08:00 reading -- dedupe records nothing
+                # already-recorded 10:00 reading -- dedupe records nothing
                 # new -- and the surviving series still governs exactly.
+                # CREDIT-16 (D-274): replays the LATEST stamp (equal counts
+                # as fresh); an 08:00 replay would now be an old reading.
                 with mock.patch.object(usage, "parse_provider_limits",
-                                       return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0}]):
+                                       return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 40.0}]):
                     out = usage.overlay_balance_guards(
                         reg, guards, "http://127.0.0.1:1",
                         lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
