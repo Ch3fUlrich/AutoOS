@@ -9646,12 +9646,71 @@ class ReadyCommandTests(unittest.TestCase):
             argv += ["--repo", repo]
         argv += ["--registry", self.registry_path, *extra]
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.agent.main(argv)
+        # T0-FREEZE: the sixth gate reads main CI via gh; these fixtures predate
+        # it and own no main run, so they stub it green — the gate itself is
+        # covered by tests/test_ready_main_freeze.py.
+        with mock.patch.object(self.agent, "main_ci_status",
+                               lambda runner=None: ("success", "999", None)):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.agent.main(argv)
         return rc, out.getvalue(), err.getvalue()
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
     NOT_PUSHED_SHA = "0" * 40
+
+    def test_main_ci_gate_is_reached_through_a_fake_gh_runner(self):
+        """T0-FREEZE-2 F3: the sixth gate runs for real — no main_ci_status stub.
+
+        The gh read is faked one level down, at the subprocess runner
+        main_ci_status itself calls, with the same CompletedProcess fakes
+        CIRunStatusTests uses (class at line 10031): a red main refuses exit 1
+        naming main-ci-red in the real cmd_ready output, and the same red main
+        with a declared AUTOOS_FIXES_MAIN=<lane>@<sha> waiver is allowed with
+        the lane@sha logged.
+        """
+        repo, sha = self.make_repo()
+        real_run = self.agent.subprocess.run
+
+        def fake_run(argv, **kw):
+            if list(argv[:3]) == ["gh", "run", "list"]:
+                return subprocess.CompletedProcess(argv, 0,
+                                                   stdout=fake_run.payload,
+                                                   stderr="")
+            return real_run(argv, **kw)
+
+        def drive(payload, extra=(), env_value=None):
+            fake_run.payload = payload
+            inbox = self.make_inbox("")
+            record = self.write_record(*self.READY_RECORD)
+            argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha,
+                    "--inbox", inbox, "--repo", repo,
+                    "--registry", self.registry_path, *extra]
+            outer = dict(os.environ)
+            outer.pop("AUTOOS_FIXES_MAIN", None)
+            if env_value is not None:
+                outer["AUTOOS_FIXES_MAIN"] = env_value
+            out, err = io.StringIO(), io.StringIO()
+            with mock.patch.dict(os.environ, outer, clear=True), \
+                    mock.patch.object(self.agent.subprocess, "run", fake_run):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = self.agent.main(argv)
+            return rc, out.getvalue(), err.getvalue(), self.read_inbox(inbox)
+
+        red = json.dumps([{"databaseId": 777, "conclusion": "failure",
+                           "headSha": "deadbeef"}])
+        rc, out, err, inbox = drive(red)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("main-ci-red", out + err)
+        self.assertIn("777", out + err)
+        self.assertEqual(inbox, "")
+
+        declared = "%s@%s" % (self.BRANCH, sha)
+        rc, out, err, inbox = drive(red, extra=("--fixes-main",),
+                                    env_value=declared)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(declared, out)
+        self.assertEqual(len(inbox.splitlines()), 1, out + err + inbox)
+        self.assertIn(' fixes_main="%s"' % declared, inbox.rstrip("\n"))
 
     # --- the review gate ----------------------------------------------------
 

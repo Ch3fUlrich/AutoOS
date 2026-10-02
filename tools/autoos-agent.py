@@ -3847,10 +3847,74 @@ def ci_run_status(run_id, runner=None):
     return data.get("conclusion"), head_sha, None
 
 
+def main_ci_status(repo=None, runner=None):
+    """``(conclusion, run_id, error)`` — what main's latest completed CI run says.
+
+    WHY: main was red on 13 consecutive pushes while takes were merged anyway,
+    so a lane that lands on a red main certifies a commit against a broken base
+    (source: plan v3 T0-FREEZE). The gate is fail-closed: an unreadable gh is
+    exit 2, never an allow.
+
+    ``gh run list --branch main --status completed --limit 1 --workflow
+    ci.yml --event push --json
+    databaseId,conclusion,headSha``, through the same injectable-runner pattern
+    ``ci_run_status`` uses for ``--ci-run`` (no new network style). Unlike ``gh
+    run view``'s single object, ``gh run list`` prints a JSON ARRAY of such
+    objects; the head row carries the latest completed run on main. Mirrors
+    ``ci_run_status``: a non-None ``error`` means the question was never
+    answered, which is a different exit code from a run that came back red.
+
+    T0-FREEZE-5 H6: ``repo`` is the lane's repo directory -- the same
+    ``args.repo or os.getcwd()`` every other gate in ``cmd_ready`` reads --
+    and gh runs with cwd=<that dir>. WHY: ``gh run list`` resolves the
+    repository from the PROCESS working directory, so without this the gate
+    evaluated the wrong repo's main CI whenever ``--repo`` named another
+    checkout. A dir that is not a git repo makes gh itself fail, which stays
+    fail-closed (non-None ``error`` -> exit 2). Repo-first/runner-second keeps
+    the pre-H6 ``lambda runner=None`` stubs working: a positional repo binds
+    their single parameter; a positional runner (callable) is still honoured.
+    The runner gains the ``cwd`` kwarg; existing ``def runner(argv, **kw)``
+    fakes accept it untouched.
+    """
+    if callable(repo) and runner is None:
+        runner, repo = repo, None
+    if repo is None:
+        repo = os.getcwd()
+    runner = runner or subprocess.run
+    argv = ["gh", "run", "list", "--branch", "main", "--status", "completed",
+            "--limit", "1", "--workflow", "ci.yml", "--event", "push",
+            "--json", "databaseId,conclusion,headSha"]
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=60,
+                      cwd=repo)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "%s" % exc
+    if proc.returncode != 0:
+        return None, None, ((proc.stderr or proc.stdout or "").strip()
+                            or "gh run list exited %d" % proc.returncode)
+    try:
+        data = json.loads(proc.stdout)
+    except ValueError as exc:
+        return None, None, "gh run list printed output that is not JSON: %s" % exc
+    if not isinstance(data, list) or not data:
+        return None, None, "gh run list answered with no completed runs on main"
+    row = data[0]
+    if not isinstance(row, dict):
+        return None, None, "gh run list answered with a row that is not JSON: %r" % (row,)
+    run_id = row.get("databaseId")
+    if run_id is None:
+        return None, None, ("gh run list answered with no databaseId (conclusion %r)"
+                            % row.get("conclusion"))
+    conclusion = row.get("conclusion")
+    if not conclusion:
+        return None, None, ("gh run list answered with no conclusion for run %s" % run_id)
+    return conclusion, str(run_id), None
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Five gates, in this order, each naming itself when it fails: the record
+    Six gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
     for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
     finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
@@ -3860,7 +3924,23 @@ def cmd_ready(args) -> int:
     record (D-110): the reviews say the lane was looked at and the sha says it
     shipped, but only that record says it was *run*, so a lane pushed with
     ``git push --no-verify`` — which steps over every hook — is refused here
-    unless an orchestrator names a reason with ``--allow-unverified``. The gates
+    unless an orchestrator names a reason with ``--allow-unverified``. The sixth
+    (T0-FREEZE, plan v3) refuses while main CI is red: the latest completed
+    push run of the CI workflow on ``main`` must conclude ``success``, else the lane is refused
+    as ``main-ci-red`` naming the run id — unless the lane fixes main itself,
+    declared with ``--fixes-main`` AND the environment declaring
+    ``AUTOOS_FIXES_MAIN=<lane>@<sha>`` whose sha equals ``--sha`` (T0-FREEZE-2:
+    a bare flag, or a declaration for a different sha, is refused as
+    ``waiver-not-declared`` saying the waiver was not declared and the CI was not
+    consulted; a declared waiver is
+    logged as ``<lane>@<sha>`` on the ready line's note and as
+    ``fixes_main="<lane>@<sha>"`` on the ready line itself, copying the
+    ``unverified="<reason>"`` style so the inbox timestamp parser still
+    reads the line). The bypass is a CLI
+    flag plus an orchestrator-owned env declaration, not a record
+    field, because the record's machine-readable vocabulary is the closed
+    ``REVIEW_ENTRY_FIELDS`` list and a free-form token there would be ignored
+    prose. The gates
     live in code because the hand-written claim was wrong once -- L1-main refused
     a `ready` line whose record had no reviews (inbox 00:31:52Z).
 
@@ -3928,11 +4008,79 @@ def cmd_ready(args) -> int:
         unverified_field = ' unverified="%s"' % waived
         print("note: --allow-unverified -- %s carries no green pre-push record, and "
               "the reason written on the line is: %s" % (args.sha[:12], waived))
-    line = "%s ready %s %s reviews: %s | %s%s%s" % (
+    # T0-FREEZE (plan v3): no lane merges while main CI is red, except the lane
+    # that fixes main. Runs after the pre-push gate so each refusal names the
+    # gate the caller actually hit; fail-closed like every other unreadable gate.
+    # T0-FREEZE-2 F1: --fixes-main alone waives nothing. The waiver is honoured
+    # ONLY when the environment declares AUTOOS_FIXES_MAIN=<lane>@<sha> whose
+    # sha equals the --sha being readied — a bare flag, or a declaration for a
+    # different sha, is refused here naming waiver-not-declared. WHY the env dance: the
+    # flag is typed by whoever runs the command (including a writer clearing
+    # its own gate), while the env is set by the orchestrator that owns the
+    # lane — so only a lane whose owner declared the fix can claim it.
+    # T0-FREEZE-3: the env value is stripped of surrounding whitespace before
+    # parsing; the split partitions at the FIRST '@' (a second '@' stays in
+    # the sha half, which then mismatches and is refused); the lane half must
+    # equal args.branch EXACTLY or equal its basename after the last '/'
+    # (documented: exact or basename), and a whitespace-only lane is refused
+    # like a missing one. A sha-matching declaration for another lane is
+    # refused naming waiver-not-declared and 'waiver lane mismatch'. The waiver field
+    # copies the unverified="..." style so inbox readers still parse the line.
+    fixes_waiver = ""
+    fixes_field = ""
+    if getattr(args, "fixes_main", False):
+        declared = os.environ.get("AUTOOS_FIXES_MAIN", "").strip()
+        lane, sep, declared_sha = declared.partition("@")
+        if not sep or not lane or not lane.strip() or declared_sha != args.sha:
+            print("ready: not appended -- waiver-not-declared: --fixes-main was given "
+                  "but the waiver was not declared for this sha (want "
+                  "AUTOOS_FIXES_MAIN=<lane>@%s); CI was not consulted; merge "
+                  "nothing until main is green" % args.sha)
+            return 1
+        # T0-FREEZE-4: the waiver rides the durable line as fixes_main="<lane>@<sha>",
+        # so a lane carrying a quote, a backslash, whitespace or a control
+        # character would break the quoting (or the inbox parser). Refused here,
+        # before it is written, naming the problem.
+        if any(c == '"' or c == "\\" or c.isspace() or ord(c) < 0x20
+               or ord(c) == 0x7f for c in lane):
+            print("ready: not appended -- waiver-not-declared: waiver lane %r "
+                  "cannot be written on the ready line (it contains a quote, "
+                  "backslash, whitespace or control character); declare a "
+                  "plain lane name" % lane)
+            return 1
+        want_exact = args.branch
+        want_base = args.branch.rsplit("/", 1)[-1]
+        if lane != want_exact and lane != want_base:
+            print("ready: not appended -- waiver-not-declared: waiver lane mismatch: "
+                  "AUTOOS_FIXES_MAIN declares lane %r but the lane being "
+                  "readied is %r (want exact match or basename after the last "
+                  "'/'); CI was not consulted; merge nothing until main is "
+                  "green" % (lane, args.branch))
+            return 1
+        fixes_waiver = declared
+        fixes_field = ' fixes_main="%s"' % fixes_waiver
+    if not fixes_waiver:
+        # T0-FREEZE-5 H6: positional repo binds pre-H6 `lambda runner=None`
+        # stubs; the real function reads it as the gh cwd (see main_ci_status).
+        main_conclusion, main_run_id, main_error = main_ci_status(
+            args.repo or os.getcwd())
+        if main_error:
+            print("ready: cannot read main CI: %s" % main_error, file=sys.stderr)
+            return 2
+        if main_conclusion != "success":
+            print("ready: not appended -- main-ci-red: main CI run %s is %s, "
+                  "not success; merge nothing until main is green, or declare "
+                  "the fix with --fixes-main AND env "
+                  "AUTOOS_FIXES_MAIN=<lane>@<sha>" % (main_run_id, main_conclusion))
+            return 1
+    else:
+        print("note: --fixes-main -- %s declares it fixes main, "
+              "so the main-ci-red gate is waived" % fixes_waiver)
+    line = "%s ready %s %s reviews: %s | %s%s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
         report["cross_family"]["detail"], report["final"]["detail"], ci_field,
-        unverified_field)
+        unverified_field, fixes_field)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -9645,6 +9793,14 @@ def _parser_ready(sub):
                               "another host or pushed past its own hooks: the reason is "
                               "written on the inbox line as unverified=\"<reason>\", and "
                               "a writer clearing its own gate is not what this is for")
+    ready_p.add_argument("--fixes-main", dest="fixes_main", action="store_true",
+                         help="this lane fixes main itself: waive the main-ci-red gate "
+                              "(T0-FREEZE). Honoured only with AUTOOS_FIXES_MAIN="
+                              "<lane>@<sha> in the environment naming this lane's sha; "
+                              "a bare flag is refused. Without a declared waiver a red "
+                              "main freezes every lane; with it the lane is allowed "
+                              "onto a red main and one note logs the <lane>@<sha> "
+                              "and the inbox line carries fixes_main=\"<lane>@<sha>\"")
 
 
 def _parser_inbox(sub):
