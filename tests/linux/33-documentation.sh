@@ -697,6 +697,10 @@ if it "t1-credit fix10: real meter without the manage key, paid cap, cache-read 
     out="$(python3 tests/test_t1_credit_fix10.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "t1-credit fix14: stale balance ledger fails closed (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix14.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Credential-JSON ignore gate (operator 2026-10-01): asserts .gitignore covers
 # configuration/*-credentials*.json and no credential-shaped path is tracked.
 # Path and git state only; never reads a credential's contents.
