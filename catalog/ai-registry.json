@@ -1447,18 +1447,18 @@
       "id": "XiaomiMiMo/MiMo-V2.6-Flash",
       "display_name": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
       "family": "xiaomi",
-      "context_advertised": 262144,
+      "context_advertised": 131072,
       "context_usable": {
         "source": "default",
-        "tokens": 131072
+        "tokens": 65536
       },
-      "output_max": 32768,
-      "reasoning": true,
+      "output_max": 16384,
+      "reasoning": false,
       "effort_ladder": [],
       "tool_calls": "unproven",
       "price_in": 0,
       "price_out": 0,
-      "$comment": "DEEPINFRA-WIRE-MIN (operator D-366/D-381, 2026-10-02): DeepInfra's MiMo-V2.6-Flash as an opencode writer pin through the gateway, served as 'deepinfra/XiaomiMiMo/MiMo-V2.6-Flash' (call-log status 200 on 2026-09-30). Price unsourced; prepaid hard stop caps spend: price_in/price_out are 0 because no DeepInfra price is on file, so a dollar estimate reads this leg as free - the $5 prepaid balance (auto top-up removed, providers.deepinfra.monthly_cap_usd) is the real stop. tool_calls stays unproven until a live multi-turn smoke proves it. The 262144 window and 32768 output are the opencode.jsonc hand-entry numbers, not measured here. trains_on_prompts is unset and inherits providers.deepinfra (null = unverified), so private_safe() fails closed and this leg reaches no -clean route. Not on any route's legs yet."
+      "$comment": "DEEPINFRA-WIRE-MIN (operator D-366/D-381, 2026-10-02): DeepInfra's MiMo-V2.6-Flash as an opencode writer pin through the gateway, served as 'deepinfra/XiaomiMiMo/MiMo-V2.6-Flash' (call-log status 200 on 2026-09-30). Price unsourced; prepaid hard stop caps spend: price_in/price_out are 0 because no DeepInfra price is on file, so a dollar estimate reads this leg as free - the $5 prepaid balance (auto top-up removed, providers.deepinfra.monthly_cap_usd) is the real stop. tool_calls stays unproven until a live multi-turn smoke proves it. The 262144 window and 32768 output are the opencode.jsonc hand-entry numbers, not measured here. trains_on_prompts is unset and inherits providers.deepinfra (null = unverified), so private_safe() fails closed and this leg reaches no -clean route. Not on any route's legs yet. unmeasured defaults; probe pending (D-311)"
     },
     "inclusionAI/Ling-3.0-flash": {
       "id": "inclusionAI/Ling-3.0-flash",

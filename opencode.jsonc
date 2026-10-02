@@ -457,7 +457,7 @@
         "deepinfra-mimo-v2.6-flash": {
           "modelID": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
           "name": "deepinfra-mimo-v2.6-flash — direct DeepInfra (prepaid $5, hard stop; public work only, not private-safe)",
-          "limit": { "context": 262144, "output": 32768 }
+          "limit": { "context": 131072, "output": 16384 }
         },
         "vertex-3.8-flash": {
           "modelID": "vertex/gemini-3.8-flash",
