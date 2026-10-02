@@ -249,6 +249,44 @@ class BHelperFallbackTests(unittest.TestCase):
         self.assertIn("ValueError", guards["deepseek"]["note"])
         self.assertNotEqual(guards.get("ovhcloud", {}).get("state"), "refuse")
 
+    def test_r2_nonhelper_apply_cap_raise_refuses_paid_keeps_credit(self):
+        # CREDIT-16 R2 (D-274): non-helper branch (fetch given, helper
+        # None) -- apply_paid_local_cap raising still fail-closes paid
+        # with TYPE only, credit stays fail-open, no crash.
+        reg = self._reg()
+        def _boom_fetch(*a, **k):
+            raise usage.UsageError("down (UsageError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(usage, "apply_paid_local_cap",
+                                   side_effect=RuntimeError("kaput")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=_boom_fetch, env=env, helper=None)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("RuntimeError", guards["deepseek"]["note"])
+        self.assertNotIn("kaput", guards["deepseek"]["note"])
+        self.assertNotEqual(guards["ovhcloud"]["state"], "refuse")
+
+    def test_r2_nonhelper_unreadable_raise_refuses_paid_keeps_credit(self):
+        # CREDIT-16 R2 (D-274): non-helper branch -- _credit_guards_
+        # unreadable raising still fail-closes paid with TYPE only.
+        reg = self._reg()
+        def _boom_fetch(*a, **k):
+            raise usage.UsageError("down (UsageError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(agent, "_credit_guards_unreadable",
+                                   side_effect=ValueError("bad")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=_boom_fetch, env=env, helper=None)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("ValueError", guards["deepseek"]["note"])
+        self.assertNotEqual(guards.get("ovhcloud", {}).get("state"), "refuse")
+
 
 class CMinorTests(unittest.TestCase):
     def test_c1_bad_since_is_stale_with_placeholder(self):
