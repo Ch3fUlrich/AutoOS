@@ -278,6 +278,30 @@ class ReviewCallTests(unittest.TestCase):
         self.assertNotIn("tools", body)
         self.assert_no_leak(result)
 
+    def test_title_with_newline_and_colon_never_reaches_a_header(self):
+        # A title a caller could paste (`bad\ntitle: x`) is NOT header-safe:
+        # session_tag() must fall back to the prompt fingerprint
+        # (SESSION_TAG_RE fallback) instead of carrying the raw title, so the
+        # received attribution header stays charset-clean and no received
+        # header value gains a newline (header injection).
+        gateway = self.start_gateway()
+        result = self.run_tool(gateway, "--title", "bad\ntitle: x")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 1)
+        received = gateway.requests[0]["headers"]
+        session_id = received.get("x-omniroute-session-id")
+        self.assertIsNotNone(session_id, repr(received))
+        self.assertRegex(session_id, r"^review/[A-Za-z0-9._/-]+$")
+        self.assertEqual(session_id,
+                         "review/" + hashlib.sha256(
+                             PROMPT.encode("utf-8")).hexdigest()[:12]
+                         + "/" + self.read_evidence()["run_id"])
+        for name, value in received.items():
+            self.assertNotIn("\n", value, "newline in received header %s" % name)
+            self.assertNotIn("\r", value, "CR in received header %s" % name)
+        self.assertRegex(received.get("x-autoos-run-id", ""), RUN_ID_RE)
+        self.assert_no_leak(result)
+
     def test_temperature_is_sent_only_when_the_flag_is_given(self):
         gateway = self.start_gateway()
         result = self.run_tool(gateway, "--temperature", "0.2")

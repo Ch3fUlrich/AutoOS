@@ -300,7 +300,7 @@ def main(argv=None) -> int:
             raw_prompt = handle.read()
     except OSError as exc:
         print("review-call: cannot read --prompt-file: %s"
-              % (exc.strerror or exc), file=sys.stderr)
+              % mask_key(str(exc), key), file=sys.stderr)
         return 2
     try:
         prompt = raw_prompt.decode("utf-8")
@@ -312,7 +312,7 @@ def main(argv=None) -> int:
         os.makedirs(args.out_dir, exist_ok=True)
     except OSError as exc:
         print("review-call: cannot create --out-dir: %s"
-              % (exc.strerror or exc), file=sys.stderr)
+              % mask_key(str(exc), key), file=sys.stderr)
         return 2
 
     prompt_sha256 = hashlib.sha256(raw_prompt).hexdigest()
@@ -424,7 +424,7 @@ def main(argv=None) -> int:
             handle.write("\n")
     except OSError as exc:
         print("review-call: cannot write output: %s"
-              % (exc.strerror or exc), file=sys.stderr)
+              % mask_key(str(exc), key), file=sys.stderr)
         return 4
 
     # Truncated or absent answer: evidence.json already carries finish_reason,
