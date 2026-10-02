@@ -8906,19 +8906,24 @@ class GatewayCooldownStopTests(unittest.TestCase):
         self.assertEqual(list(self.state()["providers"]), ["scaleway"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
-        # t2-worker-clean has no gemini leg; naming a model the route does not
-        # serve falls back to the first servable leg, as an unnamed stop does.
-        # The fallback leg is registry data, so the expectation is read from it
-        # rather than pinned to one provider's name (DSBACK 2026-09-28 moved it
-        # from opencode-zen/… to deepseek/deepseek-flash).
+        # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
+        # the trial-first clean routes): t2-worker-clean HAS a gemini leg now,
+        # vertex/gemini-3.8-flash serves gemini-3.8-flash alone, and naming it
+        # correctly benches vertex_ai. The intent stands -- naming a model the
+        # route does not serve falls back to the first live leg, as an unnamed
+        # stop does -- pinned here on gemini-3.7-flash-high, which no clean leg
+        # serves. The fallback leg is registry data, so the expectation is read
+        # from it rather than pinned to one provider's name (DSBACK 2026-09-28
+        # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
+        # it to the ovhcloud head leg).
         legs = self.registry["routes"]["t2-worker-clean"]["legs"]
         named = self.agent.stop_provider_id(
-            "Error: [429] All credentials for model gemini-3.8-flash are "
+            "Error: [429] All credentials for model gemini-3.7-flash-high are "
             "cooling down (reset after 37s)", self.registry, legs)
         unnamed = self.agent.stop_provider_id(
             "Error: [429] All credentials are cooling down (reset after 37s)",
             self.registry, legs)
-        self.assertEqual(named, "deepseek")
+        self.assertEqual(named, "ovhcloud")
         self.assertEqual(named, unnamed,
                          "an unmatched model name must attribute exactly as an "
                          "unnamed stop does, to the route's first live leg")
