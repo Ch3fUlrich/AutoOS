@@ -2297,6 +2297,12 @@ class GatewayOrderTests(unittest.TestCase):
                 self.assertFalse(leg.startswith("qoder/"), leg)
 
     def test_agentic_card_never_resolves_to_a_leg_without_proven_tool_calls(self):
+        # CIGREEN: expectation moved by ffe384a0 (credit spend guard: the only
+        # overlay-proven clean head, ovhcloud/gpt-oss-120b, is credit-unpriced
+        # and refused, so proving just it fail-closes to None) and 35148c5c
+        # (CLEAN put that ovh head on -clean). Prove the priced private-safe
+        # leg ovhcloud/Qwen3.8-27B instead: the plan must then land on it, never
+        # on an unproven leg.
         # Brief item 5: "an agentic card never picks a leg without
         # tool_calls." New legs default to tool_calls: unproven (D20 - no
         # value enters without evidence) until promoted from a probe
@@ -2304,10 +2310,11 @@ class GatewayOrderTests(unittest.TestCase):
         # (tools/autoos_resolver.py usable_legs) still holds it for an
         # implement (agentic) card over the now-larger real registry, using
         # the same inline overlay shape PlanTests._inline_toolcalls_overlay
-        # builds (the -clean head leg proven, every other real leg explicitly
-        # unproven).
+        # builds (every other real leg explicitly unproven).
         registry = self.registry()
         overlay = PlanTests._inline_toolcalls_overlay(registry)
+        overlay["legs"]["ovhcloud/Qwen3.8-27B"] = {
+            "tool_calls": {"value": "proven"}}
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "public"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
@@ -2318,11 +2325,16 @@ class GatewayOrderTests(unittest.TestCase):
                         "muse-spark", datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc))
         self.assertIsNotNone(result["route"], result)
         # result["leg"] is the route's first *usable* leg (per-leg tool_calls
-        # filter already applied by usable_legs/score_route), not merely its
-        # first serving one - every leg but clean_head_leg(registry) is
-        # explicitly unproven in this overlay, so that is the only leg an
-        # agentic (implement) card may land on.
-        self.assertEqual(result["leg"], clean_head_leg(registry))
+        # filter already applied by usable_legs/score_route): the priced
+        # private-safe leg is the only overlay-proven, credit-priced leg, so
+        # an agentic (implement) card must land on exactly it.
+        self.assertEqual(result["leg"], "ovhcloud/Qwen3.8-27B", result)
+        provider_id, model_id = registry_tool.resolve_leg(
+            result["leg"], registry)
+        effective = (overlay["legs"].get(result["leg"], {})
+                     .get("tool_calls", {}).get("value")
+                     or registry["models"][model_id].get("tool_calls"))
+        self.assertEqual(effective, "proven", result["leg"])
 
 
 class DecomposeTests(unittest.TestCase):
