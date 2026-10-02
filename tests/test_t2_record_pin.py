@@ -352,6 +352,25 @@ class PinQualifyTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("not in the free pool", r.stderr)
 
+    def test_a_free_prefixed_pin_declared_in_opencode_jsonc_is_allowed(self):
+        # A --free pin with '/' that is declared in opencode.jsonc (e.g.
+        # omniroute/or-qwen3.8-27b-free) should be allowed even if not in
+        # the registry's free_client_models (which only has opencode's zen models).
+        r = plan_of("--client", "opencode", "--free", "--model",
+                    QUALIFIED_OR, "t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # The plan should show the qualified model
+        self.assertIn("--model %s " % QUALIFIED_OR, r.stdout)
+
+    def test_a_free_prefixed_pin_undeclared_is_refused(self):
+        # A --free pin with '/' that is NOT declared in opencode.jsonc
+        # should be refused (not in free pool, not declared)
+        r = plan_of("--client", "opencode", "--free", "--model",
+                    "omniroute/or-nonexistent-free", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        # Should say not in free pool AND not declared
+        self.assertIn("not in the free pool", r.stderr)
+
 
 class ReviewTierWriteTests(unittest.TestCase):
     """Item 4: review-only tier 3 does not run an implement task."""
