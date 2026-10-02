@@ -4802,8 +4802,14 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
             # recorded with the current stamp. Credit guards keep their
             # fail-open fallback; only paid refuses. (Unforeseen-bug rows
             # failures take the `guard error` path below, untouched.)
-            guards = usage_mod.refuse_paid_without_balance_read(
-                registry, guards, env, now)
+            # Rework 2 MINOR-2 (D-274): the refuse call itself must never
+            # crash the plan -- ANY raise refuses paid with the TYPE named.
+            try:
+                guards = usage_mod.refuse_paid_without_balance_read(
+                    registry, guards, env, now)
+            except Exception as exc2:  # noqa: BLE001 - fail closed per D-274
+                guards = usage_mod.refuse_paid_on_overlay_error(
+                    registry, guards, type(exc2).__name__)
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
         # surface as its own `guard error` state -- kept for credit, kept for
@@ -4811,7 +4817,12 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         # CREDIT-10 per D-240), explain line carries the TYPE NAME only --
         # never silently `unknown` (which would read as a gateway outage) or
         # `ok`.
+        # T1-CREDIT-FIX-14 rework 2 MINOR-3 (D-274): paid is never governed
+        # without a valid read -- refuse paid here too (TYPE NAME only in
+        # the reason); credit guards keep their fail-open `guard error`.
         guards = _credit_guard_error(registry, type(exc).__name__)
+        guards = usage_mod.refuse_paid_on_overlay_error(
+            registry, guards, type(exc).__name__)
     if use_helper and rows_source is not None:
         # T1-CREDIT-FIX-10 M4 (D-253): the scheduled provider balances are
         # the paid meter ... (see `usage_mod.overlay_balance_guards`).

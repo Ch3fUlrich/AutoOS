@@ -1453,8 +1453,11 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
     untouched (no history to distrust -- behaves as before). Returns the
     refused provider ids so the caller never merges a meter over them.
     A marker write failure (OSError) propagates -- fail closed."""
+    # T1-CREDIT-FIX-14 rework 2 MAJOR-1 (D-274): only a STAMPED reading
+    # counts as read -- an entry with a missing or garbage fetchedAt parses
+    # but is dropped on load, so it must not shield its provider here.
     fresh_ids = {r.get("provider") for r in (readings or [])
-                 if isinstance(r, dict)}
+                 if isinstance(r, dict) and _reading_ts(r) is not None}
     series_ids = set()
     for r in (ledger or []):
         if not isinstance(r, dict):
@@ -1756,7 +1759,12 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
     readings = parse_provider_limits(payload, registry)
-    if not readings:
+    # T1-CREDIT-FIX-14 rework 2 MAJOR-1 (D-274): a reading without a
+    # parseable stamp is unusable (the loader drops it) -- a payload with NO
+    # usable reading at all is an empty payload: STALE, never clearing.
+    usable = [r for r in (readings or [])
+              if isinstance(r, dict) and _reading_ts(r) is not None]
+    if not usable:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
     try:
@@ -1778,16 +1786,17 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
             "future-dated provider balance reading, paid leg refused")
     try:
         newly_stale = _mark_missing_provider_reads(
-            registry, guards, path, readings, ledger, since, now)
+            registry, guards, path, usable, ledger, since, now)
     except OSError:
         return _refuse_stale(None, "provider balance unreadable, "
                                    "paid leg refused")
     try:
         # A reading arrived: the read succeeded, so the global marker (when
         # set) clears -- while a provider this payload did not name keeps its
-        # own mark until THAT provider reads (see above).
+        # own mark until THAT provider reads (see above). Only a USABLE
+        # (stamped) reading clears its provider's mark (MAJOR-1).
         _clear_balance_stale(path, now)
-        for r in (readings or []):
+        for r in usable:
             if isinstance(r, dict) and isinstance(r.get("provider"), str):
                 _clear_balance_stale(path, now, r["provider"])
     except OSError:
