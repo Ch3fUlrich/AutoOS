@@ -3260,6 +3260,7 @@ _aistack() {
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
         -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
+        -u AUTOOS_ZCODE_DIR -u AUTOOS_ZCODE_MOUNT_MODE \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -3306,6 +3307,139 @@ PY
 if it "aistack: compose template keeps the hardening contract"; then
     out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$AISTACK/compose.yml" 2>&1)" && rc=0 || rc=$?
     if (( rc == 0 )); then pass; else fail "$out"; fi
+fi
+
+# ─── The optional ZCode remote-server bundle (compose.zcode.yml) ───────────
+# The desktop app drops its bundle (server/node + server/zcode-server.cjs) and
+# the ZCode login into one host directory ($HOME/.zcode). Only the gateway
+# container mounts it, only as long as zcode-server.cjs is really a regular
+# file there, and every other host must keep today's single `-f` compose call.
+# _aistack_compose_up <sandbox>: the `compose ... up -d` line of docker.log.
+_aistack_compose_up() { grep -m1 '^compose .*up -d' "$1/docker.log" 2>/dev/null; }
+# _aistack_f_count <line>: how many -f files that compose call carried.
+_aistack_f_count() { tr ' ' '\n' <<<"$1" | grep -cx -- '-f'; }
+
+if it "aistack: the ZCode server bundle adds compose.zcode.yml after compose.yml"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    [[ -n "$line" ]] || { ok=0; echo "no compose up logged: $(tr '\n' '|' <"$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "not two -f flags: [$line]" >&2; }
+    grep -qE -- '-f .*/compose\.yml -f .*/compose\.zcode\.yml' <<<"$line" \
+        || { ok=0; echo "the override did not follow compose.yml: [$line]" >&2; }
+    rm -rf "$d"
+    # AUTOOS_ZCODE_DIR in stack.env is the documented home for the variable:
+    # a directory the file names (not $HOME) must resolve the same way.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_ZCODE_DIR=$d/zcode\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed (stack.env dir)" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "stack.env AUTOOS_ZCODE_DIR was ignored: [$line]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the ZCode override never reached compose"; fi
+fi
+
+if it "aistack: without server/zcode-server.cjs the compose call keeps a single -f"; then
+    ok=1
+    for shape in nodir emptydir nobundle; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"
+        printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        : >"$d/image-exists"
+        case "$shape" in
+            nodir)    : ;;
+            emptydir) mkdir -p "$d/home/.zcode" ;;
+            nobundle) mkdir -p "$d/home/.zcode/server" ;;   # the dir holds no zcode-server.cjs
+        esac
+        _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed ($shape)" >&2; }
+        line="$(_aistack_compose_up "$d")"
+        [[ -n "$line" ]] || { ok=0; echo "no compose up logged ($shape)" >&2; }
+        [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "$shape: not one -f flag: [$line]" >&2; }
+        grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null \
+            && { ok=0; echo "$shape: the override ran without the bundle" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a host without the ZCode bundle got the override"; fi
+fi
+
+if it "aistack: a bogus AUTOOS_ZCODE_MOUNT_MODE falls back to ro with one warning line"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_MOUNT_MODE=bogus up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "the override was dropped over the mode: [$line]" >&2; }
+    n="$(grep -c 'AUTOOS_ZCODE_MOUNT_MODE must be exactly ro or rw' <<<"$out")"
+    [[ "$n" == 1 ]] || { ok=0; echo "expected one warning line, got [$n]: $(grep 'AUTOOS_ZCODE_MOUNT_MODE' <<<"$out" | tr '\n' '|')" >&2; }
+    grep -q 'read-only' <<<"$out" || { ok=0; echo "the warning does not say it fell back to ro" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a bad mount mode never reached the operator"; fi
+fi
+
+if it "aistack: a relative or colon-bearing AUTOOS_ZCODE_DIR skips the override with a warning"; then
+    # A real bundle exists in both cases: path validation - not a missing
+    # bundle - is what has to decide here.
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR=zcode-home up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a relative dir kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a relative dir warned nowhere: $(tr '\n' '|' <<<"$out" | head -c 300)" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a relative dir" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR="$d/zcode:/host" up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a colon-bearing dir kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a colon-bearing dir warned nowhere" >&2; }
+    n="$(grep -c 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out")"
+    [[ "$n" == 1 ]] || { ok=0; echo "expected one warning line, got [$n]" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a colon dir" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a bad AUTOOS_ZCODE_DIR reached docker"; fi
+fi
+
+if it "aistack: compose.zcode.yml names only omniroute, mounts ro by default, and only ai-stack.sh knows .zcode"; then
+    ok=1
+    f="$AISTACK/compose.zcode.yml"
+    if [[ -f "$f" ]]; then
+        # One top-level key (services:), one service (omniroute), one volume.
+        [[ "$(grep -cE '^[A-Za-z][A-Za-z0-9_-]*:' "$f")" == 1 ]] \
+            || { ok=0; echo "top-level keys other than services: $(grep -E '^[A-Za-z][A-Za-z0-9_-]*:' "$f" | tr '\n' '|')" >&2; }
+        svc="$(grep -E '^  [A-Za-z0-9_-]+:' "$f")"
+        [[ "$svc" == "  omniroute:" ]] || { ok=0; echo "services named: [$(tr '\n' '|' <<<"$svc")]" >&2; }
+        vols="$(grep -cE '^[[:space:]]*-[[:space:]]' "$f")"
+        [[ "$vols" == 1 ]] || { ok=0; echo "$vols volume lines, expected 1" >&2; }
+        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/qoder/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
+            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/qoder/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+    else
+        ok=0; echo "missing $f" >&2
+    fi
+    # opencode/openhands must never see the directory: it carries the login.
+    stray="$(grep -rl '\.zcode' "$AISTACK" 2>/dev/null | grep -vE '/(ai-stack\.sh|compose\.zcode\.yml)$')"
+    [[ -z "$stray" ]] || { ok=0; echo "another ai-stack file mentions .zcode: $stray" >&2; }
+    if (( ok )); then pass; else fail "the ZCode mount leaks past the gateway"; fi
 fi
 
 if it "aistack: omniroute compose.yml sets the chat admission gate, the response-start timeout and carries no NODE_OPTIONS"; then

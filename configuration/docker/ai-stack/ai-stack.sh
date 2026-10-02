@@ -399,9 +399,69 @@ effective_bind() {
     printf '%s' "${b:-0.0.0.0}"
 }
 
+# ─── optional ZCode remote-server bundle ───────────────────────────────────
+# The ZCode desktop app installs its remote-server bundle (server/node,
+# server/zcode-server.cjs) - and stores the ZCode login in the same directory -
+# on the host, in $HOME/.zcode by default. OmniRoute finds that path by itself,
+# so compose.zcode.yml makes the host directory appear at /home/qoder/.zcode
+# INSIDE THE GATEWAY CONTAINER ONLY (opencode and openhands never get it) and
+# only while server/zcode-server.cjs is really there: a host without ZCode
+# keeps today's single -f compose call, so `ai-stack.sh up` never changes.
+# Decided once per run, like BIND_OK: the directory is inspected a single time
+# and a bad value prints ONE warning line, not one per compose call.
+ZCODE_DONE=0
+ZCODE_DIR=""     # validated host dir; empty = no override in the next dc()
+ZCODE_MODE="ro"  # validated AUTOOS_ZCODE_MOUNT_MODE handed to compose
+
+# zcode_dir(): where the bundle lives - AUTOOS_ZCODE_DIR from the environment,
+# else from $STACK_ENV (compose resolves it the same way: the shell beats
+# --env-file), else $HOME/.zcode.
+zcode_dir() {
+    local d="${AUTOOS_ZCODE_DIR:-}"
+    [[ -n "$d" ]] || d="$(env_value "$STACK_ENV" AUTOOS_ZCODE_DIR)"
+    printf '%s' "${d:-$HOME/.zcode}"
+}
+
+# zcode_decide(): validate the dir (absolute, no colon, no line break -
+# compose would split or misread any of those in a volume string), then test
+# the ONE file inside it the stack is allowed to look at. The login sits next
+# to that file, so nothing else in the directory is ever read, and the mount
+# defaults to read-only.
+zcode_decide() {
+    local d m
+    (( ZCODE_DONE )) && return 0
+    ZCODE_DONE=1
+    d="$(zcode_dir)"
+    if [[ "$d" != /* || "$d" == *:* || "$d" == *$'\n'* || "$d" == *$'\r'* ]]; then
+        echo "  ! AUTOOS_ZCODE_DIR must be an absolute path without a colon or newline - skipping the ZCode override"
+        return 0
+    fi
+    [[ -f "$d/server/zcode-server.cjs" ]] || return 0
+    m="${AUTOOS_ZCODE_MOUNT_MODE:-}"
+    [[ -n "$m" ]] || m="$(env_value "$STACK_ENV" AUTOOS_ZCODE_MOUNT_MODE)"
+    case "$m" in
+        rw)    ZCODE_MODE=rw ;;
+        ''|ro) ZCODE_MODE=ro ;;
+        *)     ZCODE_MODE=ro
+               echo "  ! AUTOOS_ZCODE_MOUNT_MODE must be exactly ro or rw - mounting the ZCode directory read-only" ;;
+    esac
+    ZCODE_DIR="$d"
+}
+
 dc() {
-    AUTOOS_STACK_BIND="$(effective_bind)" \
-        "$DOCKER" compose --project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml" "$@"
+    zcode_decide
+    local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    if [[ -n "$ZCODE_DIR" ]]; then
+        args+=(-f "$HERE/compose.zcode.yml")
+        # Both variables are exported for this compose call only, so the
+        # override's ${...} interpolation reads exactly what was validated.
+        AUTOOS_STACK_BIND="$(effective_bind)" AUTOOS_ZCODE_DIR="$ZCODE_DIR" \
+            AUTOOS_ZCODE_MOUNT_MODE="$ZCODE_MODE" \
+            "$DOCKER" compose "${args[@]}" "$@"
+    else
+        AUTOOS_STACK_BIND="$(effective_bind)" \
+            "$DOCKER" compose "${args[@]}" "$@"
+    fi
 }
 
 container_running() {
