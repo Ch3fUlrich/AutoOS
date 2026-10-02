@@ -5123,6 +5123,24 @@ Test-Case 't1-credit fix14: stale balance ledger fails closed (unit tests)' {
     Assert-Equal $rc 0 "t1-credit fix14 unit tests failed: $out"
 }
 
+Test-Case 't1-credit fix16: never govern from old data + fail-closed fallbacks (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix16.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix16 unit tests failed: $out"
+}
+
+Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_debtcap_nebius.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "debtcap nebius unit tests failed: $out"
+}
+
 Test-Case 'credential files: vertex/service-account JSONs are ignored, never tracked (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
