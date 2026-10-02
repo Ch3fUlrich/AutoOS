@@ -544,6 +544,41 @@ def is_write_role(card) -> bool:
     return role not in READ_ONLY_CARD_ROLES
 
 
+# T2-RECORD-PIN item 4: tier 3 is the reviewer's seat. The rule in one place,
+# so the CLI's refusal, the MCP spawn's ValueError and every test read the same
+# words (the spawner holds the predicate `is_write_role`, never a second copy).
+REVIEW_TIER_WRITE_REASON = "review-only tier 3 cannot run an implement task"
+
+
+def review_tier_write_refusal(tier, card, read_only: bool = False) -> str | None:
+    """Why tier 3 will not run this task, or None when tier 3 may.
+
+    T2-RECORD-PIN item 4: a run routed to tier 3 exists to produce a verdict,
+    so a task that EDITS (a card naming nothing takes the registry default
+    `implement`, exactly as `is_write_role` reads it) is refused rather than
+    started in a seat whose success is a review. Two ways to say yes are kept
+    open and both are read-only in effect: a review card (`role=review`, a v2
+    `kind=review`/`kind=research`), and `--read-only`, where an unchanged
+    sandbox is the deliverable. Every other tier is untouched — this keys on the
+    tier number alone, never on the leaf flag the isolation gate owns.
+
+    `tier` may be an int, a numeric string or None (an unparsable tier is not
+    this function's error to report: it is not tier 3).
+    """
+    if read_only:
+        return None
+    try:
+        if int(tier) != 3:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not is_write_role(card):
+        return None
+    return ("%s: pass a review card (role=review, kind=review/research) or "
+            "--read-only, or run the task at tier 1 or 2"
+            % REVIEW_TIER_WRITE_REASON)
+
+
 def writer_isolation_refusal(tier, isolate: bool, client: str, card=None,
                              read_only: bool = False) -> str | None:
     """The tier-1 half of the isolate rule: a WRITE run gets no checkout of yours.
@@ -9285,6 +9320,14 @@ def cmd_run(args, cfg: dict) -> int:
                                                              route.get("card")),
                                           card=route.get("card"),
                                           read_only=bool(route.get("read_only")))
+    # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
+    # Computed beside leaf_refusal and never instead of it — the isolation
+    # refusal speaks first (an in-place tier-3 run is refused for isolation,
+    # flag and all), and this one is announced by the preview and enforced
+    # right after the leaf verdict, still before anything is cloned or started.
+    tier_write_refusal = review_tier_write_refusal(
+        route.get("tier"), route.get("card"),
+        read_only=bool(route.get("read_only") or getattr(args, "read_only", False)))
     # REVROUTE (S2) item 2: an authored review card needs an eligible reviewer
     # before anything is started -- a review by the author's own model family is
     # not an independent one, and "everyone is rate-limited" is a wait (rc 9,
@@ -9371,11 +9414,29 @@ def cmd_run(args, cfg: dict) -> int:
         print("env: %s" % (", ".join(env_names) or "-"))
         if leaf_refusal is not None:
             print("note: this run would be refused: %s" % leaf_refusal)
+        if tier_write_refusal is not None:
+            # T2 item 4: the preview still prints the plan (planning touches
+            # nothing), and says plainly that starting it is refused — worded
+            # so it can never be read as the leaf gate's own line above.
+            print("note: spawning this plan is refused: %s" % tier_write_refusal)
+        if mismatch is not None:
+            # T2 item 2: the preview names the swap the real run would refuse.
+            print("note: spawning this plan is refused: %s" % mismatch)
         return 0
     # KEYDENY3b: the leaf fence returns here, after the preview above and before
     # anything is cloned or started.
     if leaf_refusal is not None:
         return refuse(leaf_refusal)
+    # T2-RECORD-PIN item 4: enforced after the leaf verdict, so an in-place
+    # tier-3 run still names --isolate first, and before the client, the clone
+    # and the record — a refusal starts nothing.
+    if tier_write_refusal is not None:
+        return refuse(tier_write_refusal, 2)
+    # T2-RECORD-PIN item 2: last of the plan gates — the launch model must be
+    # the model that was asked for, and a route that rewrote the pin is refused
+    # before the client, the clone and the record.
+    if mismatch is not None:
+        return refuse(mismatch, 2)
     try:
         # WINSHIM: the pre-check asks the same question the launch site will, so a
         # client that is not there is refused before anything is cloned rather than

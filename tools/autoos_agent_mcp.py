@@ -399,6 +399,17 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
+    # The CLI's own helper, so both entry points read one rule; a dry run only
+    # previews it (the server's preflight IS a dry run), and every non-dry
+    # spawn of a write task into the reviewer's seat is refused here, before a
+    # run dir exists.
+    if not (req.get("dry_run")
+            or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1"):
+        tier_refusal = agent.review_tier_write_refusal(
+            run_tier, gate_card, read_only=bool(req.get("read_only")))
+        if tier_refusal is not None:
+            raise ValueError(tier_refusal)
     # KEYDENY3g item 2: a spawned tier never runs in the caller's checkout. The
     # verdict is the CLI's own helper (leaf_isolation_refusal) — no second rule
     # table here, so the two cannot drift. A caller that asked for no isolation
@@ -464,6 +475,9 @@ def build_argv(req: dict, run_id: str | None = None,
             raise ValueError("max_depth must be an integer, got %r" % req["max_depth"])
     clients.child_depth(os.environ, req.get("max_depth"))  # raises DepthError past the budget
     for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable",
+                 # T2-RECORD-PIN item 4: --read-only is the second way tier 3
+                 # may say yes, so the MCP path must be able to say it too.
+                 "read_only",
                  # MODEFLIP opt-out (SB-B review 2): a spawn that means the chmod
                  # names it here, and the runner records the same fact in the
                  # private record below.
