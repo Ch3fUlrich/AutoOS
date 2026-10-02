@@ -440,6 +440,29 @@ class CMinorTests(unittest.TestCase):
             self.assertIn("deepseek", per)
             self.assertNotIn("secondpaid", per)
 
+    def test_c5b_future_only_payload_stays_per_provider(self):
+        # CREDIT-16 R4 (D-274): a payload with ONLY the future-stamped
+        # provider still stales per-provider only -- global stays None.
+        reg = _reg_two_paid()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            guards = {"deepseek": _ok("deepseek"),
+                      "secondpaid": _ok("secondpaid")}
+            future = (NOW + datetime.timedelta(days=2)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            fetch = lambda *a, **k: (200, json.dumps(_limits([
+                ("c1", "deepseek", 40.0, future),
+            ])).encode())
+            out = usage.overlay_balance_guards(
+                reg, guards, "http://127.0.0.1:1", fetch, env, SINCE, NOW)
+            self.assertEqual(out["deepseek"]["state"], "refuse")
+            glob, per = usage._stale_state(path)
+            self.assertIsNone(glob)
+            self.assertIn("deepseek", per)
+            self.assertIsNotNone(usage.load_balance_stale(path, "deepseek"))
+            self.assertIsNone(usage.load_balance_stale(path, "secondpaid"))
+
 
 if __name__ == "__main__":
     unittest.main()
