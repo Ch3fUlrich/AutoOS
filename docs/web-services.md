@@ -482,6 +482,37 @@ that mount instead of failing on the read-only root; nothing reaches the image.
 `ai-stack.sh verify` checks `qodercli --version` in the running gateway
 (`omniroute has qodercli`).
 
+### OmniRoute with ZCode (GLM)
+
+The gateway can run the ZCode remote-server bundle that the ZCode desktop app
+installs **on the host** - in `$HOME/.zcode/server` (`node` and
+`zcode-server.cjs`). OmniRoute looks that directory up under `$HOME` inside its
+own container, so `ai-stack.sh` adds `compose.zcode.yml` as a second `-f` and
+the host directory appears at `$HOME/.zcode` of the gateway container. Nothing else in the stack
+changes.
+
+- **The bundle comes from the desktop app**: add this host as an SSH remote in
+  ZCode and connect once - the app installs `~/.zcode/server` on the host and
+  syncs the login into the same directory.
+- **The override is optional.** It is passed to compose only while
+  `<dir>/server/zcode-server.cjs` is a regular file; a host without ZCode gets
+  today's single `-f` call and `ai-stack.sh up` behaves exactly as before.
+- **`~/.zcode` is never copied into the repository.** The mount names the host
+  directory; no file under it is read (beyond testing that the entry script
+  exists), and nothing from it is committed.
+- **The mount is read-only and gateway-only.** The directory holds the ZCode
+  login, so only `services.omniroute` (`autoos-omniroute`) gets it, and only
+  read-only; `opencode` and `openhands` never see it.
+- **Two optional variables**, in the environment or in `stack.env`:
+  `AUTOOS_ZCODE_DIR` moves the directory when it is not `$HOME/.zcode` (it
+  must be an absolute path without a colon or newline - anything else skips
+  the override with one warning line), and `AUTOOS_ZCODE_MOUNT_MODE` is
+  exactly `ro` or `rw` (any other value warns once and mounts `ro`). Set `rw`
+  only if the server has to write into that directory.
+- **The dashboard connection test for zcode always fails**: it probes `zcode://`,
+  which is not `http`, so only a real chat call proves the gateway reaches the
+  bundle.
+
 ### RAM budget (this host: 9.9 GB, ~3 GB free)
 
 Measured 2026-09-25: native OmniRoute 700 MB RSS (+130 MB launcher),
