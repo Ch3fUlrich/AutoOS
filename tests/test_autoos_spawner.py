@@ -9001,12 +9001,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
                          "an ambiguous stop must not write a provider-state file")
 
     def test_a_model_one_provider_serves_still_benches_that_provider(self):
-        # The other half of the same line: gemini-3.7-flash-high is antigravity's
-        # alone in t2-worker, so the ambiguity rule must not swallow clean stops.
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the antigravity
+        # leg): gemini-3.7-flash-high is served by NO t2-worker leg now, so
+        # naming it falls back to the first live leg instead of benching
+        # antigravity. The intent stands -- the ambiguity rule must not swallow
+        # a clean single-served stop -- pinned here on scaleway's mistral-small
+        # grant, which exactly one t2-worker leg serves.
         pid, printed = self.stop(
-            "Error: [429] All credentials for model gemini-3.7-flash-high are "
+            "Error: [429] All credentials for model "
+            "mistral-small-3.2-24b-instruct-2506 are "
             "cooling down (reset after 37s)", "t2-worker")
-        self.assertEqual(pid, "antigravity", printed)
+        self.assertEqual(pid, "scaleway", printed)
         self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
