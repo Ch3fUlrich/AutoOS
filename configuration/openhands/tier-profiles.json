@@ -102,21 +102,21 @@
     {
       "id": "omniroute-t2-orchestrator",
       "model": "openai/t2-orchestrator",
-      "max_input_tokens": 1048576,
+      "max_input_tokens": 128000,
       "max_output_tokens": 32768,
       "reasoning": true
     },
     {
       "id": "omniroute-t2-worker-clean",
       "model": "openai/t2-worker-clean",
-      "max_input_tokens": 1048576,
+      "max_input_tokens": 128000,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
       "id": "omniroute-t3-driver-clean",
       "model": "openai/t3-driver-clean",
-      "max_input_tokens": 1048576,
+      "max_input_tokens": 128000,
       "max_output_tokens": 16384,
       "reasoning": false
     },

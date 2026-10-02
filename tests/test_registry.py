@@ -1218,14 +1218,15 @@ class LegRulesTests(unittest.TestCase):
             if (before or {}).get("id") != (after or {}).get("id") or \
                     (before or {}).get("allow") != (after or {}).get("allow"):
                 changed[leg] = ((before or {}).get("id"), (after or {}).get("id"))
-        # FREEWIRE 2026-09-30: ONE expected change, and it is not a deny escape.
-        # The sweep synthesises provider-spelling x model-id pairs, so the new
-        # allow-groq-qwen3.8-27b (pattern groq/qwen/qwen3.8-27b, matched
-        # case-insensitively) also covers the UNRELATED huggingface model row
-        # 'Qwen/Qwen3.8-27B' spelled under the groq prefix - a combination no
-        # route carries and no real leg uses. It is an allow-vs-deny flip on a
-        # non-served spelling, never a deny a real leg escapes by re-casing.
-        expected = {"groq/Qwen/Qwen3.8-27B": ("deny-groq", "allow-groq-qwen3.8-27b")}
+        # T1-CLEAN-3 2026-10-01: the duplicate row is merged, so the sweep no
+        # longer synthesises that spelling and the fold changes NO committed
+        # verdict: the dict stays empty. (Before the merge the one entry below
+        # documented the duplicate's side effect: the new allow-groq-qwen3.8-27b
+        # also covered the unrelated huggingface model row 'Qwen/Qwen3.8-27B'
+        # spelled under the groq prefix - a combination no route carries. That
+        # row is now merged into the canonical 'qwen/qwen3.8-27b', so the
+        # synthetic leg is gone, not re-verdict.)
+        expected = {}
         self.assertEqual(changed, expected,
                          "unexpected leg verdict changes: %s"
                          % sorted(set(changed.items()) - set(expected.items())))
@@ -2230,14 +2231,16 @@ class DeepSeekBackTests(unittest.TestCase):
             registry._leg_is_unavailable("deepseek/deepseek-flash",
                                          reg["routes"]["t2-worker-clean"], reg))
 
-    def test_t2_worker_clean_starts_with_the_native_deepseek_leg(self):
-        # The render, not the registry list, is what the gateway serves: the
-        # -clean route's head must be back at the front of the combo.
+    def test_t2_worker_clean_ends_with_the_native_deepseek_leg(self):
+        # L1-CLEAN (2026-10-01) replaced the DSBACK head: the trial credits
+        # lead the -clean twins and the native DeepSeek leg is the last paid
+        # fallback. The render, not the registry list, is what the gateway
+        # serves.
         rendered = {c["name"]: c for c in
                     registry.render_omniroute(self.reg)["combos"]}
-        self.assertEqual(rendered["t2-worker-clean"]["models"][0],
+        self.assertEqual(rendered["t2-worker-clean"]["models"][-1],
                          "deepseek/deepseek-flash")
-        self.assertEqual(rendered["t3-driver-clean"]["models"][0],
+        self.assertEqual(rendered["t3-driver-clean"]["models"][-1],
                          "deepseek/deepseek-flash")
 
     def test_the_deepseek_route_is_servable_again(self):
@@ -2657,13 +2660,11 @@ class MistralPlanLimitsTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_the_clean_twins_head_on_native_deepseek(self):
-        # DSBACK (2026-09-28) put the native DeepSeek leg back at the head of
-        # both -clean twins; with the Mistral leg gone it is the only head.
-        # Checked here because the invariant below is only interesting while
-        # this head is live.
+    def test_the_clean_twins_keep_the_native_deepseek_leg(self):
+        # L1-CLEAN (2026-10-01): the trial credits now lead both -clean twins
+        # and the native DeepSeek leg is the last paid fallback - still live.
         for route_id in ("t2-worker-clean", "t3-driver-clean"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
                              "deepseek/deepseek-flash", route_id)
             self.assertEqual(
                 registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
@@ -2761,14 +2762,15 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertFalse(safe, route_id)
             self.assertEqual(reason, "model trains on prompts", route_id)
 
-    def test_the_clean_twins_keep_their_head_live_leg(self):
-        # One live leg, and it is the native DeepSeek head: the twins still
-        # serve, which is what the route-liveness invariant needs.
+    def test_the_clean_twins_keep_a_live_native_deepseek_fallback(self):
+        # L1-CLEAN (2026-10-01): both twins now lead with the trial credits and
+        # keep the native DeepSeek leg live as the last fallback - the twins
+        # still serve, which is what the route-liveness invariant needs.
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertEqual(live_legs(reg, route_id),
-                             ["deepseek/deepseek-flash"], route_id)
-            self.assertEqual(self.reg["routes"][route_id]["legs"][0],
+            self.assertIn("deepseek/deepseek-flash", live_legs(reg, route_id),
+                          route_id)
+            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
                              "deepseek/deepseek-flash", route_id)
 
     # -- the registered tested alternative ----------------------------------
@@ -2979,14 +2981,24 @@ class CreditSpendGuardTests(unittest.TestCase):
 
     def test_a_credit_tier_is_not_the_free_tier(self):
         # private_safe() and probe_common._skip_reason both branch on tier: a
-        # credit row is never probed by the standing free probes and never
-        # called clean, so `-clean` work cannot land on a finite grant.
+        # credit row is never probed by the standing free probes, so a `-clean`
+        # route can never land on a finite grant by accident.
+        # T1-CLEAN-4 K1 (2026-10-01) re-states the contract the lane moved:
+        # `credit` is now ADMITTED to a clean route, but only a grant whose
+        # no-training claim is cited (K2: a valid `privacy` block). An
+        # unverified grant (trains_on_prompts null) still fails - and fails on
+        # the TRAINING check, not on the tier, which is why the old
+        # `assertIn("credit", reason)` is gone.
         reg = load_registry()
         for pid in ("morph", "deepinfra", "together_ai"):
             self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
             safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
             self.assertFalse(safe, pid)
-            self.assertIn("credit", reason, pid)
+            self.assertIn("trains on prompts", reason, pid)
+        for pid in ("vertex_ai", "ovhcloud"):
+            self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
+            safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
 
     # --- the validator -----------------------------------------------------
 
@@ -3602,5 +3614,298 @@ class ComboContractTests(unittest.TestCase):
         self.assertIn("contract PASS", proc.stdout)
 
 
+class CleanTierEvidenceTests(unittest.TestCase):
+    """L1-CLEAN (2026-10-01): the trial-credit providers a privacy=sensitive
+    route may now use must PROVE no-training with cited evidence. A bare
+    trains_on_prompts: false with no evidence is the defect this guards."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_ovhcloud_declares_no_training(self):
+        self.assertIs(self.reg["providers"]["ovhcloud"]["trains_on_prompts"], False)
+
+    def test_both_trial_providers_carry_cited_privacy_evidence(self):
+        expected = {
+            "ovhcloud": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+            "vertex_ai": ("https://docs.cloud.google.com/vertex-ai/generative-ai/"
+                          "docs/vertex-ai-zero-data-retention"),
+        }
+        for pid, url in expected.items():
+            block = self.reg["providers"][pid]["privacy"]
+            self.assertIs(block["trains_on_prompts"], False, pid)
+            urls = [e["url"] for e in block["evidence"]]
+            self.assertIn(url, urls, pid)
+            for e in block["evidence"]:
+                self.assertTrue(e["url"].startswith("https://"), pid)
+                self.assertTrue(e["quote"].strip(), pid)
+                self.assertRegex(e["accessed"], r"^\d{4}-\d{2}-\d{2}$", pid)
+
+    def test_google_ai_studio_still_trains_on_prompts(self):
+        # The free AI-Studio provider trains; it must never gain a no-training
+        # privacy block (its paid twin is reached through openrouter instead).
+        self.assertIs(self.reg["providers"]["google_ai_studio"]["trains_on_prompts"], True)
+
+    def test_a_privacy_block_without_evidence_is_rejected(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"] = []
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "ovhcloud" in p for p in problems),
+            problems)
+
+    def test_a_privacy_block_must_agree_with_the_provider_flag(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["trains_on_prompts"] = None
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy" in p and "ovhcloud" in p for p in problems), problems)
+
+    def test_an_evidence_row_needs_a_quote(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["quote"] = "  "
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "vertex_ai" in p for p in problems),
+            problems)
+
+
+class CleanTierRouteTests(unittest.TestCase):
+    """L2-CLEAN (2026-10-01): privacy=sensitive routes lead with the trial
+    credits (ovh + vertex), span >= 2 families, and end on paid deepseek."""
+
+    TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
+                  "vertex/gemini-3.8-flash")
+    SENSITIVE = ("t2-worker-clean", "t3-driver-clean", "t2-orchestrator")
+    TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _leg(self, leg):
+        pid, mid = registry.resolve_leg(leg, self.reg)
+        self.assertIs(self.reg["providers"][pid].get("trains_on_prompts"), False, leg)
+        return pid, mid
+
+    def test_every_clean_route_leg_trains_nothing(self):
+        for rid in ("t2-worker-clean", "t3-driver-clean"):
+            for leg in self.reg["routes"][rid]["legs"]:
+                self._leg(leg)
+
+    def test_sensitive_routes_lead_with_the_trial_credits(self):
+        for rid in self.SENSITIVE:
+            self.assertEqual(self.reg["routes"][rid]["legs"][:3],
+                             list(self.TRIAL_LEGS), rid)
+
+    def test_sensitive_routes_end_with_paid_deepseek(self):
+        for rid in self.SENSITIVE:
+            self.assertEqual(self.reg["routes"][rid]["legs"][-1],
+                             "deepseek/deepseek-flash", rid)
+
+    def test_clean_trial_legs_span_at_least_two_families(self):
+        families = {self.reg["models"][self._leg(leg)[1]]["family"]
+                    for leg in self.TRIAL_LEGS}
+        self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
+
+    def test_no_banned_provider_serves_a_sensitive_route(self):
+        banned = ("google_ai_studio/", "openrouter/", "opencode-zen/", "gemini/")
+        for rid in self.SENSITIVE:
+            for leg in self.reg["routes"][rid]["legs"]:
+                self.assertFalse(leg.startswith(banned), (rid, leg))
+
+    def test_stale_ovh_coder_legs_are_marked_unavailable(self):
+        stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        for rid in ("t2-worker", "t3-driver"):
+            route = self.reg["routes"][rid]
+            self.assertIn(stale, route["legs"], rid)
+            entry = route["unavailable_legs"][stale]
+            self.assertIs(entry["available"], False, rid)
+            self.assertIn("not in OVH AI Endpoints catalog 2026-10-01",
+                          entry["$comment"], rid)
+
+
+class ModelKeyCaseHygieneTests(unittest.TestCase):
+    """L3 (2026-10-01): two model keys that differ only in letter case are a
+    registry hygiene bug - the same model read twice, drifting."""
+
+    def test_no_model_keys_differ_only_in_case(self):
+        reg = load_registry()
+        seen = {}
+        for key in reg["models"]:
+            seen.setdefault(key.lower(), []).append(key)
+        dupes = {k: v for k, v in seen.items() if len(v) > 1}
+        self.assertEqual(dupes, {})
+
+
+
+class CreditPrivacyEvidenceGateTests(unittest.TestCase):
+    """T1-CLEAN-4 K2 (2026-10-01): the registry's own words - "a credit leg is
+    admitted because its provider now proves no-training with a cited
+    ``privacy`` block" (private_safe's docstring and the schema's tier
+    description) - must be ENFORCED, not documented. Before this the only gate
+    was `trains_on_prompts is False`, so a credit row that merely asserted the
+    flag passed as clean with no evidence behind it, and check_registry was
+    silent about it too."""
+
+    def test_a_credit_provider_without_a_privacy_block_is_not_private_safe(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+
+    def test_a_credit_provider_with_an_incomplete_block_is_not_private_safe(self):
+        # an evidence row whose url is not https is no evidence at all
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["url"] = "http://x.test/terms"
+        safe, reason = registry.private_safe("vertex_ai", "gemini-3.8-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_cited_credit_provider_is_private_safe(self):
+        reg = load_registry()
+        for pid, model in (("ovhcloud", "gpt-oss-120b"), ("vertex_ai", "gemini-3.8-flash")):
+            safe, reason = registry.private_safe(pid, model, reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
+
+    def test_a_paid_provider_needs_no_block(self):
+        # the gate is credit-only: a paid leg was never asked to cite terms.
+        reg = load_registry()
+        self.assertNotIn("privacy", reg["providers"]["deepseek"])
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertTrue(safe, reason)
+
+    def test_check_registry_flags_a_credit_provider_with_no_privacy_block(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_check_registry_flags_a_credit_provider_with_an_empty_block(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"] = []
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.vertex_ai" in p], problems)
+
+    def test_a_model_tier_override_to_credit_on_a_paid_provider_is_not_private_safe(self):
+        # F1 (T1-CLEAN-4 rework): the gate read the EFFECTIVE tier (model
+        # override included) but the evidence predicate read only the provider's
+        # own tier, so this leg was clean at the gate and invisible to
+        # check_registry - one rule, two readings.
+        reg = mutated()
+        self.assertEqual(reg["providers"]["deepseek"]["tier"], "paid")
+        reg["models"]["deepseek-flash"]["tier"] = "credit"
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.deepseek" in p], problems)
+
+    def test_a_paid_override_on_a_credit_provider_still_demands_the_block(self):
+        # F1, the symmetric leg: the credit requirement follows the leg's
+        # effective tier AND the provider's tier - either one being credit
+        # demands the cited block, so an override cannot escape it by spelling
+        # itself paid.
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_a_paid_override_on_a_cited_credit_provider_is_private_safe(self):
+        # and the rule stays consistent in the passing direction: a credit
+        # provider with complete evidence is clean whichever tier the leg runs
+        # under.
+        reg = mutated()
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertTrue(safe, reason)
+        self.assertEqual(registry._check_privacy_evidence(reg), [])
+
+    def test_an_empty_quote_fails_the_credit_gate_not_just_the_check(self):
+        # F6: the K2 gate tests only mutated the evidence url, so the other
+        # evidence defects were untested at gate level.
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["quote"] = "   "
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_non_iso_accessed_date_fails_the_credit_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["accessed"] = "1 Oct 2026"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_block_that_disagrees_with_the_provider_flag_fails_the_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["trains_on_prompts"] = True
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_the_committed_registry_needs_no_credit_privacy_fix(self):
+        self.assertEqual(registry._check_privacy_evidence(load_registry()), [])
+
+
+class ResolveLegFoldTests(unittest.TestCase):
+    """T1-CLEAN-4 K3 (2026-10-01): resolve_leg()'s case-fold fallback (T1-CLEAN-3)
+    had no direct test - the mutant `len(folded) >= 1` survived, i.e. nothing
+    pinned that an AMBIGUOUS fold is refused rather than silently decided."""
+
+    def _reg(self, *model_keys):
+        return {"providers": {"p": {"omniroute_id": "p", "tier": "paid",
+                                    "trains_on_prompts": False}},
+                "models": {k: {"id": k, "family": "test"} for k in model_keys}}
+
+    def test_an_exact_key_wins_over_a_fold_match(self):
+        reg = self._reg("Some-Model", "some-model")
+        self.assertEqual(registry.resolve_leg("p/Some-Model", reg), ("p", "Some-Model"))
+        self.assertEqual(registry.resolve_leg("p/some-model", reg), ("p", "some-model"))
+
+    def test_two_fold_matches_are_ambiguous_never_a_silent_pick(self):
+        reg = self._reg("Some-Model", "some-MODEL")
+        with self.assertRaises(ValueError) as ctx:
+            registry.resolve_leg("p/SOME-model", reg)
+        self.assertIn("SOME-model", str(ctx.exception))
+
+    def test_exactly_one_fold_match_resolves(self):
+        reg = self._reg("Qwen3-Coder-30B-A3B-Instruct")
+        self.assertEqual(
+            registry.resolve_leg("p/qwen3-coder-30b-a3b-instruct", reg),
+            ("p", "Qwen3-Coder-30B-A3B-Instruct"))
+
+    def test_no_fold_match_raises(self):
+        reg = self._reg("Some-Model")
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("p/nothing-here", reg)
+
+    def test_a_real_leg_folds_to_the_canonical_key(self):
+        reg = load_registry()
+        self.assertEqual(
+            registry.resolve_leg("ovhcloud/qwen3-coder-30b-a3b-instruct", reg),
+            ("ovhcloud", "Qwen3-Coder-30B-A3B-Instruct"))
+
+
+class CleanCreditHeadPricedTests(unittest.TestCase):
+    """T1-CLEAN-4, out-of-scope pin (2026-10-01): the clean routes' credit HEAD
+    legs are unpriced right now, which is the state the resolver refuses them
+    for. Pinned so the CREDIT lane's change is a visible diff, not a surprise.
+    Priced by T1-CREDIT provider_prices at train integration."""
+
+    def test_the_clean_credit_head_legs_are_unpriced_today(self):
+        reg = load_registry()
+        for leg in ("ovhcloud/gpt-oss-120b", "vertex/gemini-3.8-flash"):
+            provider_id, model_id = registry.resolve_leg(leg, reg)
+            self.assertEqual(reg["providers"][provider_id]["tier"], "credit", leg)
+            self.assertFalse(resolver.credit_leg_priced(model_id, reg), leg)
 if __name__ == "__main__":
     unittest.main()

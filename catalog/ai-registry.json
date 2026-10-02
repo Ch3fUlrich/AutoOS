@@ -1193,7 +1193,7 @@
       "tool_calls": "proven"
     },
     "qwen/qwen3.8-27b": {
-      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. FREEWIRE 2026-09-30 (free-probe evidence): groq's own copy is now probed too (ack 200 + one get_weather tool call ok, 420 ms), so the model default tool_calls is promoted to 'proven'. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
+      "$comment": "groq's vendor-prefixed spelling; true free tier (t3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. FREEWIRE 2026-09-30 (free-probe evidence): groq's own copy is now probed too (ack 200 + one get_weather tool call ok, 420 ms), so the model default tool_calls is promoted to 'proven'. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key. T1-CLEAN-3 2026-10-01: merged the case-only duplicate row 'Qwen/Qwen3.8-27B' into this canonical lowercase key (rule 1b hygiene; this spelling already carries every live leg, so no leg string and no wire spelling changes; resolve_leg fold-matches the retired casing). Kept this row's groq-vendor numbers (context 131072 / usable 65536 / output 16384 - what all live legs and rendered surfaces already use); the retired row's gateway-measured numbers were context 128000 / usable 64000 / output 32768 (both price 0.0, reasoning false, tool_calls proven). Retired row verbatim: FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false). T1-CLEAN-3 case-merge (9e5ea48c) kept GROQ's context_advertised 131072 / output_max 16384 and DROPPED the huggingface sibling's (key Qwen/Qwen3.8-27B) 128000 / 32768, recorded per T1-CLEAN-4 K8; a huggingface leg is planned against groq's window until a provider-scoped context field exists.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -1492,7 +1492,7 @@
       "tool_calls": "proven",
       "price_in": 0,
       "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'scw/mistral-small-3.2-24b-instruct-2506', which is why providers.scaleway.model_prefix is 'scw'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedscaleway. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'scw/mistral-small-3.2-24b-instruct-2506', which is why providers.scaleway.model_prefix is 'scw'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedscaleway. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). T1-CLEAN-3 2026-10-01: merged the case-only duplicate row 'Mistral-Small-3.2-24B-Instruct-2506' into this canonical lowercase key (rule 1b hygiene; this spelling already carries every live leg, so no leg string and no wire spelling changes; resolve_leg fold-matches the retired casing). Kept this row's scaleway-free 0/0 pricing (all four live legs are scaleway) and display_name; the retired row's OVH paid price was 1e-07 in / 3.1e-07 out per token ($0.10/$0.31 per 1M; OVH pricing page, see retired comment). Retired row verbatim: OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Mistral-Small-3.2-24B-Instruct-2506', which is why providers.ovhcloud.model_prefix is 'ovh'. Same model as the lowercase scaleway row 'mistral-small-3.2-24b-instruct-2506' but OVH spells it mixed-case, so resolve_leg() needs this separate row. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page. trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. T1-CLEAN-3 case-merge (9e5ea48c) DROPPED the OVH sibling's numbers, which one shared row cannot carry: price_in 1e-07 / price_out 3.1e-07 and price_source 'OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.10 in / $0.31 out per 1M tokens, per-token)' - the OVH leg ovh/Mistral-Small-3.2-24B-Instruct-2506 therefore reads as no-price-on-file here; recorded per T1-CLEAN-4 K8 until a provider-scoped price field exists."
     },
     "Meta-Llama-3_3-70B-Instruct": {
       "id": "Meta-Llama-3_3-70B-Instruct",
@@ -1510,23 +1510,6 @@
       "price_out": 7.4e-07,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.74 in / $0.74 out per 1M tokens, per-token)",
       "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Meta-Llama-3_3-70B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Uses OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling row another provider may register)."
-    },
-    "Mistral-Small-3.2-24B-Instruct-2506": {
-      "id": "Mistral-Small-3.2-24B-Instruct-2506",
-      "family": "mistral",
-      "context_advertised": 128000,
-      "context_usable": {
-        "source": "default",
-        "tokens": 64000
-      },
-      "output_max": 32768,
-      "reasoning": true,
-      "effort_ladder": [],
-      "tool_calls": "proven",
-      "price_in": 1e-07,
-      "price_out": 3.1e-07,
-      "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.10 in / $0.31 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Mistral-Small-3.2-24B-Instruct-2506', which is why providers.ovhcloud.model_prefix is 'ovh'. Same model as the lowercase scaleway row 'mistral-small-3.2-24b-instruct-2506' but OVH spells it mixed-case, so resolve_leg() needs this separate row. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page. trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
     },
     "Qwen3-Coder-30B-A3B-Instruct": {
       "id": "Qwen3-Coder-30B-A3B-Instruct",
@@ -1561,22 +1544,6 @@
       "price_out": 3.19e-06,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
       "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000)."
-    },
-    "Qwen/Qwen3.8-27B": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false).",
-      "context_advertised": 128000,
-      "context_usable": {
-        "source": "default",
-        "tokens": 64000
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "Qwen/Qwen3.8-27B",
-      "output_max": 32768,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
     },
     "cohere/north-mini-code:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/cohere/north-mini-code:free answered ack 200 and one get_weather tool call ok (809 ms); gateway /v1/models row context_length 256000, output 64000. tier 'free' is a MODEL-level override so the leg can stay in a *-free-only route and is honestly priced ($0 at the vendor), while providers.openrouter.tier stays paid. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
@@ -2659,9 +2626,10 @@
       "available": false
     },
     "vertex_ai": {
-      "$comment": "Google Vertex AI (direct Gemini, the operator's GCP project). Key in api-keys.yml as 'vertex_ai'; the gateway connection id is 'vertex' (apply registers it with `providers add vertex` and refreshes it with `omniroute models vertex`). The project grants gemini-3-flash-preview / gemini-3.1-flash-lite / gemini-3.1-pro-preview and gemini-3.8-flash (the last added by the operator 2026-09-30). Direct-only: no combo leg routes through vertex - the opencode direct entries (vertex-flash, vertex-flash-lite, vertex-pro, vertex-3.8-flash) address it as vertex/<model> and live as hand entries outside the generated region of opencode.jsonc. trains_on_prompts false: Google Cloud's Vertex AI terms do not use customer prompts to train models. region us-central1 matches the registered connection. B2-VERTEX 2026-10-01 (documentation only): vertex authenticates from the GCP service-account JSON credential file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full file content is the credential, NOT a plain API key; git-ignored per .gitignore configuration/vertex-credentials-*.json, CREDIGNORE; expected to live at configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json in the checkout; worktree has none, main has it). L0 probed vertex works (gemini-3.8-flash combo acked via vertex; direct leg 200 at 08:46:52Z). Live connection list shows TWO vertex/meta rows: vertex (cc63eabf, active) + vertex-partner (2bb78365, active), and openai-compatible-chat meta-api (627d8593, active) + openai-compatible-chat-d9427825 main (8cc83b8c, active); L1-alpha measured one vertex attempt 401 [Encryption] Decryption failed (Auth tag) while direct 200 - likely one undecryptable key among the two; credential-store repair is L0s, not this lane.",
+      "$comment": "Google Vertex AI (direct Gemini, the operator's GCP project). Key in api-keys.yml as 'vertex_ai'; the gateway connection id is 'vertex' (apply registers it with `providers add vertex` and refreshes it with `omniroute models vertex`). The project grants gemini-3-flash-preview / gemini-3.1-flash-lite / gemini-3.1-pro-preview and gemini-3.8-flash (the last added by the operator 2026-09-30). Combo and direct since L1-CLEAN 2026-10-01: vertex/gemini-3.8-flash is a live leg of t2-worker-clean and t3-driver-clean, and its `trains_on_prompts: false` is backed by the cited `privacy` block that tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2), while the opencode direct entries (vertex-flash, vertex-flash-lite, vertex-pro, vertex-3.8-flash) still address it as vertex/<model> outside the generated region of opencode.jsonc. trains_on_prompts false: Google Cloud's Vertex AI terms do not use customer prompts to train models. region us-central1 matches the registered connection. B2-VERTEX 2026-10-01 (documentation only): vertex authenticates from the GCP service-account JSON credential file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full file content is the credential, NOT a plain API key; git-ignored per .gitignore configuration/vertex-credentials-*.json, CREDIGNORE; expected to live at configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json in the checkout; worktree has none, main has it). L0 probed vertex works (gemini-3.8-flash combo acked via vertex; direct leg 200 at 08:46:52Z). Live connection list shows TWO vertex/meta rows: vertex (cc63eabf, active) + vertex-partner (2bb78365, active), and openai-compatible-chat meta-api (627d8593, active) + openai-compatible-chat-d9427825 main (8cc83b8c, active); L1-alpha measured one vertex attempt 401 [Encryption] Decryption failed (Auth tag) while direct 200 - likely one undecryptable key among the two; credential-store repair is L0s, not this lane.",
       "api_base": null,
       "id": "vertex_ai",
+      "litellm_auth": "service_account",
       "litellm_env": null,
       "litellm_prefix": null,
       "omniroute_id": "vertex",
@@ -2673,7 +2641,31 @@
       "monthly_cap_usd": 250,
       "monthly_cap_source": "operator-stated grant (handoff, unverified)",
       "monthly_warn_fraction": 0.8,
-      "trains_on_prompts": false
+      "trains_on_prompts": false,
+      "privacy": {
+        "trains_on_prompts": false,
+        "evidence": [
+          {
+            "url": "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/vertex-ai-zero-data-retention",
+            "quote": "Google won't use your data to train or fine-tune any AI/ML models without your prior permission or instruction. This applies to all managed models on Gemini Enterprise Agent Platform, including GA and pre-GA models.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://docs.cloud.google.com/vertex-ai/generative-ai/docs/learn/abuse-monitoring",
+            "quote": "Google may log customer prompts solely for the purpose of examining whether a violation of the AUP or Prohibited Use Policy has occurred. This data won't be used to train or fine-tune any AI/ML models. This data is stored securely for up to 90 days in the same region or multi-region selected by the customer for their project",
+            "accessed": "2026-10-01"
+          }
+        ],
+        "caveats": [
+          "quote not re-verified (page rendered as a nav index); see each row's own accessed date",
+          "AI Studio unpaid tier contrast (not this provider): https://ai.google.dev/gemini-api/terms — \"When you use Unpaid Services, including, for example, Google AI Studio and the unpaid quota on Gemini API, Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products and services and machine learning technologies\"",
+          "flagged prompts logged up to 90 days (opt-out form available)",
+          "in-memory and implicit prompt cache 24 h by default: disable at project level",
+          "never use Grounding with Google Search for private work",
+          "partner / Model-as-a-Service models are NOT covered and cannot use the trial credit",
+          "trial-specific terms and the Service Specific Terms clause not verified"
+        ]
+      }
     },
     "cc": {
       "$comment": [
@@ -3273,15 +3265,40 @@
       "litellm_prefix": null,
       "api_base": null,
       "provider_data": null,
-
       "tier": "credit",
       "credit_usd": 200,
-      "trains_on_prompts": null,
+      "trains_on_prompts": false,
       "available": true,
       "monthly_cap_usd": 200,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
-      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%)."
+      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%).",
+      "privacy": {
+        "trains_on_prompts": false,
+        "evidence": [
+          {
+            "url": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+            "quote": "Your data will never be used to train or improve our AI models; one of our many security guarantees.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-capabilities",
+            "quote": "Data is not stored or shared during or after model use, providing users with peace of mind that their data is secure and protected.",
+            "accessed": "2026-10-01"
+          },
+          {
+            "url": "https://storage.gra.cloud.ovh.net/v1/AUTH_325716a587c64897acbef9a4a4726e38/contracts/043c367-Conditions_particulieres_OVH_Stack-IE-25.0.pdf",
+            "quote": "OVHcloud has no knowledge of Inputs and Outputs, and OVHcloud does not reuse them in any way. OVHcloud does not carry out any backups of Inputs or Outputs. This does not apply for the AI Endpoint Batch API Service.",
+            "accessed": "2026-10-01"
+          }
+        ],
+        "caveats": [
+          "abuse-monitoring log retention NOT VERIFIED",
+          "Batch API stores data: never use it for site data",
+          "authenticated key on a paid or credited Public Cloud project only (anonymous playground tier and Discovery-mode projects excluded)",
+          "EU region (Gravelines, France)"
+        ]
+      }
     },
     "api_airforce": {
       "id": "api_airforce",
@@ -3291,7 +3308,6 @@
       "litellm_prefix": null,
       "api_base": null,
       "provider_data": null,
-
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
@@ -4147,7 +4163,9 @@
       "class": "frontier",
       "id": "t2-orchestrator",
       "legs": [
-        "cc/claude-opus-4-6",
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
@@ -4158,15 +4176,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t2 orchestrator-1M — small-scope orchestration",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t2 orchestrator-128k — small-scope orchestration",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 32768,
             "reasoning": true
           },
-          "output": 32768
+          "output": 32768,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15)."
@@ -4262,6 +4281,10 @@
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
+        },
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
+          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
+          "available": false
         }
       }
     },
@@ -4270,8 +4293,10 @@
       "class": "mid",
       "id": "t2-worker-clean",
       "legs": [
-        "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4281,15 +4306,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t2 smart-reasoning-1M — no training (sensitive data)",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t2 smart-reasoning-128k — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 32768,
             "reasoning": false
           },
-          "output": 32768
+          "output": 32768,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "unavailable_legs": {
@@ -4469,6 +4495,10 @@
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
           "available": false
+        },
+        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
+          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
+          "available": false
         }
       }
     },
@@ -4477,8 +4507,10 @@
       "class": "cheap",
       "id": "t3-driver-clean",
       "legs": [
-        "deepseek/deepseek-flash",
-        "opencode-zen/deepseek-v4.1-flash"
+        "ovhcloud/gpt-oss-120b",
+        "ovhcloud/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4488,15 +4520,16 @@
             "zed",
             "openhands"
           ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "t3 cheap-driver-1M — no training (sensitive data)",
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "t3 cheap-driver-128k — no training (sensitive data)",
           "openhands_profile": {
-            "max_input_tokens": 1048576,
+            "max_input_tokens": 128000,
             "max_output_tokens": 16384,
             "reasoning": false
           },
-          "output": 16384
+          "output": 16384,
+          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
       "unavailable_legs": {

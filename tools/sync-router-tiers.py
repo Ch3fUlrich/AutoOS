@@ -77,6 +77,12 @@ GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
 PROVIDER_PREFIX: dict = {}
 API_BASE: dict = {}
 ENV_KEY: dict = {}
+# tier -> the legs of that route dropped for a declared no-API-key auth
+# (no_litellm_key_providers). Module state for the same reason as the three maps
+# above: render_block() is reached both from this tool's rewrite() and from
+# tools/registry.py's render_litellm_blocks(), and both must put the identical
+# `# litellm-skip:` line in the identical place or the two surfaces drift (K6).
+SKIPPED_BY_TIER: dict = {}
 
 START = "# AUTOOS-MANAGED-START"
 END = "# AUTOOS-MANAGED-END"
@@ -258,6 +264,47 @@ def _gateway_legs(route, registry):
     return _registry_module().gateway_legs(route, registry)
 
 
+def no_litellm_key_providers(registry):
+    """Provider ids LiteLLM cannot hand an API key (T1-CLEAN-4 K6, 2026-10-01).
+
+    `providers.<id>.litellm_auth` names an auth LiteLLM's `os.environ/*`
+    api_key cannot express — today only `service_account` (Vertex AI, whose own
+    $comment records that the credential file is not a plain key). A falsy
+    `litellm_env` is NOT that: almost every provider leaves it null and Leg
+    falls back to the conventional `<PROVIDER>_API_KEY`, which really exists, so
+    keying the drop on the null would delete groq-era/samba/ovh/scaleway legs
+    that LiteLLM does address. Both spellings (providers key and omniroute_id)
+    are returned, because a leg carries the gateway's spelling.
+    """
+    out = set()
+    providers = registry.get("providers") if isinstance(registry, dict) else None
+    for entry in (providers or {}).values():
+        if isinstance(entry, dict) and entry.get("litellm_auth"):
+            for key in (entry.get("id"), entry.get("omniroute_id")):
+                if key:
+                    out.add(key)
+    return out
+
+
+def skipped_refs(route, registry):
+    """The legs of `route` whose provider declares an auth LiteLLM cannot render
+    (T1-CLEAN-4 K6). Kept separate from litellm_servable_refs() because the two
+    callers (this tool's registry_refs() and tools/registry.py's
+    render_litellm_blocks()) both need the *names*, in leg order, for the
+    `# litellm-skip:` line. Order-preserving and deduped, like the refs list."""
+    no_key = no_litellm_key_providers(registry)
+    legs = (route.get("legs") or []) if isinstance(route, dict) else []
+    return [leg for leg in dict.fromkeys(legs)
+            if isinstance(leg, str) and leg.split("/", 1)[0] in no_key]
+
+
+def skipped_comment(leg, indent=""):
+    """The one rendered line that names a skipped leg (shared so the writer and
+    the checker cannot differ by a space)."""
+    return ("%s  # litellm-skip: %s - providers.%s authenticates without a "
+            "LiteLLM api_key (litellm_auth)" % (indent, leg, leg.split("/", 1)[0]))
+
+
 def litellm_servable_refs(route, registry):
     """The ordered refs a managed LiteLLM block mirrors for one route.
 
@@ -274,10 +321,16 @@ def litellm_servable_refs(route, registry):
     unset os.environ/* var and break whole-group validation at startup — the
     META_API_KEY lesson. Docs rule 1 calls this set out ("minus the legs
     LiteLLM cannot address"); the suite test pins the dropped set so nothing
-    else ever goes missing silently. Pure: (route, registry) -> list."""
+    else ever goes missing silently. A leg whose provider declares a
+    `litellm_auth` LiteLLM cannot express is dropped the same way (T1-CLEAN-4 K6,
+    see no_litellm_key_providers()); tools/registry.py's render names each such
+    drop in a rendered comment line, so the omission is never silent.
+    Pure: (route, registry) -> list."""
+    no_key = no_litellm_key_providers(registry)
     return [
         m for m in _gateway_legs(route, registry)
         if isinstance(m, str) and m.split("/", 1)[0] not in GATEWAY_ONLY
+        and m.split("/", 1)[0] not in no_key
     ]
 
 
@@ -333,12 +386,22 @@ def combos_refs(combos_path, tiers=None, registry=None):
     default does: every combo name whose gateway-only-filtered model list is
     non-empty, so the explicit --combos override onto the old file's own
     shape covers exactly the routes the registry would (a combo that is only
-    gateway-only legs, e.g. opus-4-6, gets no managed block either way).
+    gateway-only legs, e.g. opus-4-6, gets no managed block either way). A
+    combo emptied only by the declared-auth drop keeps no block either —
+    rewrite() refuses one config.yaml does not have — so its dropped legs are
+    named by unmanaged_skip_notices() instead (F4, T1-CLEAN-4 rework).
     """
     try:
         data = json.loads(Path(combos_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read {combos_path}: {exc}") from exc
+    # F3 (T1-CLEAN-4 rework, 2026-10-01): SKIPPED_BY_TIER is module state that
+    # render_block() reads, so each entry point OWNS it for the whole call -
+    # cleared here, not merely .update()d over. Without that, a second call in
+    # one process (a --combos run then a registry render, --combos then the
+    # default, or two tests) left the first call's skip lines to be emitted
+    # into an unrelated tier's block.
+    SKIPPED_BY_TIER.clear()
     by_name = {}
     for combo in data.get("combos", []):
         name = combo.get("name")
@@ -346,9 +409,18 @@ def combos_refs(combos_path, tiers=None, registry=None):
             refs = list(combo.get("models", []))
             if registry is not None:
                 refs = [_registry_module().registry_ref(m, registry) for m in refs]
+            no_key = no_litellm_key_providers(registry) if registry is not None else set()
             by_name[name] = [
                 m for m in refs
                 if m.split("/", 1)[0] not in GATEWAY_ONLY
+                # K6, pinned by rework F2: a provider that declares an auth
+                # LiteLLM cannot express (litellm_auth) has no renderable leg -
+                # this drop and the naming below are one rule with one home.
+                and m.split("/", 1)[0] not in no_key
+            ]
+            SKIPPED_BY_TIER[name] = [
+                m for m in refs
+                if isinstance(m, str) and m.split("/", 1)[0] in no_key
             ]
     if tiers is None:
         tiers = tuple(name for name, refs in by_name.items() if refs)
@@ -356,6 +428,24 @@ def combos_refs(combos_path, tiers=None, registry=None):
     if missing:
         raise ConfigError(f"{combos_path} has no combo(s): {', '.join(missing)}")
     return {t: by_name[t] for t in tiers}
+
+
+def unmanaged_skip_notices(combos):
+    """``<tier>: <leg>`` notices for the declared-auth legs this call dropped
+    from a combo that gets no managed block (F4, T1-CLEAN-4 rework, 2026-10-01).
+
+    combos_refs() derives its default tier set from the POST-filter list, so a
+    combo whose every leg carries `litellm_auth` ends with no block - and
+    rewrite() refuses to invent one config.yaml does not have, so the
+    `# litellm-skip:` line has nowhere to render. The drop is still real, so it
+    is still named: main() prints these lines beside its OK/Synced summary.
+    Reads the skip state the current call left behind (F3 makes that exactly
+    this call's), and only the declared-auth kind - an all-GATEWAY_ONLY combo
+    was never a LiteLLM leg at all."""
+    return [f"{tier}: {leg}"
+            for tier, legs in sorted(SKIPPED_BY_TIER.items())
+            if tier not in combos
+            for leg in legs]
 
 
 def registry_refs(registry_path, tiers=None):
@@ -380,6 +470,13 @@ def registry_refs(registry_path, tiers=None):
     missing = [t for t in tiers if t not in routes]
     if missing:
         raise ConfigError(f"{registry_path} has no route(s): {', '.join(missing)}")
+    # K6: this tool's own rewrite() renders through render_block(), so the
+    # skipped-leg names are recorded here as module state - otherwise the writer
+    # would emit the block without them and `render litellm --check` would read
+    # the hand-named omission as drift.
+    # F3 (rework): the call owns the whole table, not just its own tiers.
+    SKIPPED_BY_TIER.clear()
+    SKIPPED_BY_TIER.update({t: skipped_refs(routes[t], doc) for t in tiers})
     return {t: litellm_servable_refs(routes[t], doc) for t in tiers}
 
 
@@ -400,6 +497,8 @@ def render_block(tier, refs, indent="", extras=None):
         for extra in extras.get(leg.llm_model, ()):
             leg_lines.append(extra)
         lines.extend(leg_lines)
+    for leg in SKIPPED_BY_TIER.get(tier, ()):
+        lines.append(skipped_comment(leg, indent))
     lines.append(f"{indent}{END} {tier}")
     return lines
 
@@ -578,6 +677,13 @@ def main(argv=None):
     except (OSError, ConfigError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+
+    if not args.quiet:
+        # F4 (T1-CLEAN-4 rework): a combo emptied by the declared-auth drop has
+        # no managed block to carry its `# litellm-skip:` line, so the drop is
+        # named here rather than rendering nowhere.
+        for notice in unmanaged_skip_notices(combos):
+            print(f"litellm-skip (no managed block for it): {notice}")
 
     if args.check:
         if changed:

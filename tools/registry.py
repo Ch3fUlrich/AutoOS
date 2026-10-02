@@ -200,7 +200,11 @@ DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "month
                     # the schema's price_source asks for a DATED attribution by
                     # name ("gateway /v1/models 2026-09-28"); rule 5 must not
                     # fight rule-for-field honesty (SB-C2 item 4)
-                    "price_source")
+                    "price_source",
+                    # providers.<id>.privacy.evidence[].accessed is the schema's
+                    # own YYYY-MM-DD field (L1-CLEAN 2026-10-01) - a citation
+                    # date, not a stale value rule 5 should flag.
+                    "accessed")
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -396,6 +400,12 @@ def resolve_leg(leg, registry) -> tuple:
 
     The prefix may be a providers key or any provider's omniroute_id; the rest
     must be a models key. Anything else raises ValueError naming the leg.
+
+    Model matching is exact first, then the unique case-fold match: model keys
+    are unique under folding (rule 1b), but a leg carries its provider's own
+    wire casing (T1-CLEAN-3: ``huggingface/Qwen/Qwen3.8-27B`` names the
+    canonical key ``qwen/qwen3.8-27b``). An ambiguous or absent fold still
+    raises. (autoos_resolver.ci_key is the runtime-side precedent.)
     """
     if not isinstance(leg, str):
         raise ValueError("leg %r is not a provider/model string" % (leg,))
@@ -412,7 +422,11 @@ def resolve_leg(leg, registry) -> tuple:
                 break
     if provider_id is None:
         raise ValueError("leg %r: no provider matches prefix %r" % (leg, prefix))
-    if model_id not in _section(registry, "models"):
+    models = _section(registry, "models")
+    if model_id not in models:
+        folded = [k for k in models if k.lower() == model_id.lower()]
+        if len(folded) == 1:
+            return provider_id, folded[0]
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return provider_id, model_id
 
@@ -530,6 +544,26 @@ def _check_unique_ids(registry) -> list:
     return problems
 
 
+def _check_model_key_case(registry) -> list:
+    """Rule 1b (L3 hygiene, 2026-10-01): no two models.<key> entries may differ
+    only in letter case.
+
+    Two keys a human reads as the same model drift: a price or a trains_on_prompts
+    flag is fixed on one and silently missed on the other. The canonical spelling
+    is the one the provider's own API uses (for OVH, ``Qwen3.8-27B``); a
+    provider that spells the same model differently is a SEPARATE entry only when
+    the spelling differs beyond case (groq's ``openai/gpt-oss-120b`` vs the bare
+    ``gpt-oss-120b`` both exist), never by case alone."""
+    by_fold = {}
+    for key in _section(registry, "models"):
+        by_fold.setdefault(key.lower(), []).append(key)
+    problems = []
+    for folded, keys in sorted(by_fold.items()):
+        if len(keys) > 1:
+            problems.append("model keys differ only in case: %s" % ", ".join(sorted(keys)))
+    return problems
+
+
 # ===========================================================================
 # rule 3 - privacy-sensitive routes
 # ===========================================================================
@@ -549,8 +583,13 @@ def private_safe(provider_id, model_id, registry) -> tuple:
 
     Safe only when ALL of:
       - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
-        ``providers.<id>.tier`` -- is exactly ``"paid"`` or ``"subscription"``.
-        A free pool is never private-safe, even one whose own
+        ``providers.<id>.tier`` -- is ``"paid"``, ``"subscription"`` or
+        (L1-CLEAN, 2026-10-01) ``"credit"``. A credit leg is admitted because
+        its provider now proves no-training with a cited ``privacy`` block
+        (L1-CLEAN-4 K2, 2026-10-01: that block is ENFORCED here, via
+        ``_privacy_block_problems``, not merely documented) and the resolver's
+        own spend guard prices/caps it; a free pool is still
+        never private-safe, even one whose own
         ``trains_on_prompts`` is ``false`` (the found bug: groq/cerebras/
         sambanova free legs, and mistral's own ``mistral-code-latest`` free
         pool, all carry ``trains_on_prompts: false`` at the provider level and
@@ -586,10 +625,21 @@ def private_safe(provider_id, model_id, registry) -> tuple:
         return False, "unknown model %r" % (model_id,)
 
     effective_tier = model["tier"] if "tier" in model else provider.get("tier")
-    if effective_tier not in ("paid", "subscription"):
-        return False, "effective tier %r is not paid or subscription" % (effective_tier,)
+    if effective_tier not in ("paid", "subscription", "credit"):
+        return False, "effective tier %r is not paid, subscription or credit" % (effective_tier,)
     if provider.get("trains_on_prompts") is not False:  # True or missing: unsafe
         return False, "trains on prompts"
+    if _cited_privacy_block_required(provider, effective_tier):
+        # L1-CLEAN-4 K2 (2026-10-01), one predicate per rework F1: the credit
+        # half of the admission is the CITED block, not the bare flag - the same
+        # predicate check_registry reports with (see
+        # ``_cited_privacy_block_required``), so a leg is never clean here and a
+        # defect there.
+        problems = _privacy_block_problems(provider_id, provider,
+                                           effective_tier=effective_tier)
+        if problems:
+            return False, ("credit tier without cited privacy evidence (%s)"
+                           % problems[0].split("privacy evidence: ", 1)[-1])
     if "trains_on_prompts" in model and model["trains_on_prompts"] is not False:
         return False, "model trains on prompts"
     return True, None
@@ -657,6 +707,149 @@ def privacy_exemption_lines(registry) -> list:
         if route_id in routes:
             lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
     return lines
+
+
+def _cited_privacy_block_required(provider: dict, effective_tier=None) -> bool:
+    """The ONE predicate for "must this leg carry a cited ``privacy`` block?"
+    (T1-CLEAN-4 rework F1, 2026-10-01): `private_safe()` and
+    `_privacy_block_problems()` both ask it, so the gate and the report can
+    never read the credit rule differently across the tier-override axis.
+
+    A credit grant is the case that needs the citation, and `credit` can arrive
+    from either side of the override, so BOTH tiers are consulted: the
+    provider's own ``tier`` and the leg's EFFECTIVE tier
+    (``models.<id>.tier`` when present, else the provider's). **Either one
+    being credit demands the block** — that is the fail-closed choice, and it
+    is the rule both directions follow: a model-level ``tier: "credit"``
+    override onto a paid provider cannot borrow that provider's silence, and a
+    ``tier: "paid"`` override onto a credit provider cannot escape the citation
+    that provider's grant rests on. The requirement only ever widens with the
+    override; it never narrows. `effective_tier=None` (a provider-level row read
+    on its own, e.g. by the provider walk in `_check_privacy_evidence`) means
+    the provider's tier decides.
+    """
+    return "credit" in (provider.get("tier"), effective_tier)
+
+
+def _privacy_block_problems(provider_id: str, provider: dict,
+                            effective_tier=None) -> list:
+    """Rule 3b defects for ONE `providers.<id>` row, as ``"privacy evidence: ..."``
+    lines (T1-CLEAN-4 K2, 2026-10-01).
+
+    This is the single reading of "a cited no-training block", shared by
+    `_check_privacy_evidence()` (which reports every defect) and
+    `private_safe()` (which gates a `credit` leg), so the report and the gate can
+    never disagree about what counts as evidence. Which legs are asked for one
+    at all is `_cited_privacy_block_required()`'s single predicate, fed the same
+    `effective_tier` here and there (rework F1). Two shapes are problems:
+
+      - a present block that is not an object, disagrees with the provider's own
+        ``trains_on_prompts``, or (for a no-training claim) carries no evidence,
+        or an evidence row without an https ``url``, a non-empty ``quote`` and an
+        ISO ``accessed`` date;
+      - a credit leg — by its own tier or its provider's — that asserts
+        ``trains_on_prompts: false`` with NO block at all: the schema and
+        `private_safe()`'s docstring both say a credit leg is admitted *because*
+        its grant cites its terms, and until K2 nothing enforced it.
+
+    A row that is neither (no block, no credit grant) returns ``[]``.
+    """
+    problems = []
+    if "privacy" not in provider:
+        if (_cited_privacy_block_required(provider, effective_tier)
+                and provider.get("trains_on_prompts") is False):
+            problems.append(
+                "privacy evidence: providers.%s is tier credit with "
+                "trains_on_prompts false and no privacy block - a credit leg "
+                "admitted to a -clean route must cite the terms that say so"
+                % provider_id)
+        return problems
+    block = provider.get("privacy")
+    if not isinstance(block, dict):
+        return ["privacy evidence: providers.%s.privacy is not an object"
+                % provider_id]
+    if block.get("trains_on_prompts") is not provider.get("trains_on_prompts"):
+        problems.append(
+            "privacy evidence: providers.%s.privacy.trains_on_prompts %r "
+            "disagrees with the provider flag %r"
+            % (provider_id, block.get("trains_on_prompts"),
+               provider.get("trains_on_prompts")))
+    if block.get("trains_on_prompts") is not False:
+        return problems  # only a no-training claim needs evidence
+    evidence = block.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        problems.append("privacy evidence: providers.%s.privacy has no evidence"
+                        % provider_id)
+        return problems
+    for i, row in enumerate(evidence):
+        if not isinstance(row, dict):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "is not an object" % (provider_id, i))
+            continue
+        url = row.get("url")
+        if not isinstance(url, str) or not url.startswith("https://"):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "url is not https" % (provider_id, i))
+        quote = row.get("quote")
+        if not isinstance(quote, str) or not quote.strip():
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "quote is empty" % (provider_id, i))
+        accessed = row.get("accessed")
+        if not isinstance(accessed, str) or not re.match(r"^\d{4}-\d{2}-\d{2}$",
+                                                         accessed):
+            problems.append("privacy evidence: providers.%s.privacy.evidence[%d] "
+                            "accessed is not YYYY-MM-DD" % (provider_id, i))
+    return problems
+
+
+def _check_privacy_evidence(registry) -> list:
+    """Rule 3b (L1-CLEAN, 2026-10-01): a providers.<id>.privacy block must be
+    complete and consistent with the provider's own trains_on_prompts flag, and
+    a `credit` grant that relies on `false` must carry such a block at all
+    (T1-CLEAN-4 K2).
+
+    A provider asking to be trusted on a privacy=sensitive route cannot just
+    assert `false` - the block must cite its authority: non-empty evidence,
+    each row an https url, a non-empty quote and an ISO accessed date, and
+    privacy.trains_on_prompts must equal the provider-level flag exactly. An
+    inconsistent or unevidenced block is the defect (the registry's version of
+    "never guess false to make a row look clean", spec 3.1).
+
+    A provider row is read on its own tier, then every leg the routes carry is
+    re-read with its EFFECTIVE tier, so a model-level ``tier`` override that
+    makes a leg credit on a provider whose own row asks for nothing is reported
+    too (rework F1 — the same predicate `private_safe()` gates on)."""
+    problems = []
+    providers = _section(registry, "providers")
+    for provider_id, provider in sorted(providers.items()):
+        if not isinstance(provider, dict):
+            continue
+        problems.extend(_privacy_block_problems(provider_id, provider))
+
+    models = _section(registry, "models")
+    seen_legs = set()
+    for route in _section(registry, "routes").values():
+        if not isinstance(route, dict):
+            continue
+        for leg in dict.fromkeys((route.get("legs") or [])
+                                 + list((route.get("unavailable_legs") or {}))):
+            try:
+                provider_id, model_id = resolve_leg(leg, registry)
+            except ValueError:
+                continue  # rule 1 already reports an unresolved leg
+            if (provider_id, model_id) in seen_legs:
+                continue
+            seen_legs.add((provider_id, model_id))
+            provider = providers.get(provider_id)
+            model = models.get(model_id)
+            if not isinstance(provider, dict) or not isinstance(model, dict):
+                continue
+            effective_tier = model.get("tier", provider.get("tier"))
+            if effective_tier == provider.get("tier"):
+                continue  # the provider walk above already read this row
+            problems.extend(_privacy_block_problems(provider_id, provider,
+                                                    effective_tier=effective_tier))
+    return list(dict.fromkeys(problems))
 
 
 # ===========================================================================
@@ -1191,11 +1384,27 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     if missing_blocks:
         raise ValueError("config.yaml has no managed block for: %s" % ", ".join(missing_blocks))
 
+    # K6/F3 (T1-CLEAN-4 rework, 2026-10-01): render_block() reads the skip names
+    # out of the sync tool's module state, so this call owns that table for the
+    # whole render — set from the tiers it actually emits, cleared of everything
+    # else, so a second call in one process cannot inherit the first one's
+    # `# litellm-skip:` lines into an unrelated block.
+    sync.SKIPPED_BY_TIER.clear()
+    sync.SKIPPED_BY_TIER.update(
+        {tier: sync.skipped_refs(routes[tier], registry)
+         for tier in refs_by_tier})
+
     rendered = {}
     for tier in refs_by_tier:
         start, end = blocks[tier]
         indent = sync.leading_indent(lines[start])
         extras = sync.parse_block(lines, start, end)
+        # K6 (T1-CLEAN-4, 2026-10-01): a leg whose provider declares an auth
+        # LiteLLM cannot express is dropped by litellm_servable_refs() and NAMED
+        # here, in the block itself, so the next reader does not have to diff the
+        # registry to find out why the leg is missing. sync.render_block() owns
+        # the line (via SKIPPED_BY_TIER), so this tool's render and
+        # tools/sync-router-tiers.py's own rewrite cannot drift apart.
         try:
             block_lines = sync.render_block(tier, refs_by_tier[tier], indent, extras)
         except sync.ConfigError as exc:
@@ -3017,7 +3226,9 @@ def check_registry(registry) -> list:
     problems = []
     problems.extend(_check_legs(registry))
     problems.extend(_check_unique_ids(registry))
+    problems.extend(_check_model_key_case(registry))
     problems.extend(_check_privacy(registry))
+    problems.extend(_check_privacy_evidence(registry))
     problems.extend(_check_private_hosts(registry))
     problems.extend(_check_dated_values(registry))
     problems.extend(_check_required_keys(registry))

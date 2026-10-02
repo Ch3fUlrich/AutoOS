@@ -1264,8 +1264,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # measured plan), so the combo is now exactly the one live leg — and the
         # combo survives, which is what the invariant in tests/test_registry.py
         # requires of a route that still serves traffic.
+        # L1-CLEAN 2026-10-01 supersedes the DSBACK single-leg shape: the trial
+        # credits lead and the native DeepSeek leg is the last paid fallback.
         self.assertEqual(
-            combos["t2-worker-clean"]["models"], ["deepseek/deepseek-flash"])
+            combos["t2-worker-clean"]["models"],
+            ["ovh/gpt-oss-120b", "ovh/Qwen3.8-27B", "vertex/gemini-3.8-flash",
+             "deepseek/deepseek-flash"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes.
         # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
@@ -1310,9 +1314,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("ovhcloud/Qwen3.8-27B", rendered["t3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
-        row = row_for(registry.render_models_doc(real_registry()), "t2-worker-clean")
+        # L1-CLEAN (2026-10-01): the -clean twins no longer carry a gated leg
+        # (their trial-first legs are all servable), so the stale OVH coder leg
+        # kept in t2-worker's legs and marked unavailable_legs is the example.
+        row = row_for(registry.render_models_doc(real_registry()), "t2-worker")
         self.assertIn(
-            "~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable)", row)
+            "~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable)", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
@@ -1882,6 +1889,126 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
                  registry.render_openhands(real_registry())["tiers"]}
         for tier_id in ("omniroute-t1-orchestrator", "litellm-t1-orchestrator"):
             self.assertLessEqual(tiers[tier_id]["max_input_tokens"], 131_072, tier_id)
+
+
+class VertexNoKeyLitellmSkipTests(unittest.TestCase):
+    """T1-CLEAN-4 K6 (2026-10-01): providers.vertex_ai authenticates from a GCP
+    service-account JSON (its own $comment says the credential is NOT a plain API
+    key) and declares no litellm_env, yet the managed LiteLLM blocks rendered
+    `api_key: os.environ/VERTEX_API_KEY` - a guessed name for a variable that does
+    not exist, the same unset-key hazard GATEWAY_ONLY exists to avoid
+    (the META_API_KEY lesson). The renderer now drops such a leg and NAMES it."""
+
+    def setUp(self):
+        self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        self.text = LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
+        self.blocks = registry.render_litellm_blocks(self.reg, self.text)
+
+    def test_no_keyless_provider_leg_is_rendered(self):
+        for tier, block in sorted(self.blocks.items()):
+            self.assertNotIn("model: vertex/", block, tier)
+            self.assertNotIn("VERTEX_API_KEY", block, tier)
+
+    def test_a_dropped_leg_is_named_in_a_rendered_comment(self):
+        tiers = [t for t, r in self.reg["routes"].items()
+                 if isinstance(r, dict)
+                 and any(l.startswith("vertex/") for l in (r.get("legs") or []))]
+        self.assertTrue(tiers, "no route carries a vertex leg any more?")
+        named = [t for t in tiers if t in self.blocks]
+        self.assertTrue(named, "no managed tier carries the vertex leg: %s" % tiers)
+        for tier in named:
+            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", self.blocks[tier], tier)
+
+    def test_the_committed_config_matches_the_render(self):
+        self.assertEqual(registry.litellm_diff(self.blocks, self.text), [])
+
+    def test_a_key_provider_keeps_its_leg(self):
+        # the drop is declared-auth only: providers that do have a LiteLLM key
+        # (the <UPPER>_API_KEY convention) must keep rendering, or this "fix"
+        # would silently gut the mirror.
+        joined = "\n".join(self.blocks.values())
+        self.assertIn("model: ovhcloud/gpt-oss-120b", joined)
+        self.assertIn("OVHCLOUD_API_KEY", joined)
+
+
+class CombosDeclaredAuthSkipTests(unittest.TestCase):
+    """T1-CLEAN-4 rework F2/F3/F4: tools/sync-router-tiers.py's --combos path
+    applies the same declared-auth drop as the registry path, and the drop,
+    its naming, and its per-call state were all untested."""
+
+    def setUp(self):
+        self.sync = registry._load_sync_router_tiers()
+        self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        self.sync.PROVIDER_PREFIX, self.sync.API_BASE, self.sync.ENV_KEY = (
+            self.sync.provider_maps_from_dict(self.reg["providers"]))
+
+    def _combos(self, tmp, combos):
+        path = Path(tmp) / "combos.json"
+        path.write_text(json.dumps({"combos": combos}), encoding="utf-8")
+        return str(path)
+
+    def test_a_declared_auth_combo_leg_is_dropped_and_named(self):
+        # F2: combos_refs' `no_key` clause had no test - deleting it survived.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            refs = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(refs["t1-orchestrator"], ["ovhcloud/gpt-oss-120b"])
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["t1-orchestrator"],
+                             ["vertex/gemini-3.8-flash"])
+            block = self.sync.render_block("t1-orchestrator",
+                                           refs["t1-orchestrator"])
+            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash",
+                          "\n".join(block), block)
+
+    def test_each_call_owns_the_skip_state_it_leaves_behind(self):
+        # F3: SKIPPED_BY_TIER is module state that was only ever .update()d and
+        # assigned per tier, never cleared - a second call in one process left
+        # the first call's skips sitting there for render_block() to pick up.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            self.sync.combos_refs(path, registry=self.reg)
+            second = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+                "ovhcloud/gpt-oss-120b"]}])
+            combos = self.sync.combos_refs(second, registry=self.reg)
+            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t1-orchestrator"})
+            block = "\n".join(self.sync.render_block(
+                "t2-worker", combos.get("t2-worker", [])))
+            self.assertNotIn("litellm-skip", block)
+
+    def test_the_registry_call_clears_a_prior_combos_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+            self.sync.combos_refs(path, registry=self.reg)
+            self.sync.registry_refs(str(REGISTRY_PATH), tiers=("t4-rag",))
+            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t4-rag"})
+
+    def test_a_combo_dropped_whole_still_gets_its_skip_named(self):
+        # F4: the default tier set derived from the POST-filter list, so a combo
+        # whose every leg is a declared-auth skip got no block and its
+        # "# litellm-skip:" line rendered nowhere - the drop went invisible.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "vertex-gemini-3.8-flash",
+                                       "models": ["vertex/gemini-3.8-flash"]}])
+            combos = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(combos, {})
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["vertex-gemini-3.8-flash"],
+                             ["vertex/gemini-3.8-flash"])
+            self.assertIn("vertex-gemini-3.8-flash: vertex/gemini-3.8-flash",
+                          self.sync.unmanaged_skip_notices(combos))
+
+    def test_a_combo_dropped_only_by_gateway_only_stays_unnamed(self):
+        # the notice is for the declared-auth drop only: an all-GATEWAY_ONLY
+        # combo was never a LiteLLM leg at all (the opus-4-6 case combos_refs
+        # documents), and naming it would be a different rule with one home.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._combos(tmp, [{"name": "opus-4-6",
+                                       "models": ["cc/opus-4-6"]}])
+            combos = self.sync.combos_refs(path, registry=self.reg)
+            self.assertEqual(combos, {})
+            self.assertEqual(self.sync.unmanaged_skip_notices(combos), [])
 
 
 if __name__ == "__main__":
