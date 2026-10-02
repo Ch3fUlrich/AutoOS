@@ -2080,6 +2080,13 @@ class PlanTests(unittest.TestCase):
         return overlay
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
+        # CIGREEN: expectation moved by 35148c5c (CLEAN put the unproven
+        # ovhcloud/gpt-oss-120b head on -clean) and ffe384a0 (credit spend
+        # guard refuses it as unpriced). With only that head proven the plan
+        # fail-closes instead of picking an unsafe leg -- pinned below by the
+        # None route plus the named credit-unpriced reason -- and with a priced
+        # private-safe leg proven the plan must route to it with every serving
+        # leg private-safe. Either half fails if an unsafe leg were ever picked.
         # PRIV brief 2026-09-26, the found bug: `route --card
         # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
@@ -2099,6 +2106,14 @@ class PlanTests(unittest.TestCase):
                    "tests": True, "need_tokens": 1000}
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
+        starved = r.plan(card, features, client_state, registry, overlay, [],
+                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNone(starved["route"], starved)
+        self.assertEqual(starved["state"], "input_required", starved)
+        self.assertIn("credit leg unpriced gpt-oss-120b",
+                      starved["reason"], starved["reason"])
+        overlay["legs"]["ovhcloud/Qwen3.8-27B"] = {
+            "tool_calls": {"value": "proven"}}
         result = r.plan(card, features, client_state, registry, overlay, [],
                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
         self.assertIsNotNone(result["route"], result)
