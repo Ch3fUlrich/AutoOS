@@ -130,6 +130,97 @@ if it "taildrop-sort: hostile names ..__x and a__b/c cannot escape the sort root
     if (( ok )); then pass; else fail "taildrop-sort let a hostile name outside the sort root"; fi
 fi
 
+if it "taildrop-sort: a name part leading with . or - is filed with a _ prefix"; then
+    # The owner half cannot carry a dot, but the rest after `__` legitimately
+    # can - `..`, `.hidden` and `-rf` are all legal tails. Filed verbatim,
+    # `autoos/..` would resolve to the sort root rather than to a file inside
+    # it, so each tail gains `_` and lands as a plain name in the owner
+    # folder. Nothing may appear beside the sort root and no mapped name may
+    # reach unsorted/.
+    sb="$(td_sandbox no-fixtures)"; ok=1
+    printf 'parent\n' >"$sb/fixtures/autoos__.."
+    printf 'hidden\n' >"$sb/fixtures/autoos__.hidden"
+    printf 'dash\n'   >"$sb/fixtures/autoos__-rf"
+    out="$(td_run "$sb")"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    for want in '_..' '_.hidden' '_-rf'; do
+        [[ -f "$sb/tree/autoos/$want" ]] \
+            || { ok=0; echo "autoos/$want was not created: [$(ls -A "$sb/tree/autoos" 2>&1)]" >&2; }
+    done
+    # Exactly those three, and only those three, in the owner folder.
+    top="$(ls -A "$sb/tree/autoos" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$top" == "_-rf _.. _.hidden " ]] || { ok=0; echo "autoos/ holds [$top]" >&2; }
+    un="$(ls -A "$sb/tree/unsorted")"
+    [[ -z "$un" ]] || { ok=0; echo "a mapped name went to unsorted/: [$un]" >&2; }
+    # All three filed by owner, so the root holds only those three folders -
+    # owner filings append nothing, so there is not even a sort.log yet.
+    sroot="$(ls -A "$sb/tree" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$sroot" == "autoos incoming unsorted " ]] \
+        || { ok=0; echo "the sort root gained an entry: [$sroot]" >&2; }
+    outside="$(ls -A "$sb" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$outside" == "bin calls fixtures tree " ]] \
+        || { ok=0; echo "something was created outside the sort root: [$outside]" >&2; }
+    rm -rf -- "$sb"
+    if (( ok )); then pass; else fail "taildrop-sort did not map a leading dot/dash in the name part"; fi
+fi
+
+if it "taildrop-sort: a name with an embedded newline lands in unsorted/ untouched"; then
+    sb="$(td_sandbox no-fixtures)"; ok=1
+    nl_name=$'autoos__multi\nline.txt'
+    printf 'break\n' >"$sb/fixtures/$nl_name"
+    out="$(td_run "$sb")"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ -f "$sb/tree/unsorted/$nl_name" ]] \
+        || { ok=0; echo "the newline name was not kept byte for byte: [$(ls -A "$sb/tree/unsorted" 2>&1)]" >&2; }
+    # The owner half of that name is legible only together with its rest, so
+    # nothing may be filed by owner: no owner folder may exist.
+    sroot="$(ls -A "$sb/tree" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$sroot" == "incoming sort.log unsorted " ]] \
+        || { ok=0; echo "an owner folder appeared for an unknown owner: [$sroot]" >&2; }
+    # One log line, the break flattened to a space as for any unsorted drop.
+    n="$(grep -c . "$sb/tree/sort.log" 2>/dev/null || true)"
+    (( n == 1 )) || { ok=0; echo "expected one log line, got [$n]" >&2; }
+    log="$(cat "$sb/tree/sort.log" 2>/dev/null || true)"
+    printf '%s\n' "$log" |
+        grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z unsorted autoos__multi line\.txt$' \
+        || { ok=0; echo "log line is not a UTC stamp + unsorted + flattened name: [$log]" >&2; }
+    outside="$(ls -A "$sb" | LC_ALL=C sort | tr '\n' ' ')"
+    [[ "$outside" == "bin calls fixtures tree " ]] \
+        || { ok=0; echo "something was created outside the sort root: [$outside]" >&2; }
+    rm -rf -- "$sb"
+    if (( ok )); then pass; else fail "taildrop-sort did not keep a newline-carrying name in unsorted/"; fi
+fi
+
+if it "taildrop-sort: a second run over a drained inbox reports nothing new"; then
+    # The hostile spellings from the two cases above plus the newline name,
+    # fetched once, then fetched again against an inbox the first run emptied.
+    # The fake client re-delivers the fixtures on every call, so deleting them
+    # is what a drained inbox looks like from here.
+    sb="$(td_sandbox no-fixtures)"; ok=1
+    nl_name=$'autoos__multi\nline.txt'
+    printf 'parent\n' >"$sb/fixtures/autoos__.."
+    printf 'hidden\n' >"$sb/fixtures/autoos__.hidden"
+    printf 'dash\n'   >"$sb/fixtures/autoos__-rf"
+    printf 'break\n'  >"$sb/fixtures/$nl_name"
+    td_run "$sb" >/dev/null
+    find "$sb/fixtures" -mindepth 1 -delete
+    tree1="$(find "$sb/tree" | LC_ALL=C sort)"
+    log1="$(cat "$sb/tree/sort.log" 2>/dev/null || true)"
+    # The newline drop is an unsorted drop, so the first run must have logged
+    # it - otherwise the equality checks below would compare two empty runs.
+    [[ -n "$log1" ]] || { ok=0; echo "the first run logged nothing for the unsorted drop" >&2; }
+    out="$(td_run "$sb")"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "second fetch rc=$rc: $out" >&2; }
+    [[ -z "$out" ]] || { ok=0; echo "a drained inbox answered with output: [$out]" >&2; }
+    tree2="$(find "$sb/tree" | LC_ALL=C sort)"
+    [[ "$tree1" == "$tree2" ]] \
+        || { ok=0; echo "the second run changed the sort tree:"$'\n'"first: $tree1"$'\n'"second: $tree2" >&2; }
+    log2="$(cat "$sb/tree/sort.log" 2>/dev/null || true)"
+    [[ "$log1" == "$log2" ]] || { ok=0; echo "the second run logged again: [$log2]" >&2; }
+    rm -rf -- "$sb"
+    if (( ok )); then pass; else fail "taildrop-sort re-filed files the first run had already drained"; fi
+fi
+
 if it "taildrop-sort: a machine with no tailscale on PATH fetches nothing and exits 0"; then
     # A timer that errors every minute teaches people to ignore it. Only
     # mkdir and chmod can run before the check, so the PATH is narrowed to

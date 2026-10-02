@@ -13,14 +13,19 @@
 # What a run does: create the tree, fetch into $ROOT/incoming, then move each
 # REGULAR FILE by NAME only:
 #
-#   <owner>__<rest of name>   -> $ROOT/<owner>/<rest of name>
+#   <owner>__<rest of name>   -> $ROOT/<owner>/<rest, leading ./- mapped to _>
 #   anything else             -> $ROOT/unsorted/<name> + one line in sort.log
 #
-# The owner pattern below is a single path segment - lowercase letters, digits
-# and dashes - so no name can carry a slash or a dot and no destination is ever
-# built outside $ROOT. File CONTENT is never read, hashed, printed or compared:
-# the bytes of a file are not this script's business, and everything it decides
-# on it already fits in its name.
+# The no-slash, no-dot guarantee belongs to the OWNER part only: the owner
+# pattern below is a single path segment - lowercase letters, digits and
+# dashes - so no destination DIRECTORY is ever built outside $ROOT. The rest of
+# the name after `__` becomes a file name, so it is mapped before filing: a
+# leading `.` or `-` gains a `_` prefix (`autoos__..` lands as `autoos/_..`,
+# `autoos__-rf` as `autoos/_-rf`), and a name carrying a newline or carriage
+# return is filed in unsorted/ exactly as delivered - an unknown owner is
+# safer than a mangled name. File CONTENT is never read, hashed, printed or
+# compared: the bytes of a file are not this script's business, and everything
+# it decides on it already fits in its name.
 #
 # Every failure is cheap. A missing or failing `tailscale`, or an inbox nothing
 # has written yet, is one line on stderr and exit 0: a timer that reports an
@@ -40,9 +45,11 @@ umask 077
 ROOT="${AUTOOS_TAILDROP_ROOT:-$HOME/fleet/taildrop}"
 
 # owner__rest-of-name -> owner/ rest-of-name. Anchored, and deliberately narrow:
-# starts with a letter, then lowercase letters, digits or dashes only. No dot
-# and no slash can survive it, so `..__x`, `a.b__c`, `a/b__c` and `A__x` are
-# not owner names - they are ordinary files that land in unsorted/.
+# starts with a letter, then lowercase letters, digits or dashes only - the
+# OWNER part. No dot and no slash can survive it, so `..__x`, `a.b__c`,
+# `a/b__c` and `A__x` are not owner names - they are ordinary files that land
+# in unsorted/. The rest-of-name after `__` may legitimately begin with a dot
+# or a dash; it is mapped in the loop below, never here.
 OWNER_RE='^([a-z][a-z0-9-]*)__(.+)$'
 
 # td_mkdir <path>: create <path> at mode 0700, and say nothing when it is
@@ -84,14 +91,30 @@ stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # nowhere interesting and is simply never touched.
 while IFS= read -r -d '' path; do
     name="${path##*/}"
-    if [[ "$name" =~ $OWNER_RE ]]; then
+
+    # The default for every fetched file: unsorted/, under its exact delivered
+    # name, logged once - the owner is unknown. The branch below is the only
+    # thing that narrows this to an owner folder.
+    dest_dir="$ROOT/unsorted"
+    rest="$name"
+    filed=1
+
+    # A line break in the name short-circuits the match on purpose: whether
+    # `.` spans a newline depends on the regex engine behind `=~`, so instead
+    # of trusting either answer such a name keeps its owner unknown and is
+    # filed unchanged - an unknown owner is safer than a mangled name. (A
+    # newline in the owner half fails the pattern below on its own.)
+    if [[ "$name" != *$'\n'* && "$name" != *$'\r'* && "$name" =~ $OWNER_RE ]]; then
         dest_dir="$ROOT/${BASH_REMATCH[1]}"
         rest="${BASH_REMATCH[2]}"
+        # `.`/`..` must never stay verbatim as a file name - `autoos/..` is
+        # the sort root itself, not a file - and a hidden or dash-leading
+        # landing is a surprise nobody asked for, so `_` prefixes it and every
+        # filed name becomes a plain, visible file inside the owner folder.
+        if [[ "$rest" == .* || "$rest" == -* ]]; then
+            rest="_$rest"
+        fi
         filed=0
-    else
-        dest_dir="$ROOT/unsorted"
-        rest="$name"
-        filed=1
     fi
 
     # A clash (the same sent name twice) appends .1, .2, ... - never overwrites.
