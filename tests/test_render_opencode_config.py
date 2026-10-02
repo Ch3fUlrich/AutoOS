@@ -6,9 +6,26 @@ import unittest
 import importlib.util, os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+import json, re
+
 spec = importlib.util.spec_from_file_location('render_mod', os.path.join(ROOT, 'tools', 'render-opencode-container-config.py'))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+spec_agent = importlib.util.spec_from_file_location('agent_mod', os.path.join(ROOT, 'tools', 'autoos-agent.py'))
+agent_module = importlib.util.module_from_spec(spec_agent)
+spec_agent.loader.exec_module(agent_module)
+
+def _iter_strings(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str):
+                yield k
+            yield from _iter_strings(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_strings(v)
+    elif isinstance(obj, str):
+        yield obj
 
 class TestRenderOpencodeConfig(unittest.TestCase):
     def test_with_host_malformed_port(self):
@@ -71,6 +88,46 @@ class TestRenderOpencodeConfig(unittest.TestCase):
         second = []
         module.pin_fleet_overrides(cfg, second)
         self.assertEqual(second, [], "second render must be a no-op")
+
+    def _render_minimal(self):
+        cfg = {
+            'agent': {
+                'leaf-implementer': {'mode': 'subagent', 'model': 'meta/muse-spark-1.3-contributor'},
+            },
+            'providers': {'omniroute': {'models': {}}},
+        }
+        module.pin_fleet_overrides(cfg, [])
+        return cfg
+
+    def test_d255_rendered_config_carries_no_refused_gemini_id(self):
+        """D-255: every Gemini id in the rendered container config must be one
+        tools/autoos-agent.gemini_model_allowed() accepts."""
+        cfg = self._render_minimal()
+        seen = [s for s in _iter_strings(cfg) if 'gemini' in s.lower()]
+        self.assertTrue(seen, "expected Gemini ids in the render")
+        for s in seen:
+            self.assertTrue(agent_module.gemini_model_allowed(s),
+                            "D-255 refused Gemini id %r in render:\n%s" % (s, json.dumps(cfg)))
+
+    def test_d255_leaf_implementer_resolves_to_flash_leg(self):
+        cfg = self._render_minimal()
+        self.assertEqual(cfg['agent']['leaf-implementer']['model'],
+                         'omniroute/vertex-gemini-3.8-flash')
+        m = cfg['providers']['omniroute']['models']['vertex-gemini-3.8-flash']
+        self.assertEqual(m['modelID'], 'vertex/gemini-3.8-flash')
+
+    def test_d255_fleet_tables_have_no_pro_gemini_ids(self):
+        pro = re.compile(r'(?:^|-)pro', re.I)
+        for table in (module.FLEET_VERTEX_MODELS, module.FLEET_AGENT_MODELS):
+            for key, value in table.items():
+                vals = [key, value] + (list(value) if isinstance(value, tuple) else [])
+                for s in vals:
+                    if isinstance(s, str) and 'gemini' in s.lower():
+                        tail = s.lower()[s.lower().index('gemini'):]
+                        self.assertFalse(pro.search(tail),
+                                         "D-255: 'pro' Gemini id %r in fleet table" % s)
+                        self.assertTrue(agent_module.gemini_model_allowed(s),
+                                        "D-255: refused Gemini id %r in fleet table" % s)
 
 if __name__ == '__main__':
     unittest.main()

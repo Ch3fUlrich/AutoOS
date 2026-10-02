@@ -20013,5 +20013,470 @@ class T2IsolateSecretsS5CanaryTests(unittest.TestCase):
             self._assert_sandbox_is_clean(box, [])
 
 
+class HandEntryPricingTests(unittest.TestCase):
+    """D5 (lane trial-direct, 2026-10-01): an opencode.jsonc hand entry is a direct
+    passthrough, not a combo, and the budget gate benched every one of them —
+    `cannot be priced -- the model ... is no route the registry carries` — so a
+    `--model omniroute/vertex-3.8-flash` spawn was refused while the budget was on.
+    The name is priceable after all: its modelID is a `<gateway provider>/<model>`
+    leg, and `registry_ref()` turns the gateway spelling back into the registry leg
+    whose model row says what family answers. An id that resolves to nothing is
+    still refused: this teaches the gate to read the config, not to guess free."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def spends(self, model, cfg=None, source="--model"):
+        return self.agent.spawn_spends_claude("opencode", model, SHIPPED_REGISTRY,
+                                              source, cfg or self.cfg)
+
+    def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
+        for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
+                     "omniroute/ovh-direct-qwen3-coder-30b",
+                     "omniroute/ovh-direct-qwen3.8-27b"):
+            self.assertIs(self.spends(name), False, name)
+
+    def test_hand_entry_leg_is_the_registry_spelling_of_the_modelid(self):
+        # The gateway spells OVH's ids `ovh/*`; the registry keys the provider
+        # `ovhcloud` and declares model_prefix 'ovh', so the leg only resolves
+        # through registry_ref — the one inverse of gateway_ref.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-gpt-oss-120b",
+                                                   SHIPPED_REGISTRY, self.cfg),
+                         "ovhcloud/gpt-oss-120b")
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.8-flash",
+                                                   SHIPPED_REGISTRY, self.cfg),
+                         "vertex/gemini-3.8-flash")
+
+    def test_a_managed_region_entry_is_not_read_as_a_hand_entry(self):
+        # Its modelID is the route id itself, so the passthrough shape is absent
+        # and the route half of the gate keeps answering for it.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/t2-worker",
+                                                   SHIPPED_REGISTRY, self.cfg), "")
+
+    def test_an_unknown_hand_id_is_still_refused(self):
+        self.assertIsNone(self.spends("omniroute/no-such-hand-entry"))
+
+    def test_a_hand_entry_whose_modelid_has_no_registry_row_is_refused(self):
+        # Until a registry model row describes the leg, nothing can say what
+        # answers, so the name is refused rather than assumed free. RWP1 gave the
+        # shipped vertex-3.6/3.7-flash ids their rows, so the unrowed case is
+        # synthesised here — the guard must keep firing on it.
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-9.9-flash": {"modelID": "vertex/gemini-9.9-flash"}}}}}
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-9.9-flash",
+                                                   SHIPPED_REGISTRY, cfg), "")
+        self.assertIsNone(self.spends("omniroute/vertex-9.9-flash", cfg))
+
+    def test_the_3_6_and_3_7_hand_ids_resolve_to_their_vertex_leg(self):
+        # RWP1: the hand entries shipped in 48f0ac21 could not be priced because
+        # no `models.gemini-3.6-flash` / `models.gemini-3.7-flash` row existed for
+        # the modelID to resolve against. The leg spelling is the provider's
+        # omniroute_id plus the model key.
+        for name, leg in (("omniroute/vertex-3.6-flash", "vertex/gemini-3.6-flash"),
+                          ("omniroute/vertex-3.7-flash", "vertex/gemini-3.7-flash")):
+            self.assertEqual(self.agent.hand_entry_leg(name, SHIPPED_REGISTRY, self.cfg),
+                             leg, name)
+
+    def test_the_3_6_and_3_7_hand_ids_are_priced_and_not_claude(self):
+        for name in ("omniroute/vertex-3.6-flash", "omniroute/vertex-3.7-flash"):
+            self.assertIs(self.spends(name), False, name)
+
+    def test_the_3_6_and_3_7_hand_legs_are_credit_tier_legs(self):
+        # The price the gate reads them at is the provider's trial credit, not a
+        # per-token figure — providers.vertex_ai.tier says which.
+        for leg in ("vertex/gemini-3.6-flash", "vertex/gemini-3.7-flash"):
+            provider_id, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
+            self.assertEqual(provider_id, "vertex_ai", leg)
+            self.assertEqual(SHIPPED_REGISTRY["providers"][provider_id]["tier"],
+                             "credit", leg)
+            self.assertIn(model_id, SHIPPED_REGISTRY["models"], leg)
+
+    def test_a_hand_entry_on_an_anthropic_leg_is_claude(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "own-claude": {"modelID": "anthropic/claude-opus-4-8"}}}}}
+        self.assertIs(self.spends("omniroute/own-claude", cfg), True)
+
+    def test_a_hand_entry_on_a_claude_named_leg_is_claude(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "own-claude": {"modelID": "cc/claude-opus-4-6"}}}}}
+        self.assertIs(self.spends("omniroute/own-claude", cfg), True)
+
+    def test_run_dry_named_hand_entry_is_not_benched_as_unpriceable(self):
+        # The budget is on in the shipped registry, so before D5 this exact
+        # command refused with "cannot be priced"; now it reaches the gate that
+        # is actually about the run (tier-2 isolation).
+        r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
+                      "--dry-run", "--card", "role=implement", "reply with exactly: ack")
+        self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+        # G4 (RWP3): the absence of one phrase was the whole assertion, so a mutant
+        # that benched the run for another reason — or answered that the hand entry
+        # spends Claude — still passed. The door stays open and the spend stays False.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIs(self.spends("omniroute/ovh-direct-gpt-oss-120b"), False)
+
+    def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
+        # The same door, on the id whose registry row RWP1 adds.
+        r = run_agent("run", "--model", "omniroute/vertex-3.6-flash",
+                      "--dry-run", "--card", "role=implement", "reply with exactly: ack")
+        self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+
+class VertexFlashRegistryRowsTests(unittest.TestCase):
+    """RWP1 (lane trial-direct, 2026-10-01): `models.gemini-3.6-flash` and
+    `models.gemini-3.7-flash` are the registry half of the `vertex-3.6-flash` /
+    `vertex-3.7-flash` hand entries shipped in 48f0ac21. A hand entry passes its
+    modelID to the gateway verbatim, so with no row for the model behind
+    `vertex/gemini-3.<6,7>-flash` the spawn gate could say nothing about what
+    answers and refused the run. The rows are shaped like the `gemini-3.8-flash`
+    head they sit beside. RWP1 left their price unpriced (no source reachable from
+    that lane); the 2026-10-02 pass cites the Vertex list price per each row's
+    `price_source`, and `tool_calls` stays unproven — no leg probe was run."""
+
+    FLASH = ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.models = SHIPPED_REGISTRY["models"]
+
+    def test_exactly_the_three_flash_vertex_ids_are_in_the_registry(self):
+        for model_id in self.FLASH:
+            self.assertIn(model_id, self.models, model_id)
+
+    def test_the_three_flash_vertex_ids_pass_gemini_model_allowed(self):
+        # D-255 allows 3.6 / 3.7 / 3.8 Flash; the row's existence must not read as
+        # a ban, in either the leg or the bare-model spelling.
+        for model_id in self.FLASH:
+            for ref in (model_id, "vertex/" + model_id, "vertex-gemini"
+                        + model_id[len("gemini"):]):
+                self.assertTrue(self.agent.gemini_model_allowed(ref), ref)
+
+    def test_the_two_new_rows_are_shaped_like_the_3_8_head(self):
+        head = self.models["gemini-3.8-flash"]
+        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
+            row = self.models[model_id]
+            self.assertEqual(row["id"], model_id)
+            self.assertEqual(row["family"], "google", model_id)
+            self.assertEqual(row["tool_calls"], "unproven", model_id)
+            self.assertTrue(row["reasoning"], model_id)
+            self.assertEqual(row["effort_ladder"], head["effort_ladder"], model_id)
+            # Never larger than the 3.8 head they were copied from.
+            self.assertLessEqual(row["context_advertised"],
+                                 head["context_advertised"], model_id)
+            self.assertLessEqual(row["output_max"], head["output_max"], model_id)
+
+    def test_the_two_new_rows_carry_the_cited_vertex_list_price(self):
+        # TRIAL-DIRECT final docs pass (2026-10-02): the Vertex price was sourced,
+        # so the 0.0 unpriced form RWP1 left here is gone. Pinned to the cited
+        # list price and its dated price_source, never to a guessed figure.
+        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
+            row = self.models[model_id]
+            self.assertEqual((row["price_in"], row["price_out"], row["price_cache_read"]),
+                             (1.5e-06, 7.5e-06, 1.5e-07), model_id)
+            self.assertIn("vertex-ai/generative-ai/pricing", row["price_source"], model_id)
+            self.assertIn("accessed 2026-10-02", row["price_source"], model_id)
+            comment = row["$comment"].lower()
+            self.assertNotIn("price not sourced", comment, model_id)
+            self.assertIn("tool_calls stay unproven", comment, model_id)
+
+    def test_the_shipped_registry_still_validates(self):
+        self.assertEqual(registry_tool.check_registry(SHIPPED_REGISTRY), [])
+
+
+class GeminiAllowListTests(unittest.TestCase):
+    """D-255 (operator 2026-10-01): no Gemini *Pro* model anywhere, and only
+    Gemini 3.6 / 3.7 / 3.8 Flash — every other Gemini version, including the
+    older flash tiers, is off the list."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def allowed(self, *ids):
+        for model_id in ids:
+            self.assertTrue(self.agent.gemini_model_allowed(model_id), model_id)
+
+    def refused(self, *ids):
+        for model_id in ids:
+            self.assertFalse(self.agent.gemini_model_allowed(model_id), model_id)
+
+    def test_the_allowed_versions(self):
+        self.allowed("gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                     "gemini-3.7-flash-high", "gemini-3.7-flash-medium",
+                     "gemini-3.6-flash-preview",
+                     "vertex/gemini-3.8-flash", "antigravity/gemini-3.7-flash-high",
+                     "openrouter/google/gemini-3.8-flash", "vertex-gemini-3.8-flash",
+                     "free_ai/google/gemini-3.8-flash")
+
+    def test_a_pro_token_hidden_in_a_variant_suffix_is_refused(self):
+        # G1 (RWP3, cross-family seat): the variant tail of the allow pattern
+        # reads `-pro` as just another suffix, so `gemini-3.6-flash-pro` — a Pro
+        # model D-255 bans — full-matched it. A '-'-delimited segment that starts
+        # with 'pro' refuses the id whatever else matches, in any case spelling
+        # and behind any path prefix.
+        self.refused("gemini-3.6-flash-pro", "gemini-3.8-flash-pro-preview",
+                     "gemini-3.7-flash-promax", "vertex/gemini-3.6-flash-pro",
+                     "models/gemini-3.8-flash-pro", "google/gemini-3.1-pro-preview",
+                     "GEMINI-3.6-FLASH-PRO", "Vertex/Gemini-3.8-Flash-Pro-Preview")
+
+    def test_the_allowed_versions_and_variants_are_unchanged(self):
+        self.allowed("gemini-3.8-flash", "gemini-3.7-flash-high",
+                     "gemini-3.7-flash-medium", "gemini-3.6-flash",
+                     "gemini-3.8-flash-preview", "gemini-3.6-flash-high-preview",
+                     "vertex/gemini-3.8-flash", "models/gemini-3.7-flash-medium")
+
+    def test_every_pro_model_is_refused(self):
+        self.refused("gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3-pro",
+                     "vertex/gemini-3.1-pro-preview", "google/gemini-2.5-pro",
+                     "antigravity/gemini-3-pro")
+
+    def test_no_hand_entry_in_the_shipped_config_is_off_the_list(self):
+        # The name of a hand entry says nothing about what answers; its modelID
+        # does. vertex-pro / vertex-flash / vertex-flash-lite / gemini-2.5-flash
+        # were all in opencode.jsonc and are gone (D-255 a and b).
+        cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        offenders = []
+        for provider in (cfg.get("providers") or {}).values():
+            for name, entry in (provider.get("models") or {}).items():
+                model_id = (entry or {}).get("modelID")
+                if (isinstance(model_id, str) and "/" in model_id and model_id != name
+                        and not self.agent.gemini_model_allowed(model_id)):
+                    offenders.append("%s -> %s" % (name, model_id))
+        self.assertEqual(offenders, [])
+
+    def test_other_gemini_versions_are_refused(self):
+        self.refused("gemini-2.5-flash", "gemini-3-flash-preview", "gemini-3.5-flash",
+                     "gemini-3.1-flash-lite", "vertex/gemini-3-flash-preview",
+                     "deepinfra/google/gemini-3.1-flash-lite", "gemini/gemini-2.5-flash")
+
+    def test_non_gemini_ids_are_unaffected(self):
+        self.allowed("ovh/Qwen3.8-27B", "gpt-oss-120b", "meta_api/muse-spark-1.3-contributor",
+                     "cc/claude-opus-4-6", "gemini/gpt-oss-120b", None, "")
+
+    def refusal(self, model, combo, cfg=None, explicit=True):
+        return self.agent.gemini_spawn_refusal(model, combo, SHIPPED_REGISTRY,
+                                               cfg or self.real_cfg(), explicit=explicit)
+
+    def real_cfg(self):
+        return self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def test_an_explicit_pro_hand_entry_is_refused(self):
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-pro": {"modelID": "vertex/gemini-3.1-pro-preview"}}}}}
+        out = self.refusal("omniroute/vertex-pro", "vertex-pro", cfg)
+        self.assertIn("gemini allow-list", out)
+        self.assertIn("vertex/gemini-3.1-pro-preview", out)
+
+    def test_a_hand_entry_with_no_registry_row_is_still_read_by_its_name(self):
+        # The modelID alone says which model answers, so an entry the registry
+        # cannot price cannot slip past the allow-list either.
+        cfg = {"providers": {"omniroute": {"models": {
+            "vertex-2.5": {"modelID": "vertex/gemini-2.5-flash"}}}}}
+        self.assertIn("gemini allow-list", self.refusal("omniroute/vertex-2.5",
+                                                        "vertex-2.5", cfg))
+
+    def test_an_allowed_hand_entry_is_not_refused(self):
+        self.assertEqual(self.refusal("omniroute/vertex-3.8-flash", "vertex-3.8-flash"), "")
+        self.assertEqual(self.refusal("omniroute/ovh-direct-gpt-oss-120b",
+                                      "ovh-direct-gpt-oss-120b"), "")
+
+    def test_an_explicit_combo_with_some_off_list_legs_is_allowed(self):
+        # RWP2 S1 regression: `--model omniroute/t2-worker` is the same route a
+        # card reaches. t2-worker's registry data still carries one off-list
+        # fall-through leg (deepinfra/google/gemini-3.1-flash-lite) that only
+        # answers when the legs ahead of it are down; refusing an explicit name
+        # over it benched every qwen/gemini spawn that overrides the card.
+        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker"), "")
+
+    def test_a_combo_whose_every_leg_is_off_list_is_refused(self):
+        # The partial case is a leg that rarely answers; this is a route that can
+        # only answer off-list, and it is refused whether the caller or the
+        # router named it.
+        reg = {"routes": {"all-off": {"legs": [
+            "deepinfra/google/gemini-3.1-flash-lite", "vertex/gemini-2.5-pro"]}}}
+        for explicit in (True, False):
+            out = self.agent.gemini_spawn_refusal("omniroute/all-off", "all-off", reg,
+                                                  self.real_cfg(), explicit=explicit)
+            self.assertIn("gemini allow-list", out, explicit)
+            self.assertIn("vertex/gemini-2.5-pro", out, explicit)
+
+    def test_an_explicit_model_id_aimed_at_an_off_list_gemini_is_refused(self):
+        # What the run is aimed at is still refused outright: an explicit model
+        # name that spells an off-list Gemini does not become allowed because it
+        # is not a combo.
+        self.assertIn("gemini allow-list",
+                      self.refusal("omniroute/gemini-2.5-pro", "gemini-2.5-pro"))
+
+    def test_a_router_picked_combo_keeps_its_on_list_legs(self):
+        # The same route reached through a card: one fall-through leg that only
+        # answers when the legs ahead of it are down must not bench every tier-2
+        # spawn, so the router's pick is refused only when NO leg is on the list.
+        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker",
+                                      explicit=False), "")
+
+    def test_run_named_pro_hand_entry_is_refused_at_the_door(self):
+        args = argparse.Namespace(
+            tier=2, card="role=implement", allow_training=False, client="opencode",
+            joinable=False, max_depth=None, clean=False, model="omniroute/vertex-2.5",
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=True,
+            auto=True, lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        cfg = {"providers": {"omniroute": {"models": {
+            "t2-worker": {"modelID": "t2-worker"},
+            "vertex-2.5": {"modelID": "vertex/gemini-2.5-flash"}}}}}
+        with mock.patch.object(self.agent, "resolve_route_unchecked",
+                               lambda *a, **k: {"tier": 2, "model": "omniroute/vertex-2.5",
+                                                "combo": "vertex-2.5", "privacy": "public",
+                                                "card": {}}):
+            with self.assertRaises(self.agent.GeminiRefused) as caught:
+                self.agent.resolve_route(args, cfg, self.agent.clients.CLIENTS["opencode"])
+        self.assertIn("gemini allow-list", str(caught.exception))
+
+
+class SensitiveHandEntryPrivacyTests(unittest.TestCase):
+    """D3: ovhcloud's `trains_on_prompts` is null on main — unverified — so a
+    privacy=sensitive card must never land on an `ovh-direct-*` hand entry. The
+    existing PRIV3 door already covers a name that is no registry route: nothing
+    proves it private-safe. This pins that the door holds for the ovh-direct ids
+    too, against the real opencode.jsonc rather than a synthetic one."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def run_cmd(self, model):
+        ns = argparse.Namespace(
+            tier=None, card="privacy=sensitive", allow_training=False,
+            client="opencode", joinable=False, max_depth=None, clean=False, model=model,
+            free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
+            lean=False, title=None, dry_run=True, task="x", no_defer=False)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_run(ns, self.cfg)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_sensitive_card_on_an_ovh_direct_hand_entry_is_refused(self):
+        for name in ("omniroute/ovh-direct-gpt-oss-120b",
+                     "omniroute/ovh-direct-qwen3-coder-30b",
+                     "omniroute/ovh-direct-qwen3.8-27b"):
+            rc, out, err = self.run_cmd(name)
+            self.assertEqual(rc, 2, name + out + err)
+            self.assertIn("privacy", err, name)
+
+    def test_the_ovh_provider_is_still_unverified(self):
+        # The refusal above rests on this registry fact: null is not false, and
+        # private_safe fails closed on it. If a row ever says false, the -clean
+        # routes open and this test says so here, not in a comment elsewhere.
+        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
+                                               SHIPPED_REGISTRY)
+        self.assertFalse(safe, why)
+
+
+
+class GeminiSideModelPinTests(unittest.TestCase):
+    """D8 (gemini-cli seat, 2026-10-01): an internal side call went to
+    openrouter/google/gemini-3-flash-preview and answered HTTP 402 — a leg this
+    lane never routed. gemini-cli re-resolves its model inside the process
+    (next-speaker, routing, a retry) and with nothing pinned it falls to its own
+    `auto` default, which its bundled docs say is gemini-3-pro-preview /
+    gemini-3-flash-preview. The argv `--model` only answers the one request the
+    run was asked to make, so the pin goes in the child env (`GEMINI_MODEL`,
+    precedence 2 in the installed bundle's docs/cli/model-routing.md)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def pin(self, name, model):
+        return clients.gemini_side_model_env(name, model)
+
+    def test_only_gemini_is_pinned_and_only_with_a_model(self):
+        self.assertEqual(self.pin("gemini", "vertex-3.8-flash"),
+                         {"GEMINI_MODEL": "vertex-3.8-flash"})
+        for name in ("qwen", "opencode", "codex"):
+            self.assertEqual(self.pin(name, "vertex-3.8-flash"), {}, name)
+        self.assertEqual(self.pin("gemini", None), {})
+        self.assertEqual(self.pin("gemini", ""), {})
+
+    def test_the_pin_name_is_on_the_plan_passlist(self):
+        # worker_env refuses a plan env entry that is not passed, loudly — a pin
+        # off the passlist is a pin that never reaches the child.
+        self.assertTrue(self.agent._plan_env_passed("GEMINI_MODEL"))
+
+    def generated_env(self, client):
+        r = run_agent("run", "--client", client, "--model", "omniroute/vertex-3.8-flash",
+                      "--dry-run", "--card", "role=implement", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def test_a_gemini_spawn_hands_the_child_the_pinned_model(self):
+        out = self.generated_env("gemini")
+        self.assertIn("GEMINI_MODEL", out, out)
+        argv = [line for line in out.splitlines() if line.startswith("would run: omniroute")]
+        self.assertTrue(argv, out)
+        # worker_env is what builds the child environment: the pin must survive it,
+        # with the very value the argv carries, so an internal call names no other leg.
+        flag = argv[0].split("--model", 1)[1].split()[0]
+        pinned = self.plan_flag_and_pin()[1]
+        self.assertEqual(pinned, flag, out)
+        child = self.agent.worker_env({"env": self.pin("gemini", pinned), "cwd": "."},
+                                      None, base={})
+        self.assertEqual(child.get("GEMINI_MODEL"), pinned, out)
+
+    def test_a_qwen_spawn_gets_no_gemini_pin(self):
+        self.assertNotIn("GEMINI_MODEL", self.generated_env("qwen"))
+
+    def plan_flag_and_pin(self, env_extra=None):
+        """The real spawn path, in-process: returns (--model value in the argv the
+        plan would run, the value the pin call site hands the plan).
+
+        `generated_env` prints env *names* only, so the pinned value is not
+        observable from the dry-run text; recording what the call site passes is
+        the only way to assert the value rather than its presence, and to keep
+        the test off a hand-made pin (G5)."""
+        agent = self.agent
+        seen = []
+        real = clients.gemini_side_model_env
+
+        def spy(name, model):
+            got = real(name, model)
+            if name == "gemini":
+                seen.append(got.get(clients.GEMINI_MODEL_ENV))
+            return got
+
+        buf = io.StringIO()
+        with mock.patch.object(clients, "gemini_side_model_env", spy), \
+                mock.patch.dict(os.environ, env_extra or {}), \
+                contextlib.redirect_stdout(buf):
+            rc = agent.main(["run", "--client", "gemini",
+                             "--model", "omniroute/vertex-3.8-flash",
+                             "--dry-run", "--card", "role=implement", "t"])
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        argv = [line for line in out.splitlines() if line.startswith("would run: omniroute")]
+        self.assertTrue(argv, out)
+        self.assertEqual(len(seen), 1, out)
+        return argv[0].split("--model", 1)[1].split()[0], seen[0]
+
+    def test_the_pinned_value_is_the_model_the_argv_carries(self):
+        # G5 (RWP3): presence of the name proved nothing about the value. The
+        # child's pin and the argv flag must be the same string, because the pin
+        # exists so an internal side call can name no other leg.
+        flag, pinned = self.plan_flag_and_pin()
+        self.assertEqual(pinned, flag)
+        self.assertEqual(pinned, "vertex-3.8-flash")
+
+    def test_an_explicit_GEMINI_MODEL_in_the_spawner_env_does_not_reach_the_child(self):
+        # G3 (RWP3): the overwrite is the point. A caller-set GEMINI_MODEL is
+        # whatever the caller's shell happened to hold; the leg this run routed is
+        # the only one D-255 and the budget gate cleared, so it wins.
+        flag, pinned = self.plan_flag_and_pin({"GEMINI_MODEL": "gemini-3-pro-preview"})
+        self.assertEqual(pinned, flag)
+        self.assertNotEqual(pinned, "gemini-3-pro-preview")
+        # worker_env is where an inherited value and a plan entry meet; the plan
+        # entry is assigned after the allowlist copy, so it overwrites.
+        child = self.agent.worker_env(
+            {"env": self.pin("gemini", flag), "cwd": "."}, None,
+            base={"GEMINI_MODEL": "gemini-3-pro-preview"})
+        self.assertEqual(child.get("GEMINI_MODEL"), flag)
+
+
 if __name__ == "__main__":
     unittest.main()

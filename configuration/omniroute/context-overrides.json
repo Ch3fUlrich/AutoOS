@@ -29,29 +29,19 @@
       "$comment": "Meta Model API contributor tier: 1,048,576 in (registry models.muse-spark-1.3-contributor). The spark-1.3-contributor / t1-orchestrator-paid routes declare 1M. Measured 2026-09-30: without this the gateway served 128k."
     },
     {
-      "target": "vertex/gemini-3-flash-preview",
-      "context": 1048576,
-      "$comment": "Gemini 3 Flash (Vertex): 1M window. Serves the opencode hand entry vertex-flash (limit 1048576)."
-    },
-    {
-      "target": "vertex/gemini-3.1-flash-lite",
-      "context": 1048576,
-      "$comment": "Gemini 3.1 Flash-Lite (Vertex): 1M window. Serves the opencode hand entry vertex-flash-lite."
-    },
-    {
-      "target": "vertex/gemini-3.1-pro-preview",
-      "context": 1048576,
-      "$comment": "Gemini 3.1 Pro (Vertex): 1M window. Serves the opencode hand entry vertex-pro."
-    },
-    {
       "target": "vertex/gemini-3.8-flash",
       "context": 1048576,
       "$comment": "Gemini 3.8 Flash (Vertex, enabled in the operator's project 2026-09-30): 1M window. Serves the opencode hand entry vertex-3.8-flash."
     },
     {
-      "target": "vertex/gemini-2.5-flash",
+      "target": "vertex/gemini-3.7-flash",
       "context": 1048576,
-      "$comment": "Gemini 2.5 Flash (Vertex): 1M window. Serves the opencode hand entry gemini-2.5-flash."
+      "$comment": "Gemini 3.7 Flash (Vertex, on the D-255 allow-list): 1M window. Serves the opencode hand entry vertex-3.7-flash."
+    },
+    {
+      "target": "vertex/gemini-3.6-flash",
+      "context": 1048576,
+      "$comment": "Gemini 3.6 Flash (Vertex, on the D-255 allow-list): 1M window. Serves the opencode hand entry vertex-3.6-flash."
     }
   ]
 }

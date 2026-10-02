@@ -270,7 +270,7 @@ import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green 
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
-from registry import private_safe, resolve_leg, unavailable_now  # noqa: E402
+from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
@@ -1497,7 +1497,10 @@ WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
 # nobody decided the child should have.
 WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
                             "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
-                            clients.GEMINI_CUSTOM_HEADERS_ENV)
+                            clients.GEMINI_CUSTOM_HEADERS_ENV,
+                            # D8: the pin that keeps a gemini-cli internal call on
+                            # the leg this run routed instead of its `auto` default.
+                            clients.GEMINI_MODEL_ENV)
 WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
@@ -2410,6 +2413,112 @@ def _combo_of(model: str) -> str:
     return base if "/" not in base else ""
 
 
+GEMINI_ALLOWED_RE = re.compile(r"gemini-3\.[678]-flash(?:-[a-z0-9]+)*\Z", re.I)
+# The variant tail above happily accepts `-pro` as one more suffix, which would
+# let a Pro model (D-255 bans every one of them) in wearing a Flash name. A
+# '-'-delimited segment that starts with 'pro' — glued spellings like `-promax`
+# included, so the rule is conservative — refuses the id whatever else matched.
+GEMINI_PRO_SEGMENT_RE = re.compile(r"(?:^|-)pro", re.I)
+
+
+def gemini_model_allowed(model_id) -> bool:
+    """Whether `model_id` is off the operator's Gemini ban list (D-255).
+
+    No Gemini *Pro* model, and only 3.6 / 3.7 / 3.8 Flash — variants of those
+    versions (-flash-high, -flash-medium, -flash-preview) count as allowed. The test
+    is on the *model* part of the id: after the last '/', and from the 'gemini' that
+    names the model onward, so `vertex-gemini-3.8-flash` and
+    `openrouter/google/gemini-3.8-flash` read the same way, a provider namespace that
+    merely spells 'gemini' (`gemini/gpt-oss-120b`) says nothing about the model behind
+    it, and every non-Gemini id is unaffected. Read as: allow unless it names a Gemini
+    model the list does not. (why: D-255 is a spend-and-data rule, not a preference)
+    """
+    if not isinstance(model_id, str):
+        return True
+    part = model_id.lower().rsplit("/", 1)[-1]
+    if "gemini" not in part:
+        return True
+    tail = part[part.index("gemini"):]
+    return bool(GEMINI_ALLOWED_RE.fullmatch(tail)) and not GEMINI_PRO_SEGMENT_RE.search(tail)
+
+
+def gemini_spawn_refusal(model, combo, registry, cfg=None, explicit=False) -> str:
+    """Why this spawn breaks D-255, or "" when it does not.
+
+    What the run is *aimed at* is refused outright: the model the argv carries
+    (`omniroute/vertex-pro`), the modelID an opencode.jsonc hand entry passes
+    through to (`vertex/gemini-3.1-pro-preview` — refused even when no registry
+    row describes it, because the name alone says which model answers), and the
+    leg that name resolves to. A combo is a different case, and `--model` naming
+    one is not an aim at its off-list leg: this registry still carries one
+    off-list fall-through leg each in `t2-worker` and `gemini-3.8-flash`, and
+    refusing those would bench every tier-2 spawn over a leg that only answers
+    when the legs ahead of it are down — so a combo is refused only when EVERY
+    leg is off-list, whether the router picked it or the caller named it
+    (RWP2 S1: the explicit case is what made
+    `ReviewFindingTests.test_gateway_client_model_override_wins_over_the_card`
+    print nothing on the lane). D-255 is therefore enforced at the spawn door
+    for what a run is aimed at; an off-list fall-through leg inside a combo is
+    registry data the operator must remove, and it is reported here for that.
+    """
+    aimed = [model, combo, hand_entry_model_id(model, cfg),
+             hand_entry_leg(model, registry, cfg) if model else ""]
+    bad = [str(value) for value in aimed if value and not gemini_model_allowed(value)]
+    legs = combo_legs(combo, registry) if combo else []
+    off = [leg for leg in legs if not gemini_model_allowed(leg)]
+    if off and len(off) == len(legs):  # `explicit` no longer switches anything
+
+        bad += off
+    if not bad:
+        return ""
+    return ("gemini allow-list: %s would answer with %s — operator D-255 allows only "
+            "Gemini 3.6 / 3.7 / 3.8 Flash (variants included) and refuses every Gemini "
+            "Pro model, so this spawn is refused."
+            % (model or combo, ", ".join(sorted(set(bad)))))
+
+
+def hand_entry_model_id(name, cfg=None) -> str:
+    """The `modelID` an opencode.jsonc hand entry passes through to, or "".
+
+    A hand entry is the config's own passthrough — `vertex/gemini-3.8-flash`,
+    `ovh/gpt-oss-120b` — and the generated region's entries are not: their modelID
+    is the route id itself. So the two shapes are told apart by exactly that.
+    """
+    base = model_route_id(name)
+    if not base or "/" in base:
+        return ""
+    for provider in ((opencode_cfg(cfg) or {}).get("providers") or {}).values():
+        if not isinstance(provider, dict):
+            continue
+        entry = (provider.get("models") or {}).get(base)
+        model_id = entry.get("modelID") if isinstance(entry, dict) else None
+        if isinstance(model_id, str) and "/" in model_id and model_id != base:
+            return model_id
+    return ""
+
+
+def hand_entry_leg(model, registry, cfg=None) -> str:
+    """The registry leg an opencode.jsonc hand entry's modelID names, or "".
+
+    The modelID is the gateway spelling combos.json carries — no route, so
+    `_combo_of` finds nothing and the budget gate benched the name as unpriceable.
+    `registry_ref()` is the one inverse of `gateway_ref()`, so the modelID rewrites
+    back to the registry leg whose model row says what family answers and what the
+    provider tier costs. A name that is no hand entry, or whose modelID no registry
+    row describes, yields "" and the caller keeps refusing — an id that resolves to
+    nothing is still never assumed free. (D5)
+    """
+    model_id = hand_entry_model_id(model, cfg)
+    if not model_id:
+        return ""
+    ref = registry_ref(model_id, registry)
+    try:
+        resolve_leg(ref, registry)
+    except ValueError:
+        return ""
+    return ref
+
+
 def _leg_is_claude(leg, registry) -> bool:
     """`is_claude_leg` for a string the registry may simply not know.
 
@@ -2453,7 +2562,7 @@ def _native_model_name(source: str | None) -> bool:
 
 
 def spawn_spends_claude(client_name: str, model, registry: dict,
-                        source: str | None = None):
+                        source: str | None = None, cfg=None):
     """True / False / None for what running `client_name` at `model` costs.
 
     None is "cannot tell", and the caller treats it as a spend (CLAUDEBUDGET-d
@@ -2496,6 +2605,13 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
                     return True
                 if resolver.credit_leg_priced(combo, registry):
                     return False
+            # D5: an opencode.jsonc hand entry is no route, but its modelID is a
+            # provider/model leg the registry does carry, so the name is priceable
+            # after all. Only the leg's own row decides Claude-ness; a hand entry
+            # whose modelID resolves to nothing falls through to the refusal below.
+            leg = hand_entry_leg(combo, registry, cfg)
+            if leg:
+                return _leg_is_claude(leg, registry)
             return None
         # A combo route is what the gateway resolves; it falls through past a
         # rate-limited leg to the next one, so the route is a Claude spend
@@ -4296,6 +4412,10 @@ class PrivacyRefused(ValueError):
     not private-safe (PRIV3)."""
 
 
+class GeminiRefused(ValueError):
+    """A run aimed at a Gemini model the operator's allow-list does not name (D-255)."""
+
+
 def sensitive_combo_refusal(combo: str, registry: dict):
     """Why `combo` may not carry privacy=sensitive work, or None when it may.
 
@@ -4373,6 +4493,15 @@ def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
         reason = sensitive_combo_refusal(route["combo"], load_registry(REGISTRY_PATH))
         if reason:
             raise PrivacyRefused(reason)
+    # D-255 (operator 2026-10-01): no Gemini Pro model, only Gemini 3.6/3.7/3.8
+    # Flash. Same door as the PRIV3 read above, because it is the same question —
+    # what this run is aimed at — asked of the model name, the hand entry behind it
+    # and the route's legs.
+    gemini = gemini_spawn_refusal(route.get("model"), route.get("combo"),
+                                  load_registry(REGISTRY_PATH), cfg,
+                                  explicit=bool(override))
+    if gemini:
+        raise GeminiRefused(gemini)
     return route
 
 
@@ -4590,6 +4719,14 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # was routed to, which is the same kind of claim.
         model_source = WRITER_SOURCE_PIN if args.model else WRITER_SOURCE_ASSUMED
         model = model or (route["combo"] if client.gateway else PLAN_MODEL_UNNAMED)
+    # D8: gemini-cli re-resolves its model inside the process (next-speaker,
+    # routing, a retry) and with no pin falls to its `auto` default, which its own
+    # docs say is gemini-3-pro-preview / gemini-3-flash-preview — a leg this lane
+    # never routed (measured 402 side call, 2026-10-01). Pin GEMINI_MODEL to the
+    # value the argv carries so an internal call can only name the same leg. The
+    # update is unconditional on purpose: a GEMINI_MODEL the caller's shell happens
+    # to hold is not a leg this lane routed, so the routed model wins. (G3, RWP3)
+    env.update(clients.gemini_side_model_env(client.name, model))
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
@@ -8981,7 +9118,7 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse(str(exc), EXIT_NO_OTHER_FAMILY)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
-    except (RouteInputRequired, RouteDeferred, PrivacyRefused) as exc:  # plan's / PRIV3's own
+    except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused) as exc:  # plan's / PRIV3's / D-255's own
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
