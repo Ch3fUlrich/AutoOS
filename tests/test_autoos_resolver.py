@@ -2738,6 +2738,10 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertEqual(min(dates), "2026-09-28T12:00:37Z", result["reason"])
 
     def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity legs, and the provider is available=false, so cooling it
+        # changes nothing). The earliest still-legged cooled provider on
+        # t2-worker is now google_ai_studio; meta_api is still legged too.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "t2-worker"}}
@@ -2745,7 +2749,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("t2-worker", result["reason"])
-        self.assertIn("unavailable: antigravity until 2026-09-28T12:00:37Z",
+        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
                       result["reason"])
         self.assertIn("unavailable: meta_api until 2026-09-28T14:00:00Z",
                       result["reason"])
