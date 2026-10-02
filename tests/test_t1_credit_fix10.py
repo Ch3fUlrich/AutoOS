@@ -680,8 +680,8 @@ class T1CreditFix11R6RemainingValidationTests(unittest.TestCase):
             # pin uses a current-month stamp (same intent: never crash).
             with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}]):
                 out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
-            # No in-month balance series reaches the ledger, so the ledger
-            # guard stands exactly.
+            # The ledger gets a one-point fresh series from the current-month
+            # stamp, so the ledger guard stands exactly.
             self.assertEqual(out["deepseek"]["state"], "ok")
             self.assertEqual(out["deepseek"]["spend_usd"], 0.0)
             self.assertEqual(out["deepseek"]["note"],
