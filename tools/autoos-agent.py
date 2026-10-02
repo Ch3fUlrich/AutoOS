@@ -2087,6 +2087,17 @@ def apply_effort_rung(cfg: dict, model: str, rung) -> str:
     return model + "#" + rung if rung in declared_variants(cfg, model) else model
 
 
+def root_agents_block(cfg: dict) -> dict:
+    """The ``agents`` definitions from ROOT's opencode.jsonc (via ``cfg``).
+
+    Only the agent definitions are copied — no providers, no keys, no env.
+    This is merged into the overlay for foreign-repo sandboxes so the child
+    opencode process finds t1-orchestrator / t2-worker / t3-reviewer / t4-researcher
+    even though the foreign clone's own tree has no opencode.jsonc.
+    """
+    return dict(cfg.get("agents") or {})
+
+
 def free_overlay(model: str) -> dict:
     return {"model": model, "agents": {a: {"model": model} for a in TIERS.values()}}
 
@@ -4979,6 +4990,27 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         shell = worker_shell()
         if shell:
             overlay["shell"] = shell
+        # FLEET-AGENTS: a foreign-repo sandbox has no opencode.jsonc of its own,
+        # so the child opencode process would fail with "Agent not found".  Inject
+        # ROOT's agent definitions into the overlay (the same block free_overlay
+        # already writes for --free).  An AutoOS-checkout run must not get a new
+        # agents block — its own opencode.jsonc already declares them.
+        _child_source = sandbox.get("source") if sandbox else os.getcwd()
+        if not is_autoos_source(_child_source):
+            # Always inject the ROOT agent definitions for foreign repos
+            root_agents = root_agents_block(cfg)
+            if "agents" in overlay:
+                # Per-agent merge: for every agent name in either dict, result[name] = {**root_agents.get(name, {}), **overlay["agents"].get(name, {})}
+                # (definition first, overlay keys win)
+                merged_agents = {}
+                all_agent_names = set(root_agents.keys()) | set(overlay["agents"].keys())
+                for agent_name in all_agent_names:
+                    root_agent = root_agents.get(agent_name, {})
+                    overlay_agent = overlay["agents"].get(agent_name, {})
+                    merged_agents[agent_name] = {**root_agent, **overlay_agent}
+                overlay["agents"] = merged_agents
+            else:
+                overlay["agents"] = root_agents
         # KEYDENY3b item 1: the spawn gate is re-asserted in the overlay, which
         # opencode merges after the checkout's own rules — a leaf cannot spawn an
         # unfenced child even in a checkout whose opencode.jsonc drifted. The
