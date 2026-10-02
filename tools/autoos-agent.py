@@ -5995,8 +5995,36 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
             # TYPE -- the ledger consult above must not overwrite it with a
             # generic stale reason. Re-assert the fallback TYPE last.
             if _fallback_overlay_type is not None:
-                guards = usage_mod.refuse_paid_on_overlay_error(
-                    registry, guards, _fallback_overlay_type)
+                try:
+                    guards = usage_mod.refuse_paid_on_overlay_error(
+                        registry, guards, _fallback_overlay_type)
+                except Exception:  # noqa: BLE001 - fail closed per D-274
+                    _tn = _fallback_overlay_type
+                    try:
+                        guards = _credit_guard_error(registry, _tn)
+                    except Exception:
+                        guards = {}
+                    try:
+                        guards = usage_mod.refuse_paid_on_overlay_error(
+                            registry, guards, _tn)
+                    except Exception:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                    try:
+                        if not isinstance(guards, dict):
+                            guards = {}
+                        for _pid in _paid_guard_ids(registry):
+                            _g = guards.get(_pid)
+                            if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                                _cap = _warn = 0.0
+                                try:
+                                    _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                    _warn = usage_mod.spend_warn_usd(registry, _pid)
+                                except Exception:
+                                    pass
+                                guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                    except Exception:
+                        pass
     except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
         # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
         # surface as its own `guard error` state -- kept for credit, kept for
@@ -6008,8 +6036,36 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
         # without a valid read -- refuse paid here too (TYPE NAME only in
         # the reason); credit guards keep their fail-open `guard error`.
         guards = _credit_guard_error(registry, type(exc).__name__)
-        guards = usage_mod.refuse_paid_on_overlay_error(
-            registry, guards, type(exc).__name__)
+        try:
+            guards = usage_mod.refuse_paid_on_overlay_error(
+                registry, guards, type(exc).__name__)
+        except Exception:  # noqa: BLE001 - fail closed per D-274
+            _tn = type(exc).__name__
+            try:
+                guards = _credit_guard_error(registry, _tn)
+            except Exception:
+                guards = {}
+            try:
+                guards = usage_mod.refuse_paid_on_overlay_error(
+                    registry, guards, _tn)
+            except Exception:
+                if not isinstance(guards, dict):
+                    guards = {}
+            try:
+                if not isinstance(guards, dict):
+                    guards = {}
+                for _pid in _paid_guard_ids(registry):
+                    _g = guards.get(_pid)
+                    if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                        _cap = _warn = 0.0
+                        try:
+                            _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                            _warn = usage_mod.spend_warn_usd(registry, _pid)
+                        except Exception:
+                            pass
+                        guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+            except Exception:
+                pass
     if use_helper and rows_source is not None:
         # T1-CREDIT-FIX-10 M4 (D-253): the scheduled provider balances are
         # the paid meter ... (see `usage_mod.overlay_balance_guards`).
@@ -6020,8 +6076,36 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
             guards = usage_mod.overlay_balance_guards(
                 registry, guards, gateway, helper_fetch_fn, env, cutoff, now)
         except Exception as exc:  # noqa: BLE001 - fail closed per D-274
-            guards = usage_mod.refuse_paid_on_overlay_error(
-                registry, guards, type(exc).__name__)
+            _tn = type(exc).__name__
+            try:
+                guards = usage_mod.refuse_paid_on_overlay_error(
+                    registry, guards, _tn)
+            except Exception:  # noqa: BLE001 - fail closed per D-274
+                try:
+                    guards = _credit_guard_error(registry, _tn)
+                except Exception:
+                    guards = {}
+                try:
+                    guards = usage_mod.refuse_paid_on_overlay_error(
+                        registry, guards, _tn)
+                except Exception:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                try:
+                    if not isinstance(guards, dict):
+                        guards = {}
+                    for _pid in _paid_guard_ids(registry):
+                        _g = guards.get(_pid)
+                        if not isinstance(_g, dict) or _g.get("state") != "refuse":
+                            _cap = _warn = 0.0
+                            try:
+                                _cap = usage_mod.monthly_cap_usd(registry, _pid)
+                                _warn = usage_mod.spend_warn_usd(registry, _pid)
+                            except Exception:
+                                pass
+                            guards[_pid] = {"provider": _pid, "state": "refuse", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": _cap, "warn_usd": _warn, "models_unpriced": 0, "note": ("balance overlay failed (%s) (D-274) - paid leg refused" % (_tn,))}
+                except Exception:
+                    pass
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 
