@@ -15817,14 +15817,25 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
     def test_a_real_spawn_carries_the_fence_to_the_cli(self):
         """No mock on the launch: the runner is really started (dry run), so an
         argv that dropped a flag shows up as the CLI's own answer instead of as a
-        passing assertion about a list this process built for itself."""
+        passing assertion about a list this process built for itself.
+
+        CIGREEN: expectation moved by 7eff6020 (FREEWIRE wired nemotron legs
+        into t3-driver/t2-worker): fencing nvidia now trips the documented
+        fail-closed _fence_check_route refusal (any leg in the fence fences the
+        combo), because the review card's combo carries an nvidia leg. The
+        intent stands -- the fence reaches the CLI argv -- pinned here by
+        fencing anthropic, a family the registry carries but the review card's
+        combo serves no leg of, so the run proceeds and the argv carries the
+        fence. OPEN QUESTION (analyst unsure, needs an operator decision, no
+        code changed here): whether v1 select_combo should become fence-aware
+        instead of refusing fail-closed."""
         out = mcp_server.spawn({"task": "t", "cwd": str(ROOT), "dry_run": True,
-                                "card": {"role": "review"}, "not_family": ["nvidia"]})
+                                "card": {"role": "review"}, "not_family": ["anthropic"]})
         self.assertNotIn("error", out, out)
         job = mcp_server._read_json(os.path.join(mcp_server.state_root(), out["id"],
                                                  "job.json"))
         self.assertIn("--not-family", job["argv"])
-        self.assertIn("nvidia", job["argv"])
+        self.assertIn("anthropic", job["argv"])
         st = self.wait_done(out["id"])
         self.assertEqual(st["state"], "completed",
                          mcp_server.result(out["id"]).get("text"))
