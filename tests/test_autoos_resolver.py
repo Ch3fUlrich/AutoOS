@@ -4136,13 +4136,43 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         self.assertNotIn(("cc", "claude-opus-4-6"), kept)
 
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
-        # The same card, same route, with the declaration set by the spawner.
-        kept, skipped, _ = self.legs_of_card(
+        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
+        # antigravity leg, so no declaration can keep a leg the route no
+        # longer offers). With the declaration set, the non-Claude legs are
+        # kept and nothing is budget-held; the declaration's unlock half is
+        # then proven on a copy with cc flipped servable.
+        # The same card, same route, with the declaration set by the spawner,
+        # under the ON budget (the shipped value is mode=normal, so the ON
+        # case is built from a copy).
+        on = self.on_registry()
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in on["clients"]}
+        kept, skipped, _ = r.usable_legs(
+            on["routes"]["t2-orchestrator"],
             {"kind": "review", "privacy": "public", "critical": True},
-            "t2-orchestrator",
-            env={r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("antigravity", "claude-opus-4-6-thinking"), kept)
-        self.assertNotIn("antigravity/claude-opus-4-6-thinking", skipped)
+            {"need_tokens": 1000}, state, on, {},
+            "opencode", self.NOW,
+            {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
+        self.assertIn(("ovhcloud", "Qwen3.8-27B"), kept)
+        self.assertEqual(
+            [leg for leg, reasons in skipped.items()
+             if any(x.startswith("claude_budget:") for x in reasons)], [])
+        self.assertEqual(
+            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
+             if r.is_claude_leg(leg, on)], [])
+        import copy
+        servable = self.on_registry()
+        servable["providers"]["cc"]["available"] = True
+        state = {name: {"installed": True, "signed_in": True, "reason": ""}
+                 for name in servable["clients"]}
+        kept, skipped, _ = r.usable_legs(
+            servable["routes"]["opus-4-6"],
+            {"kind": "review", "privacy": "public", "critical": True},
+            {"need_tokens": 1000}, state, servable, {},
+            "opencode", self.NOW,
+            {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
+        self.assertIn(("cc", "claude-opus-4-6"), kept)
+        self.assertNotIn("cc/claude-opus-4-6", skipped)
 
     def test_a_budget_on_copy_refuses_claude_and_the_env_unlocks_it(self):
         # The CLI half of the same rule (item 3(d)): see ClaudeBudgetSpawnTests
