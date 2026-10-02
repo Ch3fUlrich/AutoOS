@@ -4392,6 +4392,19 @@ class ComboFallthroughTests(unittest.TestCase):
         # answer behind the fallback. The context half is the resolver's own
         # promise check, `route_leg_context_fits` -- named, not restated here
         # (FREEKEYS-2c, rev-freekeys2 finding 2).
+        # CIGREEN: expectation moved by 1de6603d (TRIAL FINAL: the Gemini hand
+        # entries read tool_calls=unproven at model level, so t1-orchestrator's
+        # registry-alone usable set is empty). D20 keeps unproven the default
+        # until a probe promotes, so tool_calls evidence is supplied the way
+        # production supplies it -- an inline probe overlay proving every combo
+        # leg -- while priced/context-fit still read the live registry. The
+        # accepted single-provider combo (06d0e714) pins exactly one usable leg.
+        proven = {"legs": {}}
+        for route_id in self.ROUTES:
+            for ref in self.combos[route_id]["models"]:
+                proven["legs"].setdefault(
+                    self.leg_for_ref(route_id, ref),
+                    {"tool_calls": {"value": "proven"}})
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             route = self.reg["routes"][route_id]
@@ -4400,7 +4413,10 @@ class ComboFallthroughTests(unittest.TestCase):
                 leg = self.leg_for_ref(route_id, ref)
                 provider_id, model_id = registry_tool.resolve_leg(leg, self.reg)
                 model = self.reg["models"][model_id]
-                if model.get("tool_calls") != "proven":
+                tool_calls = (proven["legs"].get(leg, {})
+                              .get("tool_calls", {}).get("value")
+                              or model.get("tool_calls"))
+                if tool_calls != "proven":
                     continue
                 if (self.reg["providers"][provider_id] or {}).get("tier") == "credit":
                     try:
@@ -4412,9 +4428,20 @@ class ComboFallthroughTests(unittest.TestCase):
                 if not r.route_leg_context_fits(leg, route, self.reg):
                     continue
                 usable.append(ref)
+            if len(combo["models"]) == 1:
+                self.assertEqual(
+                    usable, combo["models"],
+                    "%s: the single-provider combo's one leg must stay "
+                    "usable by an agentic card once proven" % route_id)
+                continue
             self.assertGreaterEqual(
                 len(usable), 2, "%s: only %s of %s is usable by an agentic card"
                 % (route_id, usable, combo["models"]))
+            head_prefix = combo["models"][0].split("/", 1)[0]
+            self.assertTrue(
+                any(u.split("/", 1)[0] != head_prefix for u in usable),
+                "%s: no usable fall-through off provider %s in %s"
+                % (route_id, head_prefix, usable))
 
 class PaidLastResortTests(unittest.TestCase):
     """R4a (lane T0-PAID-2b1, operator decision D-212): paid legs are the TAIL,
