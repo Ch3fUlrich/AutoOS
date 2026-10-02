@@ -237,14 +237,21 @@ class GatewayRefTests(unittest.TestCase):
     stays live for providers that genuinely diverge (scaleway -> scw)."""
 
     def test_render_omniroute_renders_antigravity_by_its_canonical_id(self):
+        # CIGREEN: expectation moved by aced9915 (B2-AGY deleted every
+        # antigravity leg from the bands, provider available:false, revisit
+        # 2026-10-15): no combo can carry one, so the AGYCANON pin moves to
+        # the unit that owns it - gateway_ref emits the canonical
+        # antigravity spelling (no agy/ rewrite while
+        # providers.antigravity.model_prefix is null) - and the real render
+        # is pinned to contain no resurrected agy/ spelling.
+        self.assertIsNone(
+            real_registry()["providers"]["antigravity"].get("model_prefix"))
+        self.assertEqual(
+            registry.gateway_ref("antigravity/gemini-3.7-flash-high",
+                                 real_registry()),
+            "antigravity/gemini-3.7-flash-high")
         rendered = registry.render_omniroute(real_registry())
-        by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("antigravity/gemini-3.7-flash-high",
-                      by_name["t2-worker"]["models"])
-        self.assertNotIn("agy/gemini-3.7-flash-high",
-                         by_name["t2-worker"]["models"])
-        self.assertIn("antigravity/claude-opus-4-6-thinking",
-                      by_name["opus-4-6"]["models"])
+        self.assertNotIn("agy/", json.dumps(rendered))
 
     def test_render_omniroute_still_applies_a_declared_model_prefix(self):
         # The mechanism AGYID added (and this AGYCANON change must not break):
@@ -270,12 +277,17 @@ class GatewayRefTests(unittest.TestCase):
                       by_name["t2-worker-clean"]["models"])
 
     def test_registry_legs_keep_their_own_spelling(self):
-        self.assertIn("antigravity/gemini-3.7-flash-high",
+        # CIGREEN: expectation moved by aced9915 (B2-AGY deleted the
+        # antigravity legs from the bands, provider available:false). Pins the
+        # same rule on a surviving multi-segment leg: the registry spelling is
+        # kept verbatim and resolve_leg still splits at the first '/'.
+        self.assertIn("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
                       real_registry()["routes"]["t2-worker"]["legs"])
         # resolve_leg still splits the registry spelling at the first '/'.
         self.assertEqual(
-            registry.resolve_leg("antigravity/gemini-3.7-flash-high", real_registry()),
-            ("antigravity", "gemini-3.7-flash-high"))
+            registry.resolve_leg("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                                 real_registry()),
+            ("openrouter", "nvidia/nemotron-3-super-120b-a12b:free"))
 
     def test_gateway_ref_returns_the_leg_when_there_is_no_model_prefix(self):
         self.assertEqual(
@@ -430,17 +442,24 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
                          registry.render_litellm_blocks(reg, real_litellm_config()))
 
     def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
-        # routes.t2-worker.legs carries antigravity/gemini-3.7-flash-high (a
-        # real registry leg) but antigravity has no LiteLLM transport or key
-        # (tools/sync-router-tiers.py GATEWAY_ONLY) - today's config.yaml
-        # never mirrors it, and the render must match: this leg's model name
-        # absent, a real sibling leg present. (FREEWIRE 2026-09-30: the sibling
-        # was gemini-3.8-flash until the gemini head was removed; use the
-        # scaleway grant that is still mirrored.)
-        legs = real_registry()["routes"]["t2-worker"]["legs"]
-        self.assertIn("antigravity/gemini-3.7-flash-high", legs)
-        rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        self.assertNotIn("gemini-3.7-flash-high", rendered["t2-worker"])
+        # CIGREEN: expectation moved by aced9915 (B2-AGY deleted exactly the
+        # antigravity fixture leg from t2-worker). The drop-behavior is now
+        # pinned with a synthetic gateway-only leg: cc sits in
+        # tools/sync-router-tiers.py GATEWAY_ONLY, so with its provider
+        # re-opened the leg IS served by the gateway combo yet still dropped
+        # from the LiteLLM mirror - dropped, not silently kept - while a real
+        # sibling leg stays mirrored and the fixture leg stays declared.
+        reg = copy.deepcopy(real_registry())
+        reg["providers"]["cc"]["available"] = True
+        leg = "cc/claude-opus-4-6"
+        reg["routes"]["t2-worker"]["legs"] = (
+            reg["routes"]["t2-worker"]["legs"] + [leg])
+        legs = reg["routes"]["t2-worker"]["legs"]
+        self.assertIn(leg, legs)
+        rendered = registry.render_litellm_blocks(reg, real_litellm_config())
+        self.assertNotIn("claude-opus-4-6", rendered["t2-worker"])
+        combos = {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
+        self.assertIn(leg, combos["t2-worker"]["models"])
         self.assertIn("scaleway/mistral-small-3.2-24b-instruct-2506",
                       rendered["t2-worker"])
 
@@ -1109,9 +1128,14 @@ class ChangedLegAvailabilityFailsModelsDocCheckTests(unittest.TestCase):
 
     def test_marking_a_leg_unavailable_exits_one_and_names_the_route(self):
         reg = copy.deepcopy(real_registry())
-        # opus-4-6 has no unavailable legs today - flip one off.
-        reg["routes"]["opus-4-6"]["unavailable_legs"] = {
-            "antigravity/claude-opus-4-6-thinking": {"available": False},
+        # CIGREEN: expectation moved by aced9915 (B2-AGY deleted the
+        # antigravity/claude-opus-4-6-thinking fixture leg from opus-4-6, whose
+        # only remaining leg cc/claude-opus-4-6 is already struck through by
+        # providers.cc available:false - flipping it changes no render, so the
+        # fixture moves to t4-rag, whose legs are all live today).
+        leg = reg["routes"]["t4-rag"]["legs"][0]
+        reg["routes"]["t4-rag"]["unavailable_legs"] = {
+            leg: {"available": False},
         }
         path = write_registry(reg)
         try:
@@ -1119,7 +1143,7 @@ class ChangedLegAvailabilityFailsModelsDocCheckTests(unittest.TestCase):
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("routes.opus-4-6", proc.stdout)
+        self.assertIn("routes.t4-rag", proc.stdout)
 
     def test_a_class_change_exits_one_and_names_the_route(self):
         reg = copy.deepcopy(real_registry())
