@@ -146,6 +146,48 @@ class AFreshReadTests(unittest.TestCase):
                 reg, guards, "http://127.0.0.1:1", fetch, env, SINCE, NOW)
             self.assertNotEqual(out["deepseek"]["state"], "refuse")
 
+    def test_r1_no_series_past_month_stales(self):
+        # CREDIT-16 R1 (D-274): a paid provider PRESENT in the payload but
+        # with only a past-month reading stales even with no in-month
+        # series; a provider absent from the payload stays untouched.
+        reg = _reg_two_paid()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            guards = {"deepseek": _ok("deepseek"),
+                      "secondpaid": _ok("secondpaid")}
+            fetch = lambda *a, **k: (200, json.dumps(_limits([
+                ("c1", "deepseek", 44.0, "2026-09-15T10:00:00Z"),
+            ])).encode())
+            out = usage.overlay_balance_guards(
+                reg, guards, "http://127.0.0.1:1", fetch, env, SINCE, NOW)
+            self.assertEqual(out["deepseek"]["state"], "refuse")
+            self.assertIn("balance stale since", out["deepseek"]["note"])
+            self.assertIn("old reading", out["deepseek"]["note"])
+            self.assertNotEqual(out["secondpaid"]["state"], "refuse")
+
+    def test_r1_sep_only_ledger_newer_sep_payload_stales(self):
+        # CREDIT-16 R1 (D-274): Sep-only ledger + a newer September payload
+        # is still past-month (never fresh) -- the provider stales.
+        reg = _reg_two_paid()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            _seed(path, [
+                {"provider": "deepseek", "fetched_at": "2026-09-10T10:00:00Z",
+                 "remaining": 50.0},
+            ])
+            guards = {"deepseek": _ok("deepseek"),
+                      "secondpaid": _ok("secondpaid")}
+            fetch = lambda *a, **k: (200, json.dumps(_limits([
+                ("c1", "deepseek", 49.0, "2026-09-15T10:00:00Z"),
+            ])).encode())
+            out = usage.overlay_balance_guards(
+                reg, guards, "http://127.0.0.1:1", fetch, env, SINCE, NOW)
+            self.assertEqual(out["deepseek"]["state"], "refuse")
+            self.assertIn("balance stale since", out["deepseek"]["note"])
+            self.assertNotEqual(out["secondpaid"]["state"], "refuse")
+
 
 class BHelperFallbackTests(unittest.TestCase):
     def setUp(self):

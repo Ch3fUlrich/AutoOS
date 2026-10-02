@@ -232,14 +232,13 @@ class M1SelectionOrderTests(unittest.TestCase):
 
     def test_no_key_falls_to_the_helper_and_names_it(self):
         rows = [_ds_row("h1", {"in": 1_000_000, "out": 0})]
-        # T1-CREDIT-FIX-14 (D-274): an empty limits payload is a failed
-        # read (stale/refuse), so the "no series" case is a single
-        # out-of-month reading -- recorded, never an in-month series, never
-        # fresh -- and the helper-measured guard stands as before.
+        # CREDIT-16 (D-274): re-pinned fresh -- R1 stales a present-but-old
+        # reading even with no in-month series, so the "no series, helper
+        # measured stands" pin uses a current-month stamp (same intent).
         fetch = _helper_fetch(
             {"/api/usage/call-logs": rows, "/api/usage/provider-limits":
              _limits_payload(
-                 [("c1", "deepseek", 44.0, "2026-09-15T10:00:00Z")])})
+                 [("c1", "deepseek", 44.0, "2026-10-01T10:00:00Z")])})
         with tempfile.TemporaryDirectory() as tmp:
             guards = agent.plan_credit_guards(
                 _reg_paid(), now=NOW, env=_bare_env(tmp), helper=fetch)
@@ -676,11 +675,10 @@ class T1CreditFix11R6RemainingValidationTests(unittest.TestCase):
             self.assertEqual(len(got), 2)
             reg = _reg_paid(cap=25.0)
             guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
-            # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
-            # (stale/refuse), so the no-series pin records a single
-            # out-of-month reading -- never an in-month series, never fresh
-            # -- and the ledger guard stands exactly.
-            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-09-15T10:00:00Z", "remaining": 44.0}]):
+            # CREDIT-16 (D-274): re-pinned fresh -- R1 stales a present-but-old
+            # reading even with no series, so the "no-series ledger stands"
+            # pin uses a current-month stamp (same intent: never crash).
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}]):
                 out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
             # No in-month balance series reaches the ledger, so the ledger
             # guard stands exactly.

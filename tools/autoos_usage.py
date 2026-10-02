@@ -1498,7 +1498,11 @@ def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
             continue
         if pid in fresh_ids:
             continue
-        if pid not in series_ids and pid not in already_stale:
+        # CREDIT-16 R1 (D-274): a provider PRESENT in the payload but NOT
+        # fresh (old/past-month stamp) never governs -- it stales even with
+        # no in-month series. Only a provider absent from the payload AND
+        # without series stays untouched.
+        if pid not in series_ids and pid not in already_stale and pid not in present_ids:
             continue
         since_ts = _mark_balance_stale(path, None, now, pid)
         # CREDIT-16 C4 (D-274): when global and per-provider markers both
