@@ -3984,16 +3984,31 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         return r.plan(card, features, state, registry, {}, [],
                       "claude-opus-4-6", self.NOW)
 
-    def legs(self, card_kind, route_id, env=None):
+    def on_registry(self):
+        """A deep copy of the shipped registry with the budget forced ON.
+
+        The shipped value is mode=normal since the operator's 2026-10-01
+        routing-00 decision (the weekly limit reset), so a test that proves the
+        ON hold must supply its own registry copy instead of reading the shipped
+        value -- otherwise it asserts the OFF behaviour and passes vacuously.
+        """
+        import copy
+        registry = copy.deepcopy(self.registry)
+        registry["policy"]["claude_budget"].update(self.ON)
+        return registry
+
+    def legs(self, card_kind, route_id, env=None, registry=None):
         """usable_legs() for one shipped route. The cards here are non-agentic
         kinds, so no tool_calls overlay is consulted, and need_tokens stays
         under every leg's context -- the budget hold is the only reason a leg
-        can be skipped in these tests."""
+        can be skipped in these tests. `registry` defaults to the shipped one;
+        pass `self.on_registry()` to prove the ON hold."""
+        registry = self.registry if registry is None else registry
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
-                 for name in self.registry["clients"]}
-        return r.usable_legs(self.registry["routes"][route_id],
+                 for name in registry["clients"]}
+        return r.usable_legs(registry["routes"][route_id],
                              {"kind": card_kind, "privacy": "public"},
-                             {"need_tokens": 1000}, state, self.registry, {},
+                             {"need_tokens": 1000}, state, registry, {},
                              "opencode", self.NOW, env)
 
     # card kind -> (route, leg) with the budget off, read off the shipped
@@ -4021,15 +4036,20 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             self.assertFalse([leg for leg in [on["leg"]]
                               if r.is_claude_leg(leg, self.registry)], kind)
 
-    def test_the_shipped_value_turns_budget_mode_on(self):
-        # The hold an operator sees in `route --explain` comes from the shipped
-        # number, not from a test that set one.
-        self.assertTrue(r.claude_budget_explain(self.registry)[0]
-                        .startswith("claude_budget: ON"))
+    def test_the_shipped_value_turns_budget_mode_off(self):
+        # Operator decision 2026-10-01 via routing-00: the weekly Claude limit
+        # reset, so the shipped number is mode=normal and the gate is OFF. The
+        # shipped `source` keeps that date; this pins the value the host runs.
+        line = r.claude_budget_explain(self.registry)[0]
+        self.assertTrue(line.startswith("claude_budget: off (mode=normal"), line)
 
     def test_a_non_final_card_holds_every_claude_leg_it_offers(self):
+        # The hold is a resolver rule, not the shipped number: the shipped
+        # registry is mode=normal now, so this builds the ON case from a copy
+        # (deepcopy + mutate) and proves the hold there.
+        on = self.on_registry()
         for route_id in ("opus-4-6", "t2-orchestrator"):
-            _kept, skipped, _ = self.legs("implement", route_id)
+            _kept, skipped, _ = self.legs("implement", route_id, registry=on)
             held = [leg for leg, reasons in skipped.items()
                     if any(x.startswith("claude_budget:") for x in reasons)]
             self.assertTrue(held, route_id)
@@ -4040,10 +4060,11 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                     "%s of %s" % (leg, route_id))
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
+        on = self.on_registry()
         for route_id in ("opus-4-6", "t2-orchestrator"):
             _kept, skipped, _ = self.legs(
                 "final", route_id,
-                env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"})
+                env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"}, registry=on)
             self.assertEqual([leg for leg, reasons in skipped.items()
                               if any(x.startswith("claude_budget:")
                                      for x in reasons)], [], route_id)
@@ -4078,11 +4099,12 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         self.assertIn(("antigravity", "claude-opus-4-6-thinking"), kept)
         self.assertNotIn("antigravity/claude-opus-4-6-thinking", skipped)
 
-    def test_the_shipped_run_command_refuses_claude_and_the_env_unlocks_it(self):
-        # The CLI half of the same rule (item 3(d)), on the shipped registry:
-        # see ClaudeBudgetSpawnTests in tests/test_autoos_spawner.py, which runs
-        # this through `autoos-agent.py run` rather than the resolver alone.
-        self.assertTrue(r.claude_budget_of(self.registry)["on"])
+    def test_a_budget_on_copy_refuses_claude_and_the_env_unlocks_it(self):
+        # The CLI half of the same rule (item 3(d)): see ClaudeBudgetSpawnTests
+        # in tests/test_autoos_spawner.py, which runs this through
+        # `autoos-agent.py run` rather than the resolver alone. The shipped
+        # value is mode=normal now, so build the ON case explicitly.
+        self.assertTrue(r.claude_budget_of(self.on_registry())["on"])
 
 
 
