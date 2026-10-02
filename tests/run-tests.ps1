@@ -5168,6 +5168,15 @@ Test-Case 'deepinfra-wire-min: MiMo-V2.6-Flash writer pin, prepaid hard stop, no
     Assert-Equal $rc 0 "deepinfra-wire-min unit tests failed: $out"
 }
 
+Test-Case 'gateway-key exec: child runs with the key in its env only (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_key_exec.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway-key exec unit tests failed: $out"
+}
+
 Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

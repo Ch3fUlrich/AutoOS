@@ -753,6 +753,10 @@ if it "deepinfra-wire-min: MiMo-V2.6-Flash writer pin, prepaid hard stop, no Cla
     out="$(python3 tests/test_deepinfra_wire_min.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "gateway-key exec: child runs with the key in its env only (unit tests)"; then
+    out="$(python3 tests/test_gateway_key_exec.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "debtcap nebius: provider excluded from free/trial tiers (unit tests)"; then
     out="$(python3 tests/test_debtcap_nebius.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

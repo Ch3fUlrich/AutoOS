@@ -22,6 +22,14 @@ Precedence:
   - Missing key -> clear error naming the EXPECTED field and why (local/non-local),
     mentioning host.yml / AUTOOS_HOST_NAME if the name may be wrong.
     Never prints a key value or the gateway URL.
+
+CLI (main()):
+  - `resolve` prints the key on stdout for shell callers that must capture it.
+  - `exec` resolves with the same precedence and runs a child with the key in
+    the CHILD's environment only (D-370) - never printed, never in argv,
+    never written to any file:
+
+        python3 tools/autoos_gateway_key.py exec -- python3 tools/autoos-agent.py run ...
 """
 
 from __future__ import annotations
@@ -253,12 +261,44 @@ def resolve_client_key(
     )
 
 
+_USAGE = (
+    "usage: autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE] | "
+    "exec [--optional] [--no-notice] [KEYS_FILE] -- <cmd> [args...] | "
+    "is-local URL | info"
+)
+
+
+def _usage() -> None:
+    """The one usage line, on stderr (unknown subcommand and a malformed `exec`)."""
+    print(_USAGE, file=sys.stderr)
+
+
+def _report_cannot_execute(target: str, exc: OSError) -> None:
+    """One stderr line for a `<cmd>` that cannot run - never a traceback.
+
+    The message names the command and the OS reason only: it must not carry the
+    child environment or the key (D-370, `exec`'s channel contract).
+    """
+    detail = exc.strerror or exc
+    print(f"autoos_gateway_key: cannot execute {target}: {detail}", file=sys.stderr)
+
+
 def main(argv: Optional[list] = None) -> int:
     """CLI used by the shell and PowerShell callers, so there is ONE resolver.
 
       autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE]
           key on stdout (no trailing noise); notices and errors on stderr.
           A missing key exits 1 with the message, or with --optional exits 0 and prints nothing.
+      autoos_gateway_key.py exec [--optional] [--no-notice] [KEYS_FILE] -- <cmd> [args...]
+          same resolution (same precedence, keys-file default, notices, --no-notice), then
+          runs <cmd> with AUTOOS_OMNIROUTE_KEY in the CHILD's environment ONLY: never printed,
+          never in argv, never written to any file. POSIX: os.execvpe - this process BECOMES
+          the child, so the exit code is the child's. Windows: subprocess.run and exit with
+          the child's return code. A missing key exits 1 with the message, unless --optional
+          (the child then runs WITHOUT the variable). A `<cmd>` that cannot be
+          executed prints one `cannot execute` line on stderr and exits 127
+          (not found) or 126 (not executable), never a traceback. No `--`, or an
+          empty command after it: usage on stderr, exit 2.
       autoos_gateway_key.py is-local URL
           exit 0 when the URL is a loopback gateway, 1 when not (the one classifier bash uses).
       autoos_gateway_key.py info
@@ -282,6 +322,54 @@ def main(argv: Optional[list] = None) -> int:
             return 1
         sys.stdout.write(key + chr(10))
         return 0
+    if cmd == "exec":
+        # exec -- <cmd> [args...]: everything before the first `--` is ours
+        # (same parsing as `resolve`), everything after it is the child's argv.
+        if "--" in args:
+            split = args.index("--")
+            own, child = args[:split], args[split + 1:]
+        else:
+            own, child = args, []
+        if not child:
+            # No `--` at all, or an empty command: usage on stderr, exit 2.
+            _usage()
+            return 2
+        optional = "--optional" in own
+        _QUIET = "--no-notice" in own
+        rest = [a for a in own if not a.startswith("--")]
+        keys_file = Path(rest[0]) if rest and rest[0] else None
+        try:
+            key = resolve_client_key(os.environ, keys_file)
+        except KeyError as exc:
+            if optional:
+                key = None
+            else:
+                print(str(exc.args[0]) if exc.args else str(exc), file=sys.stderr)
+                return 1
+        # The key exists ONLY in the child's environment: it is never printed,
+        # never in argv and never written to any file.
+        child_env = dict(os.environ)
+        if key is None:
+            child_env.pop("AUTOOS_OMNIROUTE_KEY", None)
+        else:
+            child_env["AUTOOS_OMNIROUTE_KEY"] = key
+        if os.name == "nt":
+            # No exec on Windows: run the child and exit with its return code.
+            import subprocess
+            try:
+                return subprocess.run(child, env=child_env).returncode
+            except OSError as exc:
+                _report_cannot_execute(child[0], exc)
+                return 127 if isinstance(exc, FileNotFoundError) else 126
+        # POSIX: this process BECOMES the child, so the exit code is the child's.
+        try:
+            os.execvpe(child[0], child, child_env)
+        except OSError as exc:
+            # A child that cannot run is a data error, not a crash: one line, no
+            # traceback, and never the environment or the key (shell convention).
+            _report_cannot_execute(child[0], exc)
+            return 127 if isinstance(exc, FileNotFoundError) else 126
+        return 0  # unreachable: execvpe only returns on failure
     if cmd == "is-local":
         # exit 0 = local, 1 = not local; the URL is the one argument ("" = unset = local)
         return 0 if is_local_gateway(args[0] if args else "") else 1
@@ -293,7 +381,7 @@ def main(argv: Optional[list] = None) -> int:
             "field": client_key_field(env),
         }, indent=2))
         return 0
-    print("usage: autoos_gateway_key.py resolve [--optional] [--no-notice] [KEYS_FILE] | is-local URL | info", file=sys.stderr)
+    _usage()
     return 2
 
 

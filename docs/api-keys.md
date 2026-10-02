@@ -155,6 +155,36 @@ short hostname). If it exists, setup reports `skipped` and never overwrites
    mentioning `host.yml` / `AUTOOS_HOST_NAME` if the name may be wrong.
    **Never prints a key value or the gateway URL.**
 
+### Resolve vs exec
+
+`tools/autoos_gateway_key.py` has two ways to hand the resolved client key to a
+child process — both apply the precedence above, and **neither ever puts the key
+value in argv or writes it to any file**:
+
+- `resolve` prints the key value on **stdout** (notices and errors go to
+  stderr), so the caller captures it and sets the child's environment itself —
+  the value reaches stdout because that is the only channel a caller has.
+- `exec` resolves once and **replaces itself with the child**, exposing the key
+  only as `AUTOOS_OMNIROUTE_KEY` in the child's own environment — never in
+  `argv`, never on stdout, never written to any file. This is the durable form
+  for launching a worker that needs the key:
+
+```bash
+python3 tools/autoos_gateway_key.py exec -- python3 tools/autoos-agent.py run <task>
+```
+
+`exec [--optional] [--no-notice] [KEYS_FILE] -- <cmd> [args...]`: everything
+before the first `--` is parsed exactly like `resolve`; everything after it is
+the child command. On POSIX the child replaces this process (`execvpe`, so the
+exit code *is* the child's); on Windows the child runs and its return code is
+propagated. With `--optional` a missing key runs the child with no
+`AUTOOS_OMNIROUTE_KEY` instead of failing (exit 1); no `--` or an empty
+command is a usage error (exit 2). A `<cmd>` that cannot be executed (not found
+or not executable) prints one `autoos_gateway_key: cannot execute <cmd>: <reason>`
+line on stderr — never a traceback, never the environment or the key — and exits
+`127` when the command was not found and `126` when it could not be run, per
+shell convention.
+
 ### Example
 
 ```yaml
