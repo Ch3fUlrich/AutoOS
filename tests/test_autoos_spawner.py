@@ -13294,18 +13294,22 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
 
     def test_a_claude_tier_agent_model_is_not_gated_as_the_client_default(self):
         cli = self.cli()
-        # An operator-written clients row is the client's *default*, and a tier
-        # replaces it -- reading the row first is what let a Claude tier agent
-        # walk past the gate wearing a free model's name.
+        # CIGREEN: expectation moved by 60191348 (B2-PRUNE withdrew opus-4-6 as
+        # none servable) + 266e16da (rerender dropped the opus-4-6 section), so a
+        # tier agent still naming omniroute/opus-4-6 is undeclared and
+        # resolve_model raises BEFORE the budget gate runs. The intent stands:
+        # the tier model is what the gate judges -- it must never be silently
+        # priced as the free client default. The resolution fails closed naming
+        # the tier model, and the budget refusal names it too.
         registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
-        model, source = cli.effective_spawn_model(
-            "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
-        self.assertEqual(model, "omniroute/opus-4-6")
-        self.assertIn("t2-worker", source)
+        with self.assertRaisesRegex(ValueError, "omniroute/opus-4-6"):
+            cli.effective_spawn_model(
+                "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
         refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
                                                  cfg=self.claude_tier_cfg(), tier=2)
         self.assertIsNotNone(refusal, note)
         self.assertIn("claude_budget", refusal)
+        self.assertIn("opus-4-6", refusal)
 
     def test_the_cli_gate_refuses_the_same_claude_tier_agent(self):
         # The same fixture through `cmd_run`: the budget's own refusal, not a
