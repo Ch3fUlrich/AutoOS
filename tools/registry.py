@@ -176,6 +176,7 @@ import fnmatch
 import importlib.util
 import ipaddress
 import json
+import math
 import re
 import sys
 from datetime import datetime, timezone
@@ -199,12 +200,15 @@ COMMENT_KEYS = ("$comment", "comment")
 DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "monthly_cap_source",
                     # the schema's price_source asks for a DATED attribution by
                     # name ("gateway /v1/models 2026-09-28"); rule 5 must not
-                    # fight rule-for-field honesty (SB-C2 item 4)
-                    "price_source",
+                    # fight rule-for-field honesty (SB-C2 item 4). price_as_of
+                    # is the machine-readable sibling (T1-CREDIT-FIX-6): a bare
+                    # YYYY-MM-DD the validator itself checks, not prose.
+                    "price_source", "price_as_of",
                     # providers.<id>.privacy.evidence[].accessed is the schema's
                     # own YYYY-MM-DD field (L1-CLEAN 2026-10-01) - a citation
                     # date, not a stale value rule 5 should flag.
                     "accessed")
+
 LOOPBACK_NAMES = ("localhost",)
 PRIVATE_HOST_SUFFIXES = (".local", ".lan", ".internal", ".vm")
 CLEAN_ROUTE_SUFFIX = "-clean"
@@ -429,6 +433,45 @@ def resolve_leg(leg, registry) -> tuple:
             return provider_id, folded[0]
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return provider_id, model_id
+
+
+def leg_price(model_id, provider_id, registry):
+    """(price_in, price_out) USD per token for one provider/model leg, or None.
+
+    T1-CREDIT-FIX-6 (D-220): a model id can be served at two prices at once --
+    ``gemini-3.8-flash`` is free through AI-Studio (model-level price 0) and
+    billed through Vertex AI (a $250 credit grant). The model-level row must
+    stay 0 (pricing it would bill the free leg), so the paid provider's price
+    lives per provider in ``models.<id>.provider_prices.<provider_id>`` and
+    this is the one place that reads it: the provider-scoped entry wins when
+    present and positive, else the model-level ``price_in``/``price_out``.
+    Anything unparseable or non-positive reads as unpriced (None) -- the
+    validator refuses such rows loudly, and the runtime degrades to the same
+    gap instead of billing a made-up number.
+    """
+    models = (registry or {}).get("models")
+    model = models.get(model_id) if isinstance(models, dict) else None
+    if not isinstance(model, dict):
+        return None
+    if provider_id:
+        scoped = model.get("provider_prices")
+        entry = scoped.get(provider_id) if isinstance(scoped, dict) else None
+        if isinstance(entry, dict):
+            try:
+                price_in = float(entry.get("price_in"))
+                price_out = float(entry.get("price_out"))
+            except (TypeError, ValueError):
+                price_in = price_out = 0.0
+            if price_in > 0.0 and price_out > 0.0:
+                return (price_in, price_out)
+    try:
+        price_in = float(model.get("price_in"))
+        price_out = float(model.get("price_out"))
+    except (TypeError, ValueError):
+        return None
+    if price_in > 0.0 and price_out > 0.0:
+        return (price_in, price_out)
+    return None
 
 
 def gateway_ref(leg, registry) -> str:
@@ -3083,7 +3126,7 @@ def _check_monthly_caps(registry) -> list:
     return problems
 
 
-def _check_credit_guards(registry) -> list:
+def _check_credit_guards(registry, today=None) -> list:
     """Every `credit`-tier provider carries a complete spend guard (brief FREEKEYS-1,
     D-132/D-141): `credit_usd` is the operator's grant, `monthly_cap_usd` equals it (a
     caller REFUSES at 100 % of the grant) and `monthly_warn_fraction` is a fraction in
@@ -3117,12 +3160,94 @@ def _check_credit_guards(registry) -> list:
             problems.append("providers.%s: tier credit needs a monthly_warn_fraction in "
                             "(0, 1) (0.8 = warn at 80%% of the grant), got %r"
                             % (provider_id, fraction))
+        # T1-CREDIT-FIX-5 M3: the optional reserve below the grant. It must be a
+        # non-negative number strictly below credit_usd -- a margin that reaches
+        # the grant would refuse every leg, and one at or above it makes the
+        # hard stop the whole point of the guard disappear.
+        margin = provider.get("credit_hard_stop_margin_usd")
+        if margin is not None:
+            if isinstance(margin, bool) or not isinstance(margin, (int, float)) \
+                    or not math.isfinite(margin) or margin < 0:
+                problems.append("providers.%s: credit_hard_stop_margin_usd must be a "
+                                "finite number >= 0, got %r" % (provider_id, margin))
+            elif not isinstance(credit, bool) and isinstance(credit, (int, float)) \
+                    and margin >= credit:
+                problems.append("providers.%s: credit_hard_stop_margin_usd %r must be "
+                                "less than credit_usd %r" % (provider_id, margin, credit))
     # A warn fraction without a cap is a number nothing reads.
     for provider_id, provider in sorted(_section(registry, "providers").items()):
         if isinstance(provider, dict) and "monthly_warn_fraction" in provider \
                 and "monthly_cap_usd" not in provider:
             problems.append("providers.%s: monthly_warn_fraction without monthly_cap_usd"
                             % provider_id)
+    # T1-CREDIT-FIX: the dated manual spend fallback. `credit_spent_usd` is the
+    # operator's dated reading of what a grant already billed, read when the
+    # gateway call-log ledger cannot be reached (those rows priced client-side
+    # are the only spend ledger in the repo -- no separate store exists, so no
+    # equivalent field predates this one). A figure with no date cannot age and
+    # a date with no figure judges nothing, so the pair is all-or-nothing; a
+    # negative or non-numeric figure, or an empty date, would silently mistime
+    # the fallback, so both are flagged here rather than trusted.
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict):
+            continue
+        figure = provider.get("credit_spent_usd")
+        as_of = provider.get("credit_spent_as_of")
+        if figure is None and as_of is None:
+            continue
+        if figure is None or as_of is None:
+            problems.append("providers.%s: credit_spent_usd and credit_spent_as_of "
+                            "go together (a dated manual spend needs both a "
+                            "figure and its date), got %r and %r"
+                            % (provider_id, figure, as_of))
+            continue
+        if isinstance(figure, bool) or not isinstance(figure, (int, float)) \
+                or figure < 0 or not math.isfinite(figure):
+            problems.append("providers.%s: credit_spent_usd must be a finite number >= 0, "
+                            "got %r" % (provider_id, figure))
+        if not isinstance(as_of, str) or not as_of.strip():
+            problems.append("providers.%s: credit_spent_as_of must be a non-empty "
+                            "date (YYYY-MM-DD), got %r" % (provider_id, as_of))
+        else:
+            # Validate YYYY-MM-DD format
+            try:
+                datetime.strptime(as_of.strip(), "%Y-%m-%d")
+            except ValueError:
+                problems.append("providers.%s: credit_spent_as_of must be a valid "
+                                "date YYYY-MM-DD, got %r" % (provider_id, as_of))
+    # T1-CREDIT-FIX-7 R2: the optional grant start. `credit_started` (YYYY-MM-DD)
+    # is the date the grant started billing, so the guard can measure the WHOLE
+    # grant instead of month-to-date. Absent is fine (the window stays
+    # month-to-date, loudly); present must be a real calendar date, not in the
+    # future -- a grant that starts tomorrow has no measured spend yet.
+    # T1-CREDIT-FIX-8 C5: `today` is injectable (a date or datetime) so tests
+    # pin the future rule without a clock; without it the wall clock is read.
+    if today is None:
+        ref_today = datetime.now(timezone.utc).date()
+    elif isinstance(today, datetime):
+        ref_today = (today.astimezone(timezone.utc).date()
+                     if today.tzinfo is not None else today.date())
+    else:
+        ref_today = today
+    for provider_id, provider in sorted(_section(registry, "providers").items()):
+        if not isinstance(provider, dict) or "credit_started" not in provider:
+            continue
+        raw = provider.get("credit_started")
+        if not isinstance(raw, str) or not raw.strip():
+            problems.append("providers.%s: credit_started must be a date "
+                            "YYYY-MM-DD, got %r" % (provider_id, raw))
+            continue
+        try:
+            parsed = datetime.strptime(raw.strip(), "%Y-%m-%d").date()
+        except ValueError:
+            problems.append("providers.%s: credit_started must be a valid "
+                            "calendar date YYYY-MM-DD, got %r"
+                            % (provider_id, raw))
+            continue
+        if parsed > ref_today:
+            problems.append("providers.%s: credit_started %r is in the future - "
+                            "a grant that starts tomorrow has no measured "
+                            "spend yet" % (provider_id, raw))
     # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
     # label every reader branches on, so a row that keeps `credit_usd` and calls
     # itself `free` silently un-limits the money, drops out of the leg filter's
@@ -3221,7 +3346,83 @@ def _check_model_prefix(registry) -> list:
     return problems
 
 
-def check_registry(registry) -> list:
+def _check_provider_prices(registry) -> list:
+    """models.<id>.provider_prices, when present, prices one provider's leg of
+    a model the model-level row cannot price (T1-CREDIT-FIX-6, D-220): the
+    entry is a non-empty object keyed by provider id, each value carrying a
+    positive price_in/price_out, a non-empty price_source and a real calendar
+    price_as_of date (YYYY-MM-DD). A zero price is rejected, not defaulted --
+    it is the exact state the resolver refuses the leg for.
+    """
+    problems = []
+    providers = _section(registry, "providers")
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict) or "provider_prices" not in model:
+            continue
+        label = "models.%s.provider_prices" % model_id
+        scoped = model["provider_prices"]
+        if not isinstance(scoped, dict) or not scoped:
+            problems.append("%s must be a non-empty object" % label)
+            continue
+        for provider_id, entry in sorted(scoped.items()):
+            entry_label = "%s.%s" % (label, provider_id)
+            if provider_id not in providers:
+                problems.append("%s: unknown provider %r"
+                                % (label, provider_id))
+            if not isinstance(entry, dict):
+                problems.append("%s must be an object" % entry_label)
+                continue
+            for key in ("price_in", "price_out"):
+                value = entry.get(key)
+                if isinstance(value, bool):
+                    problems.append("%s.%s must be a number > 0, got %r"
+                                    % (entry_label, key, value))
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    number = 0.0
+                if not number > 0.0:
+                    problems.append("%s.%s must be a number > 0, got %r"
+                                    % (entry_label, key, value))
+            source = entry.get("price_source")
+            if not isinstance(source, str) or not source.strip():
+                problems.append("%s.price_source must be a non-empty string"
+                                % entry_label)
+            as_of = entry.get("price_as_of")
+            if not isinstance(as_of, str) or not DATE_RE.fullmatch(as_of):
+                problems.append("%s.price_as_of must be YYYY-MM-DD, got %r"
+                                % (entry_label, as_of))
+                continue
+            try:
+                datetime.strptime(as_of, "%Y-%m-%d")
+            except ValueError:
+                problems.append("%s.price_as_of must be YYYY-MM-DD, got %r"
+                                % (entry_label, as_of))
+    return problems
+
+
+def _check_paid_local_cap(registry) -> list:
+    """policy.paid_local_cap_usd, when present, is a number > 0.
+
+    T1-CREDIT-FIX-10 M2 (D-240): the USD cap an UNMEASURED paid leg is held
+    to (default 20 when absent -- absence is fine, not a problem). A present
+    but non-positive/non-numeric value is flagged loudly; the runtime reads
+    the default rather than billing against a made-up number.
+    """
+    problems = []
+    policy = _section(registry, "policy")
+    if "paid_local_cap_usd" not in policy:
+        return problems
+    value = policy["paid_local_cap_usd"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or not value > 0:
+        problems.append("policy.paid_local_cap_usd must be a number > 0, "
+                        "got %r" % (value,))
+    return problems
+
+
+def check_registry(registry, today=None) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
     problems.extend(_check_legs(registry))
@@ -3237,7 +3438,9 @@ def check_registry(registry) -> list:
     problems.extend(_check_leg_rules(registry))
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
-    problems.extend(_check_credit_guards(registry))
+    problems.extend(_check_provider_prices(registry))
+    problems.extend(_check_paid_local_cap(registry))
+    problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))
     problems.extend(_check_claude_budget(registry))

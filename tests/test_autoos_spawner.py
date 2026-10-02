@@ -14008,19 +14008,35 @@ class CreditGuardWiringTests(unittest.TestCase):
                                                env=self.env())
         self.assertEqual(guards["morph"]["state"], "ok")
 
-    def test_a_usage_read_that_fails_refuses_every_credit_leg(self):
-        """Fail closed: with no spend data the resolver cannot cost a credit leg,
-        so every grant reads as `refuse` -- and the free leg of the same route
-        still plans, because the guard drops legs, never the whole plan."""
+    def test_a_usage_read_that_fails_keeps_every_credit_leg_with_a_note(self):
+        """Fail OPEN (T1-CREDIT-FIX, supersedes the fail-closed contract this
+        test used to pin): with no spend data the grant cannot be called spent,
+        so every grant reads as `unknown` and the leg stays -- a prepaid trial
+        grant that is truly spent rejects at the provider and the combo falls
+        through. The free leg of the same route still plans."""
         guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
                                                fetch=self.fetch_down(), env=self.env())
-        self.assertEqual(guards["morph"]["state"], "refuse")
-        self.assertIn("unreadable", guards["morph"]["note"])
+        self.assertEqual(guards["morph"]["state"], "unknown")
+        self.assertIn("spend unmeasured", guards["morph"]["note"])
         kept, skipped = _usable(self.agent, self.registry(), guards)
         self.assertIn(("groq", "groq-free"), kept)
-        self.assertIn("morph/morph-priced", skipped)
-        self.assertTrue(any("credit exhausted" in r for r in skipped["morph/morph-priced"]),
-                        skipped["morph/morph-priced"])
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertNotIn("morph/morph-priced", skipped)
+
+    def test_a_403_names_the_manage_key_and_keeps_the_leg(self):
+        """T1-CREDIT-FIX (b): the observed failure -- a 15-byte manage.key the
+        gateway answers with 403 -- surfaces as its own message, never as a
+        silent $0.00 that reads as exhausted downstream."""
+        def forbidden(url, headers, timeout):
+            return 403, b'{"error": "API key lacks \'manage\' scope."}'
+        guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
+                                               fetch=forbidden, env=self.env())
+        self.assertEqual(guards["morph"]["state"], "unknown")
+        self.assertIn("manage key rejected (403) - spend unmeasured",
+                      guards["morph"]["note"])
+        kept, skipped = _usable(self.agent, self.registry(), guards)
+        self.assertIn(("morph", "morph-priced"), kept)
+        self.assertNotIn("morph/morph-priced", skipped)
 
     def test_the_gateway_usage_is_read_once_per_process(self):
         box = []
@@ -14032,31 +14048,33 @@ class CreditGuardWiringTests(unittest.TestCase):
         self.assertEqual(len(box), 1, box)
         self.assertEqual(first, second)
 
-    def test_an_unexpected_error_from_the_read_refuses_and_never_crashes_a_plan(self):
-        """FREEKEYS-2c (rev-freekeys2 finding 4): the guard is built inside the
-        plan, so anything the usage read raises has to land in `refuse`, not on
-        the caller's stack.
+    def test_an_unexpected_error_from_the_read_keeps_legs_and_never_crashes_a_plan(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 4) as amended by T1-CREDIT-FIX-2: the
+        guard is built inside the plan, so anything the usage read raises has to
+        land in a KEPT, VISIBLE state, not on the caller's stack.
 
         `fetch_window` already wraps every transport failure into `UsageError`
         and the ledger math tolerates odd row shapes, so nothing in today's data
         walks off the three named types -- the gap was that the catch LISTED
         them. The next helper in that chain that raises something unforeseen
-        (a `TypeError` out of a new arithmetic step) must refuse the credit legs
-        exactly like a gateway outage does, not raise through `route_plan_for`
-        and take the whole plan down with it. So the unforeseen raise is
-        injected, and the assertion is about the contract, not about a shape the
-        gateway answers with today."""
-        def explode(registry, rows, since=None):
+        (a `TypeError` out of a new arithmetic step) must NOT fold into
+        `unknown` -- which would read as a gateway outage -- but land as its
+        own `guard error` state: the credit leg stays, and the note carries the
+        TYPE NAME only (never a message that can hold a path or key). So the
+        unforeseen raise is injected, and the assertion is about the contract,
+        not about a shape the gateway answers with today."""
+        def explode(registry, rows, since=None, failure=None):
             raise TypeError("unsupported operand type(s) for *: 'NoneType' and 'float'")
         with mock.patch.object(self.agent.usage_mod, "credit_guards", explode):
             guards = self.agent.plan_credit_guards(self.registry(), now=self.NOW,
                                                    fetch=self.fetch_ok(self.rows(10, 10)),
                                                    env=self.env())
-        self.assertEqual(guards["morph"]["state"], "refuse")
+        self.assertEqual(guards["morph"]["state"], "guard error")
         self.assertIn("TypeError", guards["morph"]["note"])
+        self.assertNotIn("NoneType", guards["morph"]["note"])
         kept, skipped = _usable(self.agent, self.registry(), guards)
         self.assertIn(("groq", "groq-free"), kept, "the free leg still plans")
-        self.assertIn("morph/morph-priced", skipped)
+        self.assertIn(("morph", "morph-priced"), kept, "the credit leg stays too")
 
     def test_a_different_registry_is_not_served_the_first_registry_guards(self):
         """The process cache is keyed by the registry it was built from: two

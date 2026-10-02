@@ -25,7 +25,7 @@ from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is o
                       _parse_until, leg_denied, leg_rule_for,
                       plan_dead_reasons, claude_budget as claude_budget_of,
                       context_label_to_tokens, gateway_legs,
-                      leg_advertised_context)
+                      leg_advertised_context, leg_price)
 
 # The only ordering fact the clamp needs. Effort names themselves never come
 # from this module -- they come from the table (thresholds) or the caller's
@@ -851,7 +851,7 @@ def _claude_budget_removed(removed) -> bool:
                for reasons in removed.values() for reason in reasons)
 
 
-def credit_leg_priced(model_id, registry) -> bool:
+def credit_leg_priced(model_id, registry, provider_id=None) -> bool:
     """True when the registry carries a real price for `model_id`.
 
     ``0`` is not a price (brief FREEKEYS-1b item 3 / rev-freekeys1 finding 3): a row
@@ -859,11 +859,17 @@ def credit_leg_priced(model_id, registry) -> bool:
     finite grant reads as untouched money while it drains. `prices_from_registry`
     drops those rows from its table for the same reason, so the ledger and this
     filter never disagree about what counts as priced.
+
+    T1-CREDIT-FIX-6 (D-220): `provider_id` names the leg's own provider, so a
+    model id served free by one provider and billed by another (gemini-3.8-flash:
+    free through AI-Studio, billed through Vertex AI) reads the provider-scoped
+    `provider_prices` entry via `registry.leg_price`. Without it the shared row
+    decides, exactly as before -- a bare model name with no provider on file
+    stays unpriced rather than borrowing another provider's price.
     """
-    model = registry["models"].get(model_id) or {}
     try:
-        return float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
-    except (TypeError, ValueError):
+        return leg_price(model_id, provider_id, registry) is not None
+    except Exception:
         return False
 
 
@@ -955,6 +961,24 @@ def _hold_back_paid_legs(legs, leg_names, skipped, registry):
     return kept, skipped
 
 
+def _paid_cap_usd(registry, provider_id):
+    """`monthly_cap_usd` for a `tier == paid` row, or None (T1-CREDIT-FIX-2).
+
+    Never raises: a paid row with no (or no readable) cap is simply not
+    spend-guarded, so the fail-closed hold below only ever bites a row that
+    declared what it bills against. Mirrors `autoos_usage.monthly_cap_usd`'s
+    validation without importing it (`autoos_usage` already imports this
+    module for `price_factor`, so the import would be circular)."""
+    try:
+        entry = (registry or {}).get("providers", {}).get(provider_id) or {}
+        cap = entry.get("monthly_cap_usd")
+    except Exception:
+        return None
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)) or cap <= 0:
+        return None
+    return float(cap)
+
+
 def usable_legs(route, card, features, client_state, registry, overlay,
                client="opencode", now=None, env=None, toolcalls_skips=None,
                credit_guards=None, credit_warns=None):
@@ -1011,19 +1035,37 @@ def usable_legs(route, card, features, client_state, registry, overlay,
       (``registry.leg_denied``) is skipped with reason ``leg_rules: <leg>
       denied by <rule id>`` - the same legs ``registry.gateway_legs`` drops,
       since a gateway combo never carries a denied leg.
-    - the credit grant (brief FREEKEYS-1b, items 2-3): a leg of a provider whose
-      ``tier`` is ``credit`` is a finite amount of the operator's money, so two
-      things refuse it. No price on file -- ``credit leg unpriced <model>`` --
-      because an unpriced grant bills $0 and would read as an untouched allowance
-      while it drains; this half needs no `credit_guards` at all, which is what
-      makes it fail closed rather than open. And the guard's own ``refuse`` at
-      100 % of ``providers.<id>.monthly_cap_usd`` -- ``credit exhausted <provider>
-      $x/$cap`` -- reading the state `autoos_usage.credit_guards` computes from
+    - the credit grant (brief FREEKEYS-1b, items 2-3, as amended by
+      T1-CREDIT-FIX): a leg of a provider whose ``tier`` is ``credit`` is a
+      finite amount of the operator's money, so two things refuse it. No price
+      on file -- ``credit leg unpriced <model>`` -- because an unpriced grant
+      bills $0 and would read as an untouched allowance while it drains; this
+      half needs no `credit_guards` at all, which is what makes it fail closed
+      rather than open. And the guard's own ``refuse`` at the effective
+      threshold -- the grant less ``credit_hard_stop_margin_usd``
+      (``credit exhausted <provider> $spent/$threshold``) -- reading the state
+      `autoos_usage.credit_guards` computes from
       recorded usage rows, so the figure the resolver acts on is the figure the
-      usage report prints. At the warn line (``monthly_warn_fraction``, 80 % by
-      default) the leg stays: there is money left. It is named in `credit_warns`
-      so the plan's ``explain`` and the caller's report say so instead of the
-      guard being silent until it blocks.
+      usage report prints. Field semantics: ``credit_usd`` is the trial grant
+      TOTAL; remaining = credit_usd minus spent; ``$0 spent of $N`` is intact,
+      never exhausted. An UNMEASURABLE spend (guard state ``unknown``, or no
+      guard data) keeps the leg and is named in `credit_warns` as ``credit
+      spend unknown`` -- fail open, because a spent prepaid grant rejects at
+      the provider and the combo falls through. A guard that reports its own
+      bug (`guard error`, T1-CREDIT-FIX-2 -- an unforeseen read bug, type name
+      only in the note) likewise keeps the leg and is named verbatim. No guard
+      entry at all is a third shape -- ``credit no guard for <provider>`` (the
+      plan never consulted the guard, a wiring defect) -- kept, but named as
+      its own gap instead of borrowing the `spend unknown` line. At the warn line
+      (``monthly_warn_fraction``, 80 % by default) the leg likewise stays:
+      there is money left. It is named in `credit_warns` so the plan's
+      ``explain`` and the caller's report say so instead of the guard being
+      silent until it blocks.
+    - LIMIT (D-220 follow-up T1-COMBO3, T1-CREDIT-FIX-7 R3): the hard stop
+      above filters resolver plans ONLY. `registry.gateway_legs` and the
+      rendered gateway combos do no credit gating -- a refused grant's leg
+      stays a gateway fall-through leg at run time. Gateway-side credit
+      gating is explicitly not built here.
     - an overlay rate limit (agentic kinds only, and only when the leg is
       not already proven): every trial of the leg's last tool_calls probe
       error was HTTP 429. A leg already proven is kept even if currently
@@ -1090,6 +1132,17 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             continue
 
         reasons = []
+        # T1-CREDIT-FIX-7 R5: the D-220 loud line says the leg is KEPT, so it
+        # is stashed here and emitted only when the leg survives every other
+        # filter below (a leg then skipped for tool_calls/context/etc. must
+        # not claim it was kept). T1-CREDIT-FIX-8 C4: the quiet unknown line
+        # says KEPT too, so it is stashed the same way. T1-CREDIT-FIX-9 T7:
+        # EVERY kept-claiming line is stashed the same way (no-guard,
+        # unrecognised, paid last-resort) plus the T2 month-to-date caveat
+        # for window-limited ok/warn survivors.
+        pending_loud = None
+        pending_unknown = None
+        pending_extra = []
 
         # D-102 CLAUDEBUDGET (2026-09-28): while the budget is on, Claude is
         # reserved for finals. Held per leg, not per route, so a mixed route
@@ -1161,20 +1214,83 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             reasons.append("leg_rules: %s denied by %s"
                            % (leg, rule.get("id", "(unnamed)")))
 
-        # FREEKEYS-1b (items 2-3): a `credit` provider's grant is finite, and the
-        # guard has to bite here -- a number the report prints and nothing refuses
-        # is what let a $10 grant drain invisibly (rev-freekeys1 findings 2 and 3).
-        # Both halves fail closed: no `credit_guards` from the caller means no spend
-        # data, and no spend data plus no price is a leg nobody can cost, so the
-        # unpriced check refuses it outright.
+        # FREEKEYS-1b (items 2-3) as amended by T1-CREDIT-FIX: a `credit`
+        # provider's grant is finite, and the guard has to bite here -- a number
+        # the report prints and nothing refuses is what let a $10 grant drain
+        # invisibly (rev-freekeys1 findings 2 and 3). Field semantics:
+        # `credit_usd` is the trial grant TOTAL; spent is what it already
+        # billed; remaining = credit_usd minus spent. Only a MEASURED spend at
+        # or above the cap refuses the leg. An unmeasurable spend (guard state
+        # `unknown`, or no guard data at all) keeps the leg with a `spend
+        # unknown` note -- fail open, because a prepaid trial grant that is
+        # truly spent rejects at the provider (402/429) and the combo falls
+        # through, while fail-closed put the whole trial tier offline on a
+        # manage-key 403 (`credit exhausted ovhcloud $0.00/$200.00` at $0
+        # spent). Both halves still fail closed where they must: no price on
+        # file refuses the leg outright (an unpriced grant bills $0 and would
+        # read as an untouched allowance while it drains), and a measured
+        # spend at the cap refuses it.
         if registry["providers"][provider_id].get("tier") == "credit":
-            if not credit_leg_priced(model_id, registry):
+            if not credit_leg_priced(model_id, registry, provider_id):
                 reasons.append("credit leg unpriced %s" % model_id)
             guard = (credit_guards or {}).get(provider_id) or {}
-            if guard.get("state") == "refuse":
+            if not guard:
+                if credit_warns is not None:
+                    # No entry at all: the plan never consulted the guard for
+                    # this grant (a wiring defect), not "the gateway gave no
+                    # figure". Kept (fail open), but named as its own gap.
+                    # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not
+                    # say 'kept'.
+                    line = ("credit no guard for %s - guard map has no entry, "
+                            "spend unmeasured, leg kept (fail open)"
+                            % provider_id)
+                    pending_extra.append(line)
+            elif guard.get("state") == "refuse":
+                # T1-CREDIT-FIX-5 M5b: `refuse` is checked BEFORE the unknown
+                # branch -- a guard that is both drained and `spend_unknown`
+                # must be refused, or the fail-open branch resurrects a grant
+                # the measured figure already drained.
+                # T1-CREDIT-FIX-7 R6: the reason names the EFFECTIVE threshold
+                # (the grant less its hard-stop margin), not the cap -- the
+                # figure the leg was actually refused at.
+                thresh = guard.get("hard_stop_usd")
+                if isinstance(thresh, bool) or \
+                        not isinstance(thresh, (int, float)):
+                    thresh = guard.get("cap_usd")
                 reasons.append("credit exhausted %s $%.2f/$%.2f"
                                % (provider_id, float(guard.get("spend_usd") or 0.0),
-                                  float(guard.get("cap_usd") or 0.0)))
+                                  float(thresh or 0.0)))
+            elif guard.get("state") in ("unknown", "guard error") or \
+                    guard.get("spend_unknown"):
+                if credit_warns is not None:
+                    # The guard note already names the provider and the cause;
+                    # it is the explain line verbatim (one line per grant per
+                    # plan, however many of its legs a route carries and
+                    # however many routes were filtered to get here). A `guard
+                    # error` note carries the bug TYPE NAME only, never a
+                    # message/path/key.
+                    if guard and guard.get("note"):
+                        line = guard["note"]
+                    else:
+                        line = ("credit spend unknown %s - no guard data, "
+                                "spend unmeasured, leg kept (fail open)"
+                                % provider_id)
+                    # T1-CREDIT-FIX-8 C4: stashed, not emitted -- the leg may
+                    # yet be skipped below, and a skipped leg must not say
+                    # 'kept' (the same defect R5 fixed for the loud line).
+                    pending_unknown = line
+                    # T1-CREDIT-FIX-5 M2 (D-220): while a credit leg is kept on
+                    # unknown spend the plan says so LOUDLY -- even when the leg
+                    # is otherwise unremarkable -- so an operator never mistakes
+                    # a fail-open grant for a measured, healthy one.
+                    # T1-CREDIT-FIX-7 R5: stashed, not emitted: the leg may yet
+                    # be skipped below, and a skipped leg must not say 'kept'.
+                    loud = ("SPEND UNKNOWN: %s credit leg kept (grant $%.2f, "
+                            "fail-open per D-220) - measured spend unavailable"
+                            % (provider_id, float(guard.get("cap_usd") or 0.0)))
+                    if guard.get("window_limited"):
+                        loud += " (window: month-to-date only; set credit_started)"
+                    pending_loud = loud
             elif guard.get("state") == "warn" and credit_warns is not None:
                 line = "credit warn %s $%.2f/$%.2f" % (
                     provider_id, float(guard.get("spend_usd") or 0.0),
@@ -1183,6 +1299,79 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 # carries and however many routes were filtered to get here.
                 if line not in credit_warns:
                     credit_warns.append(line)
+                # T1-CREDIT-FIX-9 T2: a window-limited warn survivor names its
+                # month-to-date limit -- stashed, survivor-only like C4.
+                if guard.get("window_limited"):
+                    pending_extra.append(
+                        "%s credit spend measured month-to-date only "
+                        "(set credit_started)" % provider_id)
+            elif guard.get("state") == "manual" and credit_warns is not None:
+                # T1-CREDIT-FIX-5 M1: a dated manual reading is not measured
+                # spend. The leg is kept, but the plan names the figure so it
+                # can never be read as a live number.
+                line = ("credit manual %s: %s" % (provider_id,
+                                                  guard.get("note") or "manual figure"))
+                if line not in credit_warns:
+                    credit_warns.append(line)
+            elif guard.get("state") == "ok":
+                # T1-CREDIT-FIX-9 T2: a window-limited ok grant prints no
+                # warn/refuse line, so its month-to-date limit would be
+                # silent -- stash one caveat line for survivors only.
+                if guard.get("window_limited") and credit_warns is not None:
+                    pending_extra.append(
+                        "%s credit spend measured month-to-date only "
+                        "(set credit_started)" % provider_id)
+            elif guard.get("state") != "ok" and credit_warns is not None:
+                # M5b: an unrecognised (or None) guard state is never silent --
+                # it is a data bug, named, while the leg stays fail-open.
+                # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not say
+                # 'kept'.
+                line = ("credit guard %s: unrecognised state %r - spend "
+                        "unmeasured, leg kept (fail open)"
+                        % (provider_id, guard.get("state")))
+                pending_extra.append(line)
+        elif registry["providers"][provider_id].get("tier") == "paid" and \
+                _paid_cap_usd(registry, provider_id) is not None:
+            # T1-CREDIT-FIX-3 (D-212): paid legs are STANDING LAST-RESORT legs.
+            # A paid leg with unmeasurable spend is KEPT with a visible note
+            # 'paid spend unmeasured <provider> - leg kept (last resort, D-212)'.
+            # It is REFUSED only when MEASURED spend >= its monthly_cap_usd
+            # (guard state == "refuse").
+            guard = (credit_guards or {}).get(provider_id) or {}
+            if not guard:
+                pass
+            elif guard.get("state") == "refuse":
+                # Measured spend >= cap: refuse the leg (real budget protection)
+                # T1-CREDIT-FIX-10 M2 (D-240): an UNMEASURED spend held to the
+                # local cap refuses with its own reason -- the note names the
+                # estimate, the cap and D-240, so it is the reason verbatim.
+                if "(D-240)" in (guard.get("note") or ""):
+                    reasons.append(guard["note"])
+                else:
+                    reasons.append("paid spend %s $%.2f/$%.2f"
+                                   % (provider_id, float(guard.get("spend_usd") or 0.0),
+                                      float(guard.get("cap_usd") or 0.0)))
+            elif guard.get("state") == "warn" and credit_warns is not None:
+                line = "paid spend warn %s $%.2f/$%.2f" % (
+                    provider_id, float(guard.get("spend_usd") or 0.0),
+                    float(guard.get("cap_usd") or 0.0))
+                if line not in credit_warns:
+                    credit_warns.append(line)
+            elif guard.get("spend_unknown") or guard.get("state") in (
+                    "unknown", "guard error"):
+                # Unmeasurable spend: leg kept (last resort), add visible warning
+                # T1-CREDIT-FIX-9 T7: stashed -- a skipped leg must not say
+                # 'kept'.
+                # T1-CREDIT-FIX-10 M2 (D-240): a kept line that already names
+                # the local estimate is emitted verbatim; anything else keeps
+                # the D-212 line exactly as before.
+                if credit_warns is not None:
+                    note = guard.get("note") or ""
+                    line = note if "(D-240)" in note else \
+                        "paid spend unmeasured %s - leg kept (last resort, D-212)" % provider_id
+                    pending_extra.append(line)
+            # spend_unknown / unknown / guard error -> leg KEPT (last resort)
+            # No reason added means the leg passes through to legs.append()
 
         if agentic and not proven and _rate_limited(leg, overlay):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
@@ -1190,6 +1379,22 @@ def usable_legs(route, card, features, client_state, registry, overlay,
         if reasons:
             skipped[leg] = notes + reasons
         else:
+            # T1-CREDIT-FIX-7 R5: the leg survived -- only now may the plan
+            # say LOUDLY that an unknown-spend credit leg was kept.
+            # T1-CREDIT-FIX-8 C4: the stashed quiet unknown line is emitted
+            # here too, for the same reason -- before the loud line, as
+            # before. T1-CREDIT-FIX-9 T7: every other stashed kept-claiming
+            # line (and the T2 month-to-date caveat) is emitted here too.
+            if (pending_unknown is not None and credit_warns is not None
+                    and pending_unknown not in credit_warns):
+                credit_warns.append(pending_unknown)
+            if (pending_loud is not None and credit_warns is not None
+                    and pending_loud not in credit_warns):
+                credit_warns.append(pending_loud)
+            if credit_warns is not None:
+                for stashed in pending_extra:
+                    if stashed not in credit_warns:
+                        credit_warns.append(stashed)
             legs.append((provider_id, model_id))
             leg_names.append(leg)
             if notes:
@@ -1296,6 +1501,40 @@ def filter_routes(card, features, client_state, registry, overlay,
             reasons.append("no usable leg: " + "; ".join(
                 "%s: %s" % (leg, "; ".join(leg_reasons))
                 for leg, leg_reasons in skipped.items()))
+
+        # T1-CREDIT-FIX: a route whose class has no scoring priors cannot be
+        # scored -- latency_minutes and track.p_success both raise ValueError
+        # on a missing class entry (fail closed, pinned by their own tests) --
+        # so it is removed here with the gap named instead of crashing the
+        # whole plan in step 4. Reached in production by the four class
+        # `credit` single-leg routes TORDER TASK4 added without
+        # policy.latency_seed.credit / policy.seed_priors.credit entries: while
+        # fail-closed they never survived filtering, so nobody noticed; with
+        # the trial legs back they score (and die) first. Their ovhcloud /
+        # vertex legs are usable again, but the singles wait on the operator
+        # adding the two seed entries -- this reason is the pointer. Only
+        # checked when the policy maps exist at all: a registry with no policy
+        # section is a unit-test synthetic exercising the leg filters, not a
+        # data gap, and scoring never ran on it either way.
+        # T1-CREDIT-FIX-4: the class must be present in BOTH maps. Round 3
+        # skipped an empty map, which let a class present in only one of
+        # latency_seed / seed_priors survive filtering and then crash the
+        # plan in step 4 (latency_minutes and track.p_success both raise
+        # ValueError on the missing entry). The real catalog now carries
+        # `credit` in both maps (round 3), so no relaxation is needed.
+        policy = registry.get("policy") or {}
+        seeds = policy.get("latency_seed") or {}
+        priors = policy.get("seed_priors") or {}
+        route_class = route.get("class")
+        if route_class and (seeds or priors):
+            missing = [name for name, mapping in
+                       (("policy.latency_seed", seeds),
+                        ("policy.seed_priors", priors))
+                       if route_class not in mapping]
+            if missing:
+                reasons.append("no scoring priors for class %r (%s) - add the "
+                               "class entries before this route can plan"
+                               % (route_class, " and ".join(missing)))
 
         if reasons:
             removed[route_id] = reasons

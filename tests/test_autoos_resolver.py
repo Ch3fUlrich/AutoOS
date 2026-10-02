@@ -2786,6 +2786,16 @@ class MetaApiResolverTests(unittest.TestCase):
         for leg in legs:
             self.assertIn(self.registry["providers"][leg[0]]["tier"],
                           ("free", "trial", "credit"), leg)
+        # T1-CREDIT-FIX-6 (D-220): the vertex leg of gemini-3.8-flash is
+        # priced per provider now, so it correctly survives while the paid
+        # leg is held back -- the band order is free -> credit -> paid. The
+        # paid leg stays held back while a freeish leg is healthy (R4a), so
+        # the band check runs over the surviving legs, all below paid.
+        band = {"free": 0, "credit": 1, "paid": 2, "subscription": 2}
+        ranks = [band[self.registry["providers"][leg[0]]["tier"]]
+                 for leg in legs]
+        self.assertEqual(ranks, sorted(ranks), legs)
+        self.assertTrue(all(rank < band["paid"] for rank in ranks), legs)
         for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             paid, _s, _n = r.usable_legs(
                 self.registry["routes"][paid_route], card,
@@ -5135,14 +5145,19 @@ class CreditGuardLegFilterTests(unittest.TestCase):
         kept, skipped, _notes = self.legs(guards, warns)
         self.assertIn(("morph", "morph-priced"), kept)
         self.assertNotIn("morph/morph-priced", skipped)
-        self.assertEqual(warns, ["credit warn morph $8.00/$10.00"])
+        self.assertEqual(warns, ["credit warn morph $8.00/$10.00",
+                                "morph credit spend measured month-to-date only "
+                                "(set credit_started)"])
 
     def test_below_the_warn_line_nothing_is_said_and_nothing_is_dropped(self):
         warns = []
         guards = self.guards(1_000_000, 1_000_000)  # $2 of $10
         kept, _skipped, _notes = self.legs(guards, warns)
         self.assertIn(("morph", "morph-priced"), kept)
-        self.assertEqual(warns, [])
+        # T1-CREDIT-FIX-9 T2: a window-limited ok grant still prints its
+        # month-to-date caveat, so the plan never reads windowed spend as a total.
+        self.assertEqual(warns, ["morph credit spend measured month-to-date only "
+                                "(set credit_started)"])
 
     # --- fail closed when there is no price on file -------------------------
 
@@ -5171,4 +5186,160 @@ class CreditGuardLegFilterTests(unittest.TestCase):
         self.assertIn(("morph", "morph-priced"), kept)
 
 
+class CreditFailOpenTests(unittest.TestCase):
+    """T1-CREDIT-FIX: `$0 spent of $N` is an intact grant, and unmeasurable spend
+    keeps the leg with a visible note instead of skipping it.
 
+    Semantics pinned here (see `autoos_usage.credit_guards`): `credit_usd` is
+    the trial grant TOTAL in USD; `spent` is what the grant already billed;
+    remaining = credit_usd - spent; the leg is exhausted only when
+    spent >= monthly_cap_usd (= credit_usd). An unknown figure fails OPEN: a
+    prepaid trial grant that is truly spent rejects at the provider (402/429)
+    and the combo falls through at run time, while fail-closed dropped the
+    whole trial tier on a 403 (measured: `credit exhausted ovhcloud
+    $0.00/$200.00` with $0.00 spent).
+    """
+
+    CAP = 200.0
+    NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
+    SINCE = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+
+    def registry(self):
+        return {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "model_prefix": "ovh", "credit_usd": self.CAP,
+                             "monthly_cap_usd": self.CAP,
+                             "monthly_warn_fraction": 0.8,
+                             "trains_on_prompts": False},
+            },
+            "models": {
+                "ovh-priced": {"id": "ovh-priced", "tool_calls": "proven",
+                               "context_usable": {"tokens": 100000,
+                                                 "source": "default"},
+                               "price_in": 1e-06, "price_out": 1e-06},
+            },
+            "routes": {
+                "r-trial": {"id": "r-trial",
+                            "legs": ["ovhcloud/ovh-priced"]},
+            },
+            "policy": {"leg_rules": []},
+        }
+
+    def rows(self, tokens_in, tokens_out):
+        return [{"timestamp": self.NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "provider": "ovhcloud", "model": "ovh-priced",
+                 "tokens": {"in": tokens_in, "out": tokens_out}}]
+
+    def legs(self, guards, warns=None):
+        reg = self.registry()
+        if warns is None:
+            warns = []
+        kept, skipped, _notes = r.usable_legs(
+            reg["routes"]["r-trial"], {"kind": "implement", "privacy": "public"},
+            {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards, credit_warns=warns)
+        return kept, skipped, warns
+
+    def test_zero_spend_of_a_grant_keeps_the_leg(self):
+        """$0 spent of $200 is intact, never exhausted."""
+        guards = usage.credit_guards(self.registry(), [], self.SINCE)
+        self.assertEqual(guards["ovhcloud"]["state"], "ok")
+        kept, skipped, _warns = self.legs(guards)
+        self.assertIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertNotIn("ovhcloud/ovh-priced", skipped)
+
+    def test_full_spend_of_a_grant_exhausts_the_leg(self):
+        """100M in + 100M out at 1e-06/token is exactly the $200 grant."""
+        guards = usage.credit_guards(self.registry(),
+                                     self.rows(100_000_000, 100_000_000),
+                                     self.SINCE)
+        self.assertEqual(guards["ovhcloud"]["state"], "refuse")
+        _kept, skipped, _warns = self.legs(guards)
+        # T1-CREDIT-FIX-7 R6: the reason names the effective threshold (the
+        # $200 grant less the $20 default margin), not the cap.
+        self.assertEqual(skipped["ovhcloud/ovh-priced"],
+                         ["credit exhausted ovhcloud $%.2f/$%.2f"
+                          % (self.CAP, self.CAP - 20.0)])
+
+    def test_unknown_spend_keeps_the_leg_with_a_note(self):
+        """No measurable figure (gateway unreadable, no manual fallback) is
+        fail open: the leg stays and the plan says why."""
+        guards = usage.credit_guards(self.registry(), None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured")
+        self.assertEqual(guards["ovhcloud"]["state"], "unknown")
+        kept, skipped, warns = self.legs(guards)
+        self.assertIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertNotIn("ovhcloud/ovh-priced", skipped)
+        self.assertTrue(any("spend unknown" in w for w in warns), warns)
+
+    def test_unknown_spend_puts_the_loud_d220_line_in_the_plan_warns(self):
+        """T1-CREDIT-FIX-5 M2 (D-220): while a credit leg is kept on unknown
+        spend the plan says so LOUDLY -- the line is the warn accumulator the
+        plan's `explain` carries, not a quiet note. Production reaches it
+        through `filter_routes` (the entry `plan` uses), not `usable_legs`
+        directly."""
+        reg = self.registry()
+        guards = usage.credit_guards(reg, None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured")
+        warns = []
+        r.filter_routes({"kind": "implement", "privacy": "public"},
+                        {"need_tokens": 10},
+                        {"opencode": {"installed": True, "signed_in": True,
+                                      "reason": ""}},
+                        reg, {}, credit_guards=guards,
+                        credit_warns=warns)
+        self.assertTrue(
+            any(w.startswith("SPEND UNKNOWN: ovhcloud credit leg kept")
+                and "grant $200.00" in w and "fail-open per D-220" in w
+                and "measured spend unavailable" in w for w in warns), warns)
+
+    def test_missing_guard_data_keeps_the_leg_with_a_note(self):
+        """No guard map at all is also 'nothing known': available, noted --
+        with its own `no guard for` line (T1-CREDIT-FIX-2), never borrowing
+        the `spend unknown` line that means the gateway gave no figure."""
+        kept, skipped, warns = self.legs(None)
+        self.assertIn(("ovhcloud", "ovh-priced"), kept)
+        self.assertNotIn("ovhcloud/ovh-priced", skipped)
+        self.assertTrue(any("no guard for ovhcloud" in w for w in warns), warns)
+
+    def test_a_route_whose_class_has_no_scoring_priors_is_removed_not_crashed(self):
+        """T1-CREDIT-FIX follow-on: the four class-`credit` single-leg routes
+        (TORDER TASK4) ship without policy.latency_seed.credit /
+        policy.seed_priors.credit. While fail-closed they never survived
+        filtering so nobody noticed; with the legs back, scoring them raises
+        ValueError and takes the whole plan down (rc=2). The filter removes
+        the unscorable route with the gap named instead."""
+        reg = self.registry()
+        reg["routes"] = {
+            "r-trial": {"id": "r-trial", "class": "credit",
+                        "legs": ["ovhcloud/ovh-priced"]},
+            "r-free": {"id": "r-free", "class": "free", "legs": ["groq/groq-free"]},
+        }
+        reg["providers"]["groq"] = {"id": "groq", "tier": "free",
+                                    "trains_on_prompts": False}
+        reg["models"]["groq-free"] = {
+            "id": "groq-free", "tool_calls": "proven",
+            "context_usable": {"tokens": 100000, "source": "default"}}
+        reg["policy"] = {"leg_rules": [],
+                         "latency_seed": {"free": {"minutes": 5}},
+                         "seed_priors": {"free": {}}}
+        guards = usage.credit_guards(reg, [], self.SINCE)
+        survivors, removed = r.filter_routes(
+            {"kind": "implement", "privacy": "public"}, {"need_tokens": 10},
+            {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
+            reg, {}, credit_guards=guards)
+        self.assertIn("r-free", survivors)
+        self.assertIn("r-trial", removed)
+        self.assertTrue(any("scoring priors" in reason
+                            for reason in removed["r-trial"]),
+                        removed["r-trial"])
+
+
+
+
+if __name__ == "__main__":
+    unittest.main()

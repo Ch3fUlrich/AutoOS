@@ -19,6 +19,7 @@ Run directly, never through unittest discover:
     python3 tests/test_autoos_usage.py
 """
 import datetime
+import copy
 import importlib.util
 import io
 import json
@@ -370,7 +371,7 @@ class CliTests(UsageCliTests):
 
         rc, out, err = self.run_cli(["--since", "1h"], broken)
         self.assertEqual(rc, 3)
-        self.assertIn("IncompleteRead", err)
+        self.assertIn("UsageError", err)
         self.assertNotIn(FIXTURE_KEY, out + err)
 
     def test_gateway_unreachable_exit3(self):
@@ -379,7 +380,9 @@ class CliTests(UsageCliTests):
 
         rc, out, err = self.run_cli(["--since", "1h"], down)
         self.assertEqual(rc, 3)
-        self.assertIn("gw.invalid:20128", err)
+        # Error should contain exception type name but not the URL
+        self.assertIn("UsageError", err)
+        self.assertNotIn("gw.invalid", err)
         self.assertNotIn(FIXTURE_KEY, out + err)
 
     def test_missing_key_file_exit3(self):
@@ -387,7 +390,8 @@ class CliTests(UsageCliTests):
         fetch = FakeFetch({0: (200, [])})
         rc, out, err = self.run_cli(["--since", "1h"], fetch)
         self.assertEqual(rc, 3)
-        self.assertIn("manage.key", err)
+        self.assertIn("manage key file missing or empty", err)
+        self.assertNotIn("manage.key", err)
         self.assertEqual(fetch.calls, [])  # never contacted the gateway
 
     def test_sends_bearer_header_and_paging_params(self):
@@ -1109,6 +1113,92 @@ class CreditGuardFromRecordedRowsTests(unittest.TestCase):
         text = usage.render_text(report, ["provider"])
         self.assertIn("morph", text)
         self.assertIn("$8.00", text)
+
+
+class CreditSpendUnknownTests(UsageCliTests):
+    """T1-CREDIT-FIX: unmeasurable spend is a named condition, never a silent $0.00.
+
+    Cause (measured 2026-10-01): the host's manage.key is 15 bytes and the
+    gateway answers the call-log read with 403, so `fetch_window` raises
+    UsageError naming HTTP 403 (tools/autoos_usage.py: the 401/403 branch of
+    `fetch_window`, which returns the real tool's (status, body) contract from
+    `urllib_fetch`, and the UsageError it raises). The fakes below reproduce
+    that contract -- a (403, body) tuple -- per R-worker-04, citing those lines.
+    """
+
+    REG = {
+        "providers": {
+            "morph": {"tier": "credit", "credit_usd": 200.0,
+                      "monthly_cap_usd": 200.0, "monthly_warn_fraction": 0.8},
+        },
+        "models": {
+            "morph-priced": {"price_in": 1e-06, "price_out": 1e-06},
+        },
+    }
+    SINCE = datetime.datetime(2026, 9, 1, tzinfo=datetime.timezone.utc)
+
+    def test_403_surfaces_manage_key_rejected_not_silent_zero(self):
+        fetch = FakeFetch({0: (403, {"error": "API key lacks 'manage' scope."})})
+        rc, out, err = self.run_cli(["--since", "1h"], fetch)
+        self.assertEqual(rc, 3)
+        self.assertIn("manage key rejected (403) - spend unmeasured", err)
+        self.assertNotIn("$0.00", err)
+        self.assertNotIn(FIXTURE_KEY, out + err)
+
+    def test_missing_key_file_says_spend_unmeasured(self):
+        (self.cfg / "manage.key").unlink()
+        fetch = FakeFetch({0: (200, [])})
+        rc, out, err = self.run_cli(["--since", "1h"], fetch)
+        self.assertEqual(rc, 3)
+        self.assertIn("spend unmeasured", err)
+        self.assertEqual(fetch.calls, [])
+
+    def test_no_rows_without_manual_figure_is_unknown(self):
+        guards = usage.credit_guards(self.REG, None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured")
+        guard = guards["morph"]
+        self.assertEqual(guard["state"], "unknown")
+        self.assertTrue(guard["spend_unknown"])
+        self.assertIn("spend unknown", guard["note"])
+        self.assertIn("403", guard["note"])
+
+    def test_no_rows_falls_back_to_the_dated_manual_figure(self):
+        """The registry's dated manual spend is the fallback when the gateway
+        call-log ledger cannot be read (no separate ledger store exists in the
+        repo -- grep finds only the call-log rows priced client-side)."""
+        reg = copy.deepcopy(self.REG)
+        reg["providers"]["morph"]["credit_spent_usd"] = 50.0
+        reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
+        guards = usage.credit_guards(reg, None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured",
+                                     today=datetime.date(2026, 10, 1))
+        guard = guards["morph"]
+        self.assertEqual(guard["spend_usd"], 50.0)
+        # M1: a manual figure never reads as measured -- state `manual`, not `ok`.
+        self.assertEqual(guard["state"], "manual")
+        self.assertIn("manual figure $50.00 as of 2026-09-30 (age 1 d)",
+                      guard["note"])
+
+    def test_a_spent_manual_figure_still_refuses(self):
+        """Fail open is for the unknown, not for a known-drained grant."""
+        reg = copy.deepcopy(self.REG)
+        reg["providers"]["morph"]["credit_spent_usd"] = 200.0
+        reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
+        guards = usage.credit_guards(reg, None, self.SINCE,
+                                     failure="gateway unreachable",
+                                     today=datetime.date(2026, 10, 1))
+        self.assertEqual(guards["morph"]["state"], "refuse")
+
+    def test_rendered_unknown_never_shows_a_bare_zero(self):
+        guards = usage.credit_guards(self.REG, None, self.SINCE,
+                                     failure="manage key rejected (403) - "
+                                             "spend unmeasured")
+        lines = usage.render_credit_guards(guards)
+        self.assertTrue(any("morph" in line for line in lines), lines)
+        self.assertTrue(any("unmeasured" in line for line in lines), lines)
+        self.assertFalse(any("$0.00" in line for line in lines), lines)
 
 
 if __name__ == "__main__":

@@ -3076,6 +3076,43 @@ class CreditSpendGuardTests(unittest.TestCase):
         del reg["providers"]["deepinfra"]["monthly_cap_usd"]
         self.assertTrue(self.credit_problems(reg))
 
+    def test_a_dated_manual_spend_pair_is_accepted(self):
+        """T1-CREDIT-FIX: the manual fallback fields are optional but paired --
+        a complete dated figure passes the shipped check."""
+        reg = mutated()
+        reg["providers"]["morph"]["credit_spent_usd"] = 3.5
+        reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
+        self.assertEqual(registry._check_credit_guards(reg), [])
+
+    def test_a_half_present_manual_spend_is_flagged(self):
+        """A figure with no date cannot age; a date with no figure judges
+        nothing -- both halves are flagged, not trusted."""
+        for figure, as_of in ((3.5, None), (None, "2026-09-30")):
+            reg = mutated()
+            if figure is not None:
+                reg["providers"]["morph"]["credit_spent_usd"] = figure
+            if as_of is not None:
+                reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_a_malformed_manual_spend_is_flagged(self):
+        for figure, as_of in ((-1.0, "2026-09-30"), (True, "2026-09-30"),
+                              ("3.5", "2026-09-30"), (3.5, ""),
+                              (3.5, None), (3.5, 20260930)):
+            reg = mutated()
+            reg["providers"]["morph"]["credit_spent_usd"] = figure
+            reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_absent_manual_spend_needs_nothing(self):
+        """The pair is optional: no credit row carries it today, and the
+        shipped registry stays clean."""
+        self.assertEqual(registry._check_credit_guards(load_registry()), [])
+
 
 class ThirdPartyClaudeLegTests(unittest.TestCase):
     """FREEKEYS-1 step 4 (D-102): a Claude model reached through anyone else's
@@ -3937,5 +3974,43 @@ class CleanCreditHeadPricedTests(unittest.TestCase):
             provider_id, model_id = registry.resolve_leg(leg, reg)
             self.assertEqual(reg["providers"][provider_id]["tier"], "credit", leg)
             self.assertFalse(resolver.credit_leg_priced(model_id, reg), leg)
+
+
+class DenyGemini31ProPreviewTests(unittest.TestCase):
+    """T1-CREDIT-FIX-11 R1 (D-255/D-256): gemini-3.1-pro-preview stays as a DENIED registry row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_deny_rule_present_with_d255_reason(self):
+        rules = self.reg["policy"]["leg_rules"]
+        hits = [r for r in rules if "gemini-3.1-pro-preview" in r.get("match", "")]
+        self.assertTrue(hits, "no leg_rule matches gemini-3.1-pro-preview")
+        rule = hits[0]
+        self.assertFalse(rule["allow"])
+        self.assertIn("D-255", rule["reason"])
+
+    def test_legs_denied_in_all_spellings(self):
+        for leg in ("vertex/gemini-3.1-pro-preview", "gemini/gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview", "vertex_ai/gemini-3.1-pro-preview"):
+            self.assertTrue(registry.leg_denied(leg, self.reg), leg)
+
+    def test_price_row_still_readable(self):
+        row = self.reg["models"]["gemini-3.1-pro-preview"]
+        self.assertEqual(row["provider_prices"]["vertex_ai"]["price_in"], 2e-06)
+
+    def test_denied_leg_never_usable_and_pin_fails_closed(self):
+        reg = mutated()
+        reg["routes"]["r-denied-probe"] = {"id": "r-denied-probe", "legs": ["vertex/gemini-3.1-pro-preview"], "class": "test"}
+        # resolve_leg needs provider + model rows; add minimal ones if absent
+        if "vertex" not in reg["providers"]:
+            reg["providers"]["vertex"] = {"id": "vertex", "tier": "paid", "monthly_cap_usd": 250.0}
+        route = reg["routes"]["r-denied-probe"]
+        legs, skipped, _ = resolver.usable_legs(route, {"kind": "implement", "privacy": "public"}, {"need_tokens": 10}, {"opencode": {"installed": True, "signed_in": True, "reason": ""}}, reg, {})
+        self.assertEqual(legs, [])
+        self.assertIn("vertex/gemini-3.1-pro-preview", skipped)
+        self.assertTrue(any("leg_rules" in r for r in skipped["vertex/gemini-3.1-pro-preview"]))
+
+
 if __name__ == "__main__":
     unittest.main()

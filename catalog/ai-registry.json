@@ -232,6 +232,27 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "anthropic/claude-sonnet-4-6": {
+      "$comment": "T1-CREDIT-FIX-10 M4 (D-253, operator 2026-10-01): DeepInfra leg of Claude Sonnet 4.6, reached through the deepinfra connection. List price $3.00 in / $15.00 out per 1M tokens (https://deepinfra.com/anthropic/claude-sonnet-4-6, accessed 2026-10-01). Window fields mirror the claude-sonnet-5 sibling row (1M advertised, 50 % usable, 32768 out) -- unmeasured for this id, re-measure before a leg depends on them. tool_calls unproven (never probed).",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "anthropic/claude-sonnet-4-6",
+      "output_max": 32768,
+      "price_in": 3e-06,
+      "price_out": 1.5e-05,
+      "price_source": "https://deepinfra.com/anthropic/claude-sonnet-4-6 (list price $3.00 in / $15.00 out per 1M tokens, accessed 2026-10-01)",
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "codestral-latest": {
       "$comment": "BRIEF MISTRALFIX2 (S1, operator via L1-main 2026-09-28 11:5xZ): mistral-small does not work - replace it with Mistral Codestral wherever it was a leg; if both mistral-code-latest and codestral-latest answer, use mistral-code-latest. Measured through the gateway (3 calls each, max_tokens 4096, evidence work/L1-routing/MISTRALREPL.probe.jsonl): codestral-latest 3/3 200 p50 0.3 s, mistral-code-latest 3/3 200 p50 0.3 s, mistral-small-latest 0/3 (429). Both siblings answer, so the operator's tie-break picks mistral-code-latest as the replacement and THIS model is registered as the tested alternative, deliberately not a leg of any route (a route change is the operator's, and it would need a plan-limits row plus a probe of its own in every surface it lands in). context_advertised / context_usable / output_max / reasoning are inherited from its provider sibling models.'mistral-code-latest' and models.'mistral-small-latest', NOT measured for codestral - they are the shape this provider's records carry, so re-measure before a leg depends on them. price_in / price_out are 0.0 because no vendor figure was sourced (same stance as mistral-small-latest - not a free-tier guarantee, do not use for cost math). tool_calls: unproven (tools/probe-toolcalls.py never probed it). trains_on_prompts: true at model level (MISTRALFIX3, operator 2026-09-28T12:0xZ \"Mistral trains -> never in -clean tiers\"): nobody sourced that codestral does NOT train, so it is treated as training and private_safe() keeps it out of every -clean route; flip only with a vendor source (tests/test_registry.py MistralReplaceTests is the guard).",
       "context_advertised": 131072,
@@ -303,10 +324,10 @@
       "family": "deepseek",
       "id": "deepseek-flash",
       "output_max": 393216,
-      "price_cache_read": 6e-09,
+      "price_cache_read": 3e-08,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
-      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) — reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 6e-09). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number — not an invented price.",
+      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) — reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 3e-08 (T1-CREDIT-FIX-10 M4, D-253: cache-read = 10 % of price_in). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number — not an invented price.",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -322,7 +343,7 @@
       "family": "deepseek",
       "id": "deepseek-v4-flash",
       "output_max": 393216,
-      "price_cache_read": 6e-09,
+      "price_cache_read": 3e-08,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
       "reasoning": false,
@@ -344,7 +365,7 @@
       "family": "deepseek",
       "id": "deepseek-v4.1-flash",
       "output_max": 393216,
-      "price_cache_read": 6e-09,
+      "price_cache_read": 3e-08,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
       "reasoning": true,
@@ -367,7 +388,7 @@
       "family": "deepseek",
       "id": "deepseek/deepseek-v4.1-flash",
       "output_max": 393216,
-      "price_cache_read": 6e-09,
+      "price_cache_read": 3e-08,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
       "reasoning": true,
@@ -413,6 +434,34 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "gemini-3.1-pro-preview": {
+      "$comment": "T1-CREDIT-FIX-10 M4 (D-253, operator 2026-10-01): Vertex AI leg of Gemini 3.1 Pro Preview (providers.vertex_ai, gateway connection 'vertex'). Model-level price stays 0 so unbilled legs bill $0; the billed leg price lives in provider_prices.vertex_ai at list $2.00 in / $12.00 out per 1M tokens (https://cloud.google.com/vertex-ai/generative-ai/pricing, accessed 2026-10-01). Window/ladder fields mirror the gemini-3.8-flash sibling row -- unmeasured for this id, re-measure before a leg depends on them. tool_calls unproven (never probed).",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 1048576
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.1-pro-preview",
+      "output_max": 65536,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "provider_prices": {
+        "vertex_ai": {
+          "price_in": 2e-06,
+          "price_out": 1.2e-05,
+          "price_source": "https://cloud.google.com/vertex-ai/generative-ai/pricing (list price $2.00 in / $12.00 out per 1M tokens, accessed 2026-10-01)",
+          "price_as_of": "2026-10-01"
+        }
+      },
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "gemini-3.8-flash": {
       "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded).",
       "context_advertised": 1048576,
@@ -431,7 +480,15 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "provider_prices": {
+        "vertex_ai": {
+          "price_in": 1.5e-06,
+          "price_out": 7.5e-06,
+          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (list price from 2027-01-01; intro $0.75/$3.75 through 2026-12-31 via 50% credits back)",
+          "price_as_of": "2026-10-01"
+        }
+      }
     },
     "glm-4.5-air": {
       "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -556,7 +613,7 @@
       "family": "meta",
       "id": "meta/muse-spark-1.3-contributor",
       "output_max": 131072,
-      "price_cache_read": 2e-09,
+      "price_cache_read": 1e-08,
       "price_in": 1e-07,
       "price_out": 2e-07,
       "reasoning": true,
@@ -656,7 +713,7 @@
       "family": "meta",
       "id": "muse-spark",
       "output_max": 131072,
-      "price_cache_read": 2e-09,
+      "price_cache_read": 1e-08,
       "price_in": 1e-07,
       "price_out": 2e-07,
       "reasoning": true,
@@ -704,6 +761,7 @@
       "family": "meta",
       "id": "muse-spark-1.3-contributor",
       "output_max": 131072,
+      "price_cache_read": 1e-08,
       "price_in": 1e-07,
       "price_out": 2e-07,
       "reasoning": true,
@@ -1862,6 +1920,11 @@
         "minutes": 8,
         "source": "default"
       },
+      "credit": {
+        "minutes": 5,
+        "source": "default",
+        "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+      },
       "free": {
         "minutes": 5,
         "source": "default"
@@ -2201,6 +2264,38 @@
           "source": "2026-09-25"
         }
       },
+      "credit": {
+        "S0": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S1": {
+          "alpha": 2,
+          "beta": 1,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S2": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S3": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        },
+        "S4": {
+          "alpha": 1,
+          "beta": 5,
+          "source": "2026-09-25",
+          "$comment": "credit class seeded from free class values 2026-10-01 pending measurement (T1-CREDIT-FIX-3)"
+        }
+      },
       "free": {
         "S0": {
           "alpha": 2,
@@ -2487,8 +2582,16 @@
         "allow": false,
         "reason": "cheaperinference balance is small: only kimi-k3, glm-5.2 and minimax-m2.7 may serve; every other cheaperinference leg spends the remaining balance and stays off until the operator allows it",
         "source": "L0 2026-09-27T12:55:16Z (operator)"
+      },
+      {
+        "id": "deny-gemini-3.1-pro-preview",
+        "match": "*gemini-3.1-pro-preview*",
+        "allow": false,
+        "reason": "D-255 operator: only Gemini 3.6/3.7/3.8 flash",
+        "source": "operator D-255/D-256 2026-10-01"
       }
     ],
+    "paid_local_cap_usd": 20,
     "reviewers": [
       {
         "client": "opencode",

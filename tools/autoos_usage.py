@@ -91,10 +91,13 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import math
 import os
 import re
+import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -104,6 +107,24 @@ DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
 MAX_PAGES = 20
 TIMEOUT_S = 15
+# T1-CREDIT-FIX-10 M1 (D-250): the gateway container the read-only CLI helper
+# runs in. The helper (`/app/bin/cli/api.mjs`' apiFetch) authenticates with its
+# own machine-derived loopback token inside the container, so this transport
+# never sees a key at all.
+HELPER_CONTAINER = "autoos-omniroute"
+HELPER_API_MODULE = "/app/bin/cli/api.mjs"
+# T1-CREDIT-FIX-10 M2 (D-240): the local USD cap an UNMEASURED paid leg is
+# held to. Tighter than the provider's own monthly cap: while spend cannot be
+# measured, the last-resort leg is refused at this line instead of the full
+# cap. Overridable per registry (`policy.paid_local_cap_usd`).
+PAID_LOCAL_CAP_DEFAULT_USD = 20.0
+# T1-CREDIT-FIX-10 M4 (D-253): the prepaid balance floor and snapshot
+# freshness for the provider-balance paid meter. A fresh snapshot below the
+# floor refuses the leg; a snapshot older than the window is history, not a
+# meter, and the exhausted check skips it.
+BALANCE_EXHAUSTED_USD = 3.0
+BALANCE_FRESH_S = 3 * 3600
+BALANCE_LEDGER_REL = os.path.join("routing", "provider-balances.jsonl")
 DIMENSIONS = ("provider", "combo", "lane", "model", "run")
 UNTAGGED_LANE = "(untagged)"
 NO_RUN_LABEL = "(no run id)"
@@ -154,6 +175,13 @@ SPEND_PROVIDER_LABEL = "DeepSeek"
 SPEND_WARN_USD = 20.0      # the warning line; the hard cap is providers.<id>.monthly_cap_usd
 BALANCE_FLOOR_USD = 5.0    # warn before the balance runs out mid-lane
 
+# T1-CREDIT-FIX-5 (D-220): a `credit` grant keeps room below its total so the
+# last calls of a draining trial do not land on a card that is already over the
+# vendor's limit. `MANUAL_CREDIT_SPEND_MAX_AGE_DAYS` is how long the operator's
+# dated manual reading is trusted before it is (correctly) treated as unknown.
+CREDIT_HARD_STOP_MARGIN_USD = 20.0
+MANUAL_CREDIT_SPEND_MAX_AGE_DAYS = 7
+
 # Registry path for cost lookup
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
@@ -191,6 +219,14 @@ def prices_from_registry(registry):
     table that reads those as $0/token reports a draining $10 grant as untouched
     money. Dropping them here makes the same model count as `models_unpriced`,
     which is the gap `autoos_resolver.credit_leg_priced` refuses a credit leg on.
+
+    T1-CREDIT-FIX-6 (D-220): a model id served at two prices at once also lands
+    here once per provider spelling -- `models.<id>.provider_prices.<provider>`
+    is emitted under both `<provider>/<model>` and, when the provider declares
+    one, `<omniroute_id>/<model>` (the spelling call-log rows carry), so an
+    exact `price_for` hit bills the provider's own price. The bare model id
+    stays absent (its row is 0), so the free provider's rows keep counting as
+    unpriced instead of borrowing the paid provider's price.
     """
     prices = {}
     for model_id, model in (registry.get("models") or {}).items():
@@ -203,6 +239,25 @@ def prices_from_registry(registry):
             continue
         if price_in > 0.0 and price_out > 0.0:
             prices[model_id] = (price_in, price_out)
+        scoped = model.get("provider_prices")
+        if not isinstance(scoped, dict):
+            continue
+        for provider_id, entry in scoped.items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                scoped_in = float(entry.get("price_in"))
+                scoped_out = float(entry.get("price_out"))
+            except (TypeError, ValueError):
+                continue
+            if not (scoped_in > 0.0 and scoped_out > 0.0):
+                continue
+            pair = (scoped_in, scoped_out)
+            prices["%s/%s" % (provider_id, model_id)] = pair
+            provider = (registry.get("providers") or {}).get(provider_id)
+            alias = provider.get("omniroute_id") if isinstance(provider, dict) else None
+            if alias and alias != provider_id:
+                prices["%s/%s" % (alias, model_id)] = pair
     return prices
 
 
@@ -226,7 +281,7 @@ def read_registry(path=None):
     return registry if isinstance(registry, dict) else {}
 
 
-def price_for(model, prices):
+def price_for(model, prices, provider=None, registry=None):
     """The (price_in, price_out) row for a call-log model, or None.
 
     The gateway reports its own spelling - prefixed with the connection, e.g.
@@ -234,6 +289,13 @@ def price_for(model, prices):
     id, so an exact-only lookup would price every real call as free. The exact
     string is tried first because a registry id may legitimately contain a slash
     (groq spells gpt-oss-120b as openai/gpt-oss-120b, cerebras does not).
+
+    T1-CREDIT-FIX-6 (D-220): when the table misses and the caller names the
+    row's `provider` with its `registry`, the provider-scoped
+    `provider_prices` entry is tried last -- a bare model spelling under a
+    billed provider (a vertex_ai row carrying just `gemini-3.8-flash`) prices
+    at the provider's price instead of reading as free. The table still wins
+    on any hit, so callers without a registry see exactly the old behavior.
     """
     if not model or not prices:
         return None
@@ -243,6 +305,17 @@ def price_for(model, prices):
         tail = model.rsplit("/", 1)[1]
         if tail in prices:
             return prices[tail]
+    if provider and isinstance(registry, dict):
+        models = registry.get("models") or {}
+        model_id = None
+        if model in models:
+            model_id = model
+        elif "/" in model and model.rsplit("/", 1)[1] in models:
+            model_id = model.rsplit("/", 1)[1]
+        if model_id is not None:
+            pair = resolver.leg_price(model_id, provider, registry)
+            if pair is not None:
+                return pair
     return None
 
 
@@ -277,10 +350,34 @@ def spend_warn_usd(registry, provider=SPEND_PROVIDER):
     return monthly_cap_usd(registry, provider) * float(fraction)
 
 
+def credit_hard_stop_margin_usd(registry, provider):
+    """The reserve a `credit` grant keeps below its total, in USD (T1-CREDIT-FIX-5).
+
+    `providers.<id>.credit_hard_stop_margin_usd` (default
+    `CREDIT_HARD_STOP_MARGIN_USD`), so a MEASURED spend refuses the leg at
+    `monthly_cap_usd - margin` instead of at 100 % of the grant. Paid rows and
+    any margin that would zero the cap keep the old refuse-at-cap behaviour; a
+    malformed margin is flagged by `registry.py check` and reads as 0 here
+    rather than turning a guard into a crash."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    if not isinstance(entry, dict) or entry.get("tier") != "credit":
+        return 0.0
+    margin = entry.get("credit_hard_stop_margin_usd", CREDIT_HARD_STOP_MARGIN_USD)
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)) or margin < 0:
+        return 0.0
+    cap = monthly_cap_usd(registry, provider)
+    if margin >= cap:
+        # A margin that would reach or pass the whole grant is no guard at all;
+        # fall back to refusing at the cap (registry.py check already flags it).
+        return 0.0
+    return float(margin)
+
+
 def spend_guard(registry, provider, spend_usd):
     """(state, note) for one provider's spend guard: "ok" below the warn line,
-    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at or
-    above `monthly_cap_usd` (100 %).
+    "warn" at the warn line (80 % of a credit grant by default) and "refuse" at
+    the hard stop -- `monthly_cap_usd` for a paid row, or `monthly_cap_usd`
+    minus `credit_hard_stop_margin_usd` for a `credit` grant (T1-CREDIT-FIX-5).
 
     The refuse half is the same rule deepseek_call.py applies today (WS-DSCALL):
     at or above the cap the call does not happen. This is the shared reading of
@@ -289,9 +386,24 @@ def spend_guard(registry, provider, spend_usd):
     sees 0 spend here, which is why the grant's own balance is what FREEKEYS-2
     must check as well.
     """
+    if isinstance(spend_usd, bool) or not isinstance(spend_usd, (int, float)) \
+            or not math.isfinite(spend_usd):
+        # T1-CREDIT-FIX-7 R4: a non-finite figure (nan/inf -- a poisoned
+        # ledger, never a measurement) is `unknown`, not `ok`: nan compared
+        # False against every line and used to read as a healthy grant.
+        return "unknown", ("%s spend %r is not a measurement - spend "
+                           "unmeasured, leg kept (fail open)"
+                           % (provider, spend_usd))
     cap = monthly_cap_usd(registry, provider)
     warn = spend_warn_usd(registry, provider)
-    if spend_usd >= cap:
+    margin = credit_hard_stop_margin_usd(registry, provider)
+    hard_stop = cap - margin
+    if spend_usd >= hard_stop:
+        if margin:
+            return "refuse", ("%s spend $%.2f is at or above the $%.2f hard stop "
+                              "($%.2f grant less the $%.2f margin, "
+                              "providers.%s.credit_hard_stop_margin_usd)"
+                              % (provider, spend_usd, hard_stop, cap, margin, provider))
         return "refuse", ("%s spend $%.2f is at or above the $%.2f cap "
                           "(providers.%s.monthly_cap_usd)" % (provider, spend_usd, cap, provider))
     if spend_usd >= warn:
@@ -310,34 +422,372 @@ def credit_guard_providers(registry):
                   if isinstance(entry, dict) and entry.get("tier") == "credit")
 
 
-def credit_guards(registry, rows, since=None):
+def _today_date(today=None):
+    """`today` as a `datetime.date`, accepting None (UTC now), a date or an aware/
+    naive datetime -- the injectable clock M1's tests drive without sleeping."""
+    if today is None:
+        return datetime.datetime.now(datetime.timezone.utc).date()
+    if isinstance(today, datetime.datetime):
+        if today.tzinfo is not None:
+            today = today.astimezone(datetime.timezone.utc)
+        return today.date()
+    return today
+
+
+def _manual_age_days(as_of, today=None):
+    """Whole days from `as_of` (YYYY-MM-DD) to `today`; callers have validated
+    the format already, so a parse error here is their bug, not this one's."""
+    parsed = datetime.datetime.strptime(as_of.strip(), "%Y-%m-%d").date()
+    return (_today_date(today) - parsed).days
+
+
+def manual_credit_spend(registry, provider, today=None):
+    """(spend_usd, as_of) from the registry's dated manual figure, or (None, None).
+
+    `providers.<id>.credit_spent_usd` + `credit_spent_as_of` is the operator's
+    dated reading of a grant's billed spend, for when the gateway call-log
+    ledger cannot be read. Both or neither: a figure with no date cannot age
+    and a date with no figure judges nothing, so a half-present or malformed
+    pair reads as absent here (tools/registry.py flags it; the plan never
+    crashes on it).
+
+    A reading is only trusted while it is fresh (T1-CREDIT-FIX-5 M1): older
+    than `MANUAL_CREDIT_SPEND_MAX_AGE_DAYS` days it reads as absent, and a date
+    more than one day in the future (timezone skew tolerance) is not a reading
+    at all. A stale reading that read as measured is exactly the fail-open the
+    403 made dangerous. `today` is injectable so tests need no clock and no
+    sleep."""
+    entry = ((registry or {}).get("providers") or {}).get(provider) or {}
+    figure = entry.get("credit_spent_usd")
+    as_of = entry.get("credit_spent_as_of")
+    if figure is None and as_of is None:
+        return None, None
+    # Reject non-finite values (NaN, Infinity, -Infinity)
+    if (isinstance(figure, bool) or not isinstance(figure, (int, float))
+            or figure < 0 or not math.isfinite(figure)
+            or not isinstance(as_of, str) or not as_of.strip()):
+        return None, None
+    # Validate YYYY-MM-DD format
+    try:
+        datetime.datetime.strptime(as_of.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None, None
+    age = _manual_age_days(as_of, today)
+    if age > MANUAL_CREDIT_SPEND_MAX_AGE_DAYS or age < -1:
+        return None, None
+    return float(figure), as_of.strip()
+
+
+def spend_failure_note(exc):
+    """The one-line reason a spend figure is unmeasured, from the failure.
+
+    A gateway 403 (or 401) names the manage key, because a 15-byte revoked or
+    wrong-scoped key 403s every call-log read and the spend then reads as $0 --
+    which downstream used to print as `credit exhausted ... $0.00/$cap`. An
+    OSError is the key file itself (missing, empty, unreadable). Anything else
+    keeps its type name only: an error text can carry the gateway URL or the
+    home path, and this note is printed into plans and reports (AGENTS.md
+    rule 1). The HTTP contract is `fetch_window`'s: 401 with no credential,
+    403 when the key lacks the 'manage' scope."""
+    if isinstance(exc, UsageError):
+        text = str(exc)
+        if "HTTP 403" in text:
+            return "manage key rejected (403) - spend unmeasured"
+        if "HTTP 401" in text:
+            return "manage key rejected (401) - spend unmeasured"
+        return "credit grant unreadable (%s) - spend unmeasured" % type(exc).__name__
+    if isinstance(exc, OSError):
+        return "manage key unreadable (%s) - spend unmeasured" % type(exc).__name__
+    return "credit grant unreadable (%s) - spend unmeasured" % type(exc).__name__
+
+
+def credit_guards_unreadable(registry, failure):
+    """``{provider id: guard}`` when even the manual fallback cannot be built.
+
+    Pure last resort: no pricing math, only best-effort cap reads, so it cannot
+    raise. Every grant reads `unknown` (fail open), never `refuse`.
+    """
+    out = {}
+    try:
+        providers = credit_guard_providers(registry)
+    except Exception:
+        return out  # a malformed registry names no grant; never raise
+    for provider in providers:
+        cap = warn = 0.0
+        try:
+            cap = monthly_cap_usd(registry, provider)
+            warn = spend_warn_usd(registry, provider)
+        except Exception:
+            pass  # a grant with no readable cap cannot be judged, only kept openly
+        out[provider] = {"provider": provider, "state": "unknown",
+                         "spend_usd": 0.0, "spend_unknown": True,
+                         "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                         "hard_stop_usd": hard_stop_usd(registry, provider,
+                                                          cap),
+                         "window_limited": credit_window_limited(registry,
+                                                                 provider),
+                         "note": "credit spend unknown %s: %s"
+                                 % (provider, failure or "no call-log rows")}
+    return out
+
+
+def credit_started_date(registry, provider, today=None):
+    """The UTC date a grant started billing (`providers.<id>.credit_started`,
+    YYYY-MM-DD), or None.
+
+    T1-CREDIT-FIX-7 R2: the gateway call-log window defaults to the calendar
+    month, but a grant cap covers the WHOLE grant -- without a start date,
+    September spend reads as $0 on October 1st. A present, well-formed, past
+    (or today) date extends the measured window back to the grant's start;
+    anything else (absent, malformed, impossible calendar date, in the
+    future) reads as absent -- the month-to-date window stays, and the guard
+    notes say so loudly instead of passing a partial window off as a total.
+    `today` is injectable so tests need no clock."""
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    raw = entry.get("credit_started") if isinstance(entry, dict) else None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.datetime.strptime(raw.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None  # malformed or impossible date; registry.py flags it
+    if parsed > _today_date(today):
+        return None  # a grant that starts tomorrow has no measured spend yet
+    return parsed
+
+
+def credit_window_limited(registry, provider, today=None):
+    """True when a `credit` grant has no usable `credit_started`.
+
+    Carried on every guard as `window_limited` so the resolver's loud line
+    and the report renderer can name the month-to-date limit without
+    re-deriving the date rule (single home: `credit_started_date`)."""
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    if not isinstance(entry, dict) or entry.get("tier") != "credit":
+        return False
+    return credit_started_date(registry, provider, today) is None
+
+
+def _window_suffix(registry, provider, today=None):
+    """The loud month-to-date caveat, or "" when the window covers the grant."""
+    if credit_window_limited(registry, provider, today):
+        return " (window: month-to-date only; set credit_started)"
+    return ""
+
+
+def _since_or_month_start(since, today=None):
+    """The spend window start: the caller's `since`, else this month's start.
+
+    `today` (a date/datetime/None) is the injectable clock tests drive;
+    without it the wall clock is read once here, not per provider."""
+    if since is not None:
+        return since
+    if today is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    elif isinstance(today, datetime.datetime):
+        now = today if today.tzinfo is not None else today.replace(
+            tzinfo=datetime.timezone.utc)
+    else:
+        now = datetime.datetime.combine(today, datetime.time.min,
+                                        tzinfo=datetime.timezone.utc)
+    return month_start(now)
+
+
+def _effective_since(registry, provider, since, today=None):
+    """The window start a grant is measured over: `since` extended back to
+    `credit_started` when the grant declares one (T1-CREDIT-FIX-7 R2)."""
+    start = credit_started_date(registry, provider, today)
+    if start is None:
+        return since
+    start_dt = datetime.datetime.combine(start, datetime.time.min,
+                                         tzinfo=datetime.timezone.utc)
+    return min(since, start_dt)
+
+
+def hard_stop_usd(registry, provider, cap):
+    """The spend figure that refuses a leg: the grant less its
+    `credit_hard_stop_margin_usd` (T1-CREDIT-FIX-7 R6: the reason names this
+    effective threshold, not the cap). Best-effort -- a margin that cannot
+    be read refuses at the cap rather than raising."""
+    try:
+        margin = credit_hard_stop_margin_usd(registry, provider)
+    except Exception:
+        margin = 0.0
+    if not isinstance(margin, float):
+        margin = 0.0
+    return float(cap) - margin
+
+
+def _unmeasured_guard(registry, provider, note):
+    """One `unknown` guard that never raises: best-effort cap reads only."""
+    cap = warn = 0.0
+    try:
+        cap = monthly_cap_usd(registry, provider)
+        warn = spend_warn_usd(registry, provider)
+    except Exception:
+        pass  # a grant with no readable cap cannot be judged, only kept openly
+    return {"provider": provider, "state": "unknown",
+            "spend_usd": 0.0, "spend_unknown": True,
+            "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+            "hard_stop_usd": hard_stop_usd(registry, provider, cap),
+            "window_limited": credit_window_limited(registry, provider),
+            "note": note}
+
+
+def credit_guards(registry, rows, since=None, failure=None, today=None,
+                complete=True):
     """``{provider id: guard}`` for every `credit` provider, from recorded usage rows.
+
+    Field semantics (T1-CREDIT-FIX): `credit_usd` is the trial grant TOTAL in
+    USD -- what the vendor funded. `spent` is what the grant already billed
+    (the ledger figure below, or the dated manual figure). Remaining =
+    credit_usd minus spent. The leg is exhausted only when spent reaches
+    `monthly_cap_usd` (which equals `credit_usd` -- refuse at 100 % of the
+    grant), so `$0 spent of $N` is an intact grant, never an exhausted one.
 
     This is the builder that feeds the resolver's leg filter (brief FREEKEYS-1b
     items 2 and 4): one figure per grant, produced by `paid_spend` over the same
     rows the report prints and judged by `spend_guard` against the provider's own
     `monthly_cap_usd`, so what blocks a leg and what the ledger reports are never
-    two different numbers. `rows` are the gateway's call-log rows; a grant with no
+    two different numbers. `rows` are the gateway's call-log rows -- the only
+    spend ledger in this repo (no separate ledger or cost store exists; the rows
+    priced client-side against the registry ARE the ledger); a grant with no
     rows of its own is at $0, and a grant whose models carry no price is reported
     with `models_unpriced` above 0 -- which is exactly the state the resolver
     refuses the leg for, because $0 here would otherwise read as untouched money.
 
-    Each guard is ``{"provider", "state", "spend_usd", "cap_usd", "warn_usd",
-    "models_unpriced", "note"}``, with `state` from `spend_guard`: `ok` below the
-    warn line, `warn` at it (80 % of the grant by default), `refuse` at the cap.
+    `rows=None` means the ledger could not be read at all (gateway down, key
+    missing or rejected): the figure falls back to the registry's dated manual
+    spend (`manual_credit_spend`), and when no manual figure exists the guard
+    reads `unknown` -- fail OPEN with a `spend unknown` note, because a prepaid
+    trial grant that is truly spent rejects at the provider (402/429) and the
+    combo falls through, while fail-closed dropped the whole trial tier on a
+    403. `failure` names the cause for the note; it is never a silent $0.00.
+
+    T1-CREDIT-FIX-7 R2: the window a grant is measured over starts at
+    `providers.<id>.credit_started` (YYYY-MM-DD) when the grant declares a
+    usable one, else at `since` (default: this month's start). The cap covers
+    the whole grant, so without a start date the window is month-to-date
+    only -- and every guard note then says so loudly
+    ("(window: month-to-date only; set credit_started)") instead of passing
+    a partial window off as a total. `today` is the injectable clock the
+    window math reads instead of the wall clock.
+
+    Each guard is ``{"provider", "state", "spend_usd", "spend_unknown",
+    "cap_usd", "warn_usd", "models_unpriced", "note"}``, with `state` from
+    `spend_guard` (`ok` below the warn line, `warn` at it, `refuse` at the hard
+    stop -- the cap, or the cap less a `credit` grant's
+    `credit_hard_stop_margin_usd`), `manual` for a still-valid dated fallback
+    figure (never `ok`; T1-CREDIT-FIX-5 M1) or `unknown` when nothing
+    measurable exists. `spend_unknown` is True only for the unknown state, so a
+    reader can tell "measured $0" from "unmeasured".
     """
     if since is None:
-        since = month_start(datetime.datetime.now(datetime.timezone.utc))
+        since = _since_or_month_start(None, today)
     prices = prices_from_registry(registry)
     out = {}
     for provider in credit_guard_providers(registry):
-        spend = paid_spend(rows, prices, registry, since, provider=provider)
-        state, note = spend_guard(registry, provider, spend["spend_usd"])
+        if rows is None:
+            manual, as_of = manual_credit_spend(registry, provider, today)
+            if manual is not None:
+                state, _note = spend_guard(registry, provider, manual)
+                # T1-CREDIT-FIX-5 M1: a dated manual figure is not a measurement.
+                # Below the hard stop it reads `manual` (never `ok`), and the note
+                # carries its age so a reader can judge how stale the reading is.
+                if state != "refuse":
+                    state = "manual"
+                note = ("manual figure $%.2f as of %s (age %d d)"
+                        % (manual, as_of, _manual_age_days(as_of, today)))
+                out[provider] = {
+                    "provider": provider, "state": state,
+                    "spend_usd": manual, "spend_unknown": False,
+                    "cap_usd": monthly_cap_usd(registry, provider),
+                    "hard_stop_usd": hard_stop_usd(
+                        registry, provider,
+                        monthly_cap_usd(registry, provider)),
+                    "warn_usd": spend_warn_usd(registry, provider),
+                    "models_unpriced": 0,
+                    "window_limited": credit_window_limited(
+                        registry, provider, today),
+                    "note": note}
+                continue
+            out[provider] = {
+                "provider": provider, "state": "unknown",
+                "spend_usd": 0.0, "spend_unknown": True,
+                "cap_usd": monthly_cap_usd(registry, provider),
+                    "hard_stop_usd": hard_stop_usd(
+                        registry, provider,
+                        monthly_cap_usd(registry, provider)),
+                "warn_usd": spend_warn_usd(registry, provider),
+                "models_unpriced": 0,
+                "window_limited": credit_window_limited(
+                    registry, provider, today),
+                "note": "credit spend unknown %s: %s - leg kept (fail open: "
+                        "a spent prepaid grant rejects at the provider and "
+                        "the combo falls through)%s"
+                        % (provider, failure or "no call-log rows",
+                           _window_suffix(registry, provider, today))}
+            continue
+        window_start = _effective_since(registry, provider, since, today)
+        try:
+            spend = paid_spend(rows, prices, registry, window_start,
+                               provider=provider)
+            state, note = spend_guard(registry, provider, spend["spend_usd"])
+            note += _window_suffix(registry, provider, today)
+            unreadable = int(spend.get("rows_unreadable") or 0)
+            if unreadable and state != "refuse":
+                # T1-CREDIT-FIX-8 C3: unreadable rows are not silent $0 --
+                # the grant reads unknown (fail open), naming the COUNT of
+                # unreadable rows (never their contents) beside the readable
+                # figure that still added up. Measured spend already at or
+                # over the hard stop still refuses: it beats unknown.
+                state = "unknown"
+                note = ("credit spend unknown %s: %d unreadable row(s) "
+                        "(readable spend $%.2f) - leg kept (fail open: a "
+                        "spent prepaid grant rejects at the provider and "
+                        "the combo falls through)%s"
+                        % (provider, unreadable, spend["spend_usd"],
+                           _window_suffix(registry, provider, today)))
+            if not complete and state != "refuse":
+                # T1-CREDIT-FIX-9 T1: a fetch cut at the page cap is not a
+                # measurement -- the September $300 row behind the cap reads
+                # as ok/$0 without this. Measured spend already at or over
+                # the hard stop still refuses: it beats unknown.
+                state = "unknown"
+                note = ("credit spend unknown %s: fetch truncated at page "
+                        "cap (readable spend $%.2f) - leg kept (fail open: "
+                        "a spent prepaid grant rejects at the provider and "
+                        "the combo falls through)%s"
+                        % (provider, spend["spend_usd"],
+                           _window_suffix(registry, provider, today)))
+        except ValueError:
+            # Config errors (a grant that cannot state its cap) still raise:
+            # the usage report exits 3 on them (pinned by T1-CREDIT-FIX-2
+            # C3) and the plan falls back to `unknown` for the map. Only
+            # UNFORESEEN per-provider bugs degrade to a single-grant
+            # `unknown` below.
+            raise
+        except Exception as exc:  # noqa: BLE001 - one bad grant, not the map
+            # T1-CREDIT-FIX-7 R4: a provider whose own figure cannot be built
+            # (a cap it cannot state, a pricing bug) degrades to `unknown`
+            # for THAT grant only -- fail open, named -- instead of raising
+            # and turning every grant into `guard error` downstream.
+            out[provider] = _unmeasured_guard(
+                registry, provider,
+                "credit guard unreadable (%s) - spend unmeasured, leg kept "
+                "(fail open)" % type(exc).__name__)
+            continue
         out[provider] = {"provider": provider, "state": state,
                          "spend_usd": spend["spend_usd"],
+                         "spend_unknown": state == "unknown",
                          "cap_usd": monthly_cap_usd(registry, provider),
+                         "hard_stop_usd": hard_stop_usd(
+                             registry, provider,
+                             monthly_cap_usd(registry, provider)),
                          "warn_usd": spend_warn_usd(registry, provider),
                          "models_unpriced": spend["models_unpriced"],
+                         "window_limited": credit_window_limited(
+                             registry, provider, today),
                          "note": note}
     return out
 
@@ -348,11 +798,121 @@ def month_start(now):
         day=1, hour=0, minute=0, second=0, microsecond=0)
 
 
-def is_spend_row(row, provider=SPEND_PROVIDER):
-    """True when the gateway billed this row to the watched paid provider."""
+def fetch_cutoff(registry, now=None):
+    """The oldest instant the gateway fetch must reach: this month's start
+    extended back to the earliest usable `credit_started` over every
+    `credit` grant (T1-CREDIT-FIX-8 C1).
+
+    `fetch_window` stops paging at the first page holding a row older than
+    its cutoff, so a month-start cutoff fetches September rows only by luck
+    of pagination -- a grant started 2026-09-01 then reads $150 on one page
+    size and $450 on another. Fetching from the earliest grant start reaches
+    every grant's rows on every page size; each grant is still FILTERED by
+    its own window (`_effective_since` in `credit_guards`, month-to-date for
+    paid), so a leg is never refused on money spent elsewhere. Single home:
+    both fetch callers read this, never a bare `month_start`."""
+    if now is None:
+        now = datetime.datetime.now(datetime.timezone.utc)
+    base = month_start(now)
+    earliest = base
+    for provider in credit_guard_providers(registry or {}):
+        try:
+            started = credit_started_date(registry, provider, now)
+        except (ValueError, TypeError, AttributeError):
+            # T1-CREDIT-FIX-9 T8: a malformed credit_started is not fetchable
+            # depth -- the grant stays month-to-date (window_limited, loud
+            # suffix) instead of silently dropping the date. Only the
+            # expected parse/shape errors are caught; anything else
+            # propagates.
+            continue
+        if started is None:
+            continue
+        start_dt = datetime.datetime.combine(
+            started, datetime.time.min, tzinfo=datetime.timezone.utc)
+        if start_dt < earliest:
+            earliest = start_dt
+    return earliest
+
+
+def _provider_spellings(provider, registry=None):
+    """Every namespace a provider's call-log rows may carry, lowercased.
+
+    T1-CREDIT-FIX-7 R1: the gateway bills under the connection id
+    (`providers.<id>.omniroute_id` -- `vertex` for `vertex_ai`), not the
+    registry id, and model spellings carry the same namespace
+    (`vertex/...`, `ovh/...` via `model_prefix`). All three are read from
+    the data, never a name list, so a renamed connection is covered the
+    moment its row lands. Without a registry only the id itself matches
+    (the old behaviour exactly)."""
+    spellings = {str(provider).strip().lower()}
+    entry = ((registry or {}).get("providers") or {}).get(provider)
+    if isinstance(entry, dict):
+        for key in ("omniroute_id", "model_prefix"):
+            val = entry.get(key)
+            if isinstance(val, str) and val.strip():
+                spellings.add(val.strip().lower())
+    return spellings
+
+
+def is_spend_row(row, provider=SPEND_PROVIDER, registry=None):
+    """True when the gateway billed this row to the watched provider.
+
+    Matches the registry id, its `omniroute_id`/`model_prefix`, and rows
+    with no provider of their own whose model is namespaced `<any of those>/...`
+    -- a `vertex/...` model billed under either spelling is vertex_ai's money
+    either way. A row whose provider field names a DIFFERENT (non-empty,
+    non-matching) provider never counts via its model namespace
+    (T1-CREDIT-FIX-8 C2: an `openrouter` row for `deepseek/...` is OpenRouter's
+    money -- billing it to DeepSeek held the paid leg on spend elsewhere). A
+    bare model under another provider (`gemini-3.8-flash` via AI-Studio) and a
+    lookalike namespace (`vertexish/...`) match nothing: the comparison is
+    exact per namespace, never a substring, case-insensitive on both sides."""
     if not isinstance(row, dict):
         return False
-    return str(row.get("provider") or "").strip().lower() == provider
+    spellings = _provider_spellings(provider, registry)
+    prov = str(row.get("provider") or "").strip().lower()
+    if prov in spellings:
+        return True
+    if prov:
+        return False
+    model = row.get("model")
+    if isinstance(model, str) and "/" in model:
+        if model.split("/", 1)[0].strip().lower() in spellings:
+            return True
+    return False
+
+
+def cache_read_price_for(model, registry):
+    """USD per token for a row's `cacheRead` tokens, or None.
+
+    T1-CREDIT-FIX-10 M4 (D-253): reads the model-level `price_cache_read`
+    (10 % of `price_in` on the priced paid models) with the same resolution
+    as `price_for` -- the exact model id first, then the tail after the last
+    `/` (a `deepseek/...` gateway spelling resolves to the bare registry
+    row). Anything absent, non-numeric or non-positive reads as unpriced
+    (None): the row's whole input then bills at `price_in`, the old
+    behaviour exactly.
+    """
+    if not model or not isinstance(registry, dict):
+        return None
+    models = registry.get("models")
+    if not isinstance(models, dict):
+        return None
+    entry = models.get(model)
+    if entry is None and "/" in model:
+        entry = models.get(model.rsplit("/", 1)[1])
+    if not isinstance(entry, dict):
+        return None
+    value = entry.get("price_cache_read")
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
 
 
 def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=None,
@@ -374,27 +934,49 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
     window_source["providers"].setdefault(provider, {})
     spend = 0.0
     calls = tokens_in = tokens_out = 0
+    unreadable = 0
     unpriced = set()
     for r in rows:
-        if not is_spend_row(r, provider):
+        if not is_spend_row(r, provider, registry):
             continue
         ts = row_timestamp(r)
         if ts is not None and ts < since:
             continue
-        tokens = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
-        tin = _as_int(tokens.get("in"))
-        tout = _as_int(tokens.get("out"))
+        tokens = r.get("tokens") if isinstance(r, dict) else None
+        # T1-CREDIT-FIX-7 R4: a row with present-but-unmeasurable token
+        # fields degrades only itself -- skipped and counted, never billed
+        # as $0 and never aborting the whole guard map.
+        tin, tout, readable = _readable_tokens(tokens)
+        if not readable:
+            unreadable += 1
+            continue
         calls += 1
         tokens_in += tin
         tokens_out += tout
-        pair = price_for(r.get("model"), prices)
+        pair = price_for(r.get("model"), prices, provider=provider,
+                         registry=registry)
         if not pair:
             if r.get("model"):
                 unpriced.add(r.get("model"))
             continue
         # No parseable timestamp means an in-flight row: bill it at full price.
         factor = resolver.price_factor(provider, window_source, ts) if ts else 1.0
-        spend += (tin * pair[0] + tout * pair[1]) * factor
+        # T1-CREDIT-FIX-10 M4 (D-253): a row's `cacheRead` tokens bill at the
+        # model's `price_cache_read`, the REST of the input at `price_in`.
+        # Real call-log row has tokens {in 51131, out 3608, cacheRead 23793, ...} and 179.4M cacheRead of 184.4M in total, so `in` INCLUDES cacheRead (bill in-cacheRead at price_in, cacheRead at price_cache_read).
+        # The cached count is clamped into [0, in] -- a row that claims more
+        # cached tokens than input tokens bills the input as fully cached,
+        # never negative.
+        cached = 0
+        if isinstance(tokens, dict):
+            cached = _as_int(tokens.get("cacheRead"))
+            cached = min(max(cached, 0), tin)
+        cache_price = cache_read_price_for(r.get("model"), registry)
+        if cache_price is not None and cached:
+            spend += ((tin - cached) * pair[0] + cached * cache_price
+                      + tout * pair[1]) * factor
+        else:
+            spend += (tin * pair[0] + tout * pair[1]) * factor
 
     spend = round(spend, 6)
     warnings = []
@@ -420,10 +1002,497 @@ def paid_spend(rows, prices, registry, since, provider=SPEND_PROVIDER, balance=N
         "balance_usd": balance,
         "balance_threshold_usd": BALANCE_FLOOR_USD,
         "models_unpriced": len(unpriced),
+        "rows_unreadable": unreadable,
         "price_source": price_source,
         "complete": bool(complete),
         "warnings": warnings,
     }
+
+
+def paid_local_cap_usd(registry):
+    """USD cap an UNMEASURED paid leg is held to (T1-CREDIT-FIX-10 M2, D-240).
+
+    `policy.paid_local_cap_usd`, default `PAID_LOCAL_CAP_DEFAULT_USD` when
+    absent. Total: a malformed value reads as the default (loudly flagged by
+    `registry.py check`), never a crash on the routing path.
+    """
+    policy = (registry or {}).get("policy")
+    raw = policy.get("paid_local_cap_usd", PAID_LOCAL_CAP_DEFAULT_USD) \
+        if isinstance(policy, dict) else PAID_LOCAL_CAP_DEFAULT_USD
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) \
+            or not math.isfinite(raw) or raw <= 0:
+        return float(PAID_LOCAL_CAP_DEFAULT_USD)
+    return float(raw)
+
+
+def local_paid_estimate(rows, registry, since, provider=SPEND_PROVIDER):
+    """Best-effort month spend over LOCAL rows (T1-CREDIT-FIX-10 M2, D-240).
+
+    The single home for the D-240 estimate: the same rows the usage report
+    reads (the gateway call log IS the ledger -- there is no second local
+    store), priced by the same `paid_spend` (registry list price via
+    `leg_price`/`provider_prices`, 10 % cache billing included), over
+    whatever rows are at hand -- even a truncated page. A run record without
+    token counts adds $0 and is counted in `unpriced_runs`. Never raises on
+    row shapes (it reuses the total readers); returns
+    `{"provider", "spend_usd", "unpriced_runs"}`.
+    """
+    prices = prices_from_registry(registry)
+    spend = paid_spend(rows or [], prices, registry, since, provider=provider)
+    unpriced = 0
+    for r in (rows or []):
+        if not is_spend_row(r, provider, registry):
+            continue
+        ts = row_timestamp(r)
+        if ts is not None and ts < since:
+            continue
+        tokens = r.get("tokens") if isinstance(r, dict) else None
+        if not isinstance(tokens, dict) \
+                or (tokens.get("in") is None and tokens.get("out") is None):
+            unpriced += 1
+    return {"provider": provider, "spend_usd": spend["spend_usd"],
+            "unpriced_runs": unpriced}
+
+
+def apply_paid_local_cap(registry, guards, rows, since):
+    """Hold UNMEASURED paid guards to the local cap (T1-CREDIT-FIX-10 M2).
+
+    For every `tier == paid` guard in state `unknown` (measured spend is
+    unavailable -- gateway down, truncated fetch, unreadable rows): the
+    local estimate over `rows` decides. At or above `paid_local_cap_usd`
+    the leg is REFUSED with the D-240 reason (the state flips to `refuse`,
+    so the resolver's paid block refuses it); below, the leg is kept with
+    the exact D-240 kept line appended to the existing note (which keeps
+    naming the underlying cause: fetch truncation, unreadable rows, or the
+    D-212 last resort). Measured states (`ok`/`warn`/`refuse`/`manual`) and
+    `guard error` are untouched -- measured spend governs, and an unforeseen
+    bug keeps its own state. Returns `guards` (mutated in place).
+
+    Every guard this touches carries `local_estimate: True`, so the balance
+    overlay can rank it as UNKNOWN (D-240/D-253: the estimate applies only
+    while spend is unmeasured; measured spend governs).
+    """
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        if guard.get("state") != "unknown" or not guard.get("spend_unknown"):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        try:
+            monthly_cap_usd(registry, pid)
+        except Exception:
+            continue  # a paid row with no readable cap is not guarded at all
+        local_cap = paid_local_cap_usd(registry)
+        est = local_paid_estimate(rows, registry, since, pid)
+        amount = est["spend_usd"]
+        # The D-240 line stays terminal in the note (and the whole note when
+        # there is nothing else to say), so the kept/refused line reads
+        # exactly as specified; an unpriced-runs count, when nonzero, precedes
+        # it rather than trailing it.
+        unpriced = "" if not est["unpriced_runs"] else \
+            "; unpriced runs: %d" % est["unpriced_runs"]
+        if amount >= local_cap:
+            guard["state"] = "refuse"
+            guard["spend_unknown"] = False
+            guard["spend_usd"] = amount
+            guard["local_estimate"] = True
+            guard["note"] = ("%spaid spend unmeasured - local estimate $%.2f "
+                             ">= $%g cap (D-240)"
+                             % (("unpriced runs: %d; " % est["unpriced_runs"]
+                                 if est["unpriced_runs"] else ""),
+                                amount, local_cap))
+        else:
+            guard["spend_usd"] = amount
+            guard["local_estimate"] = True
+            guard["note"] = ("%s%s; paid spend unmeasured - leg kept, local "
+                             "estimate $%.2f of $%g (D-240)"
+                             % (guard.get("note") or "spend unmeasured",
+                                unpriced, amount, local_cap))
+    return guards
+
+
+def balance_ledger_path(env=None):
+    """Path of the provider-balance ledger: one JSON line per reading.
+
+    T1-CREDIT-FIX-10 M4 (D-253): the ledger lives in the spawner state dir --
+    the same contract as `autoos_clients.state_dir` (`AUTOOS_STATE_DIR`, else
+    the repository's git-ignored `logs/`), under `routing/` beside the track
+    record. Never under the repo tree elsewhere (AGENTS.md rule 1 keeps
+    machine readings out of tracked files; `logs/` is git-ignored).
+    """
+    env = os.environ if env is None else env
+    base = (env or {}).get("AUTOOS_STATE_DIR")
+    if not base:
+        base = str(ROOT / "logs")
+    return os.path.join(base, BALANCE_LEDGER_REL)
+
+
+def _match_balance_provider(plan, registry):
+    """Registry provider id for a balance `plan` name, or None.
+
+    The gateway names the display plan (`DeepSeek`); the registry names the
+    id (`deepseek`). The match is exact case-insensitive over the id and the
+    provider's own spellings (`omniroute_id`, `model_prefix`) -- the same
+    namespaces `is_spend_row` bills under -- so `Vertex AI` never reads as
+    `vertex_ai` and an unknown plan matches nothing instead of someone's
+    money.
+    """
+    if not isinstance(plan, str) or not plan.strip():
+        return None
+    want = plan.strip().lower()
+    providers = (registry or {}).get("providers") or {}
+    for pid, entry in providers.items():
+        names = {str(pid).lower()}
+        if isinstance(entry, dict):
+            for key in ("omniroute_id", "model_prefix"):
+                val = entry.get(key)
+                if isinstance(val, str) and val.strip():
+                    names.add(val.strip().lower())
+        if want in names:
+            return pid
+    return None
+
+
+def parse_provider_limits(payload, registry=None):
+    """Credit-balance readings from a provider-limits payload.
+
+    T1-CREDIT-FIX-10 M4 (D-253): reads ``caches.<id>.quotas.credits_usd``
+    (`{remaining, toppedUpBalance, grantedBalance, currency}`) with the
+    provider from `plan` and the snapshot time from `fetchedAt`. Entries
+    without a `credits_usd` quota (model quotas, spend meters, null plans)
+    carry no prepaid balance and yield no reading. Never raises: a
+    mis-shaped entry is skipped, and an unreadable payload reads as no
+    readings. Returns a list of
+    `{"cache", "provider", "remaining", "currency", "fetched_at"}`.
+    """
+    out = []
+    try:
+        caches = (payload or {}).get("caches") or {}
+    except Exception:
+        return out
+    if not isinstance(caches, dict):
+        return out
+    for cid, entry in caches.items():
+        if not isinstance(entry, dict):
+            continue
+        pid = _match_balance_provider(entry.get("plan"), registry)
+        if pid is None:
+            continue
+        try:
+            quotas = entry.get("quotas") or {}
+            credits = quotas.get("credits_usd") or {}
+        except Exception:
+            continue
+        if not isinstance(credits, dict):
+            continue
+        remaining = credits.get("remaining")
+        if isinstance(remaining, bool) \
+                or not isinstance(remaining, (int, float)) \
+                or not math.isfinite(remaining):
+            continue
+        fetched_at = entry.get("fetchedAt")
+        out.append({"cache": cid, "provider": pid,
+                    "remaining": float(remaining),
+                    "currency": credits.get("currency")
+                    if isinstance(credits.get("currency"), str) else None,
+                    "fetched_at": fetched_at
+                    if isinstance(fetched_at, str) else None})
+    return out
+
+
+def load_balance_readings(path):
+    """Every well-formed balance reading; a missing file is empty, malformed
+    lines are skipped (the track record's `load` contract, one home per
+    shape -- this one carries provider/remaining/fetched_at). A line keyed
+    `fetchedAt` (the gateway's spelling) normalises to `fetched_at` on load,
+    so hand-written seeds and recorded lines dedupe against each other.
+    A line whose `remaining` is non-numeric or non-finite is skipped too
+    (never crashing the overlay). Skipped lines are not counted anywhere --
+    callers that need the exact surviving set assert on the returned list
+    (and on the guard the overlay builds from it), not on a count."""
+    readings = []
+    try:
+        fh = open(path, encoding="utf-8")
+    except OSError:
+        return readings
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or not isinstance(
+                    obj.get("provider"), str):
+                continue
+            stamped = obj.get("fetched_at")
+            if not isinstance(stamped, str):
+                stamped = obj.get("fetchedAt")
+            if not isinstance(stamped, str):
+                continue
+            remaining = obj.get("remaining")
+            if isinstance(remaining, bool) or not isinstance(remaining, (int, float)):
+                continue
+            if not math.isfinite(float(remaining)):
+                continue
+            obj = dict(obj)
+            obj["fetched_at"] = stamped
+            readings.append(obj)
+    return readings
+
+
+def record_balance_readings(path, readings):
+    """Append every new reading; dedupe on (provider, fetched_at).
+
+    Returns the number of lines added. Total on malformed input, loud on an
+    unwritable file (OSError propagates: a meter that cannot record must not
+    silently govern).
+    """
+    seen = {(r.get("provider"), r.get("fetched_at"))
+            for r in load_balance_readings(path)}
+    fresh = []
+    for r in (readings or []):
+        if not isinstance(r, dict):
+            continue
+        key = (r.get("provider"), r.get("fetched_at"))
+        if key in seen:
+            continue
+        seen.add(key)
+        fresh.append(r)
+    if not fresh:
+        return 0
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        for r in fresh:
+            fh.write(json.dumps(r, sort_keys=True) + "\n")
+            seen.add((r.get("provider"), r.get("fetched_at")))
+    return len(fresh)
+
+
+def _reading_ts(reading):
+    """Aware UTC datetime of a reading's `fetched_at`; None when unparseable."""
+    if not isinstance(reading, dict):
+        return None
+    return row_timestamp({"timestamp": reading.get("fetched_at")})
+
+
+def balance_month_spend(readings, provider, since):
+    """(spend, topups) for one provider over readings at/after `since`.
+
+    T1-CREDIT-FIX-10 M4 (D-253): the month's measured spend is the sum of
+    DECREASES between consecutive in-month readings (oldest first); an
+    increase is a top-up -- excluded from spend and reported separately, so a
+    refill never reads as negative spend. Unparseable timestamps are skipped,
+    never interpolated.
+    """
+    mine = [(ts, float(r.get("remaining") or 0.0))
+            for r in (readings or [])
+            for ts in [_reading_ts(r)]
+            if isinstance(r, dict) and r.get("provider") == provider
+            and ts is not None and ts >= since]
+    mine.sort(key=lambda pair: pair[0])
+    spend = topups = 0.0
+    for (_, prev), (_, cur) in zip(mine, mine[1:]):
+        delta = prev - cur
+        if delta >= 0:
+            spend += delta
+        else:
+            topups -= delta
+    return round(spend, 6), round(topups, 6)
+
+
+def balance_paid_guard(registry, provider, readings, since, now=None):
+    """The paid guard from the provider-balance series, or None.
+
+    T1-CREDIT-FIX-10 M4 (D-253): with two or more in-month readings the
+    scheduled balance IS the paid meter -- `balance_month_spend` judged by
+    `spend_guard` against the provider's own cap, so the $20 alert and the
+    $25 refuse are the registry's numbers, not second ones. A fresh snapshot
+    (within `BALANCE_FRESH_S`) below `BALANCE_EXHAUSTED_USD` refuses with
+    the exhausted reason regardless of the month figure, so routing falls
+    back per the leg order. A top-up in-month is logged, not billed. Fewer
+    than two readings is not a spend meter (None -- the caller falls back to
+    the call ledger, then D-240), but a fresh snapshot below the floor still
+    refuses on its own.
+    The note always names `measured via provider balance`. None on a
+    provider that cannot state its cap either (ValueError is a config error
+    the caller already handles, not a figure).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    mine = [r for r in (readings or [])
+            if isinstance(r, dict) and r.get("provider") == provider
+            and _reading_ts(r) is not None and _reading_ts(r) >= since]
+    if not mine:
+        return None
+    try:
+        cap = monthly_cap_usd(registry, provider)
+        warn = spend_warn_usd(registry, provider)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    latest = max(mine, key=_reading_ts)
+    latest_ts = _reading_ts(latest)
+    latest_remaining = latest.get("remaining")
+    fresh = latest_ts is not None and \
+        (now - latest_ts).total_seconds() <= BALANCE_FRESH_S
+    # The exhausted check runs on ANY fresh snapshot -- even the first
+    # sighting: a prepaid balance of $2.50 refuses the leg whether or not a
+    # month series exists yet. A stale snapshot is history, not a meter, and
+    # never refuses on its own.
+    if fresh and isinstance(latest_remaining, (int, float)) \
+            and not isinstance(latest_remaining, bool) \
+            and float(latest_remaining) < BALANCE_EXHAUSTED_USD:
+        spend, topups = balance_month_spend(readings, provider, since) \
+            if len(mine) >= 2 else (0.0, 0.0)
+        guard = {"provider": provider, "state": "refuse",
+                 "spend_usd": spend, "spend_unknown": False,
+                 "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                 "note": ("paid %s balance exhausted ($%.2f left) - spend "
+                          "refused [measured via provider balance]"
+                          % (provider, float(latest_remaining)))}
+        if topups > 0:
+            guard["note"] += "; top-up +$%.2f" % topups
+        return guard
+    if len(mine) < 2:
+        return None
+    spend, topups = balance_month_spend(readings, provider, since)
+    try:
+        state, note = spend_guard(registry, provider, spend)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    latest = max(mine, key=_reading_ts)
+    bal_line = ("provider balance $%.2f remaining (fetched %s)"
+                % (float(latest.get("remaining") or 0.0),
+                   latest.get("fetched_at")))
+    note = "%s; %s [measured via provider balance]" % (note, bal_line)
+    if topups > 0:
+        note += "; top-up +$%.2f" % topups
+    guard = {"provider": provider, "state": state, "spend_usd": spend,
+             "spend_unknown": False, "cap_usd": cap, "warn_usd": warn,
+             "models_unpriced": 0, "note": note}
+    return guard
+
+
+def _balance_guard_rank(state):
+    """Worse-wins rank for the ledger/balance merge (T1-CREDIT-FIX-11 R2).
+
+    refuse > warn > ok > unknown (unknown-like states rank lowest, so a
+    measured figure always governs over unmeasured -- the same ordering the
+    call-ledger guards already use where measured spend at/over the cap
+    beats unknown/truncated/unreadable).
+    """
+    order = {"refuse": 4, "warn": 3, "ok": 2, "unknown": 1, "manual": 1,
+             "guard error": 1}
+    return order.get(state, 0)
+
+
+def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
+                           env, since, now=None):
+    """Overlay the provider-balance paid meter on a guard map.
+
+    T1-CREDIT-FIX-10 M4 (D-253): one read-only `GET /api/usage/provider-limits`
+    through the helper transport; every new reading is recorded in the
+    git-ignored state-dir ledger (dedupe on provider+fetchedAt), and each
+    `tier == paid` guard with an in-month balance series is replaced by
+    `balance_paid_guard` (decreases billed, top-ups logged, fresh exhausted
+    snapshots refused). A paid guard with no series keeps its ledger figure,
+    named `measured via call ledger`; an unmeasured (D-240) one is untouched.
+    Total on expected read/parse failures (helper `UsageError`, transport
+    `OSError`, bad JSON `ValueError`): no balance series, ledger governs.
+    Returns `guards` (mutated in place).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        status, body = helper_fetch_fn(
+            gateway.rstrip("/") + "/api/usage/provider-limits", None, TIMEOUT_S)
+    except (UsageError, OSError, ValueError):
+        return guards
+    if status != 200:
+        return guards
+    try:
+        payload = json.loads(
+            body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
+    except (ValueError, UnicodeDecodeError):
+        return guards
+    if not isinstance(payload, dict):
+        return guards
+    readings = parse_provider_limits(payload, registry)
+    if readings:
+        try:
+            record_balance_readings(balance_ledger_path(env), readings)
+        except OSError:
+            pass
+    ledger = load_balance_readings(balance_ledger_path(env))
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        balanced = balance_paid_guard(registry, pid, ledger, since, now)
+        if balanced is not None:
+            # T1-CREDIT-FIX-11 R2: the worse of ledger and balance governs
+            # (refuse > warn > ok > unknown), spend is the max, the note
+            # names both sources when they differ -- a flat $0 balance must
+            # never overwrite a $30 ledger refuse with ok/$0.
+            # T1-CREDIT-FIX-12 N1 (D-240/D-253): a ledger guard carrying the
+            # `local_estimate` marker (set by `apply_paid_local_cap`) ranks
+            # as UNKNOWN here -- the estimate applies only while spend is
+            # unmeasured, so any measured balance guard wins, its spend
+            # governs alone, and its note stands alone. A REAL measured
+            # ledger refuse/warn still outranks a balance ok (R2 stands).
+            is_estimate = bool(guard.get("local_estimate"))
+            ledger_rank = 1 if is_estimate else _balance_guard_rank(
+                guard.get("state"))
+            if _balance_guard_rank(balanced.get("state")) >= ledger_rank:
+                winner, loser = balanced, guard
+            else:
+                winner, loser = guard, balanced
+            try:
+                spend_ledger = float(guard.get("spend_usd"))
+            except (TypeError, ValueError):
+                spend_ledger = 0.0
+            try:
+                spend_bal = float(balanced.get("spend_usd"))
+            except (TypeError, ValueError):
+                spend_bal = 0.0
+            if not math.isfinite(spend_ledger):
+                spend_ledger = 0.0
+            if not math.isfinite(spend_bal):
+                spend_bal = 0.0
+            if is_estimate:
+                spend = spend_bal
+            else:
+                spend = max(spend_ledger, spend_bal)
+            note_winner = winner.get("note") or ""
+            note_loser = loser.get("note") or ""
+            if is_estimate and winner is balanced:
+                note = note_winner
+            elif note_winner != note_loser and note_winner and note_loser:
+                note = "%s; %s" % (loser.get("note"), winner.get("note"))
+                # Keep the worse state's note first when the ledger wins.
+                if winner is guard:
+                    note = "%s; %s" % (guard.get("note"), balanced.get("note"))
+            else:
+                note = note_winner or note_loser
+            merged = dict(winner)
+            merged["spend_usd"] = spend
+            merged["spend_unknown"] = winner.get("state") in ("unknown", "guard error")
+            merged["note"] = note
+            try:
+                merged["models_unpriced"] = max(int(guard.get("models_unpriced") or 0), int(balanced.get("models_unpriced") or 0))
+            except (TypeError, ValueError):
+                pass
+            guards[pid] = merged
+        elif guard.get("state") in ("ok", "warn", "refuse") \
+                and "(D-240)" not in (guard.get("note") or "") \
+                and "measured via call ledger" not in (guard.get("note") or ""):
+            guard["note"] = "%s [measured via call ledger]" % guard.get("note")
+    return guards
 
 
 def parse_since(text, now):
@@ -496,6 +1565,123 @@ def urllib_fetch(url, headers, timeout):
         return e.code, e.read()
 
 
+def helper_fetch(url, headers=None, timeout=None, container=HELPER_CONTAINER,
+                 _run=None):
+    """(status, body bytes) via the gateway's own CLI helper, read-only.
+
+    T1-CREDIT-FIX-10 M1 (D-250): the second fetch transport, next to
+    `urllib_fetch`. It runs ``docker exec -w /app <container> node
+    --input-type=module -e <fixed script>`` where the fixed script GETs the
+    URL's own path+query through ``apiFetch`` (which authenticates inside
+    the container) and prints ``<status>\\n<body>``. The return shape is the
+    same (status, body bytes) page `fetch_window` consumes, so either
+    transport feeds the same paging loop.
+
+    Only the two fixed ``/api/usage/`` paths the code itself builds are
+    fetched (``fetch_window``'s call-logs page, the provider-limits balance
+    read), only with method GET (the method is hardcoded in the script,
+    never taken from the caller). `headers` is
+    accepted so this is a drop-in for the HTTP fetch signature, and IGNORED:
+    the helper handles auth inside the container, so no caller key is ever
+    read, printed or passed -- the subprocess gets no `env` override and the
+    script carries the path only. Failures raise `UsageError` naming the
+    failure TYPE only (a message could carry a gateway URL or a home path);
+    `FileNotFoundError` (no docker binary) reads as the helper being
+    unavailable, which the caller treats as "fall back", not "measured $0".
+
+    `_run` is the injectable subprocess runner (tests fake it; production
+    passes none and gets `subprocess.run`). Tests never touch the real
+    container through this function.
+    """
+    del headers  # accepted for signature parity only; never read or passed
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except Exception as exc:  # noqa: BLE001 - total: malformed URL, type only
+        raise UsageError("gateway helper cannot parse the request URL (%s)"
+                         % type(exc).__name__)
+    try:
+        # T1-CREDIT-FIX-13 (D-269): WHITELIST BUILD. The forwarded
+        # path+query is assembled from whitelist constants plus validated
+        # ints -- never from the caller string. The RAW path (before any
+        # decoding) must equal one of the two exact strings, so encoded,
+        # dot-dot, trailing-slash and case variants cannot smuggle in.
+        raw = url if isinstance(url, str) else ""
+        for char in raw:
+            # Any control (< 0x20), DEL/non-ASCII (>= 0x7f), or structural
+            # char rejects first: urlsplit strips \t\r\n and splits off
+            # #fragments, so only the raw string still shows them all.
+            # '%' is refused outright, so no percent (single- or
+            # double-encoded) form of a rejected shape can pass.
+            if ord(char) < 0x20 or ord(char) >= 0x7f or char in "%\\#;":
+                raise ValueError("bad request character")
+        path = parts.path or ""
+        if path == "/api/usage/provider-limits":
+            # No query at all: a bare trailing '?' leaves parts.query
+            # empty, so the raw string (whose scheme/host never hold '?')
+            # is what proves no query was sent.
+            if "?" in raw or parts.query or parts.fragment:
+                raise ValueError("unexpected query")
+            path_query = "/api/usage/provider-limits"
+        elif path == "/api/usage/call-logs":
+            # Hand split on '&' only (';' never separates here): each
+            # field must be key=value exactly once, with exactly the
+            # allowed key set. Strict ^[0-9]{1,9}$ ints (no bool, sign,
+            # space or exponent) and excludeTests exactly '1'.
+            seen = {}
+            for field in (parts.query or "").split("&"):
+                key, eq, value = field.partition("=")
+                if not eq or not key or key in seen:
+                    raise ValueError("bad query field")
+                seen[key] = value
+            if set(seen) != {"limit", "offset", "excludeTests"}:
+                raise ValueError("bad query keys")
+            if re.fullmatch(r"[0-9]{1,9}", seen["limit"]) is None:
+                raise ValueError("bad limit")
+            if re.fullmatch(r"[0-9]{1,9}", seen["offset"]) is None:
+                raise ValueError("bad offset")
+            if seen["excludeTests"] != "1":
+                raise ValueError("bad excludeTests")
+            path_query = ("/api/usage/call-logs?limit=%s&offset=%s"
+                          "&excludeTests=1" % (seen["limit"], seen["offset"]))
+        else:
+            raise ValueError("non-usage path")
+    except ValueError as exc:
+        raise UsageError("gateway helper refuses a non-usage path (%s)"
+                         % type(exc).__name__)
+    script = ("import { apiFetch } from %s;\n"
+              "const r = await apiFetch(%s, { method: 'GET' });\n"
+              "const t = await r.text();\n"
+              "process.stdout.write(String(r.status) + '\\n' + t);\n"
+              % (json.dumps(HELPER_API_MODULE), json.dumps(path_query)))
+    argv = ["docker", "exec", "-w", "/app", container,
+            "node", "--input-type=module", "-e", script]
+    run = _run or subprocess.run
+    try:
+        proc = run(argv, capture_output=True,
+                   timeout=timeout or TIMEOUT_S)
+    except FileNotFoundError:
+        raise UsageError("gateway helper unavailable (FileNotFoundError)")
+    except OSError as exc:
+        raise UsageError("gateway helper unavailable (%s)"
+                         % type(exc).__name__)
+    except Exception as exc:  # noqa: BLE001 - timeout shapes vary; type only
+        raise UsageError("gateway helper failed (%s)" % type(exc).__name__)
+    if getattr(proc, "returncode", 1) != 0:
+        raise UsageError("gateway helper failed (CalledProcessError)")
+    out = getattr(proc, "stdout", b"") or b""
+    if isinstance(out, str):
+        out = out.encode("utf-8", "replace")
+    head, sep, body = out.partition(b"\n")
+    try:
+        status = int(head.decode("ascii").strip())
+    except (ValueError, UnicodeDecodeError):
+        status = -1
+    if not sep or status < 0:
+        raise UsageError("gateway helper returned an unreadable page "
+                         "(ValueError)")
+    return status, body
+
+
 def fetch_window(fetch, gateway, key, cutoff):
     """Page the gateway until the rows are older than the cutoff.
 
@@ -562,10 +1748,76 @@ def _group_key(dim, row):
 
 
 def _as_int(value):
-    try:
+    """int(value), 0 when it is not a readable count -- never raises.
+
+    T1-CREDIT-FIX-7 R4: `int()` raises OverflowError on +/-inf (and huge
+    floats), which used to escape `paid_spend`, abort `credit_guards`, and
+    degrade EVERY grant to `guard error`. Non-finite floats and absurd
+    magnitudes (beyond 2**62 tokens -- at $1e-06/token that is $4.6M, not a
+    measurement) are not counts, so they read as 0 here; `paid_spend`
+    additionally skips such a row outright via `_readable_tokens`."""
+    if isinstance(value, bool):
         return int(value)
-    except (TypeError, ValueError):
+    if isinstance(value, float) and not math.isfinite(value):
         return 0
+    try:
+        n = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if abs(n) > 2 ** 62:
+        return 0
+    return n
+
+
+def _readable_tokens(tokens):
+    """(tin, tout, readable): token ints plus whether the row is billable.
+
+    A row whose `in`/`out` fields are present but unmeasurable (non-finite,
+    overflowing, or absurdly huge -- the shapes `_as_int` maps to 0) is not
+    a $0 row: `paid_spend` skips it and counts it as unreadable instead of
+    billing a drained grant as untouched money. Missing/None/unparseable
+    fields keep the old read-as-0 behaviour and stay counted."""
+    if tokens is None:
+        return 0, 0, True
+    if not isinstance(tokens, dict):
+        # T1-CREDIT-FIX-9 T3: a present-but-non-dict `tokens` (a list, a
+        # string) is unmeasured, never a $0 row.
+        return 0, 0, False
+    tin = tokens.get("in")
+    tout = tokens.get("out")
+    if not _token_field_readable(tin) or not _token_field_readable(tout):
+        return 0, 0, False
+    return _as_int(tin), _as_int(tout), True
+
+
+def _token_field_readable(value):
+    """False only for a present-but-unmeasurable token field."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    if isinstance(value, (list, tuple, dict, set)):
+        # T1-CREDIT-FIX-9 T3: a list is not a count -- unreadable, never $0.
+        return False
+    try:
+        n = int(value)
+    except OverflowError:
+        return False
+    except (TypeError, ValueError):
+        # T1-CREDIT-FIX-9 T3: a string that int() cannot parse ('1e30',
+        # 'inf', 'nan', 'abc') is unmeasured, never $0; numeric strings
+        # that int() parses ('123') stay readable. Non-string
+        # unparseables keep the old read-as-0 behaviour.
+        if isinstance(value, str):
+            return False
+        return True
+    if n < 0:
+        # T1-CREDIT-FIX-8 C3: a negative count is not a credit -- billed, it
+        # would subtract spend and read a drained grant as funded.
+        return False
+    return abs(n) <= 2 ** 62
 
 
 def _new_group(key, priced=False):
@@ -664,14 +1916,41 @@ def render_credit_guards(guards):
     lines = []
     for provider in sorted(guards or {}):
         guard = guards[provider]
-        if guard.get("state") == "warn":
+        if guard.get("state") == "unknown" or guard.get("spend_unknown"):
+            # Unmeasured, never "$0.00": a bare zero reads as an intact grant
+            # and once printed as `credit exhausted ... $0.00/$cap`.
+            # T1-CREDIT-FIX-7 R2: when the grant declares no `credit_started`
+            # the (absent) measurement covers month-to-date only -- say so.
+            line = ("credit SPEND UNKNOWN %s - %s; its legs stay available "
+                    "(fail open) until spend is measured"
+                    % (provider, guard.get("note") or "spend unmeasured"))
+            if guard.get("window_limited") and "month-to-date" not in line:
+                line += " (window: month-to-date only; set credit_started)"
+            lines.append(line)
+        elif guard.get("state") == "manual":
+            # T1-CREDIT-FIX-5 M1: a dated manual figure is not measured spend.
+            # Name it (with its age, in the note) so it never reads as live.
+            lines.append("credit MANUAL %s - %s; not measured spend"
+                         % (provider, guard.get("note") or "manual figure"))
+        elif guard.get("state") == "warn":
             lines.append("credit WARN %s $%.2f of a $%.2f grant (warn line $%.2f)"
                          % (provider, guard["spend_usd"], guard["cap_usd"],
                             guard["warn_usd"]))
+            # T1-CREDIT-FIX-9 T2: a window-limited warn grant names its
+            # month-to-date limit beside the figure.
+            if guard.get("window_limited"):
+                lines.append("%s credit spend measured month-to-date only "
+                             "(set credit_started)" % provider)
         elif guard.get("state") == "refuse":
             lines.append("credit EXHAUSTED %s $%.2f of a $%.2f cap - its legs are "
                          "dropped by the resolver until the month rolls over"
                          % (provider, guard["spend_usd"], guard["cap_usd"]))
+        elif guard.get("state") == "ok":
+            # T1-CREDIT-FIX-9 T2: an ok grant prints nothing by default, but
+            # a window-limited one must still name its month-to-date limit.
+            if guard.get("window_limited"):
+                lines.append("%s credit spend measured month-to-date only "
+                             "(set credit_started)" % provider)
         if guard.get("models_unpriced"):
             lines.append("credit UNPRICED %s: %d model(s) billed with no price on "
                          "file - the guard cannot see this spend"
@@ -688,6 +1967,11 @@ def render_spend_text(spend):
     if spend["models_unpriced"]:
         lines.append("  %d model(s) had no price on file and count as 0"
                      % spend["models_unpriced"])
+    if int(spend.get("rows_unreadable") or 0) > 0:
+        # T1-CREDIT-FIX-9 T4: unreadable rows are skipped spend, never $0 --
+        # name the count beside the readable figure.
+        lines.append("  %d unreadable row(s) skipped"
+                     % int(spend.get("rows_unreadable") or 0))
     if spend["balance_usd"] is not None:
         lines.append("  balance: $%.2f (measured by the caller); warns below $%.2f"
                      % (spend["balance_usd"], spend["balance_threshold_usd"]))
@@ -853,22 +2137,42 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     try:
         key = read_manage_key(path)
     except OSError:
-        print("autoos-usage: manage key file missing or empty: %s - create a manage-scoped "
-              "key in the OmniRoute dashboard and save it there (mode 600)" % path, file=sys.stderr)
+        print("autoos-usage: manage key file missing or empty - create a manage-scoped "
+              "key in the OmniRoute dashboard and save it there (mode 600) - spend unmeasured",
+              file=sys.stderr)
         return 3
 
     gateway = (env.get("AUTOOS_OMNIROUTE_URL") or DEFAULT_GATEWAY).rstrip("/")
     fetch = fetch or urllib_fetch
-    try:
-        rows, pages, truncated = fetch_window(fetch, gateway, key,
-                                              min(cutoff, spend_cutoff)
-                                              if spend_on else cutoff)
-    except UsageError as e:
-        print("autoos-usage: %s" % e, file=sys.stderr)
-        return 3
-
+    # T1-CREDIT-FIX-8 C1: the fetch reaches the earliest grant start, not
+    # just month-start -- one home (`fetch_cutoff`), read by both fetch
+    # callers. The registry loads here (it is needed for the cutoff and again
+    # below); `read_registry` returns {} when unreadable, never raises.
     priced = args.cost or args.lines or spend_on
     registry = read_registry(args.registry) if priced else {}
+    fetch_depths = [cutoff]
+    if spend_on:
+        fetch_depths.append(spend_cutoff)
+    if priced:
+        fetch_depths.append(fetch_cutoff(registry, now))
+    try:
+        rows, pages, truncated = fetch_window(fetch, gateway, key,
+                                              min(fetch_depths))
+    except UsageError as e:
+        # Print only the exception type name, not the message which may contain URLs
+        print("autoos-usage: spend unmeasured (%s)" % type(e).__name__, file=sys.stderr)
+        text = str(e)
+        # The distinct manage-key line (T1-CREDIT-FIX): a 403 is the observed
+        # failure -- a short/revoked/wrong-scoped key the gateway refuses --
+        # and the spend it leaves behind is unmeasured, never $0.00.
+        if "HTTP 403" in text:
+            print("autoos-usage: manage key rejected (403) - spend unmeasured",
+                  file=sys.stderr)
+        elif "HTTP 401" in text:
+            print("autoos-usage: manage key rejected (401) - spend unmeasured",
+                  file=sys.stderr)
+        return 3
+
     prices = prices_from_registry(registry)
     price_source = price_source_name(args.registry) if priced else None
     spend = paid_spend(rows, prices, registry, spend_cutoff, balance=balance,
@@ -877,7 +2181,18 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     # uses to decide "is there money left" is the report the router reads to decide
     # whether to send work there at all (brief FREEKEYS-1b item 2).
     guarded = credit_guard_providers(registry)
-    guards = credit_guards(registry, rows, spend_cutoff) if guarded else None
+    guards = None
+    if guarded:
+        try:
+            guards = credit_guards(registry, rows, spend_cutoff, today=now,
+                                   complete=not truncated)
+        except Exception as e:
+            # A grant that cannot state its own cap (ValueError) must read as
+            # unmeasured, never as a traceback: the documented exit code is 3.
+            # Type name only -- a message can carry a path or key (rule 1).
+            print("autoos-usage: credit guard unreadable (%s) - spend unmeasured"
+                  % type(e).__name__, file=sys.stderr)
+            return 3
     show_cost = args.cost or args.lines
     report = build_report(rows, dims, cutoff, pages, truncated,
                           prices=prices if show_cost else None,

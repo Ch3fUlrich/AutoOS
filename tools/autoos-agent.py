@@ -5459,36 +5459,172 @@ CREDIT_GUARD_CACHE: dict = {}
 
 
 def _credit_guards_unreadable(registry: dict, why: str) -> dict:
-    """Every `credit` grant refuses, because nobody can say what it has spent.
+    """Every `credit` grant stays available, with the reason named.
 
-    The half of the guard that must not be optimistic (brief FREEKEYS-2 item 2):
-    a usage read that fails leaves the resolver with no spend figure, and "no
-    figure" is not "$0 left" — it is the state that let a $10 grant drain
-    invisibly before. Returning `refuse` per grant drops only the credit legs of
-    a route, so a card with a free leg still plans; returning `{}` would drop
-    nothing and let the grant spend past its cap.
+    The fail-OPEN half of the guard (T1-CREDIT-FIX, supersedes the FREEKEYS-2
+    fail-closed contract): a usage read that fails leaves the resolver with no
+    spend figure, and "no figure" is not "$0 spent" -- printing it as $0.00 of
+    a $200 grant is what reported an untouched trial grant as EXHAUSTED and
+    skipped every trial leg (`credit exhausted ovhcloud $0.00/$200.00`). The
+    figure falls back to the registry's dated manual spend when one exists
+    (`autoos_usage.manual_credit_spend`), else to `unknown`, which the leg
+    filter keeps with a `spend unknown` note. A prepaid trial grant that is
+    truly spent rejects at the provider (402/429) and the combo falls through
+    at run time, so keeping the leg risks one refused call, while refusing it
+    puts the whole trial tier offline on a 403.
 
-    `why` is an exception *type name*, never its message: a gateway error text
-    can carry the URL and a key-file error the home path, and this note is
-    printed into the plan, the run log and `route --explain` (AGENTS.md rule 1).
+    `why` is the one-line `autoos_usage.spend_failure_note` for the failure --
+    `manage key rejected (403) - spend unmeasured` for the observed short-key
+    403 -- never a message that can carry key material (AGENTS.md rule 1).
     """
+    try:
+        guards = usage_mod.credit_guards(registry, None, None, failure=why)
+    except Exception:  # noqa: BLE001 - the manual fallback must never fail the plan
+        guards = usage_mod.credit_guards_unreadable(registry, why)
+    for pid, entry in _paid_guards_unreadable(registry, why).items():
+        guards.setdefault(pid, entry)
+    return guards
+
+
+def _paid_guard_ids(registry: dict) -> list:
+    """Ids of `tier == paid` providers declaring a readable `monthly_cap_usd`.
+
+    Total: never raises, so both fallback builders below can call it freely.
+    A paid row with no (or no readable) cap names nothing to hold spend
+    against, so it is simply not guarded."""
+    try:
+        items = list(((registry or {}).get("providers") or {}).items())
+    except Exception:
+        return []
+    out = []
+    for pid, entry in items:
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        try:
+            usage_mod.monthly_cap_usd(registry, pid)
+        except Exception:
+            continue
+        out.append(pid)
+    return sorted(out)
+
+
+def _paid_guards_unreadable(registry: dict, why: str) -> dict:
+    """`{provider id: guard}` for paid rows when spend cannot be measured.
+
+    Total: never raises. Every entry reads `unknown` with `spend_unknown`
+    True -- D-212: paid legs are STANDING LAST-RESORT legs, so they are KEPT
+    with a visible note 'paid spend unmeasured <provider> - leg kept (last
+    resort, D-212)'. They are REFUSED only when MEASURED spend >= monthly_cap_usd."""
     out = {}
-    for provider in usage_mod.credit_guard_providers(registry):
+    for pid in _paid_guard_ids(registry):
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, pid)
+            warn = usage_mod.spend_warn_usd(registry, pid)
+        except Exception:
+            pass
+        out[pid] = {"provider": pid, "state": "unknown",
+                    "spend_usd": 0.0, "spend_unknown": True,
+                    "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                    "note": "paid spend unmeasured %s - leg kept (last resort, D-212)"
+                            % pid}
+    return out
+
+
+def _paid_guards_measured(registry: dict, rows, since, complete=True) -> dict:
+    """`{provider id: guard}` for paid rows from recorded usage rows.
+
+    Raises on malformed input like `credit_guards` does -- the caller folds
+    those into the expected-failure fallback, and unforeseen bugs into the
+    guard-error map."""
+    prices = usage_mod.prices_from_registry(registry)
+    out = {}
+    for pid in _paid_guard_ids(registry):
+        spend = usage_mod.paid_spend(rows, prices, registry, since,
+                                     provider=pid)
+        state, note = usage_mod.spend_guard(registry, pid, spend["spend_usd"])
+        unreadable = int(spend.get("rows_unreadable") or 0)
+        if unreadable and state != "refuse":
+            # T1-CREDIT-FIX-8 C3 (paid half): unreadable rows are not silent
+            # $0 -- the grant reads unknown (kept as last resort per D-212),
+            # naming the COUNT beside the readable figure. Measured spend at
+            # or over the cap still refuses: it beats unknown.
+            state = "unknown"
+            note = ("paid spend unmeasured %s - %d unreadable row(s), "
+                    "readable spend $%.2f - leg kept (last resort, D-212)"
+                    % (pid, unreadable, spend["spend_usd"]))
+        if not complete and state != "refuse":
+            # T1-CREDIT-FIX-9 T1: a fetch cut at the page cap is not a
+            # measurement -- kept per D-212 with the note; measured spend
+            # already at or over the cap still refuses.
+            state = "unknown"
+            note = ("paid spend unmeasured %s: fetch truncated at page cap "
+                    "(readable spend $%.2f) - leg kept (last resort, D-212)"
+                    % (pid, spend["spend_usd"]))
+        out[pid] = {"provider": pid, "state": state,
+                    "spend_usd": spend["spend_usd"],
+                    "spend_unknown": state == "unknown",
+                    "cap_usd": usage_mod.monthly_cap_usd(registry, pid),
+                    "warn_usd": usage_mod.spend_warn_usd(registry, pid),
+                    "models_unpriced": spend["models_unpriced"],
+                    "note": note}
+    # T1-CREDIT-FIX-10 M2 (D-240): an `unknown` paid guard is not the end of
+    # the story -- the local estimate over these same rows either refuses the
+    # leg at the local cap or keeps it with the D-240 line. Measured states
+    # are untouched: measured spend governs.
+    return usage_mod.apply_paid_local_cap(registry, out, rows, since)
+
+
+def _credit_guard_error(registry: dict, type_name: str) -> dict:
+    """`{provider id: guard}` for an UNFORESEEN read bug (T1-CREDIT-FIX-2).
+
+    Distinct from `unknown`: `unknown` means "the gateway gave no figure"
+    (fail open for credit, kept for paid per D-212), while `guard error` means
+    "our own code raised something the contract does not predict" -- kept for
+    credit, kept for paid (D-212 last resort), and always named in the plan so
+    the bug is visible instead of silent. `type_name` is the exception TYPE
+    NAME only: a message can carry a gateway URL, a home path or key material
+    (AGENTS.md rule 1).
+    Total: never raises."""
+    out = {}
+    try:
+        providers = usage_mod.credit_guard_providers(registry)
+    except Exception:
+        providers = []
+    for provider in providers:
         cap = warn = 0.0
         try:
             cap = usage_mod.monthly_cap_usd(registry, provider)
             warn = usage_mod.spend_warn_usd(registry, provider)
-        except ValueError:
-            pass  # a grant with no cap cannot be judged, only refused
-        out[provider] = {"provider": provider, "state": "refuse", "spend_usd": 0.0,
-                         "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
-                         "note": "credit grant unreadable (%s): no spend data, so "
-                                 "the leg is refused until the gateway answers" % why}
+        except Exception:
+            pass
+        out[provider] = {"provider": provider, "state": "guard error",
+                         "spend_usd": 0.0, "spend_unknown": True,
+                         "cap_usd": cap, "warn_usd": warn,
+                         "models_unpriced": 0,
+                         "hard_stop_usd": usage_mod.hard_stop_usd(
+                             registry, provider, cap),
+                         "window_limited": usage_mod.credit_window_limited(
+                             registry, provider),
+                         "note": "credit guard error %s (%s) - spend "
+                                 "unmeasured, leg kept" % (provider, type_name)}
+    for pid in _paid_guard_ids(registry):
+        cap = warn = 0.0
+        try:
+            cap = usage_mod.monthly_cap_usd(registry, pid)
+            warn = usage_mod.spend_warn_usd(registry, pid)
+        except Exception:
+            pass
+        out[pid] = {"provider": pid, "state": "guard error",
+                    "spend_usd": 0.0, "spend_unknown": True,
+                    "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                    "note": "paid guard error %s (%s) - spend unmeasured, "
+                            "leg kept (last resort, D-212)" % (pid, type_name)}
     return out
 
 
 def plan_credit_guards(registry: dict, now=None, fetch=None,
-                       env: dict | None = None) -> dict:
+                       env: dict | None = None, helper=None) -> dict:
     """The `{provider: guard}` map `autoos_resolver.usable_legs` refuses a credit
     leg with (brief FREEKEYS-2 item 2): this month's spend per `credit` provider
     against its own `monthly_cap_usd`, read from the gateway's call log.
@@ -5499,42 +5635,143 @@ def plan_credit_guards(registry: dict, now=None, fetch=None,
     the same reader the `usage` report prints, so what blocks a leg and what the
     ledger shows are never two numbers. A read that fails (gateway down, key
     missing or unauthorised, an unparseable page) returns
-    `_credit_guards_unreadable`, not an empty map.
+    `_credit_guards_unreadable` -- the fail-open fallback (dated manual figure,
+    else `unknown` with a `spend unknown` note), not an empty map and no longer
+    a `refuse` map.
 
     Two things make this safe inside a plan (FREEKEYS-2c, rev-freekeys2 finding
     4). The cache is keyed by `registry` identity, so a caller that hands this a
     different registry — a candidate registry compared against the committed one,
     a lane that reloads — gets guards built from that registry's own caps
-    instead of the first one's answer. And the usage read is wrapped in
-    `except Exception`, not a list of expected types: every failure mode this
-    can predict already refuses the credit legs, and one it cannot predict must
-    do the same rather than raise through `route_plan_for` and take the plan
-    down with it. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
-    `Exception`, so Ctrl-C still works.
+    instead of the first one's answer. And the usage read predicts its failures
+    by type (T1-CREDIT-FIX-2): `UsageError` (gateway refusal/unreachable),
+    `OSError` (missing key file), `ValueError` (unreadable ledger, a grant with
+    no cap -- JSON decode errors land here too) map to the `unknown` fallback
+    (fail open for credit, kept for paid as last resort per D-212). An
+    UNFORESEEN bug type
+    (`TypeError`/`AttributeError`/...) is never folded into `unknown` -- which
+    would read as a gateway outage -- but lands as its own `guard error` state
+    (kept for credit, kept for paid as last resort per D-212, type name only
+    in the note), so the bug
+    stays visible. `KeyboardInterrupt`/`SystemExit` are `BaseException`, outside
+    both, so Ctrl-C still works.
 
     `fetch`/`env`/`now` are injectable so a test can drive this without a
     gateway, a key or the clock; the callers pass none of them.
+
+    T1-CREDIT-FIX-10 M1 (D-250): the rows come from the first transport that
+    answers. The manage-key HTTP fetch wins when the key file is non-empty
+    and answers 200; else the gateway's read-only CLI helper transport
+    (`autoos_usage.helper_fetch`, docker exec into the gateway container --
+    no key involved) is tried when docker and the container exist; else the
+    guards fall back to unknown with the D-240 local estimate. The helper is
+    the default stack's second transport: an explicitly injected `fetch`
+    that fails reads as that transport being down (old tests drive exactly
+    this), so the helper is attempted only when `helper` is injected or
+    `fetch` is the default. `helper` is injectable for the same reason
+    `fetch` is (a test must never touch the real container); production
+    passes neither. Every measured guard note names its rows source
+    (`measured via manage key` / `measured via gateway helper`); an
+    unmeasured paid guard carries the D-240 line (`local estimate (D-240)`).
+
+    T1-CREDIT-FIX-10 M4 (D-253): when the helper is in play, the scheduled
+    provider balances (`GET /api/usage/provider-limits` through the same
+    helper transport) become the paid meter -- a provider with an in-month
+    balance series is judged on decreases, recorded reading by reading in
+    the git-ignored state-dir ledger. No series: the call ledger governs
+    (`measured via call ledger`), and an unmeasured paid guard keeps the
+    D-240 line. Balance reads never fail the plan.
     """
     cache_key = id(registry)
     cached = CREDIT_GUARD_CACHE.get(cache_key)
     if cached is not None and cached["registry"] is registry:
         return cached["guards"]
     providers = usage_mod.credit_guard_providers(registry)
-    if not providers:
+    paid = _paid_guard_ids(registry)
+    if not providers and not paid:
         CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": {}}
         return CREDIT_GUARD_CACHE[cache_key]["guards"]
     env = os.environ if env is None else env
     now = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = usage_mod.month_start(now)
+    fetch_cut = usage_mod.fetch_cutoff(registry, now)
     gateway = (env.get("AUTOOS_OMNIROUTE_URL")
                or usage_mod.DEFAULT_GATEWAY).rstrip("/")
+    use_helper = helper is not None or fetch is None
     fetch = fetch or usage_mod.urllib_fetch
+    helper_fetch_fn = helper or usage_mod.helper_fetch
+
+    def _measured(rows, truncated):
+        guards = usage_mod.credit_guards(registry, rows, cutoff, today=now,
+                                         complete=not truncated)
+        guards.update(_paid_guards_measured(registry, rows, cutoff,
+                                            complete=not truncated))
+        return guards
+
+    def _tag_source(guards, source):
+        # Every measured guard note names the rows source that produced it.
+        # A D-240 line is terminal in its note (the kept/refused line reads
+        # exactly), so the tag skips notes that already carry one.
+        for guard in (guards or {}).values():
+            if not isinstance(guard, dict) or not guard.get("note"):
+                continue
+            if "(D-240)" in guard["note"]:
+                continue
+            guard["note"] = "%s [%s]" % (guard["note"], source)
+        return guards
+
+    rows_source = None
     try:
         key = usage_mod.read_manage_key(usage_mod.key_file_path(env))
-        rows, _pages, _truncated = usage_mod.fetch_window(fetch, gateway, key, cutoff)
-        guards = usage_mod.credit_guards(registry, rows, cutoff)
-    except Exception as exc:  # noqa: BLE001 - fail closed, never fail the plan
-        guards = _credit_guards_unreadable(registry, type(exc).__name__)
+        rows, _pages, truncated = usage_mod.fetch_window(fetch, gateway, key, fetch_cut)
+        rows_source = "measured via manage key"
+        guards = _tag_source(_measured(rows, truncated), rows_source)
+    except (usage_mod.UsageError, OSError, ValueError) as exc:
+        # Every failure mode the read predicts (gateway refusal/unreachable,
+        # missing key, unreadable ledger, a grant that cannot state its cap):
+        # `unknown` (fail open for credit, kept for paid as last resort per
+        # D-212, held to the D-240 local cap), never a
+        # traceback.
+        # ValueError already covers JSON decode errors: fetch_window rewraps
+        # bad pages as UsageError, and JSONDecodeError subclasses ValueError.
+        first_failure = exc
+        if use_helper:
+            # T1-CREDIT-FIX-10 M1 (D-250): the manage-key read did not answer
+            # 200 -- try the read-only helper transport before giving up on a
+            # measurement. The helper takes no key (it authenticates inside
+            # the container), so `key` is never passed, printed or read here.
+            def _helper_transport(url, headers, timeout):
+                return helper_fetch_fn(url, None, timeout)
+            try:
+                rows, _pages, truncated = usage_mod.fetch_window(
+                    _helper_transport, gateway, "", fetch_cut)
+                rows_source = "measured via gateway helper"
+                guards = _tag_source(_measured(rows, truncated), rows_source)
+            except (usage_mod.UsageError, OSError, ValueError) as exc2:
+                guards = _credit_guards_unreadable(
+                    registry, usage_mod.spend_failure_note(exc2))
+                usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+        else:
+            guards = _credit_guards_unreadable(
+                registry, usage_mod.spend_failure_note(first_failure))
+            usage_mod.apply_paid_local_cap(registry, guards, [], cutoff)
+    except Exception as exc:  # noqa: BLE001 - unforeseen bug: named, not hidden
+        # NOT `unknown`: an unforeseen bug (TypeError/AttributeError/...) must
+        # surface as its own `guard error` state -- kept for credit, kept for
+        # paid as last resort per D-212 (a local paid cap follows in
+        # CREDIT-10 per D-240), explain line carries the TYPE NAME only --
+        # never silently `unknown` (which would read as a gateway outage) or
+        # `ok`.
+        guards = _credit_guard_error(registry, type(exc).__name__)
+    if use_helper and rows_source is not None:
+        # T1-CREDIT-FIX-10 M4 (D-253): the scheduled provider balances are
+        # the paid meter ... (see `usage_mod.overlay_balance_guards`). This
+        # never fails the plan -- a balance read is a meter, not a gate.
+        try:
+            guards = usage_mod.overlay_balance_guards(
+                registry, guards, gateway, helper_fetch_fn, env, cutoff, now)
+        except Exception:  # noqa: BLE001 - the meter must never break the map
+            pass
     CREDIT_GUARD_CACHE[cache_key] = {"registry": registry, "guards": guards}
     return guards
 
