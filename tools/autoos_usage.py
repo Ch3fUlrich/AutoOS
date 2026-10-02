@@ -124,6 +124,15 @@ PAID_LOCAL_CAP_DEFAULT_USD = 20.0
 # meter, and the exhausted check skips it.
 BALANCE_EXHAUSTED_USD = 3.0
 BALANCE_FRESH_S = 3 * 3600
+# T1-CREDIT-FIX-14 (D-274): tolerated clock skew for balance `fetched_at`
+# stamps. A reading stamped later than now + this window is not a fresh
+# snapshot from a slow clock -- it is an untrustworthy ordering that would
+# let a future line pose as the latest reading -- so it marks the ledger
+# STALE instead. Stamps within the window count normally (fresh). A
+# far-future stamp therefore keeps the paid guard refusing (fail closed,
+# acceptable) until the stamp ages into the past, when the normal meter
+# resumes; the skew is a trust bound, not a grace period.
+BALANCE_CLOCK_SKEW_S = 300
 BALANCE_LEDGER_REL = os.path.join("routing", "provider-balances.jsonl")
 DIMENSIONS = ("provider", "combo", "lane", "model", "run")
 UNTAGGED_LANE = "(untagged)"
@@ -1209,12 +1218,18 @@ def load_balance_readings(path):
     `fetchedAt` (the gateway's spelling) normalises to `fetched_at` on load,
     so hand-written seeds and recorded lines dedupe against each other.
     A line whose `remaining` is non-numeric or non-finite is skipped too
-    (never crashing the overlay). Skipped lines are not counted anywhere --
+    (never crashing the overlay). STALE/clear markers (T1-CREDIT-FIX-14,
+    D-274 -- lines carrying a `stale` key) are NOT readings and are never
+    returned here; read them with `load_balance_stale`. Skipped lines are
+    not counted anywhere --
     callers that need the exact surviving set assert on the returned list
     (and on the guard the overlay builds from it), not on a count."""
     readings = []
     try:
-        fh = open(path, encoding="utf-8")
+        # errors="replace" (D-274 rework): a non-UTF-8 ledger file is garbage
+        # input, not a crash -- the undecodable line is skipped like any bad
+        # line, so the read never raises and the guard fails closed downstream.
+        fh = open(path, encoding="utf-8", errors="replace")
     except OSError:
         return readings
     with fh:
@@ -1226,8 +1241,9 @@ def load_balance_readings(path):
                 obj = json.loads(line)
             except ValueError:
                 continue
-            if not isinstance(obj, dict) or not isinstance(
-                    obj.get("provider"), str):
+            if not isinstance(obj, dict) or "stale" in obj:
+                continue
+            if not isinstance(obj.get("provider"), str):
                 continue
             stamped = obj.get("fetched_at")
             if not isinstance(stamped, str):
@@ -1272,6 +1288,267 @@ def record_balance_readings(path, readings):
             fh.write(json.dumps(r, sort_keys=True) + "\n")
             seen.add((r.get("provider"), r.get("fetched_at")))
     return len(fresh)
+
+
+def _stale_state(path):
+    """(global_since, {provider: since}) STALE markers in effect (D-274).
+
+    One scan, one home for marker semantics: a `{"stale": true}` line with
+    no `provider` stales every paid guard (the pre-rework global marker,
+    still written for total read failures); one WITH a `provider` stales
+    only that provider (a successful parse that carried no reading for a
+    provider with a series). A `{"stale": false}` line clears its own scope
+    only -- a global clear never clears a per-provider mark and vice versa.
+    Undecodable bytes are replaced, never raised (see `load_balance_readings`).
+    """
+    global_since = None
+    per = {}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return None, {}
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(obj, dict) or "stale" not in obj:
+                continue
+            pid = obj.get("provider")
+            if not isinstance(pid, str) or not pid:
+                pid = None
+            if obj.get("stale") is True:
+                if not isinstance(obj.get("since"), str):
+                    continue
+                if pid is None:
+                    if global_since is None:
+                        global_since = obj["since"]
+                else:
+                    per.setdefault(pid, obj["since"])
+            elif obj.get("stale") is False:
+                if pid is None:
+                    global_since = None
+                else:
+                    per.pop(pid, None)
+    return global_since, per
+
+
+def load_balance_stale(path, provider=None):
+    """The ledger's STALE `since` timestamp, or None when not stale.
+
+    T1-CREDIT-FIX-14 (D-274): the provider-balance ledger fails closed. A
+    failed balance read appends a `{"stale": true, "since": <UTC iso>}`
+    marker (see `_mark_balance_stale`); the next successful read appends
+    `{"stale": false, ...}` to clear it. Markers are ledger control lines,
+    never readings (`load_balance_readings` skips them). A missing or
+    unreadable file is not stale (None); malformed lines are skipped.
+
+    Rework (per-provider STALE): a marker may carry a `provider` id, in
+    which case it stales only that provider -- clearing needs a successful
+    reading for THAT provider. With `provider` given, a global marker still
+    wins (it stales everyone); without one, an old global marker with no
+    provider id counts as stale for every paid guard until a reading
+    arrives, else the earliest in-effect per-provider `since` is returned.
+    """
+    glob, per = _stale_state(path)
+    if provider is not None:
+        if glob is not None:
+            return glob
+        return per.get(provider)
+    if glob is not None:
+        return glob
+    if not per:
+        return None
+    return sorted(per.values())[0]
+
+
+def _utc_iso_z(moment):
+    """Aware UTC datetime -> `YYYY-MM-DDTHH:MM:SSZ` (ledger stamp spelling)."""
+    return moment.astimezone(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+def _mark_balance_stale(path, candidate_since, now=None, provider=None):
+    """Record STALE, keeping the first failure's `since` (D-274).
+
+    Appends `{"stale": true, "since": ...}` (plus `provider` when marking
+    one provider's missed read) only when that scope is not already stale,
+    so retries never move the window forward; returns the `since` the
+    caller's refuse reason must name (the persisted one, or the candidate
+    when this call marks it). A marker write failure (OSError)
+    propagates -- the caller still refuses for that call, fail closed."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    glob, per = _stale_state(path)
+    if provider is None:
+        if glob is not None:
+            return glob
+    elif per.get(provider) is not None:
+        return per[provider]
+    since = candidate_since or _utc_iso_z(now)
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    marker = {"since": since, "stale": True}
+    if provider is not None:
+        marker["provider"] = provider
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(marker, sort_keys=True) + "\n")
+    return since
+
+
+def _clear_balance_stale(path, now=None, provider=None):
+    """Clear STALE after a successful read (D-274); idempotent.
+
+    Appends one `{"stale": false, ...}` clear marker (scoped to `provider`
+    when given, else global) only when that scope is currently stale, so
+    running the successful read twice writes the marker once and never
+    touches the readings. Returns True when a marker was written. A clear
+    write failure (OSError) propagates -- the caller refuses for that call,
+    fail closed."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    glob, per = _stale_state(path)
+    if provider is None:
+        if glob is None:
+            return False
+    elif per.get(provider) is None:
+        return False
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    marker = {"at": _utc_iso_z(now), "stale": False}
+    if provider is not None:
+        marker["provider"] = provider
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(marker, sort_keys=True) + "\n")
+    return True
+
+
+def _stale_paid_refuse(registry, provider, guard, since, detail):
+    """Every paid guard while the ledger is STALE: `refuse` (D-274).
+
+    `spend_usd` is carried as is; the note IS the reason (`balance stale
+    since <ts> (D-274)` plus the detail), so the resolver surfaces it
+    verbatim and no paid leg is selectable. Never governs from the last
+    good reading."""
+    refused = dict(guard) if isinstance(guard, dict) else {}
+    refused["provider"] = provider
+    refused["state"] = "refuse"
+    refused["note"] = ("balance stale since %s (D-274) - %s"
+                       % (since, detail))
+    return refused
+
+
+def _mark_missing_provider_reads(registry, guards, path, readings, ledger,
+                                 since, now):
+    """STALE the paid providers this successful parse did NOT read (D-274).
+
+    A parse that yields readings is a successful read -- but only for the
+    providers it names. A paid provider with an in-month balance series
+    (`since`-filtered, the same window the meter judges) and no reading in
+    this payload had its read FAIL: its marker is recorded (first failure's
+    `since` kept) and its guard refuses, while every other provider is
+    unaffected. A paid provider with no series at all and no reading is
+    untouched (no history to distrust -- behaves as before). Returns the
+    refused provider ids so the caller never merges a meter over them.
+    A marker write failure (OSError) propagates -- fail closed."""
+    # T1-CREDIT-FIX-14 rework 2 MAJOR-1 (D-274): only a STAMPED reading
+    # counts as read -- an entry with a missing or garbage fetchedAt parses
+    # but is dropped on load, so it must not shield its provider here.
+    fresh_ids = {r.get("provider") for r in (readings or [])
+                 if isinstance(r, dict) and _reading_ts(r) is not None}
+    series_ids = set()
+    for r in (ledger or []):
+        if not isinstance(r, dict):
+            continue
+        ts = _reading_ts(r)
+        if ts is not None and ts >= since:
+            series_ids.add(r.get("provider"))
+    # T1-CREDIT-FIX-14 rework 3 MAJOR (D-274): a persisted per-provider
+    # marker is honoured even after that provider's in-month series ages
+    # out (month rollover) -- only that provider's own usable reading
+    # clears its marker, so a marked provider missing from this payload
+    # stays refused with its ORIGINAL since, series or no series.
+    _, already_stale = _stale_state(path)
+    newly = []
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        if pid in fresh_ids:
+            continue
+        if pid not in series_ids and pid not in already_stale:
+            continue
+        since_ts = _mark_balance_stale(path, None, now, pid)
+        guards[pid] = _stale_paid_refuse(
+            registry, pid, guard, since_ts,
+            "no provider balance reading, paid leg refused")
+        newly.append(pid)
+    return newly
+
+
+def refuse_paid_on_overlay_error(registry, guards, type_name):
+    """Every paid guard refuses: the balance overlay itself raised (D-274).
+
+    The plan call site fails closed on ANY overlay exception -- expected or
+    not. `type_name` is the exception TYPE NAME only, never the message
+    (which can carry paths or gleamed gateway text). Credit (trial grant)
+    guards are untouched -- their fail-open contract stands. Total: never
+    raises. Returns `guards` (mutated in place)."""
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        entry = ((registry or {}).get("providers") or {}).get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        refused = dict(guard)
+        refused["provider"] = pid
+        refused["state"] = "refuse"
+        refused["spend_unknown"] = False
+        refused["note"] = ("balance overlay failed (%s) (D-274) - "
+                           "paid leg refused" % (type_name,))
+        guards[pid] = refused
+    return guards
+
+
+def refuse_paid_without_balance_read(registry, guards, env, now=None):
+    """Every paid guard refuses: no balance read was possible (D-274).
+
+    The plan call site consults the ledger OUTSIDE the rows gate: when the
+    call-log rows read failed the overlay never ran, so a persisted STALE
+    marker would never be consulted and -- with the helper down -- no fresh
+    read was even attempted. Either way every `tier == paid` guard refuses
+    with the stale reason (STALE beats the D-240 local estimate), and a
+    first-failure STALE marker is recorded with the current stamp when none
+    persists, so the `since` the reason names is stable across retries. A
+    marker write failure still refuses for this call (fail closed). Credit
+    (trial grant) guards are untouched. No paid guards: no write, no change.
+    Returns `guards` (mutated in place)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    entries = (registry or {}).get("providers") or {}
+    if not any(isinstance(guard, dict)
+               and isinstance(entries.get(pid), dict)
+               and entries[pid].get("tier") == "paid"
+               for pid, guard in (guards or {}).items()):
+        return guards
+    path = balance_ledger_path(env)
+    try:
+        since_ts = _mark_balance_stale(path, None, now)
+    except OSError:
+        since_ts = (load_balance_stale(path) or _utc_iso_z(now))
+    for pid, guard in (guards or {}).items():
+        if not isinstance(guard, dict):
+            continue
+        entry = entries.get(pid)
+        if not isinstance(entry, dict) or entry.get("tier") != "paid":
+            continue
+        guards[pid] = _stale_paid_refuse(
+            registry, pid, guard, since_ts,
+            "provider balance unreadable, paid leg refused")
+    return guards
 
 
 def _reading_ts(reading):
@@ -1322,6 +1599,10 @@ def balance_paid_guard(registry, provider, readings, since, now=None):
     The note always names `measured via provider balance`. None on a
     provider that cannot state its cap either (ValueError is a config error
     the caller already handles, not a figure).
+    T1-CREDIT-FIX-14 (D-274): a reading stamped later than now +
+    `BALANCE_CLOCK_SKEW_S` is future-dated -- never fresh, never the latest
+    reading. Any such reading makes the ledger stale: `refuse` with the
+    `balance stale since <ts> (D-274)` reason naming that reading's stamp.
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     mine = [r for r in (readings or [])
@@ -1329,6 +1610,34 @@ def balance_paid_guard(registry, provider, readings, since, now=None):
             and _reading_ts(r) is not None and _reading_ts(r) >= since]
     if not mine:
         return None
+    horizon = now + datetime.timedelta(seconds=BALANCE_CLOCK_SKEW_S)
+    future = sorted(
+        (r for r in mine if _reading_ts(r) > horizon),
+        key=_reading_ts)
+    if future:
+        # The future stamp is untrustworthy ordering, not a snapshot: it
+        # must not satisfy `fresh` below and must not become `latest`, so
+        # the whole provider series reads stale. Spend is carried from the
+        # trustworthy readings alone.
+        trusted = [r for r in mine if _reading_ts(r) <= horizon]
+        if len(trusted) >= 2:
+            spend, topups = balance_month_spend(trusted, provider, since)
+        else:
+            spend, topups = 0.0, 0.0
+        try:
+            cap = monthly_cap_usd(registry, provider)
+            warn = spend_warn_usd(registry, provider)
+        except (ValueError, TypeError, AttributeError):
+            cap, warn = 0.0, 0.0
+        guard = {"provider": provider, "state": "refuse",
+                 "spend_usd": spend, "spend_unknown": False,
+                 "cap_usd": cap, "warn_usd": warn, "models_unpriced": 0,
+                 "note": ("balance stale since %s (D-274) - future-dated "
+                          "provider balance reading, paid leg refused"
+                          % future[0].get("fetched_at"))}
+        if topups > 0:
+            guard["note"] += "; top-up +$%.2f" % topups
+        return guard
     try:
         cap = monthly_cap_usd(registry, provider)
         warn = spend_warn_usd(registry, provider)
@@ -1401,38 +1710,114 @@ def overlay_balance_guards(registry, guards, gateway, helper_fetch_fn,
     `balance_paid_guard` (decreases billed, top-ups logged, fresh exhausted
     snapshots refused). A paid guard with no series keeps its ledger figure,
     named `measured via call ledger`; an unmeasured (D-240) one is untouched.
-    Total on expected read/parse failures (helper `UsageError`, transport
-    `OSError`, bad JSON `ValueError`): no balance series, ledger governs.
-    Returns `guards` (mutated in place).
+    T1-CREDIT-FIX-14 (D-274): the ledger FAILS CLOSED. ANY failed read --
+    helper `UsageError`/`OSError`/`ValueError`, status != 200, unparseable
+    or non-dict body, or a 200 that yields no readings -- marks the ledger
+    STALE (a control marker in the same git-ignored ledger file; the first
+    failure's `since` is kept while stale persists) and every `tier ==
+    paid` guard in the map becomes `refuse` with the `balance stale since
+    <ts> (D-274)` reason -- no paid leg selectable, never governed from the
+    last good reading. STALE beats the D-240 local estimate: the estimate
+    is a fallback only while spend is unmeasured with no stale logic
+    involved; a stale ledger refuses instead of keeping the capped estimate.
+    The next successful read (200, parseable dict, >= 1 reading) clears
+    STALE and the normal balance/ledger logic resumes. A ledger write
+    failure (OSError) refuses for that call, fail closed, never open.
+    A future-dated `fetched_at` (later than now + `BALANCE_CLOCK_SKEW_S`)
+    is stale, never fresh. A successful parse stales per provider: a paid
+    provider with a series but no reading in this payload is refused on its
+    own mark (cleared only by that provider's reading); the other providers
+    are unaffected. Returns `guards` (mutated in place).
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    path = balance_ledger_path(env)
+
+    def _refuse_stale(detail_since, detail):
+        try:
+            since_ts = _mark_balance_stale(path, detail_since, now)
+        except OSError:
+            since_ts = (detail_since or load_balance_stale(path)
+                        or _utc_iso_z(now))
+        for pid, guard in (guards or {}).items():
+            if not isinstance(guard, dict):
+                continue
+            entry = ((registry or {}).get("providers") or {}).get(pid)
+            if not isinstance(entry, dict) or entry.get("tier") != "paid":
+                continue
+            guards[pid] = _stale_paid_refuse(
+                registry, pid, guard, since_ts, detail)
+        return guards
+
     try:
         status, body = helper_fetch_fn(
             gateway.rstrip("/") + "/api/usage/provider-limits", None, TIMEOUT_S)
     except (UsageError, OSError, ValueError):
-        return guards
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
     if status != 200:
-        return guards
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
     try:
         payload = json.loads(
             body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
     except (ValueError, UnicodeDecodeError):
-        return guards
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
     if not isinstance(payload, dict):
-        return guards
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
     readings = parse_provider_limits(payload, registry)
-    if readings:
-        try:
-            record_balance_readings(balance_ledger_path(env), readings)
-        except OSError:
-            pass
-    ledger = load_balance_readings(balance_ledger_path(env))
+    # T1-CREDIT-FIX-14 rework 2 MAJOR-1 (D-274): a reading without a
+    # parseable stamp is unusable (the loader drops it) -- a payload with NO
+    # usable reading at all is an empty payload: STALE, never clearing.
+    usable = [r for r in (readings or [])
+              if isinstance(r, dict) and _reading_ts(r) is not None]
+    if not usable:
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
+    try:
+        record_balance_readings(path, readings)
+    except OSError:
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
+    ledger = load_balance_readings(path)
+    horizon = now + datetime.timedelta(seconds=BALANCE_CLOCK_SKEW_S)
+    future = sorted(
+        (r for r in ledger
+         if isinstance(r, dict) and _reading_ts(r) is not None
+         and _reading_ts(r) > horizon),
+        key=_reading_ts)
+    if future:
+        return _refuse_stale(
+            future[0].get("fetched_at")
+            if isinstance(future[0].get("fetched_at"), str) else None,
+            "future-dated provider balance reading, paid leg refused")
+    try:
+        newly_stale = _mark_missing_provider_reads(
+            registry, guards, path, usable, ledger, since, now)
+    except OSError:
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
+    try:
+        # A reading arrived: the read succeeded, so the global marker (when
+        # set) clears -- while a provider this payload did not name keeps its
+        # own mark until THAT provider reads (see above). Only a USABLE
+        # (stamped) reading clears its provider's mark (MAJOR-1).
+        _clear_balance_stale(path, now)
+        for r in usable:
+            if isinstance(r, dict) and isinstance(r.get("provider"), str):
+                _clear_balance_stale(path, now, r["provider"])
+    except OSError:
+        return _refuse_stale(None, "provider balance unreadable, "
+                                   "paid leg refused")
     for pid, guard in (guards or {}).items():
         if not isinstance(guard, dict):
             continue
         entry = ((registry or {}).get("providers") or {}).get(pid)
         if not isinstance(entry, dict) or entry.get("tier") != "paid":
             continue
+        if pid in newly_stale:
+            continue  # per-provider STALE above governs, never the old figure
         balanced = balance_paid_guard(registry, pid, ledger, since, now)
         if balanced is not None:
             # T1-CREDIT-FIX-11 R2: the worse of ledger and balance governs
