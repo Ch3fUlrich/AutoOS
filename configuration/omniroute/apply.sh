@@ -86,6 +86,10 @@ if ! command -v omniroute >/dev/null && [[ $DRIFT -ne 1 ]]; then
     fi
 fi
 
+# Source the shared gateway key functions from install.sh
+# shellcheck source=../../lib/linux/install.sh
+. "$ROOT/lib/linux/install.sh"
+
 # ─── Parse the flat key: value map without needing PyYAML ───────────────────
 declare -A KEYS=()
 if [[ -f "$KEYS_FILE" ]]; then
@@ -1044,8 +1048,13 @@ fi
 # "Authorization: Bearer <key>"` puts the key in argv, where every user on the
 # machine can read it out of `ps` for the lifetime of the call.
 live_ids=""
+# The client key is resolved ONCE per run, by the one rule in tools/autoos_gateway_key.py. Every
+# later use (the combo catalog read, the --probe) reads $_client_key: each resolve is a separate
+# python process, so a second one would print the legacy-field deprecation line a second time.
+# stderr is let through so that line and a missing-key error are visible.
+_client_key="$(autoos_resolve_client_key "$KEYS_FILE" || true)"
 if command -v python3 >/dev/null; then
-    if omni_rest GET /v1/models "" "${KEYS[omniroute]:-}"; then
+    if omni_rest GET /v1/models "" "$_client_key"; then
         live_ids="$(python3 -c 'import json,sys
 try:
     d = json.load(sys.stdin)
@@ -1453,7 +1462,7 @@ fi
 
 # ─── Probe: prove the combos answer, end to end ─────────────────────────────
 if [[ $PROBE -eq 1 ]]; then
-    key="${KEYS[omniroute]:-}"
+    key="$_client_key"  # resolved once, above: a second resolve would repeat the deprecation line
     if [[ -z "$key" || $DRY -eq 1 ]]; then
         echo "Probe skipped (dry run, or no omniroute client key in api-keys.yml)."
     elif (( ${#PROBE_COMBOS[@]} == 0 )); then

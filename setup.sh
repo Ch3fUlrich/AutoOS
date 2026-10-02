@@ -69,6 +69,9 @@ AutoOS — post-install provisioning for Linux
   --no-verify        Skip the post-install "does it actually work" check
   --undo             Restore files AutoOS backed up (does NOT uninstall packages)
                      (does not cover a USB write — that cannot be undone)
+  --host-name [<name>] Set the machine's host_name in host.yml (creates if missing,
+                      default = normalised short hostname). If host.yml exists,
+                      reports skipped and never overwrites.
 
   --create-usb           Build a bootable installer/rescue USB (--dry-run shows the plan only)
   --image <id>            catalog/images.json entry to write
@@ -119,6 +122,13 @@ while [[ $# -gt 0 ]]; do
         --save-state) STATE_PATH="${2:-}"; shift 2 ;;
         --no-verify)  AUTOOS_VERIFY=0; shift ;;
         --undo)       DO_UNDO=1; shift ;;
+        --host-name)
+            # Optional value: a following --flag (or nothing) means "use this
+            # machine's own hostname". Never eat the next flag as a name.
+            AUTOOS_HOST_NAME_GIVEN=1
+            if [[ -n "${2:-}" && "${2:-}" != -* ]]; then AUTOOS_HOST_NAME_CLI="$2"; shift 2
+            else AUTOOS_HOST_NAME_CLI=""; shift
+            fi ;;
         --create-usb)       DO_CREATE_USB=1; shift ;;
         --image)            USB_IMAGE="${2:-}"; shift 2 ;;
         --kind)              USB_KIND="${2:-installer}"; shift 2 ;;
@@ -135,6 +145,37 @@ while [[ $# -gt 0 ]]; do
         *) printf 'Unknown option: %s\n\n' "$1"; usage; exit 2 ;;
     esac
 done
+
+# ─── --host-name: set machine host_name in host.yml ─────────────────────────────
+# If --host-name was given, write host.yml (creates if missing, never overwrites).
+# install.sh is already sourced above, so _host_config_path/_normalize_hostname
+# are available. An explicit name is written exactly; a bare --host-name
+# defaults to the normalised short hostname.
+# Honors --dry-run: prints what would be written without writing.
+if [[ "${AUTOOS_HOST_NAME_GIVEN:-0}" == 1 ]]; then
+    host_file="$(_host_config_path)"
+    if [[ -f "$host_file" ]]; then
+        ui_info "host.yml exists at $host_file - skipped (use AUTOOS_HOST_NAME to override at runtime)"
+    else
+        _host_name_value="${AUTOOS_HOST_NAME_CLI:-}"
+        if [[ -n "$_host_name_value" && ! "$_host_name_value" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+            # one token, starting with a letter, digit or underscore: it becomes a field name and a host.yml value
+            ui_err "--host-name takes letters, digits, dot, dash and underscore only, and may not start with a dot or a dash"
+            exit 2
+        fi
+        if [[ -z "$_host_name_value" ]]; then
+            _host_name_value="$(_normalize_hostname "$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)")"
+        fi
+        if (( AUTOOS_DRY_RUN )); then
+            ui_info "would write $host_file (host_name: $_host_name_value)"
+        else
+            mkdir -p "$(dirname "$host_file")"
+            printf 'host_name: %s\n' "$_host_name_value" >"$host_file"
+            ui_ok "Created $host_file with host_name: $_host_name_value"
+        fi
+    fi
+    exit 0
+fi
 
 ui_init
 

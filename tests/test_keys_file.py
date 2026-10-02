@@ -89,6 +89,28 @@ class ReadKeysTests(unittest.TestCase):
             self.assertEqual(module.read_keys(path), {"muse": "DUMMY1"})
 
 
+class ReadKeysRulesTests(unittest.TestCase):
+    """The rules the gateway-key resolver, the bash launchers and the PowerShell reader all share."""
+
+    def test_a_placeholder_anywhere_in_the_value_is_not_a_key(self):
+        # a prefix test read the last two as real keys
+        for value in ("REPLACE_WITH_X", "sk-REPLACE_ME", "<REPLACE_WITH_X>", "your-REPLACE-here"):
+            self.assertEqual(read_text(f"muse: {value}\n"), {}, value)
+
+    def test_a_placeholder_line_is_skipped_so_a_later_real_value_is_used(self):
+        self.assertEqual(read_text("muse: REPLACE_WITH_X\nmuse: real-key\n"), {"muse": "real-key"})
+
+    def test_an_inline_comment_is_cut_and_a_quoted_hash_is_kept(self):
+        self.assertEqual(read_text("a: value  # rotated\nb: 'has # inside'  # note\nc=tab\t# t\nd: no#space\n"),
+                         {"a": "value", "b": "has # inside", "c": "tab", "d": "no#space"})
+
+    def test_crlf_lines_are_read_like_lf_lines(self):
+        self.assertEqual(read_text("a: one\r\nb: two  # c\r\n"), {"a": "one", "b": "two"})
+
+    def test_the_module_ends_with_a_newline(self):
+        self.assertTrue(MODULE.read_bytes().endswith(b"\n"))
+
+
 class SourceTests(unittest.TestCase):
     def test_no_installer_reimplements_the_parse(self):
         # Every keys read inside install.sh goes through here, so none can

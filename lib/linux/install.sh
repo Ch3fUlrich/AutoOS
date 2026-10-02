@@ -2759,15 +2759,16 @@ route_detected_clis_to_gateway() {
     # install, so without this step they would never point at the gateway).
     # Each step skips quietly when its CLI is absent; dry runs announce.
     # Keys bridge from the repo keys file when the env does not carry them
-    # (same resolution as the openhands and opencode writers — one chain, one
-    # parser, tools/keys_file.py; never printed). Without keys the claude
+    # (autoos_resolve_client_key below - the one gateway-named rule, shared
+    # with the openhands writer; never printed). Without keys the claude
     # step warns and the qwen step is skipped.
     if [[ -z "${OMNIROUTE_API_KEY:-}" || -z "${AUTOOS_OMNIROUTE_KEY:-}" ]]; then
         _keys_file="$(autoos_api_keys_conf)" || _keys_file=""
         _file_key=""
         if [[ -n "$_keys_file" ]]; then
-            _file_key="$(python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/keys_file.py" \
-                "$_keys_file" omniroute 2>/dev/null)" || _file_key=""
+            # The gateway client key: the one gateway-named rule (new field,
+            # then legacy with a deprecation line), never a second reader.
+            _file_key="$(autoos_resolve_client_key "$_keys_file" 2>/dev/null)" || _file_key=""
         fi
         unset _keys_file
         if [[ -z "${OMNIROUTE_API_KEY:-}" && -n "$_file_key" ]]; then
@@ -4966,6 +4967,115 @@ autoos_api_keys_conf() {
     return 1
 }
 
+# ─── OmniRoute gateway key resolution (shared with apply.sh, start-stack.sh) ───
+# The resolver CLI is THIS checkout's tools/autoos_gateway_key.py, found from this file (not from
+# AUTOOS_ROOT, which can name another tree), once, when the file is sourced.
+_AUTOOS_GATEWAY_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/autoos_gateway_key.py"
+
+# is_local_gateway <url>: true (0) when the URL points to loopback. There is ONE classifier,
+# tools/autoos_gateway_key.py (the PowerShell module carries the same rule in its own language);
+# unset or empty is local. Scheme-less values such as 127.0.0.1:20128 are NOT local: say
+# http://127.0.0.1:20128. Without python3 nothing can be classified: that says so and is non-local.
+is_local_gateway() {
+    local url="${1-}"
+    [[ -z "$url" ]] && return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'autoos: python3 is required to classify the gateway URL (treated as non-local)\n' >&2
+        return 1
+    fi
+    python3 "$_AUTOOS_GATEWAY_CLI" is-local "$url"
+}
+
+# _host_config_path: path to the machine-wide host.yml config.
+_host_config_path() {
+    if [[ -n "${AUTOOS_HOST_CONFIG:-}" ]]; then
+        printf '%s\n' "${AUTOOS_HOST_CONFIG/#\~/$HOME}"
+        return
+    fi
+    if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || -n "${WINDIR:-}" ]]; then
+        printf '%s\n' "${LOCALAPPDATA:-$USERPROFILE/AppData/Local}/autoos/host.yml"
+    else
+        printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/autoos/host.yml"
+    fi
+}
+
+# _normalize_hostname <name>: lower, first label, [^a-z0-9_] -> _
+_normalize_hostname() {
+    local name="$1"
+    name="${name%%.*}"
+    name="${name,,}"
+    printf '%s\n' "${name//[^a-z0-9_]/_}"
+}
+
+# autoos_host_name: resolve the host name for the local gateway field.
+# Order: 1) AUTOOS_HOST_NAME env, 2) host_name: from host.yml, 3) short hostname.
+autoos_host_name() {
+    if [[ -n "${AUTOOS_HOST_NAME:-}" ]]; then
+        _normalize_hostname "${AUTOOS_HOST_NAME}"
+        return
+    fi
+    local host_file
+    host_file="$(_host_config_path)"
+    if [[ -f "$host_file" ]]; then
+        # Strip UTF-8 BOM (EF BB BF) from first line if present
+        local first_line=1
+        while IFS= read -r line; do
+            if [[ $first_line -eq 1 ]]; then
+                line="${line#$'\xef\xbb\xbf'}"
+                first_line=0
+            fi
+            line="${line#"${line%%[![:space:]]*}"}"  # ltrim
+            line="${line%"${line##*[![:space:]]}"}"  # rtrim
+            if [[ "$line" =~ ^host_name[[:space:]]*: ]]; then
+                local val="${line#*:}"
+                val="${val#"${val%%[![:space:]]*}"}"
+                val="${val%"${val##*[![:space:]]}"}"
+                val="${val%\"}"; val="${val#\"}"; val="${val%\'}"; val="${val#\'}"
+                if [[ -n "$val" ]]; then
+                    _normalize_hostname "$val"
+                    return
+                fi
+            fi
+        done <"$host_file"
+    fi
+    local fqdn
+    fqdn="$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)"
+    local normalized
+    normalized="$(_normalize_hostname "$fqdn")"
+    # Print ONE notice line naming the field it will look up
+    printf 'AutoOS: using hostname '\''%s'\'' for omniroute key field (set AUTOOS_HOST_NAME or host_name in %s to override)\n' "$normalized" "$host_file" >&2
+    printf '%s\n' "$normalized"
+}
+
+# autoos_client_key_field: return the api-keys.yml field name for the client key.
+# Non-local gateway -> omniroute_server; Local gateway -> omniroute_<host>
+autoos_client_key_field() {
+    local gateway_url="${AUTOOS_OMNIROUTE_URL:-}"
+    if is_local_gateway "$gateway_url"; then
+        printf 'omniroute_%s\n' "$(autoos_host_name)"
+    else
+        printf 'omniroute_server\n'
+    fi
+}
+
+# autoos_resolve_client_key: resolve the OmniRoute client key.
+# One implementation: tools/autoos_gateway_key.py (env AUTOOS_OMNIROUTE_KEY, then the
+# gateway-named field, then the legacy field with ONE deprecation line). The key goes to
+# stdout; the deprecation line and the missing-key error go to stderr; rc 1 when missing.
+# Args: [keys_file] - defaults to configuration/api-keys.yml
+autoos_resolve_client_key() {
+    local keys_file="${1:-}"
+    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+    if [[ -z "$keys_file" ]]; then
+        keys_file="${AUTOOS_KEYS_FILE:-$repo_root/configuration/api-keys.yml}"
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'autoos: python3 is required to resolve the OmniRoute client key\n' >&2
+        return 1
+    fi
+    python3 "$_AUTOOS_GATEWAY_CLI" resolve "$keys_file"
+}
+
 # graphify_mcp_link_prepare: decide what may sit at ~/.local/bin/graphify-mcp, and
 # clear the path for `uv tool install` — which writes its executable there and refuses
 # (or, with --force, overwrites) whatever is in the way.
@@ -5972,13 +6082,17 @@ llm = agent_settings.setdefault("llm", {})
 # "high". The unconditional "high" used to poison the local/Ollama fallback
 # with thinking params Ollama rejects outright.
 _default_reasoning = False
-# OmniRoute client key rides AUTOOS_OMNIROUTE_KEY (same env the tier-profile
-# writer below reads), else the keys file autoos_api_keys_conf resolved —
-# AUTOOS_KEYS_FILE overrides it and the suite points that at a stub for a
-# hermetic keyless run. No second reader of that file lives here: an inline
-# parse is how a `.conf`-only reader once ended up handed a `.yml` and
-# reported a configured machine as an unconfigured one.
-_gw_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
+# OmniRoute client key resolved via tools/autoos_gateway_key.py (gateway-named fields)
+# Precedence: AUTOOS_OMNIROUTE_KEY env > new field (omniroute_server/omniroute_<host>) > legacy field.
+# A missing key is None (the keyless local fallback below), never an exception.
+import sys, os
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
+from autoos_gateway_key import resolve_client_key
+try:
+    _gw_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else Path(os.devnull))
+except KeyError:
+    _gw_key = None
 if _gw_key:
     # Gateway default (mirrors the opencode t1 setup): the whole
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
@@ -6135,7 +6249,16 @@ profiles = dict([
 ])
 for name, p_data in profiles.items():
     _put_json(os.path.join(profiles_dir, name), p_data)
-omni_key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or secrets.get("omniroute")
+# OmniRoute client key resolved via tools/autoos_gateway_key.py (gateway-named fields).
+# A missing key is None (tiers without a key are skipped below), never an exception.
+import sys, os
+from pathlib import Path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(models_file))), 'tools'))
+from autoos_gateway_key import resolve_client_key
+try:
+    omni_key = resolve_client_key(os.environ, Path(secrets_file) if secrets_file else Path(os.devnull))
+except KeyError:
+    omni_key = None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
 # (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
 _lit_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("AUTOOS_LITELLM_API_KEY")

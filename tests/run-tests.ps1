@@ -6889,6 +6889,553 @@ Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again wh
     Pass
 }
 
+Describe-Group 'gateway key (gwkey)'
+
+# WS-OMNIREMOTE: the client key field is named by gateway (omniroute_server
+# for a non-local gateway, omniroute_<host> for the local one). Fixtures only
+# (sk-test-*): the resolved VALUE is asserted, while notices, deprecations
+# and errors must name the FIELD and never a value or the URL. Messages travel
+# through Write-AutoOSLine, so they are asserted on a fresh log file, not on
+# the console ([Console]::WriteLine bypasses the output streams).
+
+Test-Case 'gwkey: local gateway resolves omniroute_<host>' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    try {
+        'omniroute_testhost: sk-test-local' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Assert-Equal (Get-AutoOSClientKeyField) 'omniroute_testhost'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile $tmp) 'sk-test-local'
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: non-local gateway resolves omniroute_server' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    try {
+        'omniroute_server: sk-test-server' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Assert-Equal (Get-AutoOSClientKeyField) 'omniroute_server'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile $tmp) 'sk-test-server'
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: legacy local omniroute warns once and resolves' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }  # notices print once per session; start clean
+        $key = Get-AutoOSClientKey -KeysFile $tmp
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-Equal $key 'sk-test-legacy'
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+        Assert-True ($warns[0].Line -like "*'omniroute'*'omniroute_testhost'*") "no old+new field in [$($warns[0].Line)]"
+        Assert-True ($text -notmatch 'sk-test-legacy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: legacy server omniroute_client_<host> warns once and resolves' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute_client_testhost: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }  # notices print once per session; start clean
+        $key = Get-AutoOSClientKey -KeysFile $tmp
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-Equal $key 'sk-test-legacy'
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+        Assert-True ($warns[0].Line -like "*'omniroute_client_testhost'*'omniroute_server'*") "no old+new field in [$($warns[0].Line)]"
+        Assert-True ($text -notmatch 'sk-test-legacy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: missing key names the expected field, never the value or URL' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'unrelated: sk-test-decoy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Assert-True ($null -eq (Get-AutoOSClientKey -KeysFile $tmp)) 'server case resolved without a key'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Assert-True ($null -eq (Get-AutoOSClientKey -KeysFile $tmp)) 'local case resolved without a key'
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -like "*Expected field 'omniroute_server'*") 'no server field in the log'
+        Assert-True ($text -like '*non-local*') 'no non-local reason in the log'
+        Assert-True ($text -like "*Expected field 'omniroute_testhost'*") 'no local field in the log'
+        Assert-True ($text -notmatch 'gw\.example\.com') 'the URL leaked into the log'
+        Assert-True ($text -notmatch '127\.0\.0\.1') 'the URL leaked into the log'
+        Assert-True ($text -notmatch 'sk-test-decoy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: explicit URL classification matches WS-OMNIREMOTE table' {
+    # WS-OMNIREMOTE r3: this table must match the bash is_local_gateway behavior
+    # and the Python is_local_gateway behavior exactly. No key/URL values in output.
+    $testCases = @(
+        @{ Url = ''; Expected = $true; Desc = 'empty URL -> local' }
+        @{ Url = 'http://127.0.0.1:20128'; Expected = $true; Desc = '127.0.0.1 -> local' }
+        @{ Url = 'http://localhost:20128'; Expected = $true; Desc = 'localhost -> local' }
+        @{ Url = 'http://LOCALHOST:20128/'; Expected = $true; Desc = 'uppercase LOCALHOST -> local' }
+        @{ Url = 'http://[::1]:20128'; Expected = $true; Desc = 'IPv6 loopback -> local' }
+        @{ Url = 'http://user:pass@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo + 127.0.0.1 -> local' }
+        @{ Url = 'http://user@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo (user only) + 127.0.0.1 -> local' }
+        @{ Url = 'http://user:pass@localhost:8080'; Expected = $true; Desc = 'userinfo + localhost -> local' }
+        @{ Url = 'http://user:pass@[::1]:8080'; Expected = $true; Desc = 'userinfo + IPv6 loopback -> local' }
+        @{ Url = 'https://gw.example.com'; Expected = $false; Desc = 'external hostname -> non-local' }
+        @{ Url = 'http://server:20128'; Expected = $false; Desc = 'bare hostname -> non-local' }
+        @{ Url = 'http://[::2]:20128'; Expected = $false; Desc = 'non-loopback IPv6 -> non-local' }
+        @{ Url = 'not-a-url'; Expected = $false; Desc = 'unparseable -> non-local' }
+        @{ Url = 'http://evil.example/x@127.0.0.1'; Expected = $false; Desc = '@ in path -> host is evil.example' }
+        @{ Url = 'http://evil.example#@127.0.0.1'; Expected = $false; Desc = '@ in fragment -> host is evil.example' }
+        @{ Url = 'http://evil.example?x=@127.0.0.1'; Expected = $false; Desc = '@ in query -> host is evil.example' }
+        @{ Url = 'http://localhost.'; Expected = $false; Desc = 'trailing-dot lookalike -> non-local' }
+        @{ Url = 'http://127.0.0.2'; Expected = $false; Desc = '127.0.0.2 -> non-local' }
+        @{ Url = 'http://0.0.0.0'; Expected = $false; Desc = '0.0.0.0 -> non-local' }
+        @{ Url = 'http://127.0.0.1/x@y'; Expected = $true; Desc = '@ in path after a loopback host -> local' }
+        @{ Url = 'http://localhost?x=1'; Expected = $true; Desc = 'query after localhost -> local' }
+        @{ Url = 'http://127.0.0.1#frag'; Expected = $true; Desc = 'fragment after 127.0.0.1 -> local' }
+    )
+    $failures = @()
+    foreach ($tc in $testCases) {
+        $result = Test-AutoOSLocalGateway -Url $tc.Url
+        if ($result -ne $tc.Expected) {
+            $failures += "$($tc.Desc): got $result, expected $($tc.Expected) for '$($tc.Url)'"
+        }
+    }
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+}
+
+Test-Case 'gwkey: key file rules match tools/keys_file.py (case, comments, placeholders, duplicates)' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_keyrules_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $keys = Join-Path $d 'api-keys.yml'
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $cases = @(
+            @{ Text = "OmniRoute_TestHost: mixed-case-key"; Want = 'mixed-case-key'; Desc = 'field match is case-insensitive' }
+            @{ Text = "omniroute_testhost: inline-key # rotated"; Want = 'inline-key'; Desc = 'an inline comment is cut' }
+            @{ Text = "omniroute_testhost: 'quoted-key'  # note"; Want = 'quoted-key'; Desc = 'quoted value with a comment after it' }
+            @{ Text = "omniroute_testhost: REPLACE_WITH_KEY`nomniroute_testhost: second-key"; Want = 'second-key'; Desc = 'a placeholder is skipped and the next value used' }
+            @{ Text = "omniroute_testhost: sk-REPLACE_ME`nomniroute_testhost: third-key"; Want = 'third-key'; Desc = 'a placeholder anywhere in the value is skipped' }
+            @{ Text = "omniroute_testhost: <REPLACE_WITH_X>"; Want = ''; Desc = 'an angle-bracket placeholder is not a key' }
+            @{ Text = "omniroute_testhost: first-key`nomniroute_testhost: second-key"; Want = 'first-key'; Desc = 'the first filled-in duplicate wins' }
+        )
+        $failures = @()
+        foreach ($c in $cases) {
+            Set-Content -LiteralPath $keys -Value $c.Text -Encoding utf8
+            $got = Get-AutoOSClientKey -KeysFile $keys
+            if ([string]$got -ne $c.Want) { $failures += "$($c.Desc): got '$got' want '$($c.Want)'" }
+        }
+        Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: -Optional makes a missing key silent and still honours the env key' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY; $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        $got = Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional
+        Assert-True ($null -eq $got) 'a missing optional key must be $null'
+        $text = if (Test-Path $log) { Get-Content $log -Raw -Encoding utf8 } else { '' }
+        Assert-True ([string]::IsNullOrEmpty($text) -or $text -notmatch 'No OmniRoute client key') 'a missing optional key must not print the error line'
+        $env:AUTOOS_OMNIROUTE_KEY = 'env-key-value'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional) 'env-key-value'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: two resolves in one session print the deprecation line once' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-once-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }
+        $null = Get-AutoOSClientKey -KeysFile $tmp
+        $null = Get-AutoOSClientKey -KeysFile $tmp
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: the shared URL table classifies every row the same way (module and start-stack copy)' {
+    $table = Get-Content -LiteralPath (Join-Path $Root 'tests\fixtures\gateway-url-classification.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    Assert-True ($table.Count -gt 60) 'the shared table is missing rows'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true))
+    Assert-Equal $fn.Count 1 'start-stack.ps1 must carry exactly one Test-AutoOSLocalGateway'
+    $inCopy = { param($text, $u) . ([scriptblock]::Create($text)); Test-AutoOSLocalGateway -Url $u }
+    $wrong = @()
+    foreach ($r in $table) {
+        $m = [bool](Test-AutoOSLocalGateway -Url $r.url)
+        $c = [bool](& $inCopy $fn[0].Extent.Text $r.url)
+        if ($m -ne [bool]$r.local) { $wrong += "module: '$($r.url | ConvertTo-Json -Compress)' got $m want $($r.local)" }
+        if ($c -ne [bool]$r.local) { $wrong += "start-stack copy: '$($r.url | ConvertTo-Json -Compress)' got $c want $($r.local)" }
+    }
+    Assert-True ($wrong.Count -eq 0) ($wrong -join '; ')
+}
+
+Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for word' {
+    # start-stack.ps1 is standalone (it imports no module), so it holds copies of the gateway-key rule.
+    # A copy that drifts picks another key field than apply.ps1 on the same machine: compare the TEXT.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $pick = {
+        param($file, $name)
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+        $f = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true))
+        if ($f.Count -ne 1) { return $null }
+        return ($f[0].Extent.Text -replace "`r`n", "`n")
+    }
+    $differ = @()
+    foreach ($n in $names) {
+        $m = & $pick (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') $n
+        $c = & $pick (Join-Path $Root 'configuration\start-stack.ps1') $n
+        if ($null -eq $m -or $null -eq $c) { $differ += "$n (missing in one file)"; continue }
+        if ($m -cne $c) { $differ += $n }
+    }
+    Assert-True ($differ.Count -eq 0) ("start-stack.ps1 drifted from the module: " + ($differ -join ', '))
+}
+
+Test-Case 'gwkey: start-stack.ps1 takes the key class from the gateway it talks to, never from a stale AUTOOS_OMNIROUTE_URL' {
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $full = Get-Content -LiteralPath $script -Raw
+    $m = [regex]::Match($full, '(?s)# BEGIN key-block.*?# END key-block')
+    Assert-True $m.Success 'start-stack.ps1 lost its key-block markers'
+    $block = $m.Value.Replace('exit 1', "throw 'no key'")
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
+    $want = 'Write-AutoOSLine','Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    $funcs = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $run = { param($funcs, $block, $keysFile) $Gateway = 'http://127.0.0.1:20128'; . ([scriptblock]::Create($funcs)); . ([scriptblock]::Create($block)); [pscustomobject]@{ Key = $Key; Url = $env:AUTOOS_OMNIROUTE_URL; Exported = $env:AUTOOS_OMNIROUTE_KEY } }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; KEY = $env:AUTOOS_OMNIROUTE_KEY; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssk_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $keys = Join-Path $d 'api-keys.yml'
+        Set-Content -LiteralPath $keys -Value "omniroute_server: K-REMOTE-must-not-leak`nomniroute_testhost: K-LOCAL-right" -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.test'   # a stale REMOTE url in the environment
+        $r = & $run $funcs $block $keys 6>$null
+        Assert-Equal $r.Key 'K-LOCAL-right' 'the REMOTE key was chosen for a launcher that talks to the local gateway'
+        Assert-Equal $r.Exported 'K-LOCAL-right' 'the exported key is not the local one'
+        Assert-Equal $env:AUTOOS_OMNIROUTE_URL 'https://gw.example.test' 'the url the block sets must be restored afterwards'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.KEY) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $saved.KEY }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: the start-stack.ps1 copy writes its missing-key line validly (no literal -Level) and reads host_name case-sensitively' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Write-AutoOSLine','Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    Assert-Equal $defs.Count $want.Count 'start-stack.ps1 no longer carries every function (the stand-in writer included)'
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    # ErrorActionPreference Stop turns an invalid parameter (Write-Host ... -Level error) into a terminating error
+    $run = { param($text, $keys) $ErrorActionPreference = 'Stop'; . ([scriptblock]::Create($text)); Get-AutoOSClientKey -KeysFile $keys }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; KEY = $env:AUTOOS_OMNIROUTE_KEY; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssl_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $out = (& $run $text (Join-Path $d 'none.yml') 6>&1 | Out-String)
+        Assert-True ($out -match 'No OmniRoute client key') "the missing-key line was not written: $out"
+        Assert-True ($out -notmatch '-Level') "a literal -Level leaked into the console line: $out"
+        # host_name is case-sensitive, like Python and bash: `Host_Name: x` is not the setting
+        [IO.File]::WriteAllText((Join-Path $d 'host.yml'), "Host_Name: wrongcase`n")
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        $field = & { . ([scriptblock]::Create($text)); Get-AutoOSClientKeyField } 6>$null
+        Assert-True ($field -ne 'omniroute_wrongcase') 'host_name matched case-insensitively'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.KEY) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $saved.KEY }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in AUTOOS_HOST_CONFIG like the module' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','Write-AutoOSNoticeOnce'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd) . ([scriptblock]::Create($text)); & $cmd }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG; HOME_ = $env:USERPROFILE }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssw_$1_' + [Guid]::NewGuid().ToString('N'))  # a $ in the profile path must not be read as a replacement token
+    $null = New-Item -ItemType Directory -Path (Join-Path $d 'autoos') -Force
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'autoos\host.yml'), "host_name: tilde-host`n")
+        $env:USERPROFILE = $d
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = '~/autoos/host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = '  http://127.0.0.1:20128  '
+        $m = Get-AutoOSClientKeyField
+        $c = & $inCopy $text 'Get-AutoOSClientKeyField'
+        Assert-Equal $m 'omniroute_tilde_host'
+        Assert-Equal (Get-AutoOSHostConfigPath) ($d + '/autoos/host.yml') 'the ~ was not expanded literally (the rest of the path stays as written)'
+        Assert-Equal $c $m 'the start-stack copy picked another field than the module'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        $env:USERPROFILE = $saved.HOME_
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: start-stack.ps1 parity with module function' {
+    # start-stack.ps1 carries a copy of the local-gateway check (Test-AutoOSLocalGateway).
+    # This test loads both and asserts they give identical answers for the WS-OMNIREMOTE URL table.
+    $testUrls = @(
+        '', 'http://127.0.0.1:20128', 'http://localhost:20128', 'http://LOCALHOST:20128/',
+        'http://[::1]:20128', 'http://user:pass@127.0.0.1:8080', 'http://user@127.0.0.1:8080',
+        'http://user:pass@localhost:8080', 'http://user:pass@[::1]:8080',
+        'https://gw.example.com', 'http://server:20128', 'http://[::2]:20128', 'not-a-url'
+    )
+    $moduleResults = @{}
+    foreach ($u in $testUrls) { $moduleResults[$u] = (Test-AutoOSLocalGateway -Url $u) }
+
+    # Extract start-stack.ps1's own copy through the AST (the script itself is never run).
+    $startStackPath = Join-Path $Root 'configuration\start-stack.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($startStackPath, [ref]$null, [ref]$null)
+    $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true)
+    Assert-True ($null -ne $fn) 'start-stack.ps1 has no Test-AutoOSLocalGateway'
+    $copy = $fn.Body.GetScriptBlock()
+    $failures = @()
+    foreach ($u in $testUrls) {
+        $other = & $copy -Url $u
+        if ($moduleResults[$u] -ne $other) { $failures += "mismatch for '$u': module=$($moduleResults[$u]) start-stack=$other" }
+    }
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+}
+
+Test-Case 'gwkey: start-stack.ps1 host-name and field choice match the module' {
+    # start-stack.ps1 is standalone (it imports no module), so it carries its own copy of the
+    # whole gateway-key rule. Extract every copied function through the AST, define them only
+    # inside a child scope (the module's versions stay untouched), and compare host name,
+    # normalisation and field choice with the module over a URL x host-source matrix.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','Write-AutoOSNoticeOnce'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true))
+    Assert-Equal $defs.Count $names.Count 'start-stack.ps1 no longer carries every gateway-key function'
+    $defsText = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd, $argList) . ([ScriptBlock]::Create($text)); & $cmd @argList }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwpar_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $yml = Join-Path $d 'host.yml'
+        [IO.File]::WriteAllText($yml, "host_name: server`n")
+        $failures = @()
+        foreach ($raw in 'Work-Station.corp.example.com', 'LAPTOP', 'a b-c') {
+            $m = ConvertTo-AutoOSHostName $raw; $c = & $inCopy $defsText 'ConvertTo-AutoOSHostName' @($raw)
+            if ($m -ne $c) { $failures += "normalise '$raw': module=$m start-stack=$c" }
+        }
+        foreach ($url in '', 'http://127.0.0.1:20128', 'https://gw.example.com') {
+            foreach ($src in 'env', 'file', 'hostname') {
+                if ($url) { $env:AUTOOS_OMNIROUTE_URL = $url } else { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue }
+                Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+                $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+                if ($src -eq 'env') { $env:AUTOOS_HOST_NAME = 'Work-Station' }
+                if ($src -eq 'file') { $env:AUTOOS_HOST_CONFIG = $yml }
+                foreach ($fn in 'Get-AutoOSHostName', 'Get-AutoOSClientKeyField') {
+                    $m = & $fn 6>$null; $c = & $inCopy $defsText $fn @() 6>$null
+                    if ($m -ne $c) { $failures += "$fn url='$url' host=$src : module=$m start-stack=$c" }
+                }
+            }
+        }
+        Assert-Equal $failures.Count 0 ($failures -join '; ')
+    } finally {
+        foreach ($k in @{ URL = 'AUTOOS_OMNIROUTE_URL'; HOSTN = 'AUTOOS_HOST_NAME'; CFG = 'AUTOOS_HOST_CONFIG' }.GetEnumerator()) {
+            if ($null -ne $saved[$k.Key]) { Set-Item -Path "Env:$($k.Value)" -Value $saved[$k.Key] } else { Remove-Item -Path "Env:$($k.Value)" -ErrorAction SilentlyContinue }
+        }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName 'testhost' 2>&1 | Out-String
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) 'host_name: testhost'
+        $hostBytes = [IO.File]::ReadAllBytes($env:AUTOOS_HOST_CONFIG)
+        Assert-True (-not ($hostBytes.Length -ge 3 -and $hostBytes[0] -eq 0xEF -and $hostBytes[1] -eq 0xBB -and $hostBytes[2] -eq 0xBF)) 'host.yml must be written without a BOM (ReadAllText hides one)'
+        Assert-True ($out -like '*Created*') "no created line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: setup -HostName never overwrites an existing host.yml' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        [IO.File]::WriteAllText($env:AUTOOS_HOST_CONFIG, "host_name: original`n")
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName 'other' 2>&1 | Out-String
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) 'host_name: original'
+        Assert-True ($out -like '*skipped*') "no skipped line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: setup -HostName defaults to the short hostname' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName '' 2>&1 | Out-String
+        try { $rawHost = [System.Net.Dns]::GetHostName() } catch { $rawHost = 'localhost' }
+        $want = 'host_name: ' + (ConvertTo-AutoOSHostName $rawHost)
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) $want
+        Assert-True ($out -like '*Created*') "no created line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
 Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
@@ -7905,9 +8452,12 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
     $script = Join-Path $Root 'configuration\start-stack.ps1'
     $tokens = $null; $parseErrors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
-    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-AutoOSKeyValue' }, $true))
-    if ($fn.Count -ne 1) { throw "want exactly one function Get-AutoOSKeyValue in start-stack.ps1, found $($fn.Count)" }
-    . ([scriptblock]::Create($fn[0].Extent.Text))
+    # The reader is three functions (value parser, file reader, exact-name lookup): extract all of them.
+    foreach ($fname in 'ConvertFrom-AutoOSKeyValue', 'Read-AutoOSKeyMap', 'Get-AutoOSKeyValue') {
+        $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fname }, $true))
+        if ($fn.Count -ne 1) { throw "want exactly one function $fname in start-stack.ps1, found $($fn.Count)" }
+        . ([scriptblock]::Create($fn[0].Extent.Text))
+    }
 
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ockey-$([Guid]::NewGuid().ToString('N'))"
     try {
@@ -7938,19 +8488,21 @@ Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml 
         Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
 
-        # Two uncommented lines: the last one wins (bash uses tail -n1).
+        # Two uncommented lines: the first one wins - the one rule in tools/keys_file.py, which
+        # the bash launchers and the Python tools now share.
         Set-Content -LiteralPath $keys -Value "opencode_password: first`nopencode_password: second" -Encoding utf8
-        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'second'
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'first'
 
         # Case-sensitive key match: Opencode_password is not opencode_password.
         Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8
         Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
 
-        # As in bash: a trailing placeholder line wins and reads empty; an indented key is not a top-level key.
+        # Like tools/keys_file.py: a placeholder line is skipped, so the real value above it is used;
+        # indentation is trimmed, as keys_file.py trims it (the keys file is flat, so an indented line is a key).
         Set-Content -LiteralPath $keys -Value "opencode_password: real`nopencode_password: REPLACE_WITH_X" -Encoding utf8
-        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'real'
         Set-Content -LiteralPath $keys -Value "  opencode_password: nested" -Encoding utf8
-        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'nested'
 
         Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
     } finally {

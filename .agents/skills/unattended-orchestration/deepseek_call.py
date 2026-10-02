@@ -11,7 +11,8 @@ failed, 2 usage/key/registry error, 3 refused by the monthly cap.
 Operator rules:
 - Keys come from AutoOS ``configuration/api-keys.yml`` (``name: value`` lines), read here in
   the process — never from argv, never printed. ``AUTOOS_OMNIROUTE_KEY`` overrides the file's
-  ``omniroute:`` value (2026-09-25).
+  gateway-named client-key field (``omniroute_server`` / ``omniroute_<host>``,
+  tools/autoos_gateway_key.py).
 - Which DeepSeek models count comes from catalog/ai-registry.json, never from this file: a
   served model passes only when it is exactly one of route ``deepseek-v4.1-flash``'s legs that
   ``policy.leg_rules`` allows, checked as served (so V4 Pro never passes, whatever the spelling).
@@ -101,28 +102,25 @@ def find_keys_file() -> Path | None:
     return next((c for c in cands if c.is_file()), None)
 
 
-def read_key(path: Path, name: str) -> str | None:
-    # Same parse as AutoOS tools/autoos-agent.py client_key().
-    for line in io.open(path, encoding="utf-8"):
-        m = re.match(r"^%s\s*:\s*(.+?)\s*$" % re.escape(name), line)
-        if m:
-            val = m.group(1).strip("\"'")
-            return None if val.startswith("REPLACE_WITH_") else val
-    return None
-
-
 def load_key() -> str:
-    key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
-    if key:
-        return key
-    path = find_keys_file()
-    if path is None:
-        raise KeyError_("no api-keys.yml found (set AUTOOS_API_KEYS or AUTOOS_ROOT, or create "
-                        "<AutoOS>/configuration/api-keys.yml; see AutoOS docs/api-keys.md)")
-    key = read_key(path, "omniroute")
-    if not key:
-        raise KeyError_("no omniroute key in %s" % path)
-    return key
+    """The OmniRoute client key, by the one rule in tools/autoos_gateway_key.py.
+
+    The keys file is the one find_keys_file() locates (AUTOOS_API_KEYS, AUTOOS_ROOT, the main
+    checkout): a lane worktree has no git-ignored api-keys.yml of its own. Whether the gateway is
+    local decides which field is read, and that comes from the URL this script is about to call
+    (DSR_OMNIROUTE_URL), not from an unrelated AUTOOS_OMNIROUTE_URL in the environment.
+    """
+    from autoos_gateway_key import resolve_client_key
+    keys = find_keys_file()
+    env = dict(os.environ)
+    env["AUTOOS_OMNIROUTE_URL"] = gateway()
+    if keys is None and not env.get("AUTOOS_OMNIROUTE_KEY"):
+        raise KeyError_("no configuration/api-keys.yml found (set AUTOOS_API_KEYS or AUTOOS_ROOT, "
+                        "or AUTOOS_OMNIROUTE_KEY)")
+    try:
+        return resolve_client_key(env, keys)
+    except KeyError as e:
+        raise KeyError_(str(e.args[0]) if e.args else str(e))
 
 
 # ── policy (catalog/ai-registry.json) ──────────────────────────────────────────

@@ -153,7 +153,9 @@ param(
     [string]$ImageSha256,
     [string]$WriteMode,
     [switch]$ListUsb,
-    [switch]$ListEngines
+    [switch]$ListEngines,
+    # D-148: set machine host_name in host.yml (creates if missing, never overwrites)
+    [string]$HostName
 )
 
 Set-StrictMode -Version Latest
@@ -178,6 +180,34 @@ Import-Module (Join-Path $LibDir 'AutoOS.Catalog.psm1') -Force -DisableNameCheck
 Import-Module (Join-Path $LibDir 'AutoOS.Install.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.State.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $LibDir 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
+
+# ─── -HostName: set machine host_name in host.yml ───────────────────────────────
+# If -HostName was bound, write host.yml (creates if missing, never overwrites).
+# An explicit name is written exactly; -HostName '' defaults to the normalised
+# short hostname. $PSBoundParameters (not $HostName truthiness) is the test so
+# an empty value still means "default", never "skip and run the whole setup".
+# Honors -DryRun: prints what would be written without writing.
+if ($PSBoundParameters.ContainsKey('HostName')) {
+    $hostFile = Get-AutoOSHostConfigPath
+    if (Test-Path -LiteralPath $hostFile) {
+        Write-AutoOSLine "host.yml exists at $hostFile - skipped (use AUTOOS_HOST_NAME to override at runtime)"
+    } else {
+        $hostNameValue = $HostName
+        if (-not $hostNameValue) {
+            try { $defaultHost = [System.Net.Dns]::GetHostName() } catch { $defaultHost = 'localhost' }
+            $hostNameValue = ConvertTo-AutoOSHostName $defaultHost
+        }
+        if ($DryRun) {
+            Write-AutoOSLine "would write $hostFile (host_name: $hostNameValue)" -Level info
+        } else {
+            $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $hostFile) -ErrorAction SilentlyContinue
+            # Write without BOM: [IO.File]::WriteAllText with UTF8Encoding(false)
+            [IO.File]::WriteAllText($hostFile, "host_name: $hostNameValue`n", [System.Text.UTF8Encoding]::new($false))
+            Write-AutoOSLine "Created $hostFile with host_name: $hostNameValue" -Level ok
+        }
+    }
+    exit 0
+}
 
 if ($NoColor) { Set-AutoOSColor $false }
 if ($NoVerify) { Set-AutoOSVerify $false }

@@ -19,8 +19,11 @@ which never live in the repo:
 
     python3 tools/sync-openhands-profiles.py --openhands-dir ~/.openhands [--keys-file configuration/api-keys.yml]
 
-Key resolution: env AUTOOS_OMNIROUTE_KEY first, then the `omniroute:` entry of
-the keys file (omniroute tiers); env LITELLM_MASTER_KEY, then
+Key resolution: env AUTOOS_OMNIROUTE_KEY first, then the gateway-named field
+of the keys file (`omniroute_server` for a non-local gateway,
+`omniroute_<host>` for the local one, then the legacy `omniroute` /
+`omniroute_client_<host>` with a deprecation line - tools/autoos_gateway_key.py
+is the one rule) (omniroute tiers); env LITELLM_MASTER_KEY, then
 AUTOOS_LITELLM_API_KEY, then the LITELLM_MASTER_KEY entry of
 configuration/litellm/.env (litellm tiers); env OPENROUTER_API_KEY, then the
 `openrouter:` entry of the keys file (a direct-provider tier, e.g. the
@@ -114,11 +117,19 @@ def read_flat_value(path: Path, name: str) -> str | None:
 
 
 def read_omni_key(keys_file: Path | None) -> str | None:
+    """The OmniRoute client key: env wins, else the gateway-named api-keys.yml
+    field via tools/autoos_gateway_key.py (the one rule - new field, then the
+    legacy field with a deprecation line). None when no source has one (the
+    caller skips those tiers); never raises for a missing key."""
     if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
         return os.environ["AUTOOS_OMNIROUTE_KEY"]
-    if keys_file and keys_file.is_file():
-        return read_flat_value(keys_file, "omniroute")
-    return None
+    if not keys_file:
+        return None
+    from autoos_gateway_key import resolve_client_key
+    try:
+        return resolve_client_key(os.environ, Path(keys_file))
+    except KeyError:
+        return None
 
 
 def read_litellm_key(env_path: Path | None) -> str | None:

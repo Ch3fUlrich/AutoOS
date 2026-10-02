@@ -36,7 +36,14 @@ def post(url, payload, key=""):
 
 def main():
     keys = read_keys(KEYS)
-    key = os.environ.get("AUTOOS_OMNIROUTE_KEY") or keys.get("omniroute", "")
+    try:
+        # one rule for every client: env, then omniroute_server / omniroute_<host>, then legacy `omniroute`
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from pathlib import Path
+        from autoos_gateway_key import resolve_client_key
+        key = resolve_client_key({**os.environ, "AUTOOS_OMNIROUTE_URL": GATEWAY}, Path(KEYS))
+    except (KeyError, ImportError):
+        key = ""
     print(f"keys file      : {KEYS}   (exists={os.path.isfile(KEYS)})")
     print(f"keys present   : {sorted(keys)}")
     print(f"omniroute entry: {'FOUND len=%d' % len(key) if key else 'ABSENT'}")

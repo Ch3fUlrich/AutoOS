@@ -104,6 +104,70 @@ the provider and the combo falls through). A 403 names itself distinctly --
 `manage key rejected (403) - spend unmeasured` -- in both the plan notes and the
 `usage` command output, never as a silent `$0.00`.
 
+## Gateway keys by name (WS-OMNIREMOTE)
+
+The OmniRoute client key field in `configuration/api-keys.yml` is now named by
+**which gateway** the client targets, not by a single fixed name. This enables
+multi-host setups where each machine has its own local gateway key.
+
+### Field selection
+
+| Gateway type | `api-keys.yml` field | When used |
+|---|---|---|
+| **Non-local gateway** | `omniroute_server` | `AUTOOS_OMNIROUTE_URL` is set and points to a non-loopback host (e.g. `https://gw.example.com`, `http://server:20128`) |
+| **Local gateway** | `omniroute_<host>` | `AUTOOS_OMNIROUTE_URL` is unset/empty, or its host is `127.0.0.1`, `localhost`, or `::1` (any port). `<host>` is the machine's host name (see below). |
+
+### Host name resolution
+
+The `<host>` part of `omniroute_<host>` is resolved in this order:
+
+1. **`AUTOOS_HOST_NAME`** environment variable — explicit override, wins always.
+2. **`host_name:`** in the machine-wide host config file:
+   - Windows: `%LOCALAPPDATA%\autoos\host.yml`
+   - Linux/macOS: `${XDG_CONFIG_HOME:-~/.config}/autoos/host.yml`
+   - Override with `AUTOOS_HOST_CONFIG` environment variable.
+   - File format: flat `name: value` (same as `api-keys.yml`), e.g. `host_name: workstation`
+3. **Short hostname** — the first label of the system's hostname, lower-cased, with any
+   character outside `[a-z0-9_]` replaced by `_`. Prints one notice line naming the
+   field it will look up.
+
+**On the server machine itself**, if `host_name: server` is set, its local gateway
+field is `omniroute_server` — no special case in code, just the natural result.
+
+### Setup `--host-name`
+
+```bash
+./setup.sh --host-name workstation   # creates host.yml with host_name: workstation
+```
+
+If `host.yml` is missing, it is created with the given name (default = normalised
+short hostname). If it exists, setup reports `skipped` and never overwrites
+(AGENTS.md rule 3). This is non-secret config; it never touches `api-keys.yml`.
+
+### Precedence
+
+1. `AUTOOS_OMNIROUTE_KEY` environment variable — always wins, never reads the file.
+2. New field from `api-keys.yml` (`omniroute_server` or `omniroute_<host>`).
+3. Legacy field (one release, read-only, prints deprecation line):
+   - Local: `omniroute` → prints `api-keys.yml: 'omniroute' is deprecated, rename it to 'omniroute_<host>'`
+   - Server: `omniroute_client_<host>` → prints `api-keys.yml: 'omniroute_client_<host>' is deprecated, rename it to 'omniroute_server'`
+4. Missing key → clear error naming the **expected field** and why (local / non-local),
+   mentioning `host.yml` / `AUTOOS_HOST_NAME` if the name may be wrong.
+   **Never prints a key value or the gateway URL.**
+
+### Example
+
+```yaml
+# configuration/api-keys.yml
+omniroute_server: sk-server-gateway-key      # for clients pointing at the central server
+omniroute_workstation: sk-workstation-key    # for this workstation's local gateway
+omniroute_laptop: sk-laptop-key              # for this laptop's local gateway
+# omniroute: sk-old-key                      # DEPRECATED (local fallback)
+# omniroute_client_workstation: sk-old-key   # DEPRECATED (server fallback)
+```
+
+The operator renames fields by hand; AutoOS never rewrites `api-keys.yml`.
+
 ## Where to get them
 
 Ordered by free value. "Training" = free tier may train on prompts: fine for
@@ -310,3 +374,10 @@ are fine — chains skip what they cannot authenticate.
   config change, just the new value + restart.
 - Free tiers churn monthly (this page already needed corrections 3 weeks
   after writing). Re-check `/dashboard/free-tiers` before trusting a number.
+
+## Repeated names, comments and placeholders
+
+Every reader of `configuration/api-keys.yml` (Python, the bash launchers through the resolver CLI, PowerShell) follows the
+rules of `tools/keys_file.py`: when a name appears twice, the FIRST filled-in value wins (`run-opencode-serve.sh` used to take the
+last line); an unquoted ` #` starts a comment (quote a value that contains one); a value containing `REPLACE` is a placeholder and
+is skipped, so a later real value of the same name is used.

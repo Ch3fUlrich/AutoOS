@@ -508,7 +508,9 @@ def main(argv=None) -> int:
     key = agent.client_key(ROOT)
     if not key:
         print("probe-recall: no OmniRoute client key (export AUTOOS_OMNIROUTE_KEY or "
-              "add 'omniroute:' to configuration/api-keys.yml)", file=sys.stderr)
+              "add the gateway key to configuration/api-keys.yml: `omniroute_server` "
+              "for a non-local gateway, `omniroute_<host>` for the local one)",
+              file=sys.stderr)
         return 3
     if not gateway_up(args.gateway):
         print("probe-recall: gateway not reachable at %s" % args.gateway, file=sys.stderr)

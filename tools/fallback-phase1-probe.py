@@ -37,18 +37,13 @@ def probe_key():
         return key
     path = os.path.join(ROOT, "configuration", "api-keys.yml")
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except OSError:
+        # the one rule: omniroute_server / omniroute_<host>, then the legacy field (this probe talks to GATEWAY)
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        from pathlib import Path
+        from autoos_gateway_key import resolve_client_key
+        return resolve_client_key({**os.environ, "AUTOOS_OMNIROUTE_URL": GATEWAY}, Path(path))
+    except (KeyError, ImportError):
         return None
-    for pattern in (r"^omniroute_server\s*:\s*(.+?)\s*$", r"^omniroute\s*:\s*(.+?)\s*$"):
-        for line in lines:
-            m = re.match(pattern, line)
-            if m:
-                val = m.group(1).strip("\"'")
-                if not val.startswith("REPLACE_WITH_"):
-                    return val
-    return None
 
 
 def post(path, body, key):
