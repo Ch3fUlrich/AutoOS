@@ -330,6 +330,28 @@ class PinQualifyTests(unittest.TestCase):
         self.assertIn("not declared in opencode.jsonc providers",
                       str(ctx.exception))
 
+    # F3: --free pin with '/' that is not in the free pool is refused
+    def test_a_free_pin_with_slash_not_in_free_pool_is_refused(self):
+        # A --free-model like 'foo/bar' that is not in the registry's
+        # free_client_models for the client should be refused
+        r = plan_of("--client", "opencode", "--free", "--free-model",
+                    "foo/bar", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("not in the free pool", r.stderr)
+
+    def test_a_free_pin_in_free_pool_is_allowed(self):
+        # A --free pin that IS in the free pool should be allowed
+        r = plan_of("--client", "opencode", "--free", "--free-model",
+                    "opencode/mimo-v2.6-flash-free", "t")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_free_model_pin_with_slash_not_in_free_pool_is_refused(self):
+        # Same check for --model when --free is used
+        r = plan_of("--client", "opencode", "--free", "--model",
+                    "foo/bar", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("not in the free pool", r.stderr)
+
 
 class ReviewTierWriteTests(unittest.TestCase):
     """Item 4: review-only tier 3 does not run an implement task."""

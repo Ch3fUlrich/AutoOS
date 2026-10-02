@@ -9326,6 +9326,22 @@ def cmd_run(args, cfg: dict) -> int:
     # declare is launched unprefixed and only fails inside opencode. Both pins
     # are qualified: --model names the same slot as --free-model.
     if args.free:
+        # F3: first, check pins that already contain '/' against the free pool
+        # (they skip qualify_pinned_model). The free pool uses the client's
+        # own spellings (e.g. opencode/... for zen free models).
+        if registry is None:
+            try:
+                registry = load_registry(REGISTRY_PATH)
+            except (OSError, ValueError):
+                registry = None
+        free_pool = ((registry or {}).get("policy") or {}).get("free_client_models") or {}
+        client_free = free_pool.get(client.name) or []
+        for attr in ("model", "free_model"):
+            pin = getattr(args, attr, None)
+            if pin and "/" in str(pin) and pin not in client_free:
+                return refuse("%s is not in the free pool for %s (declared: %s)"
+                              % (pin, client.name, ", ".join(client_free) or "none"), 2)
+        # Then qualify bare pins (no '/' in original)
         for attr in ("model", "free_model"):
             pin = getattr(args, attr, None)
             if not pin or "/" in str(pin):
