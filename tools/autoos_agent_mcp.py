@@ -379,6 +379,13 @@ def build_argv(req: dict, run_id: str | None = None,
     task = (req.get("task") or "").strip()
     if not task:
         raise ValueError("task is empty")
+    # T2-RECORD-PIN item 5 (D-284): the banned pin is refused before anything
+    # else is considered, and even for a dry run -- a preview that showed a plan
+    # the real launch would refuse is a preview an agent would believe.
+    for pin in (req.get("model"), req.get("free_model")):
+        d284 = agent.d284_model_refusal(pin)
+        if d284 is not None:
+            raise ValueError(d284)
     argv = ["run", "--client", client]
     tier = req.get("tier")
     card = req.get("card")
@@ -399,6 +406,17 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
+    # The CLI's own helper, so both entry points read one rule; a dry run only
+    # previews it (the server's preflight IS a dry run), and every non-dry
+    # spawn of a write task into the reviewer's seat is refused here, before a
+    # run dir exists.
+    if not (req.get("dry_run")
+            or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1"):
+        tier_refusal = agent.review_tier_write_refusal(
+            run_tier, gate_card, read_only=bool(req.get("read_only")))
+        if tier_refusal is not None:
+            raise ValueError(tier_refusal)
     # KEYDENY3g item 2: a spawned tier never runs in the caller's checkout. The
     # verdict is the CLI's own helper (leaf_isolation_refusal) — no second rule
     # table here, so the two cannot drift. A caller that asked for no isolation
@@ -464,6 +482,9 @@ def build_argv(req: dict, run_id: str | None = None,
             raise ValueError("max_depth must be an integer, got %r" % req["max_depth"])
     clients.child_depth(os.environ, req.get("max_depth"))  # raises DepthError past the budget
     for flag in ("allow_training", "isolate", "lean", "free", "clean", "joinable",
+                 # T2-RECORD-PIN item 4: --read-only is the second way tier 3
+                 # may say yes, so the MCP path must be able to say it too.
+                 "read_only",
                  # MODEFLIP opt-out (SB-B review 2): a spawn that means the chmod
                  # names it here, and the runner records the same fact in the
                  # private record below.
@@ -488,6 +509,12 @@ def build_argv(req: dict, run_id: str | None = None,
     for opt in ("model", "title", "max_depth"):
         if req.get(opt) is not None:
             argv += ["--" + opt.replace("_", "-"), str(req[opt])]
+    # T2-RECORD-PIN item 1: `free` and a pinned model used to reach the CLI as
+    # two facts the CLI reconciled by launching the promo default. One value for
+    # the plan, the record and the budget gate: the pin also goes in as
+    # --free-model, so `--free --model X` is X on every surface.
+    if req.get("free") and req.get("model") is not None:
+        argv += ["--free-model", str(req["model"])]
     if req.get("review_of") is not None:
         # FAMILYFENCE item 2: which run's WRITER this review must not copy. The
         # family is read from that run's runner-private record by the CLI, so all
@@ -585,7 +612,14 @@ def spawn(req: dict) -> dict:
             # runs -- the flags go in as flags, and `free` is priced at the promo
             # model the argv carries (this tool passes --free, never --free-model).
             model=req.get("model"), card=req.get("card"), tier=req.get("tier"),
-            free=bool(req.get("free")), free_model=agent.DEFAULT_FREE_MODEL,
+            # T2-RECORD-PIN item 1: price the pin, not the default -- a spawn
+            # that carries `free` and a model launches that model (the argv
+            # above passes it as --free-model too), so the budget gate must see
+            # the same value the plan will.
+            free=bool(req.get("free")),
+            free_model=(req.get("model") if (req.get("free")
+                                             and req.get("model")) else
+                        agent.DEFAULT_FREE_MODEL),
             clean=bool(req.get("clean")),
             reason=req.get("claude_reason"))
     except (OSError, ValueError) as exc:
