@@ -505,7 +505,7 @@ changes.
   read-only; `opencode` and `openhands` never see it.
 - **Two optional variables**, in the environment or in `stack.env`:
   `AUTOOS_ZCODE_DIR` moves the directory when it is not `$HOME/.zcode` (it
-  must be an absolute path without a colon or newline - anything else skips
+  must be an absolute path without a colon, space or line break - anything else skips
   the override with one warning line), and `AUTOOS_ZCODE_MOUNT_MODE` is
   exactly `ro` or `rw` (any other value warns once and mounts `ro`). Set `rw`
   only if the server has to write into that directory.

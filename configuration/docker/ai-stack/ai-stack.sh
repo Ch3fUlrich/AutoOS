@@ -432,8 +432,8 @@ zcode_decide() {
     (( ZCODE_DONE )) && return 0
     ZCODE_DONE=1
     d="$(zcode_dir)"
-    if [[ "$d" != /* || "$d" == *:* || "$d" == *$'\n'* || "$d" == *$'\r'* ]]; then
-        echo "  ! AUTOOS_ZCODE_DIR must be an absolute path without a colon or newline - skipping the ZCode override"
+    if [[ "$d" != /* || "$d" == *:* || "$d" == *[[:space:]]* ]]; then
+        echo "  ! AUTOOS_ZCODE_DIR must be an absolute path without a colon, space or line break - skipping the ZCode override"
         return 0
     fi
     [[ -f "$d/server/zcode-server.cjs" ]] || return 0

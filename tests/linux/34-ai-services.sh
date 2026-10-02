@@ -3387,7 +3387,7 @@ if it "aistack: a bogus AUTOOS_ZCODE_MOUNT_MODE falls back to ro with one warnin
     if (( ok )); then pass; else fail "a bad mount mode never reached the operator"; fi
 fi
 
-if it "aistack: a relative or colon-bearing AUTOOS_ZCODE_DIR skips the override with a warning"; then
+if it "aistack: a relative, colon- or space-bearing AUTOOS_ZCODE_DIR skips the override with a warning"; then
     # A real bundle exists in both cases: path validation - not a missing
     # bundle - is what has to decide here.
     ok=1
@@ -3416,6 +3416,20 @@ if it "aistack: a relative or colon-bearing AUTOOS_ZCODE_DIR skips the override 
     n="$(grep -c 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out")"
     [[ "$n" == 1 ]] || { ok=0; echo "expected one warning line, got [$n]" >&2; }
     grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a colon dir" >&2; }
+    rm -rf "$d"
+    # A space splits the volume string compose builds from the dir (measured:
+    # `docker compose config` cut the source at the first space).
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/my zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/my zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR="$d/my zcode" up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a dir with a space kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a dir with a space warned nowhere" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a dir with a space" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a bad AUTOOS_ZCODE_DIR reached docker"; fi
 fi
