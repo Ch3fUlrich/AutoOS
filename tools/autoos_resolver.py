@@ -1235,7 +1235,11 @@ def usable_legs(route, card, features, client_state, registry, overlay,
                 # T1-CREDIT-FIX-10 M2 (D-240): an UNMEASURED spend held to the
                 # local cap refuses with its own reason -- the note names the
                 # estimate, the cap and D-240, so it is the reason verbatim.
-                if "(D-240)" in (guard.get("note") or ""):
+                # T1-CREDIT-FIX-14 (D-274): a STALE ledger refuses the same
+                # way -- the note IS the `balance stale since <ts> (D-274)`
+                # reason, so it is the explain line verbatim.
+                if "(D-240)" in (guard.get("note") or "") \
+                        or "(D-274)" in (guard.get("note") or ""):
                     reasons.append(guard["note"])
                 else:
                     reasons.append("paid spend %s $%.2f/$%.2f"

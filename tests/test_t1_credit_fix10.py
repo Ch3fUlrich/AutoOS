@@ -232,9 +232,14 @@ class M1SelectionOrderTests(unittest.TestCase):
 
     def test_no_key_falls_to_the_helper_and_names_it(self):
         rows = [_ds_row("h1", {"in": 1_000_000, "out": 0})]
+        # T1-CREDIT-FIX-14 (D-274): an empty limits payload is a failed
+        # read (stale/refuse), so the "no series" case is a single
+        # out-of-month reading -- recorded, never an in-month series, never
+        # fresh -- and the helper-measured guard stands as before.
         fetch = _helper_fetch(
             {"/api/usage/call-logs": rows, "/api/usage/provider-limits":
-             {"caches": {}}})
+             _limits_payload(
+                 [("c1", "deepseek", 44.0, "2026-09-15T10:00:00Z")])})
         with tempfile.TemporaryDirectory() as tmp:
             guards = agent.plan_credit_guards(
                 _reg_paid(), now=NOW, env=_bare_env(tmp), helper=fetch)
@@ -541,8 +546,13 @@ class T1CreditFix11R2OverlayWorseTests(unittest.TestCase):
         guards = {"deepseek": {"provider": "deepseek", "state": "refuse", "spend_usd": 30.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger $30"}}
         balanced = {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance $0 [measured via provider balance]"}
         with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
-            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
-                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+            # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
+            # (stale/refuse), so the merge pin drives a benign recorded
+            # reading through a temp ledger; the mocked balance guard still
+            # decides the merge exactly as before.
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
         self.assertEqual(out["deepseek"]["state"], "refuse")
         self.assertEqual(out["deepseek"]["spend_usd"], 30.0)
         self.assertIn("ledger", out["deepseek"]["note"].lower() if isinstance(out["deepseek"]["note"], str) else "")
@@ -553,8 +563,13 @@ class T1CreditFix11R2OverlayWorseTests(unittest.TestCase):
         guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
         balanced = {"provider": "deepseek", "state": "refuse", "spend_usd": 5.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance exhausted [measured via provider balance]"}
         with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
-            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
-                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+            # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
+            # (stale/refuse), so the merge pin drives a benign recorded
+            # reading through a temp ledger; the mocked balance guard still
+            # decides the merge exactly as before.
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
         self.assertEqual(out["deepseek"]["state"], "refuse")
         self.assertEqual(out["deepseek"]["spend_usd"], 5.0)
 
@@ -563,8 +578,13 @@ class T1CreditFix11R2OverlayWorseTests(unittest.TestCase):
         guards = {"deepseek": {"provider": "deepseek", "state": "unknown", "spend_usd": 0.0, "spend_unknown": True, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger unknown"}}
         balanced = {"provider": "deepseek", "state": "ok", "spend_usd": 1.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "balance ok [measured via provider balance]"}
         with mock.patch.object(usage, "balance_paid_guard", return_value=balanced):
-            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
-                out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
+            # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
+            # (stale/refuse), so the merge pin drives a benign recorded
+            # reading through a temp ledger; the mocked balance guard still
+            # decides the merge exactly as before.
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T10:00:00Z", "remaining": 44.0}]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
         self.assertEqual(out["deepseek"]["state"], "ok")
         self.assertEqual(out["deepseek"]["spend_usd"], 1.0)
 
@@ -633,10 +653,14 @@ class T1CreditFix11R6RemainingValidationTests(unittest.TestCase):
             self.assertEqual(len(got), 2)
             reg = _reg_paid(cap=25.0)
             guards = {"deepseek": {"provider": "deepseek", "state": "ok", "spend_usd": 0.0, "spend_unknown": False, "cap_usd": 25.0, "warn_usd": 20.0, "models_unpriced": 0, "note": "ledger ok"}}
-            with mock.patch.object(usage, "parse_provider_limits", return_value=[]):
+            # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
+            # (stale/refuse), so the no-series pin records a single
+            # out-of-month reading -- never an in-month series, never fresh
+            # -- and the ledger guard stands exactly.
+            with mock.patch.object(usage, "parse_provider_limits", return_value=[{"provider": "deepseek", "fetched_at": "2026-09-15T10:00:00Z", "remaining": 44.0}]):
                 out = usage.overlay_balance_guards(reg, guards, "http://127.0.0.1:1", lambda *a, **k: (200, b"{}"), {"AUTOOS_STATE_DIR": tmp}, SINCE_MONTH, NOW)
-            # No balance series reaches the ledger path (the bad-lines file
-            # is not the ledger), so the ledger guard stands exactly.
+            # No in-month balance series reaches the ledger, so the ledger
+            # guard stands exactly.
             self.assertEqual(out["deepseek"]["state"], "ok")
             self.assertEqual(out["deepseek"]["spend_usd"], 0.0)
             self.assertEqual(out["deepseek"]["note"],
@@ -764,8 +788,12 @@ class T1CreditFix12N3BadLinesExactTests(unittest.TestCase):
                                    "models_unpriced": 0, "note": "ledger ok"}}
             with mock.patch.object(usage, "balance_ledger_path",
                                    return_value=path):
+                # T1-CREDIT-FIX-14 (D-274): an empty parse is a failed read
+                # (stale/refuse), so the exact-guard pin replays the
+                # already-recorded 08:00 reading -- dedupe records nothing
+                # new -- and the surviving series still governs exactly.
                 with mock.patch.object(usage, "parse_provider_limits",
-                                       return_value=[]):
+                                       return_value=[{"provider": "deepseek", "fetched_at": "2026-10-01T08:00:00Z", "remaining": 50.0}]):
                     out = usage.overlay_balance_guards(
                         reg, guards, "http://127.0.0.1:1",
                         lambda *a, **k: (200, b"{}"), {}, SINCE_MONTH, NOW)
