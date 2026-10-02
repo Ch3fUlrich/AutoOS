@@ -202,9 +202,13 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # ids); the paid openrouter deepseek leg stays route-gated.
         self.assertNotIn("openrouter/deepseek/deepseek-v4.1-flash",
                          combos_by_name["t2-worker"]["models"])
-        # FREEWIRE: the gemini/gemini-3.8-flash head was removed from every combo.
-        self.assertNotIn("gemini/gemini-3.8-flash",
-                         combos_by_name["t2-worker"]["models"])
+        # CIGREEN: expectation moved by ba73f1cf (TASK2 re-added the gemini
+        # head) + 20c4a816 (provider re-open): gemini/gemini-3.8-flash is a
+        # live servable head of t2-worker again, so the combo correctly
+        # contains it - the FREEWIRE-era removal is superseded (D-255 allows
+        # 3.8 Flash).
+        self.assertIn("gemini/gemini-3.8-flash",
+                      combos_by_name["t2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
         # t2-worker-paid/t3-driver-paid (LiteLLM-only) and
@@ -1322,8 +1326,11 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
         self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
         self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
-        # FREEWIRE 2026-09-30: the gemini head was removed from every route.
-        self.assertNotIn("gemini-3.8-flash", rendered["t2-worker"])
+        # CIGREEN: expectation moved by 018438ed (TASK1 re-added the gemini
+        # head) + ba73f1cf (TASK2) + 20c4a816 (TASK3 re-opened google_ai_studio
+        # available:true): the render correctly mirrors the live head. Gated
+        # legs are still dropped - every assertNotIn above still holds.
+        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
         # t3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
         # client-bound. FREEWIRE re-opened the groq qwen3.8-27b and openrouter
         # ':free' qwen3.8-27b legs, so the lowercase spelling is now present.
