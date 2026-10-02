@@ -514,12 +514,12 @@
         },
         "t2-worker-clean": {
           "modelID": "t2-worker-clean",
-          "name": "t2 smart-reasoning-1M — no training (sensitive data)",
-          "limit": { "context": 1048576, "output": 32768 },
+          "name": "t2 smart-reasoning-128k — no training (sensitive data)",
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "max", "settings": { "reasoningEffort": "max" } }
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
         "t2-worker-free-only": {
@@ -534,12 +534,12 @@
         },
         "t2-orchestrator": {
           "modelID": "t2-orchestrator",
-          "name": "t2 orchestrator-1M — small-scope orchestration",
-          "limit": { "context": 1048576, "output": 32768 },
+          "name": "t2 orchestrator-128k — small-scope orchestration",
+          "limit": { "context": 128000, "output": 32768 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "max", "settings": { "reasoningEffort": "max" } }
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
         "t3-driver": {
@@ -554,12 +554,12 @@
         },
         "t3-driver-clean": {
           "modelID": "t3-driver-clean",
-          "name": "t3 cheap-driver-1M — no training (sensitive data)",
-          "limit": { "context": 1048576, "output": 16384 },
+          "name": "t3 cheap-driver-128k — no training (sensitive data)",
+          "limit": { "context": 128000, "output": 16384 },
           "variants": [
             { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } },
-            { "id": "max", "settings": { "reasoningEffort": "max" } }
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
         "t3-driver-free-only": {
