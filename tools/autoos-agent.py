@@ -9440,6 +9440,10 @@ def cmd_run(args, cfg: dict) -> int:
     # by a --dry-run preview instead of failing it — a preview touches nothing,
     # and the MCP preflight reads the note the same run would refuse on.
     mismatch = model_mismatch_refusal(plan)
+    # F2: D-284 also guards the resolved plan model (card, combo, reviewer
+    # override, fallthrough re-plan), not just the CLI pin strings. The check
+    # runs on plan["model"] which is what the launcher actually hands the client.
+    d284_plan = d284_model_refusal(plan.get("model"))
     route = plan["route"]
     # KEYDENY3b item 2 / KEYDENY3g: a spawned tier gets no option to work in the
     # caller's checkout. Read *after* build_plan because that is where a client
@@ -9554,6 +9558,9 @@ def cmd_run(args, cfg: dict) -> int:
             # nothing), and says plainly that starting it is refused — worded
             # so it can never be read as the leaf gate's own line above.
             print("note: spawning this plan is refused: %s" % tier_write_refusal)
+        if d284_plan is not None:
+            # F2: the preview names the D-284 refusal the real run would refuse.
+            print("note: spawning this plan is refused: %s" % d284_plan)
         if mismatch is not None:
             # T2 item 2: the preview names the swap the real run would refuse.
             print("note: spawning this plan is refused: %s" % mismatch)
@@ -9567,6 +9574,10 @@ def cmd_run(args, cfg: dict) -> int:
     # and the record — a refusal starts nothing.
     if tier_write_refusal is not None:
         return refuse(tier_write_refusal, 2)
+    # F2: D-284 post-plan check on the resolved model (card, combo, reviewer
+    # override). Enforced after tier/leaf checks, before client/clone/record.
+    if d284_plan is not None:
+        return refuse(d284_plan, 2)
     # T2-RECORD-PIN item 2: last of the plan gates — the launch model must be
     # the model that was asked for, and a route that rewrote the pin is refused
     # before the client, the clone and the record.
@@ -9762,6 +9773,8 @@ def cmd_run(args, cfg: dict) -> int:
         # not started. The first attempt cannot get here: the same predicate on
         # the same plan refused it before any clone existed.
         mismatch = model_mismatch_refusal(plan)
+        # F2: D-284 also guards fallthrough re-plans (next route, next free model)
+        d284_fallthrough = d284_model_refusal(plan.get("model"))
         if mismatch is not None:
             if worker_id is not None:
                 try:
@@ -9769,6 +9782,15 @@ def cmd_run(args, cfg: dict) -> int:
                 except OSError:
                     pass  # the reason is already on the record; rc 2 stands
             print("autoos-agent: %s" % mismatch, file=sys.stderr)
+            rc = 2
+            break
+        if d284_fallthrough is not None:
+            if worker_id is not None:
+                try:
+                    _worker_record_end(workers, worker_id, worker_rec, 2)
+                except OSError:
+                    pass
+            print("autoos-agent: %s" % d284_fallthrough, file=sys.stderr)
             rc = 2
             break
         try:
