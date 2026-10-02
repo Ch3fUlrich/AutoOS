@@ -20429,12 +20429,56 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
             self.assertIn("privacy", err, name)
 
     def test_the_ovh_provider_is_still_unverified(self):
-        # The refusal above rests on this registry fact: null is not false, and
-        # private_safe fails closed on it. If a row ever says false, the -clean
-        # routes open and this test says so here, not in a comment elsewhere.
+        # CIGREEN: expectation moved by 35148c5c (L1-CLEAN D1+D2, part of the
+        # fcecae85 CLEAN merge; comment rework 587f465e): ovhcloud's
+        # trains_on_prompts went null -> false with a 3-citation privacy block
+        # (OVH AI Endpoints terms, docs and contract quotes, accessed
+        # 2026-10-01). The name above is kept for continuity but the intent is
+        # inverted: a sensitive hand entry reaches ovh ONLY through that cited
+        # verification -- private_safe is True, and the privacy block carries
+        # evidence with a url and a quote, as the registry validator
+        # (_privacy_block_problems) requires. The still-unverified half moved
+        # to test_a_null_trains_provider_is_still_refused below.
+        provider = SHIPPED_REGISTRY["providers"]["ovhcloud"]
+        self.assertIs(provider["trains_on_prompts"], False)
         safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
                                                SHIPPED_REGISTRY)
+        self.assertTrue(safe, why)
+        block = provider.get("privacy") or {}
+        self.assertIs(block.get("trains_on_prompts"), False)
+        evidence = block.get("evidence") or []
+        self.assertGreaterEqual(len(evidence), 1,
+                                "a credit leg is admitted because it cites its terms")
+        for row in evidence:
+            self.assertTrue(str(row.get("url") or "").startswith("https://"), row)
+            self.assertTrue(str(row.get("quote") or "").strip(), row)
+        rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        self.assertEqual(rc, 0, out + err)
+
+    def test_a_null_trains_provider_is_still_refused(self):
+        # CIGREEN companion to the test above (same 35148c5c/587f465e move):
+        # the fail-closed half. A registry copy with ovhcloud's own
+        # verification stripped (flag back to null, privacy block removed) is
+        # refused by private_safe AND by a sensitive run aimed at its route
+        # (rc 2) -- unknown is unsafe, and removing the citation closes the
+        # door the citation opened. api_airforce ships in exactly that
+        # unverified state (trains_on_prompts null), pinned here as the live
+        # example.
+        import copy
+        self.assertIsNone(
+            SHIPPED_REGISTRY["providers"]["api_airforce"].get("trains_on_prompts"))
+        neutered = copy.deepcopy(SHIPPED_REGISTRY)
+        neutered["providers"]["ovhcloud"]["trains_on_prompts"] = None
+        neutered["providers"]["ovhcloud"].pop("privacy", None)
+        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b", neutered)
         self.assertFalse(safe, why)
+        self.assertIn("trains on prompts", why)
+        agent = self.agent
+        with mock.patch.object(agent, "load_registry", lambda path: neutered), \
+                mock.patch.object(agent, "load_live_registry", lambda *a, **k: neutered):
+            rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("privacy", err)
 
 
 
