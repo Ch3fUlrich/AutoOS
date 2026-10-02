@@ -4169,6 +4169,36 @@ def sensitive_combo_refusal(combo: str, registry: dict):
     return None
 
 
+# T0-PAID-2a1: the paid combos a --free run must never be labelled with, and the
+# *-free-only twin that labels it instead. One home for the mapping; every twin
+# is a declared route in catalog/ai-registry.json and a combo in
+# configuration/omniroute/combos.json.
+FREE_ONLY_COMBOS = {
+    "t1-orchestrator": "t1-orchestrator-free-only",
+    "t2-worker": "t2-worker-free-only",
+    "t3-driver": "t3-driver-free-only",
+}
+
+
+def free_only_combo(combo):
+    """The *-free-only twin of a paid combo, or the combo unchanged.
+
+    WHY: a --free run pins the keyless opencode model (build_plan uses
+    args.free_model; no leg of route["combo"] is ever resolved — FAMILYFENCE-3
+    B1), so the combo is only ever a label. But select_combo knows nothing of
+    free — it stays pure, since the MCP `route` tool takes only a card — and
+    labelling that run `t1-orchestrator` names a combo with a paid tail the run
+    never touches (T0-PAID-2a1). None (a --tier --free run names no combo) and
+    combos without a twin (-clean, t4-rag, resolver ids, and paid combos with
+    no free-only twin such as t2-orchestrator and t1-orchestrator-paid) pass
+    through: the rule is that a free run is labelled with the paid combo's
+    twin whenever a twin exists, not that every free run names one.
+    """
+    if combo is None:
+        return None
+    return FREE_ONLY_COMBOS.get(combo, combo)
+
+
 def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
                   provider_cooldown: dict | None = None,
                   fence: dict | None = None) -> dict:
@@ -4176,9 +4206,14 @@ def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
     explicit --model replaced the card's combo must still land on private-safe
     legs only (--allow-training keeps its compatibility escape, which now only
     waives that explicit-override check - it no longer unlocks a trainable leg,
-    since 2026-09-27)."""
+    since 2026-09-27). A --free run is relabelled to its *-free-only twin (see
+    free_only_combo) so the recorded combo never names a paid leg it resolves."""
     route = resolve_route_unchecked(args, cfg, client, exclude_routes, provider_cooldown,
                                     fence)
+    if args.free:
+        twin = free_only_combo(route.get("combo"))
+        if twin != route.get("combo"):
+            route = dict(route, combo=twin)
     if args.free and route.get("privacy") == "sensitive":
         # close-priv 2026-09-26: --free replaces the combo with the promo
         # model, which may train on prompts - never for a sensitive task.

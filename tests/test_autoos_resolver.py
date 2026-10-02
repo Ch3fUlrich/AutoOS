@@ -2767,18 +2767,25 @@ class MetaApiResolverTests(unittest.TestCase):
         for route_id in ("t1-orchestrator", "t1-orchestrator-paid",
                          "spark-1.3-contributor"):
             self.assertIn(route_id, survivors, route_id)
-        legs, _skipped, _notes = r.usable_legs(
+        legs, skipped, _notes = r.usable_legs(
             self.registry["routes"]["t1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
+        # R4a (D-212, supersedes D-141 ordering cited below): the paid
+        # contributor leg is last resort, not merely "not first" -- while a
+        # free leg of the route is healthy it is not selected at all. It stays
+        # in skipped with its held-back reason, and everything usable is free.
         # FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid, so the
         # paid contributor leg is no longer the first leg a public card sees — it is
         # still the leg the route *serves* the writer on, and everything ahead of it
         # must be free, which is the whole point of the reorder.
-        self.assertIn(("meta_api", "muse-spark-1.3-contributor"), legs)
-        head = [leg for leg in legs if leg[0] == "meta_api"][0]
-        self.assertGreater(legs.index(head), 0, legs)
-        for leg in legs[:legs.index(head)]:
-            self.assertEqual(self.registry["providers"][leg[0]]["tier"], "free", leg)
+        self.assertNotIn(("meta_api", "muse-spark-1.3-contributor"), legs)
+        self.assertIn("meta_api/muse-spark-1.3-contributor", skipped)
+        self.assertTrue(any(reason.startswith("paid held back")
+                            for reason in
+                            skipped["meta_api/muse-spark-1.3-contributor"]))
+        for leg in legs:
+            self.assertIn(self.registry["providers"][leg[0]]["tier"],
+                          ("free", "trial", "credit"), leg)
         for paid_route in ("t1-orchestrator-paid", "spark-1.3-contributor"):
             paid, _s, _n = r.usable_legs(
                 self.registry["routes"][paid_route], card,
@@ -2852,7 +2859,9 @@ class ReviewerSelectionTests(unittest.TestCase):
     """Brief REVROUTE (S2) item 2: a review card carrying ``author`` resolves to
     the first entry of ``policy.reviewers`` whose family differs from the
     author's, whose provider/client is available at ``now``, and which privacy
-    allows. Everything the walk rejected is returned with its reason, because a
+    allows -- paid entries LAST (T0-PAID-4 Q1, operator rule D-212/D-219: the
+    walk tries every NON-paid entry first in registry order, then the paid
+    ones, and a paid choice says ``last resort`` in its reason). Everything the walk rejected is returned with its reason, because a
     reviewer list that silently narrows is indistinguishable from a config
     mistake -- and "silently no review" is exactly the failure this brief
     exists to close.
@@ -2923,8 +2932,10 @@ class ReviewerSelectionTests(unittest.TestCase):
     def test_author_spelled_as_a_registry_model_works(self):
         result = self.pick("muse-spark-1.3-contributor")
         self.assertEqual(result["author_family"], "meta")
-        # A meta author cannot be reviewed by the meta reviewer.
-        self.assertEqual(result["reviewer"]["family"], "google")
+        # A meta author cannot be reviewed by the meta reviewer. The free
+        # google entry rides a paid-tier leg in this fixture, so it serves
+        # only as last resort -- the legless free qwen entry reviews.
+        self.assertEqual(result["reviewer"]["family"], "qwen")
 
     def test_author_spelled_as_a_leg_works(self):
         self.assertEqual(self.pick("meta_api/muse-spark-1.3-contributor")
@@ -2967,7 +2978,7 @@ class ReviewerSelectionTests(unittest.TestCase):
         # to read as an independent one.
         result = self.pick("Meta")
         self.assertEqual(result["author_family"], "meta")
-        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertEqual(result["reviewer"]["family"], "qwen")
         self.assertIn("same family as author (meta)", result["skipped"][0]["reasons"][0])
 
     def test_a_reviewer_entry_family_is_compared_without_case(self):
@@ -2975,7 +2986,7 @@ class ReviewerSelectionTests(unittest.TestCase):
         reg["policy"]["reviewers"][0]["family"] = "Meta"
         result = r.reviewer_for("muse-spark-1.3-contributor", reg, self.state(),
                                 self.NOW, risk="normal", privacy="public")
-        self.assertEqual(result["reviewer"]["family"], "google",
+        self.assertEqual(result["reviewer"]["family"], "qwen",
                          "an operator's capitalization is the same family")
 
     def test_an_author_spelled_as_a_model_id_ignores_case(self):
@@ -3019,16 +3030,21 @@ class ReviewerSelectionTests(unittest.TestCase):
     # --- the same-family rule ----------------------------------------------
 
     def test_the_walk_stops_at_the_first_usable_reviewer(self):
-        # The list is an ORDERED preference: once one entry passes, nothing
-        # after it is examined, so a cheap reviewer later never steals a
-        # cheaper-but-already-chosen one and the skipped list stays short.
+        # Two passes, each an ORDERED preference (T0-PAID-4 Q1, D-212/D-219):
+        # every NON-paid entry first in registry order, then the paid ones.
+        # Once one entry passes, nothing after it in its pass is examined.
+        # Here the qwen author fences its own free entry, so the first pass
+        # finds nobody and the paid meta head takes the second pass as last
+        # resort -- the skipped list holds exactly the fenced free entry.
         result = self.pick("qwen")
         self.assertEqual(result["reviewer"]["family"], "meta")
-        self.assertEqual(result["skipped"], [])
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertEqual(result["skipped"][0]["family"], "qwen")
+        self.assertIn("last resort", result["reason"])
 
     def test_the_author_family_is_skipped_with_a_reason(self):
         result = self.pick("meta")
-        self.assertEqual(result["reviewer"]["family"], "google")
+        self.assertEqual(result["reviewer"]["family"], "qwen")
         first = result["skipped"][0]
         self.assertEqual(first["family"], "meta")
         self.assertIn("same family as author (meta)", first["reasons"][0])
@@ -3156,8 +3172,16 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertTrue(lines, "no explain line for a skipped reviewer")
         self.assertIn("omniroute/spark-1.3-contributor", lines[0])
 
-    def test_explain_is_empty_when_the_head_of_the_list_was_usable(self):
-        self.assertEqual(r.reviewer_explain_lines(self.pick("qwen")), [])
+    def test_explain_names_the_last_resort_when_paid_reviews(self):
+        # T0-PAID-4 Q1: the qwen author fences its own free entry and the
+        # paid-tier google entry reviews as last resort -- the explain block
+        # names the skipped free entry and the reason says paid was last
+        # resort, never a silent paid review.
+        result = self.pick("qwen")
+        lines = r.reviewer_explain_lines(result)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("qwen3.8-flash", lines[0])
+        self.assertIn("last resort", result["reason"])
 
     # --- REVFREE: the free Zen reviewers, on the real registry --------------
 
@@ -3232,11 +3256,15 @@ class PlanReviewCardTests(unittest.TestCase):
                       self.NOW)
 
     def test_a_review_card_with_an_author_carries_the_review_decision(self):
+        # T0-PAID-4 Q1 (D-212/D-219): the paid meta head must not review a
+        # qwen card while a free entry is usable -- the free google reviewer
+        # takes it.
         review = self.plan(author="qwen")["review"]
         self.assertEqual(review["author_family"], "qwen")
-        self.assertEqual(review["reviewer"]["family"], "meta")
-        self.assertEqual(review["reviewer"]["client"], "opencode")
-        self.assertIn("spark-1.3-contributor", review["reviewer"]["model"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual(review["reviewer"]["client"], "gemini")
+        self.assertIn("gemini-3.8-flash", review["reviewer"]["model"])
+        self.assertIsNot(review["reviewer"].get("paid"), True)
         self.assertEqual(review["state"], "resolved")
 
     def test_the_reason_says_who_authored_it(self):
@@ -3266,6 +3294,55 @@ class PlanReviewCardTests(unittest.TestCase):
                                 risk="normal", privacy="sensitive")
         if result["reviewer"] is not None:
             self.assertNotEqual(result["reviewer"]["family"], "meta")
+
+    def ghost_review_plan(self, registry):
+        card = {"kind": "review", "mode": "balanced", "risk": "normal",
+                "spec": "exact", "privacy": "public", "author": "qwen"}
+        return r.plan(card, {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                             "tests": True, "need_tokens": 1000},
+                      self.state(), registry, {}, [], "claude-opus-4-6",
+                      self.NOW)
+
+    def test_a_ghost_leg_after_the_head_does_not_crash_the_review_card(self):
+        # T0-PAID-5 P1: one ghost leg in policy.reviewers (after the usable
+        # head) must not crash every authored review card -- it reads as
+        # unknown (a rejection naming the leg), never a crash.
+        import copy
+        reg = copy.deepcopy(self.registry)
+        reg["policy"]["reviewers"].append(
+            {"client": "opencode", "model": "ghost-model",
+             "family": "ghostfam", "leg": "ghost-p/ghost-model"})
+        plan = self.ghost_review_plan(reg)
+        review = plan["review"]
+        self.assertIsNotNone(review["reviewer"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        ghost_rows = [s for s in review["skipped"]
+                      if s["model"] == "ghost-model"]
+        self.assertTrue(ghost_rows, review["skipped"])
+        self.assertTrue(any("leg ghost-p/ghost-model unresolvable" in reason
+                            for reason in ghost_rows[0]["reasons"]),
+                        ghost_rows[0]["reasons"])
+        self.assertTrue(any("ghost-model" in line for line in plan["explain"]))
+
+    def test_a_ghost_leg_before_the_head_does_not_crash_the_review_card(self):
+        # T0-PAID-5 P1: the same ghost leg placed BEFORE the usable head --
+        # the two-pass walk pre-computes rejections for every entry, so the
+        # crash fired before any reviewer was even considered.
+        import copy
+        reg = copy.deepcopy(self.registry)
+        reg["policy"]["reviewers"].insert(
+            0, {"client": "opencode", "model": "ghost-model",
+                "family": "ghostfam", "leg": "ghost-p/ghost-model"})
+        plan = self.ghost_review_plan(reg)
+        review = plan["review"]
+        self.assertIsNotNone(review["reviewer"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        ghost_rows = [s for s in review["skipped"]
+                      if s["model"] == "ghost-model"]
+        self.assertTrue(ghost_rows, review["skipped"])
+        self.assertTrue(any("leg ghost-p/ghost-model unresolvable" in reason
+                            for reason in ghost_rows[0]["reasons"]),
+                        ghost_rows[0]["reasons"])
 
 
 class PlanLimitsGateTests(unittest.TestCase):
@@ -4220,6 +4297,415 @@ class ComboFallthroughTests(unittest.TestCase):
                 len(usable), 2, "%s: only %s of %s is usable by an agentic card"
                 % (route_id, usable, combo["models"]))
 
+class PaidLastResortTests(unittest.TestCase):
+    """R4a (lane T0-PAID-2b1, operator decision D-212): paid legs are the TAIL,
+    extended by T0-PAID-3 P1 to every non-free leg.
+
+    A leg whose effective tier (models.<id>.tier else providers.<id>.tier) is
+    outside the known free-ish set (free/trial/credit) must never be selected
+    while a free/trial/credit leg of the same route is healthy -- even when
+    the non-free leg is listed FIRST. A missing or unrecognised tier
+    ("subscription" included) is non-free: held back like paid, never counted
+    as healthy. When no free/trial/credit leg is servable the non-free leg is
+    allowed and the plan carries a `last_resort` line naming every skipped
+    free-ish leg + reason. Applies to implement AND review cards, reviewers
+    included. Existing credit/trial fail-open behaviour stays untouched
+    (credit legs are blockers of paid here, never blocked themselves).
+    Fixture style copies the PlanTests registry/card/features/state shapes
+    and the leg-overlay shape {"legs": {leg: {"tool_calls": {"value": ...}}}};
+    real-registry style copies the ComboFallthroughTests setUpClass loading
+    catalog/ai-registry.json.
+    """
+
+    def fixture(self, legs=("paid-p/paid-model", "free-p/free-model"),
+                extra_models=None, extra_providers=None, policy_reviewers=None):
+        providers = {"paid-p": {"id": "paid-p", "tier": "paid",
+                                "trains_on_prompts": False},
+                     "free-p": {"id": "free-p", "tier": "free",
+                                "trains_on_prompts": False}}
+        providers.update(extra_providers or {})
+        models = {"paid-model": {"id": "paid-model", "family": "paidfam",
+                                 "reasoning": False, "effort_ladder": [],
+                                 "tool_calls": "proven", "price_in": 1e-5,
+                                 "price_out": 2e-5, "output_max": 1000,
+                                 "context_usable": {"tokens": 100000,
+                                                    "source": "default"}},
+                  "free-model": {"id": "free-model", "family": "freefam",
+                                 "reasoning": False, "effort_ladder": [],
+                                 "tool_calls": "proven", "price_in": 0.0,
+                                 "price_out": 0.0, "output_max": 1000,
+                                 "context_usable": {"tokens": 100000,
+                                                    "source": "default"}},
+                  "orch": {"id": "orch", "price_in": 5e-6, "price_out": 1e-5,
+                           "context_usable": {"tokens": 200000,
+                                              "source": "default"}}}
+        models.update(extra_models or {})
+        return {"providers": providers, "models": models,
+                "routes": {"r-mix": {"id": "r-mix", "class": "cheap",
+                                     "legs": list(legs)}},
+                "clients": {"opencode": {"id": "opencode"}},
+                "policy": {"modes": {"balanced": {"theta": {"value": 0.8},
+                                                  "lambda": {"value": 0.01}}},
+                           "verify_tokens": {"S0": {"tokens": 2000}},
+                           "latency_seed": {"cheap": {"minutes": 10}},
+                           "seed_priors": {"cheap": {"S0": {"alpha": 8,
+                                                             "beta": 2}}},
+                           "reviewers": policy_reviewers or []}}
+
+    def card(self, kind="implement", **over):
+        base = {"kind": kind, "spec": "exact", "risk": "normal",
+                "mode": "balanced", "privacy": "public"}
+        base.update(over)
+        return base
+
+    def feats(self, need_tokens=1000):
+        return {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
+                "tests": True, "need_tokens": need_tokens}
+
+    def state(self):
+        return {"opencode": {"installed": True, "signed_in": True, "reason": ""}}
+
+    def now(self):
+        return datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+
+    def run_plan(self, registry, card, overlay=None):
+        return r.plan(card, self.feats(), self.state(), registry,
+                      {} if overlay is None else overlay, [], "orch", self.now())
+
+    def test_implement_paid_first_healthy_free_chooses_free_and_names_paid_held_back(self):
+        plan = self.run_plan(self.fixture(), self.card("implement"))
+        self.assertEqual(plan["leg"], "free-p/free-model")
+        self.assertIn("paid-p/paid-model", " ".join(plan["explain"]))
+
+    def test_implement_all_free_down_paid_allowed_with_last_resort(self):
+        reg = self.fixture()
+        reg["routes"]["r-mix"]["unavailable_legs"] = {
+            "free-p/free-model": {"available": False}}
+        plan = self.run_plan(reg, self.card("implement"))
+        self.assertEqual(plan["leg"], "paid-p/paid-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("last_resort", blob)
+        self.assertIn("free-p/free-model", blob)
+
+    def test_review_card_paid_first_healthy_free_chooses_free(self):
+        plan = self.run_plan(self.fixture(), self.card("review"))
+        self.assertEqual(plan["leg"], "free-p/free-model")
+        self.assertIn("paid-p/paid-model", " ".join(plan["explain"]))
+
+    def test_review_card_all_free_down_paid_allowed_with_last_resort(self):
+        reg = self.fixture()
+        reg["routes"]["r-mix"]["unavailable_legs"] = {
+            "free-p/free-model": {"available": False}}
+        plan = self.run_plan(reg, self.card("review"))
+        self.assertEqual(plan["leg"], "paid-p/paid-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("last_resort", blob)
+        self.assertIn("free-p/free-model", blob)
+
+    def test_reviewer_paid_entry_first_healthy_free_entry_wins(self):
+        # T0-PAID-4 Q1 (operator rule D-212/D-219): paid reviewers are
+        # LAST-RESORT, used only when no free/trial/credit reviewer serves.
+        # The walk tries every NON-paid entry first (registry order kept),
+        # then the paid ones -- so a paid head must not win while a free
+        # entry behind it is healthy.
+        reviewers = [
+            {"client": "opencode", "family": "paidfam", "paid": True,
+             "leg": "paid-p/paid-model", "model": "paid-model"},
+            {"client": "opencode", "family": "freefam",
+             "leg": "free-p/free-model", "model": "free-model"}]
+        reg = self.fixture(policy_reviewers=reviewers)
+        reg["models"]["author-model"] = {"id": "author-model",
+                                         "family": "otherfam"}
+        got = r.reviewer_for("author-model", reg, self.state(), self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertEqual(got["reviewer"]["model"], "free-model")
+        self.assertNotIn("last resort", got["reason"])
+
+    def test_reviewer_unknown_tier_entry_waits_behind_a_free_entry(self):
+        # T0-PAID-5 P2 (fail closed): a reviewer entry whose leg's tier
+        # cannot be read (its provider carries no tier) walks in the LAST
+        # pass, so a free entry listed behind it still wins.
+        providers = {"tierless-p": {"id": "tierless-p",
+                                    "trains_on_prompts": False}}
+        models = {"tierless-model": {"id": "tierless-model",
+                                     "family": "mystfam"},
+                  "author-model": {"id": "author-model",
+                                   "family": "otherfam"}}
+        reviewers = [
+            {"client": "opencode", "family": "mystfam",
+             "leg": "tierless-p/tierless-model", "model": "tierless-model"},
+            {"client": "opencode", "family": "freefam",
+             "leg": "free-p/free-model", "model": "free-model"}]
+        reg = self.fixture(policy_reviewers=reviewers,
+                           extra_models=models, extra_providers=providers)
+        got = r.reviewer_for("author-model", reg, self.state(), self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertEqual(got["reviewer"]["model"], "free-model")
+        self.assertNotIn("last resort", got["reason"])
+
+    def test_reviewer_all_free_skipped_paid_allowed_as_last_resort(self):
+        # T0-PAID-4 Q1: when every free entry is skipped (same family here),
+        # the paid entry is chosen and the reason says it was last resort.
+        reviewers = [
+            {"client": "opencode", "family": "freefam",
+             "leg": "free-p/free-model", "model": "free-model"},
+            {"client": "opencode", "family": "paidfam", "paid": True,
+             "leg": "paid-p/paid-model", "model": "paid-model"}]
+        reg = self.fixture(policy_reviewers=reviewers)
+        reg["models"]["author-model"] = {"id": "author-model",
+                                         "family": "freefam"}
+        got = r.reviewer_for("author-model", reg, self.state(), self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertEqual(got["reviewer"]["model"], "paid-model")
+        self.assertIn("last resort", got["reason"])
+
+    def test_shipped_registry_reviewers_prefer_free_over_paid_head(self):
+        # T0-PAID-4 Q1 on shipped data: the paid meta head
+        # (omniroute/spark-1.3-contributor) must NOT review while a free
+        # entry is usable. Authors are spelled as the registry resolves
+        # them (bare "gemini" is not a registry spelling -- the model id
+        # "gemini-3.8-flash" is). A deepseek-family author must still get
+        # a cross-family reviewer, never a same-family one.
+        import copy
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            shipped = copy.deepcopy(json.load(fh))
+        state = {client: {"installed": True, "signed_in": True, "reason": ""}
+                 for client in ("opencode", "gemini", "qoder", "qwen",
+                                "claude", "codex")}
+        for author, family in (("gemini-3.8-flash", "google"),
+                               ("qwen3.8-27b", "qwen"),
+                               ("muse-spark-1.3-contributor", "meta")):
+            got = r.reviewer_for(author, shipped, state, self.now())
+            self.assertIsNotNone(got["reviewer"], author)
+            self.assertIsNot(got["reviewer"].get("paid"), True, author)
+            self.assertNotEqual(got["reviewer"]["family"], family, author)
+        got = r.reviewer_for("deepseek/deepseek-v4.1-flash", shipped,
+                             state, self.now())
+        self.assertIsNotNone(got["reviewer"])
+        self.assertNotEqual(got["reviewer"]["family"], "deepseek")
+
+    def test_shipped_registry_standard_card_chooses_non_paid_while_free_healthy(self):
+        # Card complexity=standard, ctx=128k, privacy=public, role=implement,
+        # spend=free-ok: v1 shape; resolver v2 equivalent is kind=implement,
+        # privacy=public, need_tokens well under 128k. Uses the real
+        # route/plan entry (t1-orchestrator). The tail property is derived
+        # from the registry, not pinned by leg name: every paid-tier leg of
+        # the route is listed after every non-paid leg.
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            shipped = json.load(fh)
+        route = shipped["routes"]["t1-orchestrator"]
+        paid_idx = [i for i, leg in enumerate(route["legs"])
+                    if r.leg_tier(leg, shipped) == "paid"]
+        non_paid_idx = [i for i, leg in enumerate(route["legs"])
+                        if r.leg_tier(leg, shipped) != "paid"]
+        self.assertTrue(paid_idx, "route has no paid leg to hold back")
+        self.assertTrue(non_paid_idx, "route has no non-paid leg to prefer")
+        self.assertLess(max(non_paid_idx), min(paid_idx),
+                        "paid legs are not the tail: %s" % (route["legs"],))
+        overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                            for leg in route["legs"]}}
+        legs, _skipped, _notes = r.usable_legs(
+            route, self.card("implement"), self.feats(), self.state(),
+            shipped, overlay, "opencode", self.now())
+        self.assertTrue(legs)
+        provider_id, model_id = legs[0]
+        tier = r.leg_tier("%s/%s" % (provider_id, model_id), shipped)
+        self.assertIn(tier, ("free", "trial", "credit"))
+
+    def unknown_tier_fixture(self):
+        providers = {"myst-p": {"id": "myst-p",
+                                 "trains_on_prompts": False},
+                     "sub-p": {"id": "sub-p", "tier": "subscription",
+                               "trains_on_prompts": False}}
+        models = {}
+        for model_id, family in (("myst-model", "mystfam"),
+                                 ("sub-model", "subfam")):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": 1e-5, "price_out": 2e-5, "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        return self.fixture(legs=("myst-p/myst-model", "sub-p/sub-model",
+                                  "free-p/free-model"),
+                            extra_models=models, extra_providers=providers)
+
+    def test_implement_unknown_and_subscription_tiers_first_healthy_free_wins(self):
+        # T0-PAID-3 P1: a leg whose tier is missing (None) or unrecognised
+        # ("subscription" here) is NON-free -- held back like paid while a
+        # free leg is usable, never chosen ahead of it.
+        plan = self.run_plan(self.unknown_tier_fixture(),
+                             self.card("implement"))
+        self.assertEqual(plan["leg"], "free-p/free-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("myst-p/myst-model", blob)
+        self.assertIn("sub-p/sub-model", blob)
+        self.assertIn("subscription", blob)
+
+    def test_implement_all_free_down_unknown_tier_allowed_with_last_resort(self):
+        # T0-PAID-3 P1: with every free leg down the non-free legs stay --
+        # last resort, with a last_resort line naming the skipped free leg.
+        reg = self.unknown_tier_fixture()
+        reg["routes"]["r-mix"]["unavailable_legs"] = {
+            "free-p/free-model": {"available": False}}
+        plan = self.run_plan(reg, self.card("implement"))
+        self.assertEqual(plan["leg"], "myst-p/myst-model")
+        blob = " ".join(plan["explain"])
+        self.assertIn("last_resort", blob)
+        self.assertIn("free-p/free-model", blob)
+
+    def test_shipped_registry_subscription_leg_held_back_while_free_healthy(self):
+        # T0-PAID-3 P1 on shipped data: the cc subscription leg (tier
+        # "subscription") is held back while a free leg is healthy. The copy
+        # re-opens the two orthogonal gates -- the operator-wide cc outage and
+        # the Claude budget -- so the tier rule is what decides.
+        import copy
+        with (Path(__file__).resolve().parent.parent
+              / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
+            shipped = copy.deepcopy(json.load(fh))
+        self.assertEqual(r.leg_tier("cc/claude-opus-4-6", shipped),
+                         "subscription")
+        shipped["providers"]["cc"]["available"] = True
+        shipped["policy"]["claude_budget"]["mode"] = "normal"
+        shipped["policy"]["claude_budget"]["weekly_share_left"] = 0.9
+        route = {"id": "r-sub", "class": "cheap",
+                 "legs": ["cc/claude-opus-4-6", "groq/openai/gpt-oss-120b"]}
+        overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                            for leg in route["legs"]}}
+        legs, skipped, _notes = r.usable_legs(
+            route, self.card("implement"), self.feats(), self.state(),
+            shipped, overlay, "opencode", self.now())
+        self.assertTrue(legs)
+        self.assertEqual(legs[0], ("groq", "openai/gpt-oss-120b"))
+        self.assertIn("cc/claude-opus-4-6", skipped)
+        blob = " ".join(sum(skipped.values(), []))
+        self.assertIn("subscription", blob)
+
+    def test_review_card_paid_cross_family_reviewer_allowed_as_last_resort(self):
+        # T0-PAID-3 P3: writer family meta; the reviewer route's healthy free
+        # legs are all meta and its only non-meta leg is paid. A free leg of
+        # the fenced writer family is not healthy for this card, so the paid
+        # cross-family leg is allowed as a last resort -- never reviewer-less.
+        providers = {"meta-p": {"id": "meta-p", "tier": "free",
+                                "trains_on_prompts": False},
+                     "paid-p": {"id": "paid-p", "tier": "paid",
+                                "trains_on_prompts": False}}
+        models = {"writer-model": {"id": "writer-model", "family": "meta",
+                                   "reasoning": False, "effort_ladder": [],
+                                   "tool_calls": "proven", "price_in": 0.0,
+                                   "price_out": 0.0, "output_max": 1000,
+                                   "context_usable": {"tokens": 100000,
+                                                      "source": "default"}}}
+        for model_id, family, price in (("meta-model", "meta", 0.0),
+                                       ("paid-model", "otherfam", 1e-5)):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": price, "price_out": 2 * price,
+                "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        reg = self.fixture(legs=("paid-p/paid-model", "meta-p/meta-model"),
+                           extra_models=models, extra_providers=providers)
+        card = self.card("review", author="writer-model")
+        plan = self.run_plan(reg, card)
+        self.assertEqual(plan["leg"], "paid-p/paid-model")
+        blob = " ".join(plan["explain"])
+        # T0-PAID-5 P4: the fenced free leg is ineligible, not down -- it
+        # reads as skipped, never as a last-resort cause for the paid leg.
+        self.assertIn("meta-p/meta-model skipped (same family as author)",
+                      blob)
+        self.assertNotIn("last_resort", blob)
+
+    def test_v1_role_review_card_arms_the_author_fence(self):
+        # T0-PAID-4 Q3: v1 cards spell the review as role=review (see
+        # is_final_card) -- the P3 author fence must arm for kind OR role.
+        # usable_legs is the fence's home (plan() requires a v2 kind), so
+        # the v1 card goes straight there: the author's own family (meta)
+        # is fenced and the paid cross-family leg stays usable -- the same
+        # verdict the kind=review control gets.
+        providers = {"meta-p": {"id": "meta-p", "tier": "free",
+                                "trains_on_prompts": False},
+                     "paid-p": {"id": "paid-p", "tier": "paid",
+                                "trains_on_prompts": False}}
+        models = {"writer-model": {"id": "writer-model", "family": "meta",
+                                   "reasoning": False, "effort_ladder": [],
+                                   "tool_calls": "proven", "price_in": 0.0,
+                                   "price_out": 0.0, "output_max": 1000,
+                                   "context_usable": {"tokens": 100000,
+                                                      "source": "default"}}}
+        for model_id, family, price in (("meta-model", "meta", 0.0),
+                                       ("paid-model", "otherfam", 1e-5)):
+            models[model_id] = {
+                "id": model_id, "family": family, "reasoning": False,
+                "effort_ladder": [], "tool_calls": "proven",
+                "price_in": price, "price_out": 2 * price,
+                "output_max": 1000,
+                "context_usable": {"tokens": 100000, "source": "default"}}
+        reg = self.fixture(legs=("meta-p/meta-model", "paid-p/paid-model"),
+                           extra_models=models, extra_providers=providers)
+        route = reg["routes"]["r-mix"]
+        overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                            for leg in route["legs"]}}
+        v1 = {"role": "review", "author": "writer-model", "spec": "exact",
+              "risk": "normal", "mode": "balanced", "privacy": "public"}
+        legs, skipped, _notes = r.usable_legs(
+            route, v1, self.feats(), self.state(), reg, overlay,
+            "opencode", self.now())
+        self.assertEqual(legs, [("paid-p", "paid-model")])
+        self.assertIn("meta-p/meta-model", skipped)
+        self.assertTrue(any("same family as author" in reason
+                            for reason in skipped["meta-p/meta-model"]))
+        control = dict(v1, kind="review")
+        legs2, skipped2, _notes2 = r.usable_legs(
+            route, control, self.feats(), self.state(), reg, overlay,
+            "opencode", self.now())
+        self.assertEqual(legs2, legs)
+        self.assertEqual(skipped2, skipped)
+
+    def test_hold_back_paid_legs_survives_a_missing_provider(self):
+        # T0-PAID-4 Q4: a registry oddity (a leg whose provider is gone)
+        # must not crash the plan -- the unresolvable leg reads as an
+        # unknown tier (non-free, held back) instead of raising.
+        reg = self.fixture()
+        legs = [("free-p", "free-model"), ("ghost-p", "ghost-model")]
+        kept, skipped = r._hold_back_paid_legs(
+            legs, ["free-p/free-model", "ghost-p/ghost-model"], {}, reg)
+        self.assertEqual(kept, [("free-p", "free-model")])
+        self.assertIn("ghost-p/ghost-model", skipped)
+
+    def test_last_resort_lines_survive_a_missing_provider(self):
+        # T0-PAID-4 Q4: same oddity through the explain path -- naming a
+        # held-back leg whose provider is gone must not raise.
+        reg = self.fixture()
+        lines = r._paid_last_resort_lines(
+            "free-p/free-model",
+            {"ghost-p/ghost-model": ["non-free held back: ghost-p/ghost-model "
+                                     "is last resort while free-p/free-model "
+                                     "is healthy"]}, reg)
+        self.assertTrue(any("ghost-p/ghost-model" in line for line in lines))
+
+    def test_hold_back_unreadable_tier_recorded_with_last_resort(self):
+        # T0-PAID-5 P3: when the only would-be-free leg's tier lookup raises,
+        # the early return must not leave the paid leg selectable with no
+        # record -- the unreadable leg lands in skipped ('tier unreadable')
+        # and the paid leg carries a last_resort line naming it.
+        import copy
+        reg = copy.deepcopy(self.fixture())
+        kept, skipped = r._hold_back_paid_legs(
+            [("ghost-p", "ghost-model"), ("paid-p", "paid-model")],
+            ["ghost-p/ghost-model", "paid-p/paid-model"], {}, reg)
+        self.assertEqual(kept, [("paid-p", "paid-model")])
+        self.assertIn("ghost-p/ghost-model", skipped)
+        self.assertTrue(any("tier unreadable" in reason
+                            for reason in skipped["ghost-p/ghost-model"]),
+                        skipped["ghost-p/ghost-model"])
+        lines = r._paid_last_resort_lines("paid-p/paid-model", skipped, reg)
+        self.assertTrue(any("last_resort" in line
+                            and "ghost-p/ghost-model" in line
+                            for line in lines), lines)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -4661,5 +5147,6 @@ class CreditGuardLegFilterTests(unittest.TestCase):
         tier reads as dead data."""
         kept, _skipped, _notes = self.legs(self.guards(1_000_000, 1_000_000))
         self.assertIn(("morph", "morph-priced"), kept)
+
 
 
