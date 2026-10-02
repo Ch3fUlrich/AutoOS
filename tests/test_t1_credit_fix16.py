@@ -331,6 +331,54 @@ class BHelperFallbackTests(unittest.TestCase):
         self.assertEqual(guards["deepseek"]["state"], "refuse")
         self.assertIn("RuntimeError", guards["deepseek"]["note"])
 
+    def test_r3_helper_branch_reassert_raise_never_crashes(self):
+        # CREDIT-17: helper branch -- the re-assert call (after ledger
+        # consult) raising must not crash the plan; paid still refuses
+        # with the fallback TYPE named. This exercises the path at
+        # lines 5997-5999 where _fallback_overlay_type is re-asserted.
+        reg = self._reg()
+        def _boom_fetch(*a, **k):
+            raise usage.UsageError("down (UsageError)")
+        def _boom_helper(*a, **k):
+            raise usage.UsageError("helper down (UsageError)")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(usage, "apply_paid_local_cap",
+                                   side_effect=RuntimeError("kaput")), \
+                  mock.patch.object(usage, "refuse_paid_on_overlay_error",
+                                    side_effect=TypeError("reassert boom")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=_boom_fetch, env=env,
+                    helper=_boom_helper)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("RuntimeError", guards["deepseek"]["note"])
+
+    def test_r3_unforeseen_bug_refuse_raise_never_crashes(self):
+        # CREDIT-17: unforeseen bug path -- the second
+        # refuse_paid_on_overlay_error call (line 6011-6012) raising
+        # must not crash the plan; paid still refuses with the TYPE
+        # named. This exercises the `except Exception` block at
+        # lines 6000-6012. We mock fetch_window on the agent's
+        # usage_mod to raise an unforeseen exception (TypeError) since
+        # fetch_window wraps all exceptions in UsageError.
+        reg = self._reg()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "s"),
+                   "AUTOOS_OMNIROUTE_URL": "http://127.0.0.1:1",
+                   "HOME": tmp}
+            with mock.patch.object(agent.usage_mod, "read_manage_key",
+                                    return_value="fake-key"), \
+                 mock.patch.object(agent.usage_mod, "fetch_window",
+                                    side_effect=TypeError("unforeseen boom")), \
+                 mock.patch.object(usage, "refuse_paid_on_overlay_error",
+                                    side_effect=TypeError("refuse boom")):
+                guards = agent.plan_credit_guards(
+                    reg, now=NOW, fetch=lambda *a, **k: None, env=env, helper=None)
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("TypeError", guards["deepseek"]["note"])
+
 
 class CMinorTests(unittest.TestCase):
     def test_c1_bad_since_is_stale_with_placeholder(self):
@@ -467,6 +515,110 @@ class CMinorTests(unittest.TestCase):
             self.assertIn("deepseek", per)
             self.assertIsNotNone(usage.load_balance_stale(path, "deepseek"))
             self.assertIsNone(usage.load_balance_stale(path, "secondpaid"))
+
+
+class DCredit17Tests(unittest.TestCase):
+    """CREDIT-17: present-but-unusable entries and month-start boundary."""
+
+    def test_credit17_paid_present_but_unusable_no_series_stales(self):
+        # CREDIT-17: a PAID provider whose only payload entry has an
+        # unparseable/missing stamp and that has NO in-month series
+        # must be staled (per-provider STALE), not left ok.
+        reg = {
+            "providers": {
+                "deepseek": {"id": "deepseek", "tier": "paid",
+                             "monthly_cap_usd": 25.0,
+                             "monthly_warn_fraction": 0.8},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {"leg_rules": []},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            guards = {"deepseek": _ok("deepseek")}
+            # Empty ledger, payload has deepseek with garbage fetchedAt
+            all_readings = [{"provider": "deepseek", "fetched_at": "garbage",
+                             "remaining": 40.0}]
+            readings = []  # fresh_ids empty (garbage stamp dropped)
+            ledger = []  # no series
+            newly = usage._mark_missing_provider_reads(
+                reg, guards, path, readings, ledger, SINCE, NOW, all_readings)
+            self.assertEqual(newly, ["deepseek"])
+            self.assertEqual(guards["deepseek"]["state"], "refuse")
+            self.assertIn("old reading for provider balance", guards["deepseek"]["note"])
+
+    def test_credit17_credit_present_but_unusable_no_series_unchanged(self):
+        # CREDIT-17: a CREDIT provider in the same situation stays
+        # fail-open (unchanged).
+        reg = {
+            "providers": {
+                "ovhcloud": {"id": "ovhcloud", "tier": "credit",
+                             "monthly_cap_usd": 200.0,
+                             "monthly_warn_fraction": 0.8,
+                             "credit_grant_usd": 200.0},
+            },
+            "models": {},
+            "routes": {},
+            "policy": {"leg_rules": []},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            guards = {"ovhcloud": {"provider": "ovhcloud", "state": "ok",
+                                   "spend_usd": 0.0, "spend_unknown": False,
+                                   "cap_usd": 200.0, "warn_usd": 160.0,
+                                   "models_unpriced": 0, "note": "ledger ok"}}
+            all_readings = [{"provider": "ovhcloud", "fetched_at": "garbage",
+                             "remaining": 150.0}]
+            readings = []
+            ledger = []
+            newly = usage._mark_missing_provider_reads(
+                reg, guards, path, readings, ledger, SINCE, NOW, all_readings)
+            self.assertEqual(newly, [])
+            self.assertEqual(guards["ovhcloud"]["state"], "ok")
+
+    def test_credit17_month_start_boundary_exact_stamp_vs_one_sec_before(self):
+        # CREDIT-17: month-start boundary test - stamp exactly at UTC
+        # month start vs one second before. A `_ts <= since` mutant
+        # should die.
+        reg = _reg_two_paid()
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"AUTOOS_STATE_DIR": os.path.join(tmp, "state")}
+            path = usage.balance_ledger_path(env)
+            # Seed with a reading exactly at month start
+            _seed(path, [
+                {"provider": "deepseek", "fetched_at": "2026-10-01T00:00:00Z",
+                 "remaining": 40.0},
+            ])
+            guards = {"deepseek": _ok("deepseek"),
+                      "secondpaid": _ok("secondpaid")}
+            # Payload has a reading exactly at month start (should be fresh)
+            fetch = lambda *a, **k: (200, json.dumps(_limits([
+                ("c1", "deepseek", 39.0, "2026-10-01T00:00:00Z"),
+                ("c2", "secondpaid", 39.0, "2026-10-01T00:00:00Z"),
+            ])).encode())
+            out = usage.overlay_balance_guards(
+                reg, guards, "http://127.0.0.1:1", fetch, env, SINCE, NOW)
+            # Exactly at month start should be fresh (>= since)
+            self.assertNotEqual(out["deepseek"]["state"], "refuse")
+            self.assertNotEqual(out["secondpaid"]["state"], "refuse")
+
+            # Now test one second before month start (should be past-month)
+            guards2 = {"deepseek": _ok("deepseek"),
+                       "secondpaid": _ok("secondpaid")}
+            fetch2 = lambda *a, **k: (200, json.dumps(_limits([
+                ("c1", "deepseek", 39.0, "2026-09-30T23:59:59Z"),
+                ("c2", "secondpaid", 39.0, "2026-10-01T00:00:00Z"),
+            ])).encode())
+            out2 = usage.overlay_balance_guards(
+                reg, guards2, "http://127.0.0.1:1", fetch2, env, SINCE, NOW)
+            # One second before month start is past-month -> stale
+            self.assertEqual(out2["deepseek"]["state"], "refuse")
+            self.assertIn("balance stale since", out2["deepseek"]["note"])
+            # secondpaid at exactly month start is fresh
+            self.assertNotEqual(out2["secondpaid"]["state"], "refuse")
 
 
 if __name__ == "__main__":
