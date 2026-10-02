@@ -684,6 +684,30 @@ class D284PostPlanTests(unittest.TestCase):
         gw_patcher = mock.patch.object(self.agent, "gateway_up", return_value=True)
         gw_patcher.start()
         self.addCleanup(gw_patcher.stop)
+        # CI's runner has no opencode on PATH, and the launch path resolves the
+        # client's program (`resolve_client_executable` -> `shutil.which(name)`)
+        # *before* this class's fallthrough loop runs: without the resolution
+        # the first attempt's refusal is rc 3 "not installed: opencode (PATH …)"
+        # instead of the rc 2 D-284 refusal these tests exist to pin. So the one
+        # lookup the launch path makes — a single positional question, the
+        # client's binary — is answered here, in setUp with addCleanup, same
+        # style as the gateway stub above; a lookup that carries arguments (the
+        # signin probe's own `path=` question) and every other name (env,
+        # systemd-run, systemctl) still delegates to the real shutil.which.
+        real_which = shutil.which
+        program = self.agent.clients.CLIENTS[self.args().client].binary
+
+        def which_client_only(name, *args, **kwargs):
+            if not args and not kwargs and os.path.basename(str(name)) == program:
+                # Named only: `run_client` is stubbed in every launch here, and
+                # the pre-check discards the path it resolves.
+                return "/nonexistent/autoos-test/bin/%s" % program
+            return real_which(name, *args, **kwargs)
+
+        which_patcher = mock.patch.object(self.agent.shutil, "which",
+                                          side_effect=which_client_only)
+        which_patcher.start()
+        self.addCleanup(which_patcher.stop)
 
     def _restore(self):
         if self.old is None:

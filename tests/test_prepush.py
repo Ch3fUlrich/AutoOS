@@ -24,12 +24,23 @@ test decides what "red" means. The production path — the real mapping against 
 real suite — is exercised by running ``python3 tools/prepush.py`` on this branch,
 which is exactly what the pre-push hook does.
 
+One seam is deliberately fixture-side: a plan whose ``pytest`` list is non-empty
+runs the gate in-process with ``prepush.python_executable`` pointed at a fake
+interpreter (``RepoFixture.fake_python``), because CI's runner has no pytest —
+``/usr/bin/python3 -m pytest`` there dies with "No module named pytest" and the
+fixture would go red for a reason that has nothing to do with the fixture. The
+gate itself is never weakened: the fake answers ``-m pytest -q <files>`` the way
+pytest does (exit 0 and ``<n> passed`` when the named files' tests pass, a red
+exit when one fails) and hands every other command to the real interpreter.
+
 Run directly:
 
     python3 tests/test_prepush.py
 """
+import contextlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 import shutil
@@ -38,10 +49,73 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "tools" / "prepush.py"
 AFFECTED = ROOT / "tools" / "affected-tests.py"
+
+# Template for the fake interpreter ``RepoFixture.fake_python`` writes into the
+# fixture's temp dir.  ``__REAL__`` is replaced with the interpreter running this
+# suite.  It answers exactly the command the gate builds for the pytest leg of a
+# plan — ``fake -m pytest -q <files>`` — by loading each named file and running
+# its ``test_*`` callables, printing pytest's own verdict shapes (``<n> passed``
+# green, ``<m> failed, <n> passed`` red) because that line is what
+# ``prepush.parse_passed`` reads to call a check ok.  A ``-m pytest`` invocation
+# naming a file that does not exist exits 4, pytest's "no tests ran" code.  Every
+# other argv (the plan checks, the mapper: ``fake tools/ci-shards.py`` …) is
+# handed to the real interpreter verbatim via ``os.execv``, so the gate's own
+# commands are unchanged and no test may drop one.
+PY_FAKE = '''#!__REAL__
+"""Stand-in for the interpreter prepush points at.  See tests/test_prepush.py."""
+import importlib.util as _ilu
+import os
+import sys
+
+REAL = "__REAL__"
+
+
+def _run(path):
+    spec = _ilu.spec_from_file_location("__fake_" + str(len(path)), path)
+    if spec is None or spec.loader is None:
+        return 0, 0
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    failed = 0
+    names = [n for n in dir(mod) if n.startswith("test_")]
+    for name in names:
+        fn = getattr(mod, name)
+        if not callable(fn):
+            continue
+        try:
+            fn()
+        except Exception:
+            failed += 1
+    return failed, len(names) - failed
+
+
+argv = sys.argv[1:]
+if len(argv) >= 3 and argv[0] == "-m" and argv[1] == "pytest":
+    files = [a for a in argv[2:] if not a.startswith("-")]
+    failed = ran = 0
+    missing = False
+    for f in files:
+        if not os.path.isfile(f):
+            missing = True
+            continue
+        r_failed, r_passed = _run(f)
+        failed += r_failed
+        ran += r_failed + r_passed
+    if missing:
+        print("ERROR: file or directory not found: %s" % files, file=sys.stderr)
+        sys.exit(4)
+    if failed:
+        print("%d failed, %d passed" % (failed, ran))
+        sys.exit(1)
+    print("%d passed" % ran)
+    sys.exit(0)
+os.execv(REAL, [REAL] + sys.argv[1:])
+'''
 
 
 def _load(name, path):
@@ -102,6 +176,9 @@ class RepoFixture(unittest.TestCase):
         old_state = os.environ.get("AUTOOS_STATE_DIR")
         os.environ["AUTOOS_STATE_DIR"] = str(self.tmp / "store")
         self.addCleanup(self._restore_state, old_state)
+        # What the stubbed mapping will answer — consulted by prepush() to pick
+        # the hermetic runner, so it starts at "no tests named".
+        self.plan = {}
 
     @staticmethod
     def _restore_state(old):
@@ -133,6 +210,7 @@ class RepoFixture(unittest.TestCase):
         """What the (stubbed) mapping answers, and the stub files it names."""
         os.environ["PREPUSH_FIXTURE_PLAN"] = json.dumps(plan)
         self.addCleanup(os.environ.pop, "PREPUSH_FIXTURE_PLAN", None)
+        self.plan = dict(plan)
         for rel in plan.get("pytest", []):
             self._write(rel, "def test_stub():\n    assert 0 == 0\n")
 
@@ -160,7 +238,50 @@ class RepoFixture(unittest.TestCase):
                              "sys.exit(1)\n")
         self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_RED)
 
+    def fake_python(self):
+        """The fake interpreter (``PY_FAKE``) written into this fixture's temp dir.
+
+        Executable, with a ``#!/<real interpreter>`` shebang, so the subprocess
+        the gate runs for the pytest leg starts under an interpreter whose
+        behaviour is pinned here — CI's runner has no pytest to start.  The real
+        interpreter is the one this suite runs under (``sys.executable``), which
+        is what ``python_executable`` would have returned on a green host; the
+        fake only ever *custodies* the ``-m pytest`` leg and execs that real
+        interpreter for everything else.
+        """
+        path = self.tmp / "fake-python"
+        path.write_text(PY_FAKE.replace("__REAL__", sys.executable or "python3"),
+                        encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def hermetic_prepush(self, *args, env=None):
+        """The same gate run in-process with the interpreter seam faked.
+
+        Why in-process: ``commands_for`` asks ``prepush.python_executable`` for
+        the interpreter *inside the gate process*, so a fake interpreter can only
+        be installed there — the ``PATH`` a child inherits cannot reach back and
+        replace ``/usr/bin/python3``.  Everything else about the run is the
+        subprocess path's: this process's environment becomes exactly what the
+        child would inherit (``base_env``), stdout/stderr are pooled into the one
+        string the tests read, and every command the gate runs still leaves as a
+        real subprocess of a fixture repo.
+        """
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.base_env(env), clear=True), \
+                mock.patch.object(prepush, "python_executable",
+                                  return_value=str(self.fake_python())), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = prepush.main(["--repo", str(self.repo)] + list(args))
+        return rc, out.getvalue()
+
     def prepush(self, *args, env=None):
+        # A plan naming pytest tests is the leg CI's runner cannot execute for
+        # real (no pytest there); it takes the fake interpreter above.  A plan
+        # without it — and everything on Windows, where a shebang script is not
+        # an executable — runs exactly as it always did, as a child process.
+        if os.name != "nt" and (self.plan.get("pytest") or []):
+            return self.hermetic_prepush(*args, env=env)
         proc = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.repo)]
                               + list(args), capture_output=True, text=True,
                               env=self.base_env(env), cwd=str(self.repo))
