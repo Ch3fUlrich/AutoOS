@@ -246,23 +246,36 @@ class M1SelectionOrderTests(unittest.TestCase):
         self.assertIn("measured via gateway helper",
                       guards["deepseek"]["note"])
 
-    def test_helper_non_200_falls_back_to_unknown(self):
+    def test_helper_non_200_refuses_paid_fail_closed(self):
         runner = FakeRunner()
         runner.add("/api/usage/call-logs", stdout=b"403\n[]")
         def helper(url, headers, timeout):
             return usage.helper_fetch(url, headers, timeout, _run=runner)
         with tempfile.TemporaryDirectory() as tmp:
+            env = _bare_env(tmp)
             guards = agent.plan_credit_guards(
-                _reg_paid(), now=NOW, env=_bare_env(tmp), helper=helper)
-        self.assertEqual(guards["deepseek"]["state"], "unknown")
-        self.assertTrue(guards["deepseek"]["spend_unknown"])
+                _reg_paid(), now=NOW, env=env, helper=helper)
+            # T1-CREDIT-FIX-14 rework M2 (D-274): the helper is unreachable,
+            # so no balance read was possible -- paid fails closed (refuse
+            # with the recorded STALE marker), never unknown/D-240.
+            self.assertEqual(guards["deepseek"]["state"], "refuse")
+            self.assertIn("balance stale since", guards["deepseek"]["note"])
+            self.assertIn("(D-274)", guards["deepseek"]["note"])
+            self.assertNotIn("(D-240)", guards["deepseek"]["note"])
+            self.assertIsNotNone(
+                usage.load_balance_stale(usage.balance_ledger_path(env)))
 
-    def test_docker_missing_falls_back_to_unknown(self):
+    def test_docker_missing_refuses_paid_fail_closed(self):
         fetch = _helper_fetch(exc=FileNotFoundError("no docker"))
         with tempfile.TemporaryDirectory() as tmp:
+            env = _bare_env(tmp)
             guards = agent.plan_credit_guards(
-                _reg_paid(), now=NOW, env=_bare_env(tmp), helper=fetch)
-        self.assertEqual(guards["deepseek"]["state"], "unknown")
+                _reg_paid(), now=NOW, env=env, helper=fetch)
+        # T1-CREDIT-FIX-14 rework M2 (D-274): docker missing means no
+        # balance read was possible -- paid refuses, fail closed.
+        self.assertEqual(guards["deepseek"]["state"], "refuse")
+        self.assertIn("balance stale since", guards["deepseek"]["note"])
+        self.assertIn("(D-274)", guards["deepseek"]["note"])
 
 
 class M2LocalCapTests(unittest.TestCase):
@@ -279,20 +292,30 @@ class M2LocalCapTests(unittest.TestCase):
             usage.paid_local_cap_usd({"policy": {"paid_local_cap_usd": 30}}),
             30.0)
 
-    def test_unknown_with_no_records_keeps_at_zero(self):
+    def test_helper_down_refuses_paid_fail_closed(self):
+        # T1-CREDIT-FIX-14 rework M2 (D-274): with the helper down no rows
+        # and no balance read are possible -- the paid leg refuses with the
+        # STALE reason (fail closed), superseding the old D-240 kept line.
         fetch = _helper_fetch(exc=OSError("down"))
         with tempfile.TemporaryDirectory() as tmp:
+            env = _bare_env(tmp)
             guards = agent.plan_credit_guards(
-                _reg_paid(), now=NOW, env=_bare_env(tmp), helper=fetch)
-        guard = guards["deepseek"]
-        self.assertEqual(guard["state"], "unknown")
-        self.assertIn("paid spend unmeasured - leg kept, "
-                      "local estimate $0.00 of $20 (D-240)", guard["note"])
-        kept, skipped, warns = _legs_for(_reg_paid(), "r-paid", guards)
-        self.assertIn(("deepseek", "ds-model"), kept)
-        self.assertNotIn("deepseek/ds-model", skipped)
-        self.assertTrue(any("local estimate $0.00 of $20 (D-240)" in w
-                            for w in warns), warns)
+                _reg_paid(), now=NOW, env=env, helper=fetch)
+            guard = guards["deepseek"]
+            self.assertEqual(guard["state"], "refuse")
+            self.assertIn("balance stale since", guard["note"])
+            self.assertIn("(D-274)", guard["note"])
+            self.assertIsNotNone(
+                usage.load_balance_stale(usage.balance_ledger_path(env)))
+            kept, skipped, warns = _legs_for(_reg_paid(), "r-paid", guards)
+            self.assertNotIn(("deepseek", "ds-model"), kept)
+            blob_parts = []
+            for v in list(skipped.values()) + warns:
+                if isinstance(v, list):
+                    blob_parts.extend(v)
+                else:
+                    blob_parts.append(v)
+            self.assertIn("balance stale since", " ".join(blob_parts))
 
     def test_estimate_between_local_cap_and_provider_cap_refuses(self):
         # $22 of partial rows: truncated -> unknown, but >= the $20 local
