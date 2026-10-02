@@ -728,6 +728,47 @@ class D284PostPlanTests(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertNotIn("D-284", text)
 
+    # F4: child_rc and attempt_start are initialized before the attempt loop,
+    # so an early break (e.g., on mismatch or D-284 in fallthrough) does not
+    # raise NameError when wip_commit or track_entry uses them.
+    def test_fallthrough_break_on_mismatch_does_not_raise_nameerror(self):
+        # This test verifies the fix by checking that the code path where
+        # the loop breaks early (before child_rc/attempt_start are assigned
+        # in the loop body) doesn't crash with NameError.
+        # We can't easily test the full wip_commit path without a real sandbox,
+        # but we verify the variables are initialized by running a scenario
+        # that hits the early break.
+        banned_route = self.route(model="omniroute/gemini-3.8-flash", combo="t2-banned")
+        allowed_route = self.route(model="omniroute/t2-other", combo="t2-other")
+
+        attempt = {"count": 0}
+        def resolve_side_effect(*a, **k):
+            attempt["count"] += 1
+            if attempt["count"] == 1:
+                return allowed_route
+            return banned_route
+
+        args = self.args()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.dict(os.environ, {"AUTOOS_CLAUDE_CRITICAL":
+                                              "test: T2-RECORD-PIN"}):
+                with mock.patch.object(self.agent, "resolve_route",
+                                       side_effect=resolve_side_effect):
+                    with mock.patch.object(self.agent, "client_key",
+                                           lambda *a, **k: "fake-key"):
+                        with mock.patch.object(self.agent, "run_client",
+                                               return_value=self.MockRunRC(
+                                                   returncode=0,
+                                                   tail="Error: Rate limit exceeded",
+                                                   raw_tail="Error: Rate limit exceeded",
+                                                   raw_err="Error: Rate limit exceeded",
+                                                   refusal=None)):
+                            rc = self.agent.cmd_run(args, self.cfg())
+        # Should not crash with NameError; should return rc=2 for D-284
+        self.assertEqual(rc, 2, out.getvalue() + err.getvalue())
+        self.assertIn("D-284", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

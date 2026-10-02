@@ -9729,6 +9729,11 @@ def cmd_run(args, cfg: dict) -> int:
     # before the client starts, so a run in progress already says it, and from the
     # exit object after, so what is printed is what ran.
     scope_rec = None
+    # F4: child_rc and attempt_start are assigned inside the loop but used
+    # after the loop (in wip_commit and track_entry). Initialize them to
+    # avoid NameError if the loop breaks early (e.g., on mismatch or D-284).
+    child_rc = None
+    attempt_start = None
     while True:
         # CLAUDEBUDGET-g item A: the authority. Checked on every plan this run is
         # about to launch, here and not only at the dry-run branch above, because a
