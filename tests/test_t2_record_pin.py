@@ -516,5 +516,69 @@ class D284GuardTests(unittest.TestCase):
             os.environ.pop("AUTOOS_AGENT_MCP_DRY_RUN", None)
 
 
+class D284NormalisedSpellingTests(unittest.TestCase):
+    """F1: the guard normalises the spelling ONCE, so no variant slips past.
+
+    The same pin spelled `OmniRoute/...`, `omniroute/omniroute/...`, with a
+    `-clean` twin, with whitespace inside the prefix, or in upper case used to
+    read as a different model and launched the pin D-284 holds back.
+    """
+
+    BANNED_VARIANTS = ("OmniRoute/gemini-3.8-flash",
+                       "omniroute/omniroute/gemini-3.8-flash",
+                       "omniroute/gemini-3.8-flash-clean",
+                       "gemini-3.8-flash-clean",
+                       "openrouter/ google/gemini-3.8-flash",
+                       "openrouter/google/ gemini-3.8-flash",
+                       "OPENROUTER/GOOGLE/gemini-3.8-flash",
+                       "gemini-3.8-flash-clean#high")
+
+    ALLOWED_IDS = ("vertex/gemini-3.8-flash", "vertex-gemini-3.8-flash",
+                   "google/gemini-3.8-flash", "gemini-3.8-flash-high",
+                   "openrouter/anthropic/claude-opus-4-6",
+                   "omniroute/t2-worker-clean", None, "")
+
+    def test_the_helper_refuses_every_normalisable_variant(self):
+        agent = load_agent()
+        for model in self.BANNED_VARIANTS:
+            reason = agent.d284_model_refusal(model)
+            self.assertIsNotNone(reason, model)
+            self.assertIn("D-284", reason, model)
+            self.assertIn("until stage 2", reason, model)
+
+    def test_the_helper_still_allows_vertex_and_every_other_id(self):
+        agent = load_agent()
+        for model in self.ALLOWED_IDS:
+            self.assertIsNone(agent.d284_model_refusal(model), model)
+
+    def test_the_cli_refuses_every_variant_on_model_and_free_model(self):
+        for model in self.BANNED_VARIANTS[:4]:
+            r = plan_of("--client", "opencode", "--model", model, "t")
+            self.assertNotEqual(r.returncode, 0, model)
+            self.assertIn("D-284", r.stderr, model)
+            self.assertIn("until stage 2", r.stderr, model)
+        r = plan_of("--client", "opencode", "--free", "--free-model",
+                    "OPENROUTER/GOOGLE/gemini-3.8-flash", "t")
+        self.assertNotEqual(r.returncode, 0, r.stdout)
+        self.assertIn("D-284", r.stderr)
+
+    def test_an_allowed_variant_is_not_named_as_d284(self):
+        r = plan_of("--client", "opencode", "--model",
+                    "vertex/gemini-3.8-flash", "t")
+        self.assertNotIn("D-284", r.stderr)
+
+    def test_the_mcp_spawn_refuses_every_variant(self):
+        for req in ({"task": "t", "model": "OmniRoute/gemini-3.8-flash"},
+                    {"task": "t", "model":
+                     "omniroute/omniroute/gemini-3.8-flash"},
+                    {"task": "t", "free": True, "model":
+                     "gemini-3.8-flash-clean"},
+                    {"task": "t", "free_model":
+                     "OPENROUTER/GOOGLE/gemini-3.8-flash"}):
+            with self.assertRaises(ValueError) as ctx:
+                mcp_server.build_argv(req)
+            self.assertIn("D-284", str(ctx.exception), req)
+
+
 if __name__ == "__main__":
     unittest.main()

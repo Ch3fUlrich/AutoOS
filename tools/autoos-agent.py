@@ -2526,6 +2526,30 @@ D284_ROUTE_ID = "gemini-3.8-flash"
 D284_BANNED_PREFIXES = ("openrouter/google/",)
 
 
+def d284_model_key(value) -> str:
+    """The one spelling D-284 compares against (F1).
+
+    The guard used to compare the raw string, so every spelling of the same
+    model read as a different one and slipped past: `OmniRoute/...` (the prefix
+    strip was case-sensitive), `omniroute/omniroute/...` (one prefix stripped),
+    `...-clean` (the twin `_model_pin_key` already treats as the same model),
+    `openrouter/ google/...` (whitespace inside the prefix) and any upper-case
+    spelling of the banned prefix. Normalised ONCE here — strip, case-fold,
+    collapse whitespace around `/`, drop the `#effort` rung, every leading
+    `omniroute/` prefix and a trailing `-clean` — and compared. A D-284-private
+    key, so `model_route_id`/`_model_pin_key` (which stay case-sensitive for
+    the mismatch gate) keep the behaviour their own tests pin.
+    """
+    text = str(value or "").strip()
+    text = re.sub(r"\s*/\s*", "/", text)
+    text = text.partition("#")[0].strip().casefold()
+    while text.startswith("omniroute/"):
+        text = text[len("omniroute/"):]
+    if text.endswith("-clean"):
+        text = text[: -len("-clean")]
+    return text
+
+
 def d284_model_refusal(model) -> str | None:
     """Why D-284 will not launch this pin, or None when the pin is allowed.
 
@@ -2533,12 +2557,13 @@ def d284_model_refusal(model) -> str | None:
     reads it on `--model` and `--free-model` before anything is priced or
     planned, the MCP server reads it on the spawn request before an argv exists.
     A pin that names no model (None, "") is nothing to guard, so it passes.
+    Comparison runs on `d284_model_key`, never on the raw spelling.
     """
     text = str(model or "").strip()
     if not text:
         return None
-    banned = model_route_id(text).lower() == D284_ROUTE_ID or \
-        text.lower().startswith(D284_BANNED_PREFIXES)
+    key = d284_model_key(text)
+    banned = key == D284_ROUTE_ID or key.startswith(D284_BANNED_PREFIXES)
     if not banned:
         return None
     return ("D-284: %s stays off the spawn list until stage 2 (operator hold) - "
