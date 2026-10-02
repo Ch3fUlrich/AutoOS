@@ -355,9 +355,10 @@ for n in clean:
     if bad:
         problems.append(n + "-trains:" + ",".join(bad))
 # *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
+# SHARDB: expectation moved by 7eff6020 (FREEWIRE wired probe-passed openrouter :free legs into free-only routes): a :free suffixed id is free.
 paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
 for n in (n for n in names if n.endswith("-free-only")):
-    bad = [m for m in by[n] if paid.search(m)]
+    bad = [m for m in by[n] if paid.search(m) and not m.endswith(":free")]
     if bad:
         problems.append(n + "-paid:" + ",".join(bad))
 print(" ".join(problems))
