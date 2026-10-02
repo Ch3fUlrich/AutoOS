@@ -462,6 +462,12 @@ script_is_installed() {
         uv)              has_bin uv ;;
         ollama)          has_bin ollama ;;
         claude-autostart) [[ -f "$SYS_HOME/.config/systemd/user/claude-sessions-restore.service" ]] ;;
+        # Both halves install_taildrop_sort writes, or neither: the script the
+        # unit runs and the timer that runs it. One without the other is a
+        # half-install a rerun should repair (it reports installed), so only the
+        # pair counts as installed and silently skips.
+        taildrop-sort)   [[ -f "$SYS_HOME/.local/share/autoos/taildrop-sort.sh" && \
+                           -f "$SYS_HOME/.config/systemd/user/taildrop-sort.timer" ]] ;;
         # A HS_SCOPE=system install (configuration/herdr-sessions/install.sh, the
         # headless-root branch) puts its restore unit in /etc/systemd/system, never
         # under $SYS_HOME - check both, or a system-scope herdr-sessions is invisible

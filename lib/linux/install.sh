@@ -584,6 +584,7 @@ install_script() {
         uv)              install_uv ;;
         ollama)          install_ollama ;;
         claude-autostart) install_claude_autostart ;;
+        taildrop-sort)   install_taildrop_sort ;;
         herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
@@ -2004,6 +2005,121 @@ claude_autostart_interval() {
              sed -n "s/^AUTOOS_CLAUDE_SNAPSHOT_INTERVAL_MINS='\(.*\)'$/\1/p")"
     [[ "$value" =~ ^[0-9]+$ ]] && (( value >= 1 && value <= 59 )) || value=5
     printf '%s' "$value"
+}
+
+# TAILDROP_CHANGED: set to 1 by taildrop_copy whenever a file was actually
+# written. It is the only channel from that helper back to its caller - the
+# helper decides between "already current" and "replace", the caller decides
+# what a replacement means (reload the units, report installed, not skipped).
+TAILDROP_CHANGED=0
+
+# taildrop_copy <src> <dest>: install one file idempotently. Identical bytes are
+# left alone - no backup, no mtime churn, nothing that would restart a timer
+# nobody changed. A changed or missing dest is backed up first (AGENTS.md hard
+# rule 5), then staged to a temp file and moved in, so a dest is never left
+# half-written and a replacement is never silent about what it overwrote.
+taildrop_copy() {
+    local src="$1" dest="$2" tmp
+    if [[ -f "$dest" ]] && cmp -s "$src" "$dest"; then
+        ui_info "${dest##*/} is already current"
+        return 0
+    fi
+    if [[ -f "$dest" ]] && ! backup_file "$dest" >/dev/null; then
+        ui_err "could not back up $dest - left as it was"
+        return 1
+    fi
+    if ! tmp="$(mktemp)"; then
+        ui_err "cannot stage a copy of $dest"
+        return 1
+    fi
+    if ! cp -p -- "$src" "$tmp"; then
+        rm -f "$tmp"
+        ui_err "could not copy $src to $dest"
+        return 1
+    fi
+    if ! mv -f "$tmp" "$dest"; then
+        rm -f "$tmp"
+        ui_err "could not move the staged copy over $dest"
+        return 1
+    fi
+    TAILDROP_CHANGED=1
+    return 0
+}
+
+# install_taildrop_sort: the host's ONE Taildrop fetcher (D-410), on the shape
+# of install_claude_autostart above. Two kinds of copy - the script the unit
+# runs (into the path the units name, so the unit survives this checkout being
+# moved or removed) and the two user units - then the timer. Nothing is
+# rendered: the units carry a literal %h path, so "changed" is a plain `cmp` and
+# a run over an untouched tree writes nothing at all and reports skipped.
+install_taildrop_sort() {
+    INSTALL_SCRIPT_STATE=""
+
+    local appdir="${AUTOOS_ROOT}/lib/linux"
+    local script_dest="${SYS_HOME}/.local/share/autoos/taildrop-sort.sh"
+    local udest="${SYS_HOME}/.config/systemd/user"
+    local units=(taildrop-sort.service taildrop-sort.timer)
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install the taildrop-sort fetcher to $script_dest"
+        ui_muted "would install ${#units[@]} systemd user units into $udest and enable the minute timer"
+        return 0
+    fi
+
+    if ! has_cmd systemctl; then
+        ui_err "systemd is required for taildrop-sort and systemctl was not found"
+        return 1
+    fi
+
+    local src="${appdir}/taildrop-sort.sh"
+    if [[ ! -f "$src" ]]; then
+        ui_err "missing script: $src"
+        return 1
+    fi
+
+    # Every source is checked before anything is written: a missing template is
+    # a broken checkout, not a condition of this machine, and it must not be
+    # discovered half-way through replacing the installed copy.
+    local u usrc
+    for u in "${units[@]}"; do
+        usrc="${appdir}/systemd/user/${u}"
+        if [[ ! -f "$usrc" ]]; then
+            ui_err "missing unit template: $usrc"
+            return 1
+        fi
+    done
+
+    mkdir -p -- "$(dirname "$script_dest")" "$udest"
+
+    TAILDROP_CHANGED=0
+    taildrop_copy "$src" "$script_dest" || return 1
+    # systemd execs ExecStart directly: a 0644 script is a 203/EXEC the journal
+    # only explains. The checkout's mode is not ours to trust (fileMode off, a
+    # copy from anywhere), so the installed copy's mode is set here, once.
+    chmod 0755 -- "$script_dest"
+
+    for u in "${units[@]}"; do
+        taildrop_copy "${appdir}/systemd/user/${u}" "${udest}/${u}" || return 1
+    done
+
+    if (( ! TAILDROP_CHANGED )); then
+        ui_info "taildrop-sort: everything is already current"
+        INSTALL_SCRIPT_STATE=skipped
+        return 0
+    fi
+
+    if systemctl --user daemon-reload >/dev/null 2>&1; then
+        ui_ok "reloaded the user unit files"
+    else
+        ui_warn "systemctl --user daemon-reload failed — is there a user manager on this session?"
+    fi
+    if systemctl --user enable --now taildrop-sort.timer >/dev/null 2>&1; then
+        ui_ok "enabled taildrop-sort.timer (fetches Taildrop every minute)"
+    else
+        ui_warn "could not enable taildrop-sort.timer — run: systemctl --user enable --now taildrop-sort.timer"
+    fi
+    ui_ok "taildrop-sort installed"
+    return 0
 }
 
 # install_herdr_sessions: a thin dispatch to the herdr-sessions driver, on the

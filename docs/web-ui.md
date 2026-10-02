@@ -142,6 +142,28 @@ bash lib/linux/claude-sessions.sh status
 pwsh lib\windows\claude-sessions.ps1 -Action status
 ```
 
+### Taildrop sorting
+
+The `taildrop-sort` component installs the machine's one Taildrop fetcher: a
+systemd user timer that drains the inbox once a minute. `tailscale file get`
+does not fetch *your* files, it drains an inbox every session on the host
+shares, so whichever process fetches first takes everybody's — **no session may
+run `tailscale file get` itself.** Sessions send instead, naming their owner in
+the file name, and the timer files it on the way out:
+
+| Sent as | Filed to |
+|---|---|
+| `autoos__notes.md` | `~/fleet/taildrop/autoos/notes.md` |
+| `server__build.log` | `~/fleet/taildrop/server/build.log` |
+| `plangraph__flow.dot` | `~/fleet/taildrop/plangraph/flow.dot` |
+| `routing__edges.csv` | `~/fleet/taildrop/routing/edges.csv` |
+| no prefix (`notes.md`) | `~/fleet/taildrop/unsorted/notes.md` + one line in `sort.log` |
+
+An owner is `<lower-case letters, digits, dashes>__` and nothing else, so
+`..__x` and `A__x` are ordinary names and stay in `unsorted/`; a name delivered
+twice becomes `name.1` rather than clobbering whoever sent first. File contents
+are never read — the sorter decides on the name alone.
+
 ### Prefilled answers
 
 On a machine with no `autoos.config.json` yet, the configuration form is seeded

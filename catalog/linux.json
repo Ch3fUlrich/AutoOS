@@ -1037,6 +1037,23 @@
           "homepage": "https://tailscale.com/"
         },
         {
+          "id": "taildrop-sort",
+          "name": "Taildrop file sorter",
+          "description": "Sorts received Taildrop files into per-owner folders",
+          "provider": "script",
+          "package": "taildrop-sort",
+          "requires": [
+            "tailscale"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://tailscale.com/",
+          "launcher": "none"
+        },
+        {
           "id": "openssh-server",
           "name": "OpenSSH server",
           "description": "Accept inbound SSH",

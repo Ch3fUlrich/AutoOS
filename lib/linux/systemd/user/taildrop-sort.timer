@@ -1,0 +1,21 @@
+# Fetch and sort the shared Taildrop inbox once a minute (D-410).
+#
+# Monotonic cadence: OnBootSec arms the first run of a boot (OnUnitActiveSec
+# alone would wait for a run that has not happened yet - see the long note in
+# claude-sessions-snapshot.timer for how that ends), OnUnitActiveSec then
+# holds the interval after each run.
+#
+# Persistent=false, on purpose: nothing here is owed to a minute that went by
+# while the machine was off. The inbox keeps every file until it is fetched, so
+# the boot run drains everything anyway and a queue of catch-up runs would only
+# fight over the same inbox.
+[Unit]
+Description=Fetch and sort the shared Taildrop inbox once a minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
