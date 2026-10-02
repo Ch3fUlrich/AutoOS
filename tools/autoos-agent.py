@@ -9334,7 +9334,7 @@ def cmd_run(args, cfg: dict) -> int:
         # model straight from args.free_model and never reaches resolve_model.
         if registry is None:
             try:
-                registry = load_registry(REGISTRY_PATH)
+                registry = load_registry(getattr(args, "registry", None) or REGISTRY_PATH)
             except (OSError, ValueError):
                 registry = None
         free_pool = ((registry or {}).get("policy") or {}).get("free_client_models") or {}
@@ -9342,9 +9342,19 @@ def cmd_run(args, cfg: dict) -> int:
         declared = declared_models(cfg)
         for attr in ("model", "free_model"):
             pin = getattr(args, attr, None)
-            if pin and "/" in str(pin) and pin not in client_free and pin not in declared:
-                return refuse("%s is not in the free pool for %s (declared: %s)"
-                              % (pin, client.name, ", ".join(client_free) or "none"), 2)
+            if pin and "/" in str(pin):
+                pin_str = str(pin)
+                # Skip F3 free pool check for opencode/ models when the pool is
+                # empty/absent: opencode/* free models are served by opencode itself
+                # and keep their old behaviour (they don't need a declared pool).
+                if client_free and pin_str not in client_free and pin_str not in declared:
+                    return refuse("%s is not in the free pool for %s (declared: %s)"
+                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
+                # When pool is empty/absent, still refuse non-opencode pins
+                # (e.g. foo/bar) that are not declared.
+                if not client_free and pin_str not in declared and not pin_str.startswith("opencode/"):
+                    return refuse("%s is not in the free pool for %s (declared: %s)"
+                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
         # Then qualify bare pins (no '/' in original)
         for attr in ("model", "free_model"):
             pin = getattr(args, attr, None)
@@ -10472,6 +10482,8 @@ def _parser_run(sub):
                           "instead of minting a new one, so one spawn has one id: it names the "
                           "branch, the sandbox, logs/workers/<id>.json and the child env; a bad "
                           "shape is refused with exit 2")
+    run.add_argument("--registry",
+                     help="registry to use (default: catalog/ai-registry.json)")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     run.add_argument("task")
 

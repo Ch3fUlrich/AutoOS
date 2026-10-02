@@ -371,6 +371,44 @@ class PinQualifyTests(unittest.TestCase):
         # Should say not in free pool AND not declared
         self.assertIn("not in the free pool", r.stderr)
 
+    def test_a_free_opencode_pin_with_empty_pool_is_allowed(self):
+        # An opencode/<anything>-free pin with an empty/absent free pool
+        # should be allowed (opencode models are served by opencode itself).
+        # This simulates a policy with no free_client_models for opencode.
+        import os
+        import tempfile
+        import json
+        # Create a temporary registry with empty free_client_models
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = os.path.join(tmpdir, "ai-registry.json")
+            registry = {"policy": {"free_client_models": {"opencode": []}}}
+            with open(registry_path, "w") as f:
+                json.dump(registry, f)
+            env = clean_env()
+            r = plan_of("--registry", registry_path,
+                        "--client", "opencode", "--free", "--free-model",
+                        "opencode/anything-free", "t", env=env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("--model opencode/anything-free", r.stdout)
+
+    def test_a_free_non_opencode_pin_with_empty_pool_is_refused(self):
+        # A non-opencode pin (e.g. foo/bar) with an empty/absent free pool
+        # should still be refused by F3.
+        import os
+        import tempfile
+        import json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            registry_path = os.path.join(tmpdir, "ai-registry.json")
+            registry = {"policy": {"free_client_models": {"opencode": []}}}
+            with open(registry_path, "w") as f:
+                json.dump(registry, f)
+            env = clean_env()
+            r = plan_of("--registry", registry_path,
+                        "--client", "opencode", "--free", "--free-model",
+                        "foo/bar", "t", env=env)
+            self.assertNotEqual(r.returncode, 0, r.stdout)
+            self.assertIn("not in the free pool", r.stderr)
+
 
 class ReviewTierWriteTests(unittest.TestCase):
     """Item 4: review-only tier 3 does not run an implement task."""
