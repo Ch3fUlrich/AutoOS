@@ -1089,11 +1089,15 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # individually now - see
         # test_leg_flagged_unavailable_in_its_own_route_is_marked).
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t2-orchestrator"]["unavailable_legs"] = {}
-        reg["providers"]["openrouter"]["available"] = False
+        # CIGREEN: expectation moved by c4c3654b (TORDER-OR removed the paid
+        # openrouter legs from t2-orchestrator) + aced9915 (removed its
+        # antigravity leg too): the route carries ovhcloud legs now, so the
+        # provider-wide flip uses ovhcloud - still a provider the route
+        # actually reaches through, which is what this test needs.
+        reg["providers"]["ovhcloud"]["available"] = False
         rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "t2-orchestrator")
-        self.assertIn("~~openrouter", row)
+        self.assertIn("~~ovhcloud", row)
         self.assertIn("(unavailable)", row)
 
     def test_available_leg_is_not_marked(self):
