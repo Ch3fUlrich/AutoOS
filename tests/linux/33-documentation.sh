@@ -355,9 +355,10 @@ for n in clean:
     if bad:
         problems.append(n + "-trains:" + ",".join(bad))
 # *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
+# SHARDB: expectation moved by 7eff6020 (FREEWIRE wired probe-passed openrouter :free legs into free-only routes): a :free suffixed id is free.
 paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
 for n in (n for n in names if n.endswith("-free-only")):
-    bad = [m for m in by[n] if paid.search(m)]
+    bad = [m for m in by[n] if paid.search(m) and not m.endswith(":free")]
     if bad:
         problems.append(n + "-paid:" + ",".join(bad))
 print(" ".join(problems))
@@ -490,36 +491,67 @@ if it "apply.sh reads provider rows from ai-registry.json and skips a provider w
     if (( ok )); then pass; else fail "provider-level all-unavailable skip is not wired into apply.sh"; fi
 fi
 
-# Regression lock for today's registry (2026-09-28): cerebras (402/401 credit
-# exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter (DSMAX
-# 401, 2026-09-27T15:05:54Z) and opencode-zen (every deepseek-v4.1-flash leg
-# route-gated by the operator) are, right now, all-unavailable across every
-# route that lists them - proves the real catalog/ai-registry.json actually
-# reaches apply.sh's live plan, not just the synthetic fixture above.
-# Antigravity, mistral and deepseek still carry a live leg, so they are offered
-# and only skipped for the missing key - deepseek rejoined them on DSBACK
-# 2026-09-28 (operator top-up, router balance 19.99 USD) after the 402 of
-# 2026-09-27T16:4xZ.
+# Dead-vs-live is provider state, so the dead set is derived from the
+# registry itself instead of re-pinned as a literal list here: a provider is
+# dead iff it carries an omniroute_id, appears in at least one route leg, and
+# every such leg is unavailable (tools/registry.py, the same read apply.sh
+# performs) - proves the real catalog/ai-registry.json actually reaches
+# apply.sh's live plan, not just the synthetic fixture above.
+# SHARDB: expectation moved by 7eff6020 (FREEWIRE gave groq/openrouter servable :free legs) + c4c3654b (TORDER-OR kept the provider available).
 if it "apply --dry-run against the real registry skips a provider whose every leg is dead today"; then
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/nonexistent/api-keys.yml \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    map="$(python3 - 2>&1 <<'PY'
+import json, sys
+sys.path.insert(0, "tools")
+import registry as regmod
+reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
+routes = reg.get("routes") or {}
+providers = reg.get("providers") or {}
+legs_by_provider = {}
+for route in routes.values():
+    if not isinstance(route, dict):
+        continue
+    for leg in route.get("legs") or []:
+        try:
+            pid, _ = regmod.resolve_leg(leg, reg)
+        except ValueError:
+            continue
+        legs_by_provider.setdefault(pid, []).append((leg, route))
+for name, entry in providers.items():
+    provider_id = entry.get("omniroute_id")
+    if not provider_id:
+        continue
+    legs = legs_by_provider.get(name) or []
+    if legs and all(regmod._leg_is_unavailable(leg, route, reg) for leg, route in legs):
+        print("dead %s" % provider_id)
+    else:
+        print("live %s" % provider_id)
+PY
+)"
+    dead=""; live=""
+    while read -r state oid; do
+        if [[ "$state" == "dead" ]]; then dead="${dead}${oid} "
+        elif [[ "$state" == "live" ]]; then live="${live}${oid} "; fi
+    done <<<"$map"
+    # A vacuous set proves nothing: the derivation must find dead providers
+    # (e.g. cerebras, opencode-zen today) and live ones (e.g. groq,
+    # openrouter, deepseek today) alike.
+    if [[ -z "$dead" ]]; then fail "derived dead set is empty, the both-ways check below is vacuous"; fi
+    if [[ -z "$live" ]]; then fail "derived live set is empty, the both-ways check below is vacuous"; fi
     ok=1
-    [[ "$out" == *"  - cerebras: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "cerebras was not flagged: $out" >&2; }
-    [[ "$out" == *"  - groq: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "groq was not flagged: $out" >&2; }
-    [[ "$out" == *"  - openrouter: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "openrouter was not flagged: $out" >&2; }
-    [[ "$out" == *"  - opencode-zen: all legs unavailable (skipped)"* ]] \
-        || { ok=0; echo "opencode-zen was not flagged: $out" >&2; }
+    for oid in $dead; do
+        [[ "$out" == *"  - $oid: all legs unavailable (skipped)"* ]] \
+            || { ok=0; echo "$oid (every leg unavailable in the registry) was not flagged: $out" >&2; }
+    done
     # A provider with a live leg must still be offered normally, even with no
-    # key: antigravity and deepseek both satisfy that today.
-    [[ "$out" == *"  - antigravity: no key in api-keys.yml, skipped"* ]] \
-        || { ok=0; echo "antigravity (has a live leg today) was wrongly skipped: $out" >&2; }
-    [[ "$out" == *"  - deepseek: no key in api-keys.yml, skipped"* ]] \
-        || { ok=0; echo "deepseek has a live leg since DSBACK but was not offered: $out" >&2; }
-    [[ "$out" != *"  - deepseek: all legs unavailable"* ]] \
-        || { ok=0; echo "deepseek is still counted all-unavailable, the flip did not reach apply.sh" >&2; }
+    # key - and must never be counted all-unavailable.
+    for oid in $live; do
+        [[ "$out" == *"  - $oid: no key in api-keys.yml, skipped"* ]] \
+            || { ok=0; echo "$oid (has a live leg today) was not offered: $out" >&2; }
+        [[ "$out" != *"  - $oid: all legs unavailable"* ]] \
+            || { ok=0; echo "$oid (has a live leg today) was wrongly counted all-unavailable" >&2; }
+    done
     if (( ok )); then pass; else fail "the real registry's dead providers do not reach apply.sh's plan"; fi
 fi
 
