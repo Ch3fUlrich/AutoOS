@@ -379,6 +379,13 @@ def build_argv(req: dict, run_id: str | None = None,
     task = (req.get("task") or "").strip()
     if not task:
         raise ValueError("task is empty")
+    # T2-RECORD-PIN item 5 (D-284): the banned pin is refused before anything
+    # else is considered, and even for a dry run -- a preview that showed a plan
+    # the real launch would refuse is a preview an agent would believe.
+    for pin in (req.get("model"), req.get("free_model")):
+        d284 = agent.d284_model_refusal(pin)
+        if d284 is not None:
+            raise ValueError(d284)
     argv = ["run", "--client", client]
     tier = req.get("tier")
     card = req.get("card")

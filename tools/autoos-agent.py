@@ -2480,6 +2480,35 @@ def gemini_model_allowed(model_id) -> bool:
     return bool(GEMINI_ALLOWED_RE.fullmatch(tail)) and not GEMINI_PRO_SEGMENT_RE.search(tail)
 
 
+# T2-RECORD-PIN item 5 (D-284): the pin this lane may not launch until stage 2.
+# Spelled as a route id (so `gemini-3.8-flash`, `omniroute/gemini-3.8-flash` and
+# `omniroute/gemini-3.8-flash#high` are one refusal) plus the one provider path
+# that carries the same model under another name. `vertex/...` and every other
+# Gemini spelling are NOT this guard's business — D-255 already answers those.
+D284_ROUTE_ID = "gemini-3.8-flash"
+D284_BANNED_PREFIXES = ("openrouter/google/",)
+
+
+def d284_model_refusal(model) -> str | None:
+    """Why D-284 will not launch this pin, or None when the pin is allowed.
+
+    The ONE guard for both entry points (spec: a single D-284 helper): the CLI
+    reads it on `--model` and `--free-model` before anything is priced or
+    planned, the MCP server reads it on the spawn request before an argv exists.
+    A pin that names no model (None, "") is nothing to guard, so it passes.
+    """
+    text = str(model or "").strip()
+    if not text:
+        return None
+    banned = model_route_id(text).lower() == D284_ROUTE_ID or \
+        text.lower().startswith(D284_BANNED_PREFIXES)
+    if not banned:
+        return None
+    return ("D-284: %s stays off the spawn list until stage 2 (operator hold) - "
+            "pin another model, or leave --model off and let the router pick "
+            "the leg for this card." % text)
+
+
 def gemini_spawn_refusal(model, combo, registry, cfg=None, explicit=False) -> str:
     """Why this spawn breaks D-255, or "" when it does not.
 
@@ -9151,6 +9180,18 @@ def cmd_run(args, cfg: dict) -> int:
                       "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
                       "the spawner or the MCP server's spawn)"
                       % (args.run_id, RUN_ID_SLUG_CAP), 2)
+    # T2-RECORD-PIN item 5 (D-284): the pins this lane may not launch, refused
+    # on the way IN - before the budget prices a model, before a route is burned
+    # and before anything is cloned. Both pins are read: --free-model only when
+    # this run would actually use it (with --free, or named explicitly instead
+    # of the default). One helper, the same one the MCP server calls.
+    pins = [args.model]
+    if args.free or (getattr(args, "free_model", None) or "") != DEFAULT_FREE_MODEL:
+        pins.append(getattr(args, "free_model", None))
+    for pin in pins:
+        d284 = d284_model_refusal(pin)
+        if d284 is not None:
+            return refuse(d284, 2)
     # SPAWNCAP (S2): decide the client from the task's shell/write needs before
     # anything is planned or started. An explicit --client that lacks one is
     # refused with the capable clients named; with no --client the first capable
