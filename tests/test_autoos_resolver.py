@@ -4357,6 +4357,9 @@ class ComboFallthroughTests(unittest.TestCase):
                                 % (route_id, head.split("/", 1)[0]))
 
     def test_two_consecutive_provider_failures_still_leave_a_third(self):
+        # CIGREEN: expectation moved by 06d0e714 (D-TORDER-2 ACCEPT:
+        # t1-orchestrator-free-only is deliberately a single-provider combo,
+        # so it has one prefix, not three, and two failures leave nothing).
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             prefixes = []
@@ -4364,6 +4367,15 @@ class ComboFallthroughTests(unittest.TestCase):
                 prefix = ref.split("/", 1)[0]
                 if prefix not in prefixes:
                     prefixes.append(prefix)
+            if len(prefixes) == 1:
+                self.assertEqual(
+                    len(combo["models"]), 1,
+                    "%s: a single-prefix combo must be a single leg, "
+                    "not several legs on one 429 domain" % route_id)
+                self.assertIsNone(
+                    self.fake_priority_walk(
+                        combo["models"], {prefixes[0]: 429}), route_id)
+                continue
             self.assertGreaterEqual(len(prefixes), 3,
                                     "%s: %s has no third provider to fall to"
                                     % (route_id, combo["models"]))
