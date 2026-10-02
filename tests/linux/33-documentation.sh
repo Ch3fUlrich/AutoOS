@@ -677,6 +677,33 @@ if it "autoos_usage: gateway call-logs report, paging and aggregation (unit test
     out="$(python3 tests/test_autoos_usage.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# T1-CREDIT fixes (CIGREEN wiring: these red-first gates cover tools/autoos_resolver.py
+# credit guards and tools/autoos_usage.py spend mapping; fixtures and fake fetches only,
+# never a live gateway): fix2 narrow guards/total fallback/exit 3, fix6 per-provider
+# pricing, fix7 review findings R1-R5, fix10 real meter without the manage key.
+if it "t1-credit fix2: narrow guards, total fallback, usage exit 3 (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix2.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "t1-credit fix6: per-provider pricing for credit legs (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix6.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "t1-credit fix7: review findings R1-R5 on fix6 (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix7.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "t1-credit fix10: real meter without the manage key, paid cap, cache-read billing (unit tests)"; then
+    out="$(python3 tests/test_t1_credit_fix10.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# Credential-JSON ignore gate (operator 2026-10-01): asserts .gitignore covers
+# configuration/*-credentials*.json and no credential-shaped path is tracked.
+# Path and git state only; never reads a credential's contents.
+if it "credential files: vertex/service-account JSONs are ignored, never tracked (unit tests)"; then
+    out="$(python3 tests/test_credential_files_ignored.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # REVFIX: no unit test file may be invisible to every harness. This guard
 # fails when a tests/test_*.py is not named by any suite entry point.
 if it "suite wiring: every tests/test_*.py is wired into a harness"; then

@@ -123,13 +123,13 @@ class RepoTests(unittest.TestCase):
     def test_the_wide_tiers_carry_the_window_their_smallest_servable_leg_takes(self):
         # PROVFIX3 finding 1 re-pins this: "1M everywhere" was the defect. A
         # route falls through to its smallest leg at any time, so the promise is
-        # the narrowest advertised window among its SERVED legs. FREEKEYS-2/2c
-        # (D-141) put the free band ahead of gemini in t1-orchestrator and
-        # t1-orchestrator-free-only, and the scaleway/nebius grants advertise
-        # 128,000 (gemini itself takes 131,072) - so the honest promise dropped
-        # to 128,000. The tiers whose every served leg is the 1M contributor
-        # keep the full window.
-        clamp = {"t1-orchestrator": 128000, "t1-orchestrator-free-only": 128000,
+        # the narrowest advertised window among its SERVED legs.
+        # CIGREEN: expectation moved by 095faa44 (FREEKEYS-2d re-pinned this to
+        # 128k for the scaleway/nebius free band, but TORDER 2026-10-01 moved
+        # every sub-1M leg out of t1 into t2/t3, so on this branch every served
+        # leg of t1-orchestrator and t1-orchestrator-free-only is a 1M leg and
+        # the honest promise is back to 1000000).
+        clamp = {"t1-orchestrator": 1000000, "t1-orchestrator-free-only": 1000000,
                  "t1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
         seen = set()
@@ -189,10 +189,10 @@ class WriteTests(SandboxCase):
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
-        # FREEWIRE 2026-09-30: t2-worker-clean's committed context is 1048576
-        # (CTXFIX 2026-09-30 set the -clean twins to deepseek's 1M window); the
-        # drift here only changes output.
-        self.assertEqual(t1["limit"], {"context": 1048576, "output": 40000})
+        # CIGREEN: expectation moved by e1da4f7a (L1-CLEAN D2 render moved the
+        # -clean twins from deepseek's 1M window to the 128k trial-first head;
+        # 35148c5c made ovh the head) - the drift here only changes output.
+        self.assertEqual(t1["limit"], {"context": 128000, "output": 40000})
         self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
@@ -273,28 +273,36 @@ class WriteTests(SandboxCase):
                     for v in entry["variants"]:
                         self.assertEqual(set(v), {"id", "settings"}, v)
                         self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        # FREEWIRE 2026-09-30: t1-orchestrator-free-only's served head is now the
-        # free scaleway grant (no declared ladder), so it carries no variants.
+        # CIGREEN: expectation moved by 35148c5c (trial-first clean routes head
+        # ovh gpt-oss-120b, ladder low/medium/high) + e1da4f7a (the render
+        # follows the served head): the -clean twins now carry low/medium/high,
+        # and t1-orchestrator-free-only's served head is the gemini free leg
+        # (ladder low/medium/high), so it carries variants too; t3-driver's
+        # served head likewise carries low/medium/high now.
         # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
-        # ladder is low/medium/high) and is the low/medium/high case now.
+        # ladder is low/medium/high) and stays the low/medium/high case.
         free = oc["providers"]["omniroute"]["models"]["gemini-3.8-flash"]
         self.assertEqual([v["id"] for v in free["variants"]],
                          ["low", "medium", "high"])
         for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertNotIn(
-            "variants",
-            oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"])
+        self.assertEqual(
+            [v["id"] for v in
+             oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]["variants"]],
+            ["low", "medium", "high"])
         clean = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
         self.assertEqual([v["id"] for v in clean["variants"]],
-                         ["low", "high", "max"])
+                         ["low", "medium", "high"])
         for v in clean["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         self.assertEqual(
             [v["id"] for v in
              oc["providers"]["omniroute"]["models"]["t3-driver-clean"]["variants"]],
-            ["low", "high", "max"])
-        self.assertNotIn("variants", oc["providers"]["omniroute"]["models"]["t3-driver"])
+            ["low", "medium", "high"])
+        self.assertEqual(
+            [v["id"] for v in
+             oc["providers"]["omniroute"]["models"]["t3-driver"]["variants"]],
+            ["low", "medium", "high"])
 
 
 class CommaDisciplineTests(SandboxCase):
