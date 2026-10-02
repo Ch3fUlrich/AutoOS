@@ -123,13 +123,13 @@ class RepoTests(unittest.TestCase):
     def test_the_wide_tiers_carry_the_window_their_smallest_servable_leg_takes(self):
         # PROVFIX3 finding 1 re-pins this: "1M everywhere" was the defect. A
         # route falls through to its smallest leg at any time, so the promise is
-        # the narrowest advertised window among its SERVED legs. FREEKEYS-2/2c
-        # (D-141) put the free band ahead of gemini in t1-orchestrator and
-        # t1-orchestrator-free-only, and the scaleway/nebius grants advertise
-        # 128,000 (gemini itself takes 131,072) - so the honest promise dropped
-        # to 128,000. The tiers whose every served leg is the 1M contributor
-        # keep the full window.
-        clamp = {"t1-orchestrator": 128000, "t1-orchestrator-free-only": 128000,
+        # the narrowest advertised window among its SERVED legs.
+        # CIGREEN: expectation moved by 095faa44 (FREEKEYS-2d re-pinned this to
+        # 128k for the scaleway/nebius free band, but TORDER 2026-10-01 moved
+        # every sub-1M leg out of t1 into t2/t3, so on this branch every served
+        # leg of t1-orchestrator and t1-orchestrator-free-only is a 1M leg and
+        # the honest promise is back to 1000000).
+        clamp = {"t1-orchestrator": 1000000, "t1-orchestrator-free-only": 1000000,
                  "t1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
         seen = set()
