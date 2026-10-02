@@ -2123,6 +2123,24 @@ class PlanTests(unittest.TestCase):
             self.assertTrue(
                 safe, "%s/%s on route %s is not private-safe: %s"
                      % (provider_id, model_id, result["route"], reason))
+        # CIGREEN-REWORK1 (Sonnet seat; expectation moved by 35148c5c): the two
+        # variants above prove only the clean/private-safe head, so the only
+        # usable route is private-safe either way -- a plan with the privacy
+        # route filter removed, or with private_safe forced True, still passes
+        # them. This third variant proves EVERY registry leg, so a filter-less
+        # plan falls onto a free pool while the correct plan must still route
+        # to a route whose every serving leg is private-safe.
+        all_proven = {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                               for leg in overlay["legs"]}}
+        result = r.plan(card, features, client_state, registry, all_proven, [],
+                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        self.assertIsNotNone(result["route"], result)
+        route = registry["routes"][result["route"]]
+        for provider_id, model_id in r.serving_legs(route, registry):
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            self.assertTrue(
+                safe, "%s/%s on route %s is not private-safe: %s"
+                     % (provider_id, model_id, result["route"], reason))
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
         # Extra (PRIV2): the same regression against the real probe's
@@ -4193,7 +4211,6 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         self.assertEqual(
             [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
              if r.is_claude_leg(leg, on)], [])
-        import copy
         servable = self.on_registry()
         servable["providers"]["cc"]["available"] = True
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
@@ -4343,6 +4360,12 @@ class ComboFallthroughTests(unittest.TestCase):
     ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker",
               "t2-worker-free-only", "t3-driver", "t3-driver-free-only")
 
+    # CIGREEN-REWORK1 (Sonnet seat; expectation moved by 06d0e714): D-TORDER-2
+    # accepts exactly this route as single-provider. Branch on the ROUTE ID,
+    # never on leg count, so truncating any other route to one leg still fails
+    # the multi-provider pins below instead of passing as "single-provider".
+    SINGLE_PROVIDER_EXEMPT = {"t1-orchestrator-free-only"}
+
     @classmethod
     def setUpClass(cls):
         with (Path(__file__).resolve().parent.parent
@@ -4373,17 +4396,33 @@ class ComboFallthroughTests(unittest.TestCase):
         # t1-orchestrator-free-only is deliberately single-provider, so a head
         # 429 there has nowhere to fall and fail-closes to None). Multi-leg
         # combos still fall through to another provider.
+        # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
+        # by route id, not len(combo["models"]) == 1, and the exempt route pins
+        # its single leg/single prefix so the exemption goes stale loudly.
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             head = combo["models"][0]
             chosen = self.fake_priority_walk(
                 combo["models"], {head.split("/", 1)[0]: 429})
-            if len(combo["models"]) == 1:
+            if route_id in self.SINGLE_PROVIDER_EXEMPT:
+                self.assertEqual(len(self.reg["routes"][route_id]["legs"]), 1,
+                                  "%s: the exemption goes stale if this route "
+                                  "grows a second leg" % route_id)
+                self.assertEqual(len(combo["models"]), 1,
+                                  "%s: the exemption goes stale if this combo "
+                                  "grows a second leg" % route_id)
+                self.assertEqual(len({ref.split("/", 1)[0]
+                                      for ref in combo["models"]}), 1,
+                                  "%s: the exemption goes stale if this combo "
+                                  "grows a second prefix" % route_id)
                 self.assertIsNone(chosen,
                                   "%s: a single-provider combo must "
                                   "fail closed, not pick the 429ing leg"
                                   % route_id)
                 continue
+            self.assertGreater(len(combo["models"]), 1,
+                                "%s: only the exempt single-provider route "
+                                "may render one leg" % route_id)
             self.assertIsNotNone(chosen, "%s: every leg 429s" % route_id)
             self.assertNotEqual(chosen.split("/", 1)[0], head.split("/", 1)[0],
                                 "%s: the fall-through stayed on %s"
@@ -4393,6 +4432,9 @@ class ComboFallthroughTests(unittest.TestCase):
         # CIGREEN: expectation moved by 06d0e714 (D-TORDER-2 ACCEPT:
         # t1-orchestrator-free-only is deliberately a single-provider combo,
         # so it has one prefix, not three, and two failures leave nothing).
+        # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
+        # by route id, not len(prefixes) == 1, and the exempt route pins its
+        # single leg/single prefix so the exemption goes stale loudly.
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             prefixes = []
@@ -4400,15 +4442,21 @@ class ComboFallthroughTests(unittest.TestCase):
                 prefix = ref.split("/", 1)[0]
                 if prefix not in prefixes:
                     prefixes.append(prefix)
-            if len(prefixes) == 1:
+            if route_id in self.SINGLE_PROVIDER_EXEMPT:
+                self.assertEqual(len(combo["models"]), 1,
+                                  "%s: the exemption goes stale if this combo "
+                                  "grows a second leg" % route_id)
                 self.assertEqual(
-                    len(combo["models"]), 1,
-                    "%s: a single-prefix combo must be a single leg, "
-                    "not several legs on one 429 domain" % route_id)
+                    prefixes, [prefixes[0]],
+                    "%s: the exemption goes stale if this combo grows a "
+                    "second prefix" % route_id)
                 self.assertIsNone(
                     self.fake_priority_walk(
                         combo["models"], {prefixes[0]: 429}), route_id)
                 continue
+            self.assertGreater(len(combo["models"]), 1,
+                                "%s: only the exempt single-provider route "
+                                "may render one leg" % route_id)
             self.assertGreaterEqual(len(prefixes), 3,
                                     "%s: %s has no third provider to fall to"
                                     % (route_id, combo["models"]))
@@ -4432,6 +4480,9 @@ class ComboFallthroughTests(unittest.TestCase):
         # production supplies it -- an inline probe overlay proving every combo
         # leg -- while priced/context-fit still read the live registry. The
         # accepted single-provider combo (06d0e714) pins exactly one usable leg.
+        # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
+        # by route id, not len(combo["models"]) == 1, and the exempt route pins
+        # its single leg/single prefix so the exemption goes stale loudly.
         proven = {"legs": {}}
         for route_id in self.ROUTES:
             for ref in self.combos[route_id]["models"]:
@@ -4461,12 +4512,21 @@ class ComboFallthroughTests(unittest.TestCase):
                 if not r.route_leg_context_fits(leg, route, self.reg):
                     continue
                 usable.append(ref)
-            if len(combo["models"]) == 1:
+            if route_id in self.SINGLE_PROVIDER_EXEMPT:
+                self.assertEqual(len(self.reg["routes"][route_id]["legs"]), 1,
+                                  "%s: the exemption goes stale if this route "
+                                  "grows a second leg" % route_id)
+                self.assertEqual(len(combo["models"]), 1,
+                                  "%s: the exemption goes stale if this combo "
+                                  "grows a second leg" % route_id)
                 self.assertEqual(
                     usable, combo["models"],
                     "%s: the single-provider combo's one leg must stay "
                     "usable by an agentic card once proven" % route_id)
                 continue
+            self.assertGreater(len(combo["models"]), 1,
+                                "%s: only the exempt single-provider route "
+                                "may render one leg" % route_id)
             self.assertGreaterEqual(
                 len(usable), 2, "%s: only %s of %s is usable by an agentic card"
                 % (route_id, usable, combo["models"]))
