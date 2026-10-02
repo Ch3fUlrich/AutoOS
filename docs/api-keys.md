@@ -199,7 +199,7 @@ python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py --model
 ```
 
 Optional: `--title <slug>` (the session tag becomes `review/<title>`, else
-`review/<prompt-sha12>`), `--max-tokens N` (default 4096), `--temperature F`
+`review/<prompt-sha12>`), `--max-tokens N` (default 16000), `--temperature F`
 (off by default — measured 2026-10-02 on the central gateway, a
 `temperature: 0` request is cut at 64 completion tokens with an empty answer)
 and `--gateway-url
@@ -207,12 +207,15 @@ URL` (otherwise `AUTOOS_OMNIROUTE_URL`, otherwise `http://127.0.0.1:20128/v1`;
 a URL with no path gains `/v1`). The call is stamped with the spawner's own
 `x-omniroute-session-id` / `X-AutoOS-Run-Id` headers, so the gateway call log
 attributes it like a run. It writes `review.txt` and `evidence.json`
-(requested/served model, status, `finish_reason`, correlation id, response
-header **names** only, session tag, run id, prompt sha256, token usage, UTC
-start/finish) into
+(requested/served model, status, `finish_reason`, `verdict`, correlation id,
+response header **names** only, session tag, run id, prompt sha256, token
+usage, UTC start/finish) into
 `--out-dir`, or `error.json` and exit 3 on a non-200, and prints only the two
-paths, the served model and the answer's last `VERDICT:` line (or `VERDICT:
-missing`) — never the key, the request headers or the prompt. Exit **4** also
+paths, the served model and the answer's verdict normalised as `VERDICT:
+pass` / `VERDICT: fail-with-findings` (or `VERDICT: missing`) by the tolerant
+D-337 parse (`**Verdict:** pass` counts; quoted lines, table rows, fenced code
+and diff-hunk bodies do not; the last qualifying line wins) — never the key,
+the request headers or the prompt. Exit **4** also
 covers a truncated or empty answer (`finish_reason: length`, or no answer
 text): `evidence.json` is still written with its `finish_reason`, and
 `review-call: answer truncated/empty (finish_reason=<x>)` goes to stderr

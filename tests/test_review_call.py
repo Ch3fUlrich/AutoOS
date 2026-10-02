@@ -10,21 +10,25 @@ touches the network.
 
 Asserted: the Authorization header equals the fake env key (and reaches the
 gateway only via `exec`), the session-tag/run-id headers match the spawner's
-shape, every evidence.json field (including finish_reason, recorded on every
-run), served_model taken from the response, the request carries NO
-`temperature` by default (`--temperature 0.2` is sent verbatim - measured, a
-temperature-0 request is cut at 64 completion tokens on this gateway), the
-fake key (and the prompt) never in stdout/stderr nor in any output file, no
-response header VALUE recorded besides the correlation id, missing key -> exit
-2, non-200 -> exit 3 + error.json, a finish_reason 'length' empty answer ->
-exit 4 + stderr warning + evidence.json finish_reason, and the VERDICT line
-extraction.
+shape, every evidence.json field (including finish_reason and verdict,
+recorded on every run), served_model taken from the response, the request
+carries NO `temperature` by default (`--temperature 0.2` is sent verbatim -
+measured, a temperature-0 request is cut at 64 completion tokens on this
+gateway) and `max_tokens` 16000 UNLESS `--max-tokens` is given, the fake key
+(and the prompt) never in stdout/stderr nor in any output file, no response
+header VALUE recorded besides the correlation id, missing key -> exit 2,
+non-200 -> exit 3 + error.json, a finish_reason 'length' empty answer ->
+exit 4 + stderr warning + evidence.json finish_reason, and the VERDICT parse
+(the tolerant D-337 rules, called directly on the loaded module: bold heading
+and `**Verdict:** pass` accepted, quotes/tables/fences/diff hunks rejected,
+the last qualifying line wins, an open fence fails closed).
 
 Run directly:
 
     python3 tests/test_review_call.py
 """
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -41,12 +45,23 @@ TOOLS = ROOT / "tools"
 TOOL = TOOLS / "review-call.py"
 GATEWAY_KEY = TOOLS / "autoos_gateway_key.py"
 
+# The tool loaded in-process - the hyphen in the file name rules out a plain
+# import, so the repo's spec_from_file_location pattern. Only the parser is
+# called from here (`verdict_line`); every end-to-end case still runs the tool
+# as a subprocess against FakeGateway.
+_spec = importlib.util.spec_from_file_location("review_call_under_test",
+                                               str(TOOL))
+review_call = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(review_call)
+
 FAKE_KEY = "fake-review-key-DO-NOT-LEAK-0123456789abcdef"
 MODEL = "ovh/gpt-oss-120b"
 SERVED_MODEL = "gateway-server/served-model-9"
 PROMPT = "REVIEW-PROMPT-SENTINEL: paste of the diff to review.\nExplain it.\n"
-# Two VERDICT lines: the LAST one wins.
-ANSWER = "first pass\nVERDICT: pass\nthen a finding\nVERDICT: revise\n"
+# Two VERDICT lines: the LAST qualifying one wins (neither value outside
+# pass / fail-with-findings counts - see VerdictParseTests).
+ANSWER = ("first pass\nVERDICT: pass\nthen a finding\n"
+          "VERDICT: fail-with-findings\n")
 CORRELATION = "corr-id-abc-123"
 # A response header whose VALUE must never be recorded (names only).
 DIAG_HEADER_VALUE = "diag-trace-value-must-not-be-recorded"
@@ -215,7 +230,8 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(lines[0], "review.txt: " + str(self.out_dir / "review.txt"))
         self.assertEqual(lines[1], "evidence.json: " + str(self.out_dir / "evidence.json"))
         self.assertEqual(lines[2], "model: " + SERVED_MODEL)
-        self.assertEqual(lines[3], "VERDICT: revise")  # the LAST VERDICT line
+        self.assertEqual(lines[3],
+                         "VERDICT: fail-with-findings")  # the LAST verdict
 
         review = (self.out_dir / "review.txt").read_text(encoding="utf-8")
         self.assertEqual(review, ANSWER)
@@ -274,7 +290,10 @@ class ReviewCallTests(unittest.TestCase):
         # temperature-0 request is cut at 64 completion tokens (finish_reason
         # 'length', empty content) - hence the opt-in --temperature flag.
         self.assertNotIn("temperature", body)
-        self.assertEqual(body["max_tokens"], 4096)
+        # The default max-tokens is 16000: a reasoning model used 6.2k
+        # completion tokens on an 11k prompt, so the old 4096 cut it. The
+        # dedicated test below pins the default AND the explicit flag.
+        self.assertEqual(body["max_tokens"], 16000)
         self.assertNotIn("tools", body)
         self.assert_no_leak(result)
 
@@ -309,6 +328,33 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(len(gateway.requests), 1)
         self.assertEqual(gateway.requests[0]["body"]["temperature"], 0.2)
         self.assertEqual(self.read_evidence()["finish_reason"], "stop")
+        self.assert_no_leak(result)
+
+    def test_max_tokens_is_16000_unless_the_flag_is_given(self):
+        gateway = self.start_gateway()
+        result = self.run_tool(gateway, "--title", "tok-default")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 1)
+        self.assertEqual(gateway.requests[0]["body"]["max_tokens"], 16000)
+        result = self.run_tool(gateway, "--title", "tok-flag",
+                               "--max-tokens", "4096")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 2)
+        self.assertEqual(gateway.requests[1]["body"]["max_tokens"], 4096)
+        self.assert_no_leak(result)
+
+    def test_colon_bold_verdict_is_normalised_in_stdout_and_evidence(self):
+        # The measured miss: the model wrote `**Verdict:** pass` (colon INSIDE
+        # the bold) and the old `startswith("VERDICT:")` scan printed
+        # `VERDICT: missing`.
+        gateway = self.start_gateway(answer="reviewed, looks good\n"
+                                             "**Verdict:** pass\n")
+        result = self.run_tool(gateway, "--title", "bold-verdict")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
+        self.assertEqual(lines[3], "VERDICT: pass")  # normalised
+        self.assertEqual(self.read_evidence()["verdict"], "pass")
         self.assert_no_leak(result)
 
     def test_autoos_omniroute_url_env_is_the_gateway_without_the_flag(self):
@@ -384,8 +430,79 @@ class ReviewCallTests(unittest.TestCase):
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
         self.assertEqual(lines[3], "VERDICT: missing")
+        self.assertIsNone(self.read_evidence()["verdict"])  # null, not a word
         self.assertEqual(self.read_evidence()["served_model"], SERVED_MODEL)
         self.assert_no_leak(result)
+
+
+class VerdictParseTests(unittest.TestCase):
+    """verdict_line() called DIRECTLY on the loaded module: the tolerant
+    D-337 parse (copied from tools/autoos_agent_mcp.py's review_verdict /
+    _verdict_value), no gateway, no subprocess.
+
+    Every case returns the NORMALISED line: `VERDICT: pass` /
+    `VERDICT: fail-with-findings` / `VERDICT: missing`.
+    """
+
+    def verdict(self, text):
+        return review_call.verdict_line(text)
+
+    def test_colon_inside_the_bold_mark_is_a_verdict(self):
+        # The measured miss that produced this parser.
+        self.assertEqual(self.verdict("**Verdict:** pass"), "VERDICT: pass")
+
+    def test_bold_around_the_label_only(self):
+        self.assertEqual(self.verdict("**VERDICT**: pass"), "VERDICT: pass")
+        self.assertEqual(self.verdict("**verdict:** PASS"),
+                         "VERDICT: pass")  # label and value are case-blind
+
+    def test_heading_prefix_normalises_the_value(self):
+        self.assertEqual(self.verdict("## VERDICT: fail-with-findings"),
+                         "VERDICT: fail-with-findings")
+
+    def test_bullet_and_bold_value_with_one_trailing_punctuation(self):
+        self.assertEqual(self.verdict("- VERDICT: **pass**."),
+                         "VERDICT: pass")
+
+    def test_a_value_that_says_more_than_the_word_is_no_verdict(self):
+        self.assertEqual(self.verdict("VERDICT: pass, but X"),
+                         "VERDICT: missing")
+
+    def test_a_quoted_line_is_someone_elses_text(self):
+        self.assertEqual(self.verdict("> VERDICT: pass"), "VERDICT: missing")
+
+    def test_a_table_row_is_template_syntax(self):
+        self.assertEqual(self.verdict("| VERDICT: pass |"),
+                         "VERDICT: missing")
+
+    def test_a_verdict_inside_a_fence_only_is_no_verdict(self):
+        self.assertEqual(self.verdict("```text\nVERDICT: pass\n```\n"),
+                         "VERDICT: missing")
+
+    def test_a_verdict_inside_a_diff_hunk_only_is_no_verdict(self):
+        text = ("diff --git a/f b/f\n"
+                "--- a/f\n"
+                "+++ b/f\n"
+                "@@ -1,3 +1,3 @@\n"
+                " keep\n"
+                "+VERDICT: pass\n"
+                " done\n")
+        self.assertEqual(self.verdict(text), "VERDICT: missing")
+
+    def test_two_verdicts_the_last_qualifying_line_wins(self):
+        text = ("VERDICT: pass\n"
+                "changed my mind after re-reading the hunk\n"
+                "VERDICT: fail-with-findings\n")
+        self.assertEqual(self.verdict(text), "VERDICT: fail-with-findings")
+
+    def test_an_unclosed_fence_fails_closed_to_the_earlier_verdict(self):
+        text = "VERDICT: pass\n```json\n{\"a\": 1}\n"
+        self.assertEqual(self.verdict(text), "VERDICT: pass")
+
+    def test_no_verdict_at_all_reports_missing(self):
+        self.assertEqual(self.verdict("looks fine to me\n"),
+                         "VERDICT: missing")
+        self.assertEqual(self.verdict(""), "VERDICT: missing")
 
 
 if __name__ == "__main__":

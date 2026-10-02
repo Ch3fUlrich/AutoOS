@@ -6,7 +6,7 @@ this process's environment (D-370) and nowhere else:
 
     python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py \
         --model ovh/gpt-oss-120b --prompt-file prompt.md --out-dir out \
-        [--title my-review] [--max-tokens 4096] [--gateway-url URL] \
+        [--title my-review] [--max-tokens 16000] [--gateway-url URL] \
         [--temperature 0.2]
 
 This tool never reads configuration/api-keys.yml, never resolves a key, and
@@ -24,7 +24,9 @@ header keys and `<tag>/<run-id>` value are replicated EXACTLY instead.
 
 The call: POST <base>/chat/completions with `stream: false`, NO `tools`,
 NO `temperature` (unless `--temperature FLOAT` is given), `max_tokens`
-(default 4096) and the prompt as one user message. temperature is OFF by
+(default 16000 - RC-2: reasoning models burned 6.2k completion tokens on an
+11k prompt, so 4096 cut the answer) and the prompt as one user message.
+temperature is OFF by
 default because of a MEASURED defect on the central OmniRoute 2026-10-02
 (ovh/gpt-oss-120b): a request carrying `"temperature": 0` is cut at 64
 completion tokens (finish_reason 'length', content empty - the reasoning
@@ -39,12 +41,14 @@ Written into --out-dir:
     review.txt     the answer text (the key masked, should it ever echo back)
     evidence.json  requested_model, served_model, status, correlation_id (the
                    ONLY response header VALUE recorded), response_header_names
-                   (names only), finish_reason, session_tag, run_id,
+                   (names only), finish_reason, verdict (the D-337 parse: pass
+                   / fail-with-findings / null), session_tag, run_id,
                    prompt_sha256, tokens (usage), started/finished (UTC)
     error.json     only when the gateway answers non-200 -> exit 3
 
 Printed, and nothing else: the two paths, the served model, and the answer's
-last line starting with `VERDICT:` (or `VERDICT: missing`).
+verdict normalised as `VERDICT: pass` / `VERDICT: fail-with-findings` (or
+`VERDICT: missing`).
 
 Exit codes: 0 ok; 2 missing key / bad arguments (message on stderr); 3 the
 gateway answered non-200 (error.json written); 4 the gateway could not be
@@ -71,7 +75,7 @@ import urllib.request
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 KEY_ENV_VAR = "AUTOOS_OMNIROUTE_KEY"
 DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1"
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 16000
 REQUEST_TIMEOUT_SECONDS = 300
 MAX_ERROR_BODY = 4000
 
@@ -103,6 +107,43 @@ CORRELATION_HEADER_NAMES = (
     "x-request-id",
     "request-id",
 )
+
+# --- the verdict parse, COPIED from tools/autoos_agent_mcp.py ---------------
+# Its D-337 rules (`_VERDICT_LINE_RE` ~line 910, `_verdict_value` ~line 940,
+# `review_verdict` ~line 962). That module is NOT imported here - it pulls the
+# whole MCP stack into this one-shot tool (the same reason autoos-agent.py is
+# replicated instead of imported, see the header) - so the needed logic is
+# copied verbatim, changing only the value set: a review call answers `pass` /
+# `fail-with-findings`, never the runner's `ready` / `fix-first` / `not-ready`.
+
+# The verdict line a review answer states, anchored at the line start so a
+# sentence that merely mentions a verdict does not read as one. The decoration
+# it tolerates is what a markdown-speaking reviewer wraps a real decision in:
+# a heading, a bullet, or bold on the label - both `**VERDICT**: pass` and the
+# colon-inside form `**Verdict:** pass` (the closing `**` sits before the
+# colon, which the optional `\*\*` in front of `:` accepts).
+_VERDICT_LINE_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?:\*\*)?VERDICT(?:\*\*)?\s*:\s*(\S.*)$")
+
+# What a verdict IS for a review call. A line that opens with the label and
+# then says something else (`VERDICT: pass, but the ref is never read`) is a
+# reviewer *talking*, and grading it as pass merges the very review that
+# raised a finding.
+_VERDICT_VALUES = ("pass", "fail-with-findings")
+
+# A fence opener, at markdown's own indentation: up to 3 spaces of leading
+# space and then three or more ` or ~. A closing fence is the opener's OWN
+# character, at least as long, and nothing but whitespace after it (CommonMark
+# - `~~~` does not close a ``` block and ' ```' does not close ' ````').
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+
+# A unified-diff hunk header; the b/d line counts decide how far the hunk body
+# reaches. Inside that body nothing is markdown: a `+VERDICT: pass` line is the
+# DIFFED FILE's text, not the reviewer's (VERDICTFENCE-R2 (b)).
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def utc_now() -> str:
@@ -223,13 +264,104 @@ def finish_reason_of(payload: dict) -> str | None:
     return reason if isinstance(reason, str) else None
 
 
+def _verdict_value(stripped: str) -> str | None:
+    """The normalised verdict word a single line states, or None.
+
+    Copied from tools/autoos_agent_mcp.py `_verdict_value` (D-337 SB-A2 item
+    D), revalued for this tool: a `>`-quoted line is someone else's text, a
+    line carrying `<` or `|` is template syntax (the brief echoed back / a
+    table row), and the value has to be the bare word - `pass, but ...` is a
+    reviewer *talking* and reads as NO verdict. Bold/italic decoration and one
+    trailing `. ! ?` (`VERDICT: pass.`) are stripped before the test, so
+    `**Verdict:** pass` and `**VERDICT**: pass` both land on `pass`.
+    """
+    if stripped.startswith(">") or "<" in stripped or "|" in stripped:
+        return None
+    m = _VERDICT_LINE_RE.match(stripped)
+    if not m:
+        return None
+    value = m.group(1)
+    # Twice: `pass.` needs the punctuation then the decorators, while
+    # `**pass**.` needs a decorator round after the punctuation falls off.
+    for _ in range(2):
+        value = value.strip().strip("*_` ").strip()
+        if value[-1:] in (".", "!", "?"):
+            value = value[:-1]
+    value = value.strip().lower()
+    return value if value in _VERDICT_VALUES else None
+
+
+def review_verdict(text: str) -> str | None:
+    """The answer's verdict (`pass` / `fail-with-findings`), or None.
+
+    Copied from tools/autoos_agent_mcp.py `review_verdict` (D-337): the LAST
+    qualifying line wins - a reviewer that changed its mind said so - a
+    verdict line inside a fenced code block or a unified-diff hunk body is not
+    the reviewer's own word, a fence still open at the END of the text fails
+    CLOSED (ignore everything from the first fence marker on: the answer was
+    cut mid-block, so nothing in it is trusted), and fences follow CommonMark.
+    """
+    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
+    found = None               # last verdict outside fences and hunks
+    found_before_fence = None  # ...and before the text's first fence marker
+    fence = None               # (char, length) while a block is open
+    first_marker = None
+    hunk = None                # (old, new) lines left in the active hunk body
+    for i, raw in enumerate(raws):
+        if hunk is not None:
+            old, new = hunk
+            if old <= 0 and new <= 0:
+                hunk = None
+            elif raw.startswith(" "):
+                hunk = (old - 1, new - 1)
+                continue
+            elif raw.startswith("-"):
+                hunk = (old - 1, new)
+                continue
+            elif raw.startswith("+"):
+                hunk = (old, new - 1)
+                continue
+            elif raw.startswith("\\"):
+                continue  # "\ No newline at end of file" counts toward neither
+            elif raw == "":
+                # a blank context line that lost its single leading space to a
+                # trailing-whitespace strip is still hunk content
+                hunk = (old - 1, new - 1)
+                continue
+            else:
+                hunk = None
+        if fence is not None:
+            m = _FENCE_CLOSE_RE.match(raw)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if raw.startswith(("diff --git", "index ", "---", "+++")):
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
+            continue
+        m = _FENCE_OPEN_RE.match(raw)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            if first_marker is None:
+                first_marker = i
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        value = _verdict_value(stripped)
+        if value:
+            found = value
+            if first_marker is None:
+                found_before_fence = value
+    return found_before_fence if fence is not None else found
+
+
 def verdict_line(text: str) -> str:
-    """The last line that starts with `VERDICT:`, or the sentinel."""
-    for line in reversed((text or "").splitlines()):
-        stripped = line.strip()
-        if stripped.startswith("VERDICT:"):
-            return stripped
-    return "VERDICT: missing"
+    """The one stdout verdict line: `VERDICT: pass` / `VERDICT:
+    fail-with-findings` / `VERDICT: missing` (the parse is review_verdict's)."""
+    return "VERDICT: " + (review_verdict(text) or "missing")
 
 
 def correlation_id(headers) -> tuple:
@@ -399,6 +531,9 @@ def main(argv=None) -> int:
     text = mask_key(answer, key)
     finish = finish_reason_of(payload)
     tokens = dict(usage)
+    # The same parse the stdout line prints, captured as a machine-readable
+    # field: pass / fail-with-findings / null (null, never a sentinel word).
+    verdict = review_verdict(text)
 
     review_path = os.path.join(args.out_dir, "review.txt")
     evidence_path = os.path.join(args.out_dir, "evidence.json")
@@ -407,6 +542,7 @@ def main(argv=None) -> int:
         "served_model": served_model,
         "status": int(status),
         "finish_reason": finish,
+        "verdict": verdict,
         "correlation_id": cid,
         "response_header_names": header_names,
         "session_tag": tag,
