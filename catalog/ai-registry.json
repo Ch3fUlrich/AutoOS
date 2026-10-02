@@ -3725,7 +3725,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "local-process provider: spawn zcode ENOENT, app not installed on the gateway host (OS-72). GWDIAG 2026-10-02 (D-323 item 2): zcode://app-server/stdio is a LOCAL process the gateway spawns (ZCode CLI/app-server under ~/.zcode/server or $ZCODE_BIN; auth lives in that host's ZCode profile). Call-logs on both gateways show 502 'spawn zcode ENOENT' in 11-66 ms (workstation and coding.vm gateway call-logs); the dashboard /models validation answers 'Invalid outbound URL protocol zcode://' by design (http/https only); the executor is buffered (whole turn, up to 120 s, before any SSE byte) so it cannot serve streaming legs. No legs. Revisit only if ZCode is installed on the gateway host."
+      "$comment": "local-process provider: spawn zcode ENOENT, app not installed on the gateway host (OS-72). GWDIAG 2026-10-02 (D-323 item 2): zcode://app-server/stdio is a LOCAL process the gateway spawns (ZCode CLI/app-server under ~/.zcode/server or $ZCODE_BIN; auth lives in that host's ZCode profile). Call-logs on both gateways show 502 'spawn zcode ENOENT' in 11-66 ms (both gateways' call-logs); the dashboard /models validation answers 'Invalid outbound URL protocol zcode://' by design (http/https only); the executor is buffered (whole turn, up to 120 s, before any SSE byte) so it cannot serve streaming legs. No legs. Revisit only if ZCode is installed on the gateway host."
     }
   },
   "routes": {
