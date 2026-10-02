@@ -509,6 +509,12 @@ def build_argv(req: dict, run_id: str | None = None,
     for opt in ("model", "title", "max_depth"):
         if req.get(opt) is not None:
             argv += ["--" + opt.replace("_", "-"), str(req[opt])]
+    # T2-RECORD-PIN item 1: `free` and a pinned model used to reach the CLI as
+    # two facts the CLI reconciled by launching the promo default. One value for
+    # the plan, the record and the budget gate: the pin also goes in as
+    # --free-model, so `--free --model X` is X on every surface.
+    if req.get("free") and req.get("model") is not None:
+        argv += ["--free-model", str(req["model"])]
     if req.get("review_of") is not None:
         # FAMILYFENCE item 2: which run's WRITER this review must not copy. The
         # family is read from that run's runner-private record by the CLI, so all
@@ -606,7 +612,14 @@ def spawn(req: dict) -> dict:
             # runs -- the flags go in as flags, and `free` is priced at the promo
             # model the argv carries (this tool passes --free, never --free-model).
             model=req.get("model"), card=req.get("card"), tier=req.get("tier"),
-            free=bool(req.get("free")), free_model=agent.DEFAULT_FREE_MODEL,
+            # T2-RECORD-PIN item 1: price the pin, not the default -- a spawn
+            # that carries `free` and a model launches that model (the argv
+            # above passes it as --free-model too), so the budget gate must see
+            # the same value the plan will.
+            free=bool(req.get("free")),
+            free_model=(req.get("model") if (req.get("free")
+                                             and req.get("model")) else
+                        agent.DEFAULT_FREE_MODEL),
             clean=bool(req.get("clean")),
             reason=req.get("claude_reason"))
     except (OSError, ValueError) as exc:

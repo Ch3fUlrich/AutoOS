@@ -2006,14 +2006,51 @@ def declared_models(cfg: dict) -> set:
     return out
 
 
+def qualify_pinned_model(cfg: dict, model) -> str | None:
+    """`model` with the opencode.jsonc provider that declares it, or None.
+
+    T2-RECORD-PIN item 3: `--free-model or-qwen3.8-27b-free` (and every other
+    bare pin) is an id opencode cannot resolve on its own — the config declares
+    models under a provider, and the model opencode is handed is
+    `provider/mid`. Exactly ONE provider may declare it: two would make the
+    prefix the caller's guess rather than a fact, so an ambiguous or wholly
+    undeclared pin returns None and the caller refuses with the same
+    "not declared in opencode.jsonc providers" reason `resolve_model` gives.
+
+    An already-qualified pin is returned unchanged (and a variant tail rides
+    with its base), so this is safe to call on every pin — idempotent, never
+    double-prefixed.
+    """
+    text = str(model or "").strip()
+    if not text:
+        return None
+    base, sep, variant = text.partition("#")
+    if "/" in base:
+        return text
+    owners = [pid for pid, prov in (cfg.get("providers") or {}).items()
+              if base in (prov.get("models") or {})]
+    if len(owners) != 1:
+        return None
+    return "%s/%s%s%s" % (owners[0], base, sep, variant)
+
+
 def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> str:
     agent = TIERS[tier]
     model = override or cfg["agents"][agent]["model"]
     base, _, variant = model.partition("#")
+    # T2-RECORD-PIN item 3: a bare pin is qualified before it is tested, so a
+    # model the config DOES declare is launched instead of refused for wearing
+    # no provider prefix. A pin nothing declares still fails below, in the same
+    # words it always used.
+    qualified = qualify_pinned_model(cfg, base)
+    if qualified:
+        base = qualified
     if clean and not base.endswith("-clean"):
         base += "-clean"
     if base not in declared_models(cfg):
-        raise ValueError("%s is not declared in opencode.jsonc providers" % base)
+        raise ValueError("%s is not declared in opencode.jsonc providers "
+                         "(a bare pin needs the provider prefix that declares "
+                         "it, e.g. omniroute/%s)" % (base, base))
     return base + ("#" + variant if variant else "")
 
 
@@ -9255,6 +9292,38 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse("--clean is for --tier; with a card say privacy=sensitive.")
     if args.free and client.name != "opencode":
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
+    # T2-RECORD-PIN items 3 and 1: settle every pin HERE, before the fence, the
+    # free-model chain and the plan read it, so one value is what all three see.
+    #
+    # Item 3: a bare pin gets the single opencode.jsonc provider that declares
+    # it. A --free model never reaches resolve_model (build_plan takes it
+    # straight from args.free_model), so without this an id the config DOES
+    # declare is launched unprefixed and only fails inside opencode. Both pins
+    # are qualified: --model names the same slot as --free-model.
+    if args.free:
+        for attr in ("model", "free_model"):
+            pin = getattr(args, attr, None)
+            if not pin or "/" in str(pin):
+                continue
+            qualified = qualify_pinned_model(cfg, pin)
+            if qualified is None:
+                return refuse("%s is not declared in opencode.jsonc providers "
+                              "(a bare pin needs the provider prefix that "
+                              "declares it, e.g. omniroute/%s)" % (pin, pin), 2)
+            setattr(args, attr, qualified)
+    if args.free and args.model:
+        # Item 1: `--free --model X` launches X. It used to record X as the pin
+        # (model_source=pinned) and launch the promo default anyway — a swap
+        # nobody could see from the record. Two pins naming the same slot that
+        # disagree are REFUSED with both spellings; a --free-model that says the
+        # same model as --model is not a disagreement, and --model's spelling
+        # wins because it is the pin the caller named first.
+        if getattr(args, "free_model", None) in (None, DEFAULT_FREE_MODEL):
+            args.free_model = args.model
+        elif _model_pin_key(args.free_model) != _model_pin_key(args.model):
+            return refuse(model_mismatch_text(args.model, args.free_model), 2)
+        else:
+            args.free_model = args.model
     if args.joinable and client.name != "claude":
         return refuse("--joinable is a Claude Code --bg --remote-control session; only --client claude.")
     # FAMILYFENCE: who may NOT serve this run, settled before any leg is picked —
