@@ -558,13 +558,6 @@ def preflight(argv: list, cwd: str, env: dict | None = None):
     r = subprocess.run([sys.executable, AGENT] + dry, cwd=cwd, stdin=subprocess.DEVNULL,
                        env=agent.spawner_child_env(extra=env),
                        capture_output=True, text=True)
-    # G2: CLI's post-plan gates (D-284, tier-3 write, model_mismatch) print
-    # "note: spawning this plan is refused: <reason>" on --dry-run and return 0.
-    # Scan stdout for that line so MCP preflight catches the refusal before spawn.
-    if r.returncode == 0:
-        for line in (r.stdout or "").splitlines():
-            if line.startswith("note: spawning this plan is refused: "):
-                return line[len("note: spawning this plan is refused: "):].strip()
     return None if r.returncode == 0 else (r.stderr.strip() or r.stdout.strip() or "rc=%d" % r.returncode)
 
 
