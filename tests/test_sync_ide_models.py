@@ -124,11 +124,10 @@ class RepoTests(unittest.TestCase):
         # PROVFIX3 finding 1 re-pins this: "1M everywhere" was the defect. A
         # route falls through to its smallest leg at any time, so the promise is
         # the narrowest advertised window among its SERVED legs.
-        # CIGREEN: expectation moved by 095faa44 (FREEKEYS-2d re-pinned this to
-        # 128k for the scaleway/nebius free band, but TORDER 2026-10-01 moved
-        # every sub-1M leg out of t1 into t2/t3, so on this branch every served
-        # leg of t1-orchestrator and t1-orchestrator-free-only is a 1M leg and
-        # the honest promise is back to 1000000).
+        # CIGREEN: expectation moved by 018438ed (TORDER TASK1, t1 band 1M-only:
+        # every sub-1M leg moved out of t1 into t2/t3, so on this branch every
+        # served leg of t1-orchestrator and t1-orchestrator-free-only is a 1M
+        # leg and the honest promise is back to 1000000).
         clamp = {"t1-orchestrator": 1000000, "t1-orchestrator-free-only": 1000000,
                  "t1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
