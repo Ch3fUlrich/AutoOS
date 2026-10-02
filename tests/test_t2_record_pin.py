@@ -681,6 +681,9 @@ class D284PostPlanTests(unittest.TestCase):
         self.old = os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN")
         os.environ.pop("AUTOOS_AGENT_MCP_DRY_RUN", None)
         self.addCleanup(self._restore)
+        gw_patcher = mock.patch.object(self.agent, "gateway_up", return_value=True)
+        gw_patcher.start()
+        self.addCleanup(gw_patcher.stop)
 
     def _restore(self):
         if self.old is None:
