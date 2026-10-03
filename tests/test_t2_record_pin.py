@@ -15,8 +15,11 @@ Five contracts, one test module each:
    same "not declared" reason resolve_model always gave.
 4. TIER-3 WRITE - review-only tier 3 refuses an implement task (rc 2 / MCP state
    rejected); a review card, a read-only run and a --dry-run preview still pass.
-5. D-284 - `gemini-3.8-flash` (any prefix, any variant) and every
-   `openrouter/google/` pin are refused until stage 2; `vertex/...` is not.
+5. D-284 - Under D-505/D-507 (paid tier, $200 hard stop / $180 warn, private-safe
+   per the cited paid terms), the spawn-pin hold lifts for exactly
+   `omniroute/gemini-3.8-flash`; training-leg classification of this pool is F0's
+   business. Every `openrouter/google/` pin remains refused until stage 2;
+   `vertex/...` is not covered.
 
 No network, no gateway, no container: every run below is a --dry-run or an
 in-process cmd_run with the route stubbed, and every spawn is stubbed at
@@ -54,7 +57,8 @@ def load_agent():
 def clean_env(**extra):
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+           if not k.startswith("AUTOOS_AGENT_") and k not in dropped
+           and not k.startswith("GIT_CONFIG_")}
     env.update(extra)
     return env
 
@@ -71,6 +75,9 @@ _WORKERS_TMP = None
 
 def setUpModule():
     global _WORKERS_TMP
+    for k in list(os.environ):
+        if k.startswith("GIT_CONFIG_"):
+            os.environ.pop(k, None)
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-t2-workers-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
 
@@ -540,16 +547,17 @@ class ReviewTierWriteTests(unittest.TestCase):
 
 
 class D284GuardTests(unittest.TestCase):
-    """Item 5: D-284 pins are refused until stage 2, and named as D-284."""
+    """Item 5: D-284 pins are refused until stage 2, and named as D-284.
 
-    def test_the_helper_reads_every_spelling_of_the_banned_model(self):
+    Under D-505/D-507, omniroute/gemini-3.8-flash is lifted (accepted);
+    openrouter/google/ pins stay refused.
+    """
+
+    def test_the_helper_accepts_every_spelling_of_the_lifted_model(self):
         agent = load_agent()
         for model in ("gemini-3.8-flash", "omniroute/gemini-3.8-flash",
                       "omniroute/gemini-3.8-flash#high", "GEMINI-3.8-FLASH"):
-            reason = agent.d284_model_refusal(model)
-            self.assertIsNotNone(reason, model)
-            self.assertIn("D-284", reason)
-            self.assertIn("until stage 2", reason)
+            self.assertIsNone(agent.d284_model_refusal(model), model)
 
     def test_openrouter_google_pins_are_refused_too(self):
         agent = load_agent()
@@ -558,6 +566,7 @@ class D284GuardTests(unittest.TestCase):
             reason = agent.d284_model_refusal(model)
             self.assertIsNotNone(reason, model)
             self.assertIn("D-284", reason)
+            self.assertIn("until stage 2", reason)
 
     def test_other_gemini_spellings_and_no_pin_are_allowed(self):
         agent = load_agent()
@@ -567,9 +576,16 @@ class D284GuardTests(unittest.TestCase):
                       "opencode/mimo-v2.6-flash-free", None, ""):
             self.assertIsNone(agent.d284_model_refusal(model), model)
 
+    def test_the_cli_accepts_lifted_pin_and_reaches_argv(self):
+        r = plan_of("--client", "opencode", "--model",
+                    "omniroute/gemini-3.8-flash", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("D-284", r.stderr)
+        self.assertIn("--model omniroute/gemini-3.8-flash", r.stdout)
+
     def test_the_cli_refuses_a_banned_pin(self):
-        for model in ("omniroute/gemini-3.8-flash",
-                      "openrouter/google/gemini-3.8-flash"):
+        for model in ("openrouter/google/gemini-3.8-flash",
+                      "OPENROUTER/GOOGLE/gemini-3.8-flash"):
             r = plan_of("--client", "opencode", "--model", model, "t")
             self.assertNotEqual(r.returncode, 0, model)
             self.assertIn("D-284", r.stderr, model)
@@ -586,6 +602,12 @@ class D284GuardTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("D-284", r.stderr)
 
+    def test_the_mcp_spawn_accepts_lifted_pin(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "model": "omniroute/gemini-3.8-flash"})
+        self.assertIn("--model", argv)
+        idx = argv.index("--model")
+        self.assertEqual(argv[idx + 1], "omniroute/gemini-3.8-flash")
+
     def test_the_mcp_spawn_refuses_it_even_in_a_dry_run(self):
         os.environ["AUTOOS_AGENT_MCP_DRY_RUN"] = "1"
         try:
@@ -600,40 +622,99 @@ class D284GuardTests(unittest.TestCase):
 class D284NormalisedSpellingTests(unittest.TestCase):
     """F1: the guard normalises the spelling ONCE, so no variant slips past.
 
-    The same pin spelled `OmniRoute/...`, `omniroute/omniroute/...`, with a
-    `-clean` twin, with whitespace inside the prefix, or in upper case used to
-    read as a different model and launched the pin D-284 holds back.
+    Under D-505/D-507, all normalised variants of omniroute/gemini-3.8-flash
+    are accepted. Every openrouter/google/* pin and other banned pins stay refused.
     """
 
-    BANNED_VARIANTS = ("OmniRoute/gemini-3.8-flash",
+    LIFTED_VARIANTS = ("OmniRoute/gemini-3.8-flash",
                        "omniroute/omniroute/gemini-3.8-flash",
                        "omniroute/gemini-3.8-flash-clean",
                        "gemini-3.8-flash-clean",
-                       "openrouter/ google/gemini-3.8-flash",
-                       "openrouter/google/ gemini-3.8-flash",
-                       "OPENROUTER/GOOGLE/gemini-3.8-flash",
-                       "gemini-3.8-flash-clean#high")
+                       "gemini-3.8-flash-clean#high",
+                       "omniroute/gemini-3.8-flash",
+                       "gemini-3.8-flash",
+                       "omniroute/gemini-3.8-flash#high",
+                       "GEMINI-3.8-FLASH")
+
+    REFUSED_TABLE = (
+        "openrouter/google/gemini-3.8-flash",
+        "openrouter/google/gemini-3-flash-preview",
+        "openrouter/google/gemini-2.5-flash",
+        "openrouter/google/gemini-3.8-flash-lite",
+        "openrouter/google/3.8-flash-lite",
+        "openrouter/google/gemini-3.8-flash-pro",
+        "openrouter/google/vertex-gemini-3.8-flash",
+        "OPENROUTER/GOOGLE/gemini-3.8-flash",
+        "openrouter/ google/gemini-3.8-flash",
+        "openrouter/google/ gemini-3.8-flash",
+        "openrouter/google/gemini-3.8-flash-clean",
+        "openrouter/google/gemini-3.8-flash#high",
+        "openrouter/google/gemini-3.8-flash-pro-preview",
+        "openrouter/google/gemini-1.5-pro",
+        "openrouter/google/gemini-1.5-flash",
+        "openrouter/google/gemini-2.0-flash-exp",
+    )
 
     ALLOWED_IDS = ("vertex/gemini-3.8-flash", "vertex-gemini-3.8-flash",
                    "google/gemini-3.8-flash", "gemini-3.8-flash-high",
                    "openrouter/anthropic/claude-opus-4-6",
                    "omniroute/t2-worker-clean", None, "")
 
-    def test_the_helper_refuses_every_normalisable_variant(self):
+    def test_the_helper_accepts_every_normalisable_lifted_variant(self):
         agent = load_agent()
-        for model in self.BANNED_VARIANTS:
+        for model in self.LIFTED_VARIANTS:
+            self.assertIsNone(agent.d284_model_refusal(model), model)
+
+    def test_the_helper_refuses_table_of_refused_ids(self):
+        agent = load_agent()
+        self.assertGreaterEqual(len(self.REFUSED_TABLE), 12)
+        for model in self.REFUSED_TABLE:
             reason = agent.d284_model_refusal(model)
             self.assertIsNotNone(reason, model)
             self.assertIn("D-284", reason, model)
             self.assertIn("until stage 2", reason, model)
+
+    def test_mutation_proof_widen_lift_to_any_gemini_38(self):
+        """Mutation proof: widening the lift to any gemini-3.8-* fails the refused table."""
+        agent = load_agent()
+        def mutant_refusal(model):
+            text = str(model or "").strip()
+            key = agent.d284_model_key(text)
+            if "gemini-3.8-" in key or key.startswith("gemini-3.8-"):
+                return None
+            return agent.d284_model_refusal(model)
+
+        leaked = [m for m in self.REFUSED_TABLE if mutant_refusal(m) is None]
+        self.assertTrue(len(leaked) > 0, "Mutant unexpectedly passed all refused table entries")
+
+    def test_mutation_proof_widen_lift_to_openrouter_prefix(self):
+        """Mutation proof: widening the lift to openrouter/google/ fails the refused table."""
+        agent = load_agent()
+        def mutant_refusal(model):
+            text = str(model or "").strip()
+            key = agent.d284_model_key(text)
+            if key.startswith("openrouter/google/"):
+                return None
+            return agent.d284_model_refusal(model)
+
+        leaked = [m for m in self.REFUSED_TABLE if mutant_refusal(m) is None]
+        self.assertTrue(len(leaked) > 0, "Mutant unexpectedly passed all refused table entries")
 
     def test_the_helper_still_allows_vertex_and_every_other_id(self):
         agent = load_agent()
         for model in self.ALLOWED_IDS:
             self.assertIsNone(agent.d284_model_refusal(model), model)
 
+    def test_the_cli_accepts_lifted_variants(self):
+        for model in ("omniroute/gemini-3.8-flash", "gemini-3.8-flash"):
+            r = plan_of("--client", "opencode", "--model", model, "t")
+            self.assertEqual(r.returncode, 0, f"{model}: {r.stderr}")
+            self.assertNotIn("D-284", r.stderr, model)
+            self.assertIn("--model omniroute/gemini-3.8-flash", r.stdout)
+
     def test_the_cli_refuses_every_variant_on_model_and_free_model(self):
-        for model in self.BANNED_VARIANTS[:4]:
+        for model in ("openrouter/ google/gemini-3.8-flash",
+                      "openrouter/google/ gemini-3.8-flash"):
             r = plan_of("--client", "opencode", "--model", model, "t")
             self.assertNotEqual(r.returncode, 0, model)
             self.assertIn("D-284", r.stderr, model)
@@ -648,14 +729,18 @@ class D284NormalisedSpellingTests(unittest.TestCase):
                     "vertex/gemini-3.8-flash", "t")
         self.assertNotIn("D-284", r.stderr)
 
-    def test_the_mcp_spawn_refuses_every_variant(self):
-        for req in ({"task": "t", "model": "OmniRoute/gemini-3.8-flash"},
-                    {"task": "t", "model":
-                     "omniroute/omniroute/gemini-3.8-flash"},
-                    {"task": "t", "free": True, "model":
-                     "gemini-3.8-flash-clean"},
-                    {"task": "t", "free_model":
-                     "OPENROUTER/GOOGLE/gemini-3.8-flash"}):
+    def test_the_mcp_spawn_accepts_all_lifted_variants(self):
+        for model in self.LIFTED_VARIANTS:
+            argv, _ = mcp_server.build_argv({"task": "t", "model": model})
+            self.assertIn("--model", argv)
+            idx = argv.index("--model")
+            self.assertEqual(argv[idx + 1], model)
+
+    def test_the_mcp_spawn_refuses_every_banned_variant(self):
+        for req in ({"task": "t", "model": "openrouter/ google/gemini-3.8-flash"},
+                    {"task": "t", "model": "openrouter/google/ gemini-3.8-flash"},
+                    {"task": "t", "free_model": "OPENROUTER/GOOGLE/gemini-3.8-flash"},
+                    {"task": "t", "model": "openrouter/google/gemini-3.8-flash-clean"}):
             with self.assertRaises(ValueError) as ctx:
                 mcp_server.build_argv(req)
             self.assertIn("D-284", str(ctx.exception), req)
@@ -677,6 +762,9 @@ class D284PostPlanTests(unittest.TestCase):
             return self.returncode
 
     def setUp(self):
+        for k in list(os.environ):
+            if k.startswith("GIT_CONFIG_"):
+                os.environ.pop(k, None)
         self.agent = load_agent()
         self.old = os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN")
         os.environ.pop("AUTOOS_AGENT_MCP_DRY_RUN", None)
@@ -753,11 +841,17 @@ class D284PostPlanTests(unittest.TestCase):
                         rc = self.agent.cmd_run(args, self.cfg())
         return rc, out.getvalue() + err.getvalue()
 
+    def test_a_route_resolving_to_lifted_model_is_accepted_post_plan(self):
+        # Under D-505/D-507, omniroute/gemini-3.8-flash is lifted.
+        rc, text = self.dispatch(route=self.route(model="omniroute/gemini-3.8-flash"))
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("D-284", text)
+
     def test_a_route_resolving_to_banned_model_is_refused_post_plan(self):
-        # A card/combo that resolves to gemini-3.8-flash is refused at the
+        # A card/combo that resolves to a banned openrouter/google model is refused at the
         # post-plan check, not at the CLI pin (no pin was given).
         # In dry_run mode, the refusal is announced but rc=0 (preview only).
-        rc, text = self.dispatch(route=self.route(model="omniroute/gemini-3.8-flash"))
+        rc, text = self.dispatch(route=self.route(model="openrouter/google/gemini-3.8-flash"))
         self.assertEqual(rc, 0, text)
         self.assertIn("note: spawning this plan is refused: D-284", text)
         self.assertIn("until stage 2", text)
@@ -765,7 +859,7 @@ class D284PostPlanTests(unittest.TestCase):
     def test_a_fallthrough_replan_to_banned_model_is_refused(self):
         # A provider-stopped run that falls through to a banned model is
         # refused in the fallthrough loop (second net).
-        banned_route = self.route(model="omniroute/gemini-3.8-flash", combo="t2-banned")
+        banned_route = self.route(model="openrouter/google/gemini-3.8-flash", combo="t2-banned")
         allowed_route = self.route(model="omniroute/t2-other", combo="t2-other")
 
         # First attempt: provider stop on allowed route
@@ -805,6 +899,7 @@ class D284PostPlanTests(unittest.TestCase):
         # covers the core logic.
         self.assertIsNone(self.agent.d284_model_refusal("omniroute/t2-other"))
         self.assertIsNone(self.agent.d284_model_refusal("vertex/gemini-3.8-flash"))
+        self.assertIsNone(self.agent.d284_model_refusal("omniroute/gemini-3.8-flash"))
 
     def test_vertex_model_still_allowed_post_plan(self):
         # vertex/... spellings are NOT covered by D-284
@@ -822,7 +917,7 @@ class D284PostPlanTests(unittest.TestCase):
         # We can't easily test the full wip_commit path without a real sandbox,
         # but we verify the variables are initialized by running a scenario
         # that hits the early break.
-        banned_route = self.route(model="omniroute/gemini-3.8-flash", combo="t2-banned")
+        banned_route = self.route(model="openrouter/google/gemini-3.8-flash", combo="t2-banned")
         allowed_route = self.route(model="omniroute/t2-other", combo="t2-other")
 
         attempt = {"count": 0}

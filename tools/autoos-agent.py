@@ -2569,12 +2569,12 @@ def gemini_model_allowed(model_id) -> bool:
     return bool(GEMINI_ALLOWED_RE.fullmatch(tail)) and not GEMINI_PRO_SEGMENT_RE.search(tail)
 
 
-# T2-RECORD-PIN item 5 (D-284): the pin this lane may not launch until stage 2.
-# Spelled as a route id (so `gemini-3.8-flash`, `omniroute/gemini-3.8-flash` and
-# `omniroute/gemini-3.8-flash#high` are one refusal) plus the one provider path
-# that carries the same model under another name. `vertex/...` and every other
-# Gemini spelling are NOT this guard's business — D-255 already answers those.
-D284_ROUTE_ID = "gemini-3.8-flash"
+# T2-RECORD-PIN item 5 (D-284): the provider path this lane may not launch.
+# omniroute/gemini-3.8-flash is no longer held (D-505 operator go, D-507 routing:
+# paid tier, $200 hard stop / $180 warn, private-safe per the cited paid terms;
+# training-leg classification of this pool is F0's business). What stays refused
+# here is the openrouter route to the same model; every other Gemini spelling is
+# answered by the other gates (D-255), as before.
 D284_BANNED_PREFIXES = ("openrouter/google/",)
 
 
@@ -2615,7 +2615,7 @@ def d284_model_refusal(model) -> str | None:
     if not text:
         return None
     key = d284_model_key(text)
-    banned = key == D284_ROUTE_ID or key.startswith(D284_BANNED_PREFIXES)
+    banned = key.startswith(D284_BANNED_PREFIXES)
     if not banned:
         return None
     return ("D-284: %s stays off the spawn list until stage 2 (operator hold) - "

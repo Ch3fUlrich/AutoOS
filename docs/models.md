@@ -339,6 +339,7 @@ leg inside such a combo is registry data that stage 2 removes (D-256), not
 something the spawn door refuses.
 `tests/test_autoos_spawner.py::GeminiAllowListTests` pins the list; the registry and
 combos rows on the list's far side are reported for the orchestrator, not edited here.
+Under D-284, `gemini-3.8-flash` and `openrouter/google/` spawn pins were held back. Under D-505/D-507, the spawn-pin hold lifts for exactly `omniroute/gemini-3.8-flash` (paid tier, $200 hard stop / $180 warn, private-safe per the cited paid terms); training-leg classification of this pool is F0's business. All other `openrouter/google/*` pins remain refused.
 
 - repo `opencode.jsonc` → `providers.openrouter` with
   `muse-spark-1.3-contributor` (`modelID: meta/muse-spark-1.3-contributor`,
