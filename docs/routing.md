@@ -215,3 +215,21 @@ reported: OmniRoute answers 503 "resource pressure" when the host is short of me
 is load shedding, not a dead leg. 400, 404 and transport errors are drift and are never
 retried, so the audit stays quick when a leg is really gone. A leg that still answers 503
 after the last retry is reported as `503` (state, not drift) and the audit does not fail.
+
+## Windows native spawner: prompt delivery and shim resolution
+
+On native Windows (`os.name == 'nt'`), clients installed via npm or package managers often expose `.cmd`, `.bat`, or `.ps1` wrapper shims on PATH (e.g. `opencode.cmd`). Launching these shims directly causes Windows to execute them via `cmd.exe`, which truncates command-line arguments at the first newline character (`\n`) and treats characters like `%`, `^`, `&`, `|`, `<`, `>`, and quotes as shell metacharacters. In isolated agent runs where prompts consist of multiple lines (such as containment warnings followed by task instructions), this truncation dropped the task brief entirely, leaving workers idle.
+
+To guarantee that workers receive multi-line prompts and special characters byte-exact, `tools/autoos-agent.py`'s executable resolver (`resolve_client_executable`) intercepts Windows shims:
+1. **Direct binaries:** For `opencode`, the resolver first checks for the sibling native executable `node_modules/@opencode/cli/bin/opencode.exe` relative to the shim directory (standard npm global install layout). Other clients distributed as native binaries (such as `claude.exe`, `agy.exe`, and `qodercli.exe`) are launched directly via `CreateProcess` without intermediate shell wrappers.
+2. **Parsed script targets:** When a shim invokes a Node or Python entry point (such as `omniroute.cmd`, `qwen.cmd`, or `codex.cmd`), the shim is parsed for its target script, which is executed directly via `node.exe`, `python.exe`, or the `py` launcher. Interpreter variations (`node`, `nodejs`, `python`, `python3`, `python3.12`-style versions, `pythonw`, `py`) are recognized without dropping the target script, value-taking flags (such as `-r`, `--require`, `-X`, `-W`) keep their values, `py` launcher selectors (such as `-3`) are preserved, and quoted target paths or `--flag=value` arguments with spaces are handled.
+3. **Fail-closed refusal:** If a shim cannot be resolved to a direct executable or runtime script (including inline code or module shims like `-e`/`--eval`/`-p`/`-c`/`-m`), and the prompt contains newlines or special characters, or the whole command line exceeds ~7000 characters, the spawner refuses the spawn loudly (exit code 3, `ClientMissing`) rather than silently truncating arguments or invoking `shell=True`. Shell executables named in the shim line (`cmd.exe`, `powershell.exe`, and the other shells in `SHIM_SHELL_EXE_NAMES`) are never taken as the target, so a `cmd.exe /c …` shim still resolves to the real target and a shell-only shim fails closed. POSIX platforms remain byte-identical.
+
+Known limits of shim resolution:
+
+- Fixed arguments after the script in the shim (`node cli.js serve --port 1 %*`) are dropped, so the client is launched without them.
+- A value flag outside the listed sets loses its value (`node -C development cli.js` launches `node -C cli.js`).
+- The first existing native token on a line wins, so a helper exe on an earlier line gets the prompt instead of the client.
+- The interpreter is taken from the shim only by name: for python the current interpreter (sys.executable) is used unless a sibling python.exe is next to the shim AND the shim spells the token `python.exe`.
+- The ~32767-character CreateProcess limit still applies to a resolved target.
+

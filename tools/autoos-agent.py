@@ -8789,20 +8789,76 @@ def client_program_index(cmd) -> int:
     return 0
 
 
-def resolve_client_executable(cmd) -> list:
+INTERPRETER_NAME_RE = re.compile(
+    r'^(?:node|nodejs|python\d*(?:\.\d+)?|pythonw|py)(?:\.exe)?$',
+    re.IGNORECASE
+)
+
+NODE_VALUE_FLAGS = {
+    "-r", "--require", "--import", "--loader", "--experimental-loader",
+    "-e", "--eval", "-p", "--print", "--env-file"
+}
+
+PYTHON_VALUE_FLAGS = {
+    "-X", "-W", "-c", "-m", "--check-hash-based-pycs"
+}
+
+SHIM_NO_SCRIPT_FLAGS = {"-e", "--eval", "-p", "--print", "-c", "-m"}
+
+# Shell executables a shim may invoke to run its real target (`cmd.exe /c`,
+# `powershell.exe -File`, ...). None of these is ever the client itself, so
+# none of them may be taken as the native target: doing that would hand the
+# prompt back to a shell interpreter.
+SHIM_SHELL_EXE_NAMES = frozenset((
+    "cmd", "powershell", "pwsh", "bash", "sh", "zsh",
+    "wsl", "conhost", "wscript", "cscript",
+))
+
+
+def _split_shim_line(line: str) -> list[str]:
+    """Tokenize a shim command line preserving quotes and Windows backslashes."""
+    escaped = line.replace("\\", "\x00")
+    try:
+        parts = shlex.split(escaped, posix=True)
+    except ValueError:
+        return []
+    return [p.replace("\x00", "\\") for p in parts]
+
+
+class _ShimTarget(tuple):
+    """Target script and interpreter flags, preserving optional interpreter name."""
+
+    def __new__(cls, target: str, flags: list[str], interp: str | None = None):
+        obj = super().__new__(cls, (target, flags))
+        obj.interp = interp
+        return obj
+
+
+def resolve_client_executable(cmd, _nt: bool | None = None) -> list:
     """`cmd` with the client's program replaced by what `shutil.which()` found.
 
-    WINSHIM (reported by Workstation-AutoOS): on Windows a client installed as a
-    `.cmd`/`.ps1` shim is on PATH — so the spawner's own which() pre-check calls it
-    installed — while `CreateProcess` appends only `.exe` and Popen of the bare
-    name raised FileNotFoundError [WinError 2]. which() honours PATHEXT, so it
-    finds the shim and Popen is handed its full path. `shell=True` is not the
-    answer: it would put argv quoting and an injection surface behind every spawn.
+    On Windows a client installed as a `.cmd`/`.ps1` shim is on PATH — so the spawner's
+    own which() pre-check calls it installed — while `CreateProcess` appends only `.exe`
+    and Popen of the bare name raised FileNotFoundError [WinError 2]. which() honours
+    PATHEXT, so it finds the shim and Popen is handed its full path. `shell=True` is not
+    the answer: it would put argv quoting and an injection surface behind every spawn.
     On POSIX which() returns the file execvp would have picked, so a client that
     works today is untouched. Every launch site goes through here — `run_client`
     (the first attempt and each fallthrough re-run) and the MCP runner's detached
     `run` — so one rule decides what starts, and a program that is not there is
     named, with the PATH that was searched, instead of traced back.
+
+    On Windows (`os.name == 'nt'`), executing a `.cmd`/`.bat` shim passes command-line
+    arguments through `cmd.exe`, which truncates at the first newline and mangles `%`, `^`,
+    `&`, `|`, `<`, `>`, and quotes. To prevent prompt truncation, the real entry is resolved:
+      1. For `opencode`, sibling `node_modules/@opencode/cli/bin/opencode.exe` relative
+         to the shim directory is checked first (standard npm global install layout).
+      2. If not found, the shim is parsed for its target executable or script (node/python).
+         A node/python script target is launched directly via `node.exe` or `python.exe`.
+      3. If no target can be resolved and the command line contains newlines, shell hazard
+         characters, or exceeds ~7000 characters, the launch is refused loudly
+         (ClientMissing) rather than truncating.
+    On POSIX which() returns the file execvp would have picked, byte-identical.
     """
     argv = list(cmd)
     index = client_program_index(argv)
@@ -8813,8 +8869,223 @@ def resolve_client_executable(cmd) -> list:
             "not installed: %s (PATH %s). Install it (catalog: ./setup.sh --only "
             "<id> -y; on Windows the directory holding the .cmd/.ps1 shim has to "
             "be on PATH); see: list" % (name, os.environ.get("PATH", "")))
+
+    if _nt is None:
+        _nt = (os.name == "nt")
+
+    if not _nt:
+        argv[index] = exe
+        return argv
+
+    ext = os.path.splitext(exe)[1].lower()
+    if ext not in (".cmd", ".bat", ".ps1"):
+        argv[index] = exe
+        return argv
+
+    shim_dir = os.path.dirname(os.path.abspath(exe))
+    target = None
+    flags = []
+    interp = None
+    base_name = os.path.basename(exe).lower()
+    if name == "opencode" or base_name.startswith("opencode"):
+        sibling = os.path.normpath(os.path.join(shim_dir, "node_modules", "@opencode", "cli", "bin", "opencode.exe"))
+        if os.path.isfile(sibling):
+            target = sibling
+
+    if target is None:
+        parsed = parse_shim_target(exe)
+        if parsed is not None:
+            target, flags = parsed
+            interp = getattr(parsed, "interp", None)
+
+    if target is not None:
+        t_ext = os.path.splitext(target)[1].lower()
+        if t_ext == ".exe":
+            argv[index:index + 1] = [target]
+            return argv
+        elif t_ext in (".js", ".mjs", ".cjs"):
+            interp_file = os.path.basename(interp) if interp else "node.exe"
+            sibling = os.path.join(shim_dir, interp_file)
+            if os.path.isfile(sibling):
+                node_cand = sibling
+            elif os.path.isfile(os.path.join(shim_dir, "node.exe")):
+                node_cand = os.path.join(shim_dir, "node.exe")
+            else:
+                node_cand = (shutil.which(interp_file) or shutil.which("node.exe")
+                             or shutil.which("node"))
+            if node_cand:
+                argv[index:index + 1] = [node_cand] + flags + [target]
+                return argv
+        elif t_ext == ".py":
+            interp_base = os.path.basename(interp).lower() if interp else "python.exe"
+            if interp_base in ("py", "py.exe"):
+                sibling = os.path.join(shim_dir, interp_base)
+                if os.path.isfile(sibling):
+                    py_cand = sibling
+                else:
+                    py_cand = shutil.which("py.exe") or shutil.which("py") or "py"
+            else:
+                interp_file = os.path.basename(interp) if interp else "python.exe"
+                sibling = os.path.join(shim_dir, interp_file)
+                if os.path.isfile(sibling):
+                    py_cand = sibling
+                else:
+                    py_cand = sys.executable or shutil.which("python.exe") or shutil.which("python")
+            if py_cand:
+                argv[index:index + 1] = [py_cand] + flags + [target]
+                return argv
+
+    args = argv[index + 1:]
+    total_len = sum(len(a) for a in args) + max(0, len(args) - 1)
+    has_hazards = total_len > 7000 or any(_has_shim_hazards(arg) for arg in args)
+    if has_hazards:
+        raise ClientMissing(
+            "cannot spawn %s on Windows: prompt contains newlines or special characters "
+            "(or exceeds command line length limit) and shim %s has no resolvable native "
+            "executable or script target" % (name, exe))
+
     argv[index] = exe
     return argv
+
+
+def _has_shim_hazards(text: str) -> bool:
+    """True if string contains newlines, cmd.exe metacharacters, or exceeds command line length limit."""
+    if not isinstance(text, str):
+        return False
+    if len(text) > 7000:
+        return True
+    return any(c in text for c in ("\n", "\r", "%", "^", "&", "|", "<", ">", '"', "'"))
+
+
+def parse_shim_target(path: str) -> tuple[str, list[str]] | None:
+    """Extract target executable or script path and interpreter flags from a Windows .cmd, .bat, or .ps1 shim.
+
+    Shell executables named in the line (cmd.exe, powershell.exe, and the rest
+    of `SHIM_SHELL_EXE_NAMES`) are never returned as the target, so a shim that
+    only runs a shell resolves to nothing rather than to that shell.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    shim_dir = os.path.dirname(os.path.abspath(path))
+    try:
+        with io.open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+
+    value_flags = NODE_VALUE_FLAGS | PYTHON_VALUE_FLAGS
+
+    for line in lines:
+        line_clean = line.strip()
+        if not line_clean:
+            continue
+        lower_line = line_clean.lower()
+        if (line_clean.startswith("::")
+                or line_clean.startswith("#")
+                or lower_line.startswith("rem ")
+                or lower_line.startswith("@rem")
+                or lower_line == "rem"
+                or lower_line == "@rem"):
+            continue
+
+        for marker in ("%~dp0\\", "%~dp0/", "%~dp0", "%dp0%\\", "%dp0%/", "%dp0%"):
+            line_clean = line_clean.replace(marker, shim_dir + os.sep)
+        for marker in ("$basedir/", "$basedir\\", "$basedir"):
+            line_clean = line_clean.replace(marker, shim_dir + os.sep)
+
+        tokens = _split_shim_line(line_clean)
+        if not tokens:
+            continue
+
+        flags: list[str] = []
+        interp: str | None = None
+        has_no_script = False
+
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            cleaned = tok.lstrip('@&').strip('"`\'')
+            if not cleaned:
+                i += 1
+                continue
+
+            base = os.path.basename(cleaned).lower()
+            if INTERPRETER_NAME_RE.match(base) and interp is None:
+                interp = cleaned
+                i += 1
+                continue
+
+            if cleaned.startswith("-"):
+                flag_name = cleaned.split("=", 1)[0]
+                if flag_name in SHIM_NO_SCRIPT_FLAGS or (
+                    not flag_name.startswith("--") and any(
+                        flag_name.startswith(f) for f in ("-e", "-c", "-m", "-p")
+                    )
+                ):
+                    has_no_script = True
+                    break
+
+                is_value_flag = False
+                val_in_token = False
+                if flag_name in value_flags:
+                    is_value_flag = True
+                    val_in_token = ("=" in cleaned)
+                else:
+                    for vf in ("-X", "-W", "-r"):
+                        if cleaned.startswith(vf) and not cleaned.startswith("--") and len(cleaned) > len(vf):
+                            is_value_flag = True
+                            val_in_token = True
+                            break
+
+                if is_value_flag:
+                    if val_in_token:
+                        flags.append(cleaned)
+                        i += 1
+                    else:
+                        flags.append(cleaned)
+                        if i + 1 < len(tokens):
+                            val_tok = tokens[i + 1].strip('"`\'')
+                            flags.append(val_tok)
+                            i += 2
+                        else:
+                            i += 1
+                    continue
+                else:
+                    flags.append(cleaned)
+                    i += 1
+                    continue
+
+            ext = os.path.splitext(cleaned)[1].lower()
+            if ext in (".js", ".mjs", ".cjs", ".py", ".exe"):
+                if ext == ".exe":
+                    if INTERPRETER_NAME_RE.match(base):
+                        if interp is None:
+                            interp = cleaned
+                        i += 1
+                        continue
+                    shell_base = base[:-4] if base.endswith(".exe") else base
+                    if shell_base in SHIM_SHELL_EXE_NAMES:
+                        # This token names the shell that runs the rest of the
+                        # line, not the client: skip it and keep looking, so a
+                        # `cmd.exe /c "%~dp0real.exe"` shim still resolves to
+                        # the real target and a shell-only shim resolves to
+                        # nothing instead of to the shell.
+                        i += 1
+                        continue
+                cand = cleaned if os.path.isabs(cleaned) else os.path.join(shim_dir, cleaned)
+                norm = os.path.normpath(cand)
+                if os.name != "nt":
+                    norm = norm.replace("\\", "/")
+                if os.path.isfile(norm) and not norm.lower().endswith((".cmd", ".bat", ".ps1")):
+                    if ext == ".exe":
+                        return _ShimTarget(norm, [], interp)
+                    return _ShimTarget(norm, flags, interp)
+            i += 1
+
+        if has_no_script:
+            return None
+
+    return None
 
 
 def cli_scope_unit(run_id, attempt) -> str:

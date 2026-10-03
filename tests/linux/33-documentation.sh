@@ -956,6 +956,10 @@ if it "audit-router's unit tests pass (registry-sourced, task A5c)"; then
     out="$(python3 tests/test_audit_router_registry.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "autoos-agent spawner windows prompt delivery and shim resolution (unit tests)"; then
+    out="$(python3 tests/test_win_prompt_spawn.py 2>&1 && python3 tests/test_win_prompt_spawn_more.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
     report="$(python3 - 2>&1 <<'PY'
 import importlib.util
