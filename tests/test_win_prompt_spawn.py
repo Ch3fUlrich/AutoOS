@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -289,8 +290,11 @@ class TestPosixEquivalenceWithMain(unittest.TestCase):
             for name in names:
                 p = os.path.join(folder, name)
                 open(p, "w", encoding="utf-8").close()
-                try: os.chmod(p, 0o755)
-                except OSError: pass
+                if os.name != "nt":  # which() needs the exec bit on POSIX; Windows uses the extension
+                    try:
+                        pathlib.Path(p).chmod(0o755)
+                    except OSError:
+                        pass
 
     def test_posix_equivalence_60_inputs(self):
         d, sp = self.tmp, self.sp_dir

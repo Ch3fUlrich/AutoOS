@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -39,10 +40,11 @@ def _mk(path: str, content: str = "") -> str:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
-    try:
-        os.chmod(path, 0o755)
-    except OSError:
-        pass
+    if os.name != "nt":
+        try:
+            pathlib.Path(path).chmod(0o755)
+        except OSError:
+            pass
     return path
 
 
