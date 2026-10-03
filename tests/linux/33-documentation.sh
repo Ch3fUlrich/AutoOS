@@ -784,6 +784,30 @@ if it "omnigraph gateway policy: static refusal and least-privilege checks (unit
     out="$(python3 tests/test_gateway_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "cost guard: run and daily budget evaluations (unit tests)"; then
+    out="$(python3 tests/test_run_budget.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost guard: edge inputs, classification and price file (unit tests)"; then
+    out="$(python3 tests/test_run_budget_more.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost guard: spawner refusal and daily gate integration (unit tests)"; then
+    out="$(python3 tests/test_run_budget_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost guard: CLI output, exit codes and boundaries (unit tests)"; then
+    out="$(python3 tests/test_run_budget_v3.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost guard: rotate-on-last-call, day bad-row accumulation, gateway handling and provider/model pins (unit tests)"; then
+    out="$(python3 tests/test_run_budget_v3b.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost guard: spawner gate numeric values, no-override rule and model sources (unit tests)"; then
+    out="$(python3 tests/test_run_budget_spawner_v3.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # REVFIX: no unit test file may be invisible to every harness. This guard
 # fails when a tests/test_*.py is not named by any suite entry point.
 if it "suite wiring: every tests/test_*.py is wired into a harness"; then

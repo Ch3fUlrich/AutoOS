@@ -1500,7 +1500,14 @@ WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR"
                      "AUTOOS_NO_COLOR", "AUTOOS_DRY_RUN", "AUTOOS_NONINTERACTIVE",
                      "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
                      "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
-                     "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN")
+                     "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN",
+                     # the daily gate file path: the gate itself runs inside
+                     # our own CLI, so the MCP server's preflight and detached
+                     # runner must hand the CLI the path to the spend report
+                     # that decides the refusal. A path to a report, not a
+                     # credential, and the client worker it reaches never
+                     # reads it.
+                     "AUTOOS_DAILY_GATE_FILE")
 # Cross-check on top of the allowlist, applied to what the *plan* injects too:
 # no secret-shaped name reaches the child from either side.
 WORKER_ENV_DENY = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
@@ -3229,6 +3236,172 @@ def lean_decision(client_name: str, route: dict) -> tuple:
                   "servers, and a writer run is where that tool surface is exactly "
                   "what --lean asks to remove (%s can drop them)." % (
                       client_name, " and ".join(LEAN_CLIENTS)))
+
+
+DAILY_GATE_ENV_VAR = "AUTOOS_DAILY_GATE_FILE"
+DAILY_GATE_MAX_AGE_SECONDS = 7200  # 2 hours
+
+
+def _is_google_paid_model(model: str) -> bool:
+    """Whether one model string is a Google-paid one.
+
+    Agy/antigravity and OVH names are never counted - per model string, so an
+    OVH leg beside a vertex plan model does not stand down the check.
+    """
+    m = str(model or "").strip().lower()
+    if m in ("antigravity", "agy", "ovh", "ovhcloud"):
+        return False
+    if m.startswith(("antigravity/", "agy/", "ovh/", "ovhcloud/")):
+        return False
+    if m.startswith(("vertex/", "gemini/", "omniroute/vertex-", "omniroute/gemini-",
+                     "vertex-", "google/")):
+        return True
+    return m in ("vertex", "gemini", "google")
+
+
+def is_google_paid_start(args=None, plan=None) -> bool:
+    """True when ANY model or leg this start can use is Google-paid.
+
+    `--free` does not exempt the model the run will actually use: `--free
+    --model X` launches X, so it is checked like any other pin. A plain
+    `--free` run uses the free chain (never a Google-paid model the caller did
+    not name), so it passes. Deciding per model string - not per start - keeps
+    an OVH or agy leg from disabling the gate for a vertex plan model.
+    """
+    client = None
+    if args is not None:
+        client = getattr(args, "client", None)
+    if not client and isinstance(plan, dict):
+        client = plan.get("client")
+    if client in ("agy", "antigravity"):
+        return False
+
+    models = []
+    if args is not None:
+        if getattr(args, "model", None):
+            models.append(getattr(args, "model"))
+        free_model = getattr(args, "free_model", None)
+        # the same two pins the CLI checks before anything else (the --model
+        # pin, and the free model when this run would actually use it)
+        if getattr(args, "free", False) or (free_model or "") != DEFAULT_FREE_MODEL:
+            if free_model:
+                models.append(free_model)
+    if isinstance(plan, dict):
+        if plan.get("model"):
+            models.append(plan["model"])
+        if plan.get("free_model"):
+            models.append(plan["free_model"])
+        route = plan.get("route")
+        if isinstance(route, dict):
+            if route.get("model"):
+                models.append(route["model"])
+            for leg in (route.get("legs") or []):
+                if isinstance(leg, dict):
+                    if leg.get("model"):
+                        models.append(leg["model"])
+                    if leg.get("provider"):
+                        models.append(leg["provider"])
+                elif isinstance(leg, str):
+                    models.append(leg)
+
+    return any(_is_google_paid_model(m) for m in models)
+
+
+def _read_daily_gate(path: str):
+    """The gate JSON from `path`, in whatever encoding the writer's shell gave it.
+
+    `run_budget.py day` writes plain UTF-8, but a redirection may change the
+    encoding on the way out: PowerShell 5 `>` writes UTF-16, `Out-File -Encoding
+    utf8` and `Set-Content -Encoding utf8` add a BOM. Try UTF-8 (with or
+    without BOM) first, then UTF-16, instead of failing open on a perfectly
+    good block.
+    """
+    last = None
+    for enc in ("utf-8-sig", "utf-16"):
+        try:
+            with open(path, "r", encoding=enc) as f:
+                return json.load(f)
+        except (OSError, ValueError) as exc:
+            last = exc
+    raise last
+
+
+def _parse_gate_num(val, default: float) -> float:
+    """Parse a gate number (usd or budget). Falsy values use the default.
+    Booleans, non-numeric strings, non-finite values, and non-empty collections
+    raise an exception to be handled as garbage values.
+    """
+    if val is True:
+        raise ValueError("boolean true")
+    if not val:
+        return default
+    num = float(val)
+    import math
+    if math.isnan(num) or math.isinf(num):
+        raise ValueError("non-finite number")
+    return num
+
+
+def daily_gate_refusal(args=None, plan=None, env=None, now=None) -> str | None:
+    """Return refusal message if this start is Google-paid and the daily gate
+    says block, else None.
+
+    Fails OPEN (printing 'daily gate unavailable' to stderr) when the gate
+    file is unset, unreadable, not written for today's UTC day, older than
+    2 hours, or dated in the future: any of those is a report that does not
+    speak about today's spend, and a guard that guesses is not a guard.
+    """
+    if not is_google_paid_start(args, plan):
+        return None
+
+    if env is None:
+        env = os.environ
+    if now is None:
+        now = time.time()
+
+    def unavailable(reason: str) -> None:
+        print(f"daily gate unavailable: {reason}", file=sys.stderr)
+        return None
+
+    gate_path = (env.get(DAILY_GATE_ENV_VAR) or "").strip()
+    if not gate_path:
+        return unavailable("env var not set")
+
+    try:
+        mtime = os.path.getmtime(gate_path)
+        # Stale means too old AND not-yet: the file is a verdict about a closed
+        # UTC day, and a block written for another day must not ride into this
+        # one on the strength of a fresh mtime alone.
+        if mtime > now:
+            return unavailable("file stale (future mtime)")
+        if now - mtime > DAILY_GATE_MAX_AGE_SECONDS:
+            return unavailable("file stale (age)")
+        data = _read_daily_gate(gate_path)
+    except OSError:
+        return unavailable("file unreadable")
+    except ValueError:
+        return unavailable("not a JSON object")
+
+    if not isinstance(data, dict):
+        return unavailable("not a JSON object")
+
+    day = str(data.get("day") or "").strip()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    if day != today:
+        return unavailable("file stale (not today's UTC day)")
+
+    verdict = str(data.get("verdict") or "").strip().lower()
+    if verdict != "block":
+        return None
+
+    try:
+        total_usd = _parse_gate_num(data.get("usd"), 0.0)
+        budget = _parse_gate_num(data.get("budget"), 25.0)
+    except (TypeError, ValueError, OverflowError):
+        # A word where a number belongs is an unreadable gate, not a gate with
+        # no numbers: fail open with the note, never a traceback.
+        return unavailable("garbage value")
+    return "daily budget blocked: day total $%.2f exceeds budget $%.2f" % (total_usd, budget)
 
 
 def lean_overlay(cfg: dict) -> dict:
@@ -9812,6 +9985,9 @@ def cmd_run(args, cfg: dict) -> int:
         d284 = d284_model_refusal(pin)
         if d284 is not None:
             return refuse(d284, 2)
+    daily_early_refusal = daily_gate_refusal(args)
+    if daily_early_refusal is not None:
+        return refuse(daily_early_refusal)
     # SPAWNCAP (S2): decide the client from the task's shell/write needs before
     # anything is planned or started. An explicit --client that lacks one is
     # refused with the capable clients named; with no --client the first capable
@@ -10016,6 +10192,12 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    # The early gate read the flags; the plan may have rewritten the model
+    # since (a re-resolved route, a fenced free head), so the gate reads the
+    # plan it would actually launch on, not just the argv.
+    daily_refusal = daily_gate_refusal(args, plan)
+    if daily_refusal is not None:
+        return refuse(daily_refusal)
     # T2-RECORD-PIN item 2: the plan may have rewritten the pin after the flags
     # were checked (the reviewer override, a re-resolved route, a fenced free
     # head) - a launch on a model nobody asked for is refused HERE, before the
@@ -10321,6 +10503,12 @@ def cmd_run(args, cfg: dict) -> int:
             break
         if launch_note is not None:
             print("claude-budget: %s" % launch_note, file=sys.stderr)
+        if fallthroughs:
+            daily_refusal = daily_gate_refusal(args, plan)
+            if daily_refusal is not None:
+                print("autoos-agent: %s" % daily_refusal, file=sys.stderr)
+                rc = 2
+                break
         # SPAWNFREE (S2) item 2: a fallthrough re-run is a fresh start on the
         # same shared free account, so it passes the same gate (the first
         # attempt passed it before the clone was made). Breaking here still
