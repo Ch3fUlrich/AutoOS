@@ -81,7 +81,7 @@ merely follows a heredoc's terminator line. The `claude` check only flags a
 **double-quoted** argument — a single-quoted or escaped backtick, and a
 bare `$VAR`, are never expanded by the shell and are always allowed.
 
-Round-2 coverage extends checks through leading command wrappers (`sudo`, `env`, `command`, `nohup`, `time`, `exec`, `nice`, `setsid`, `timeout`, `builtin`), flag assignments (`--print="..."`), clustered short flags (`-pq`, `-cp`, `-pc`), backslash-escaped triggers in unquoted heredoc bodies (`\` and `\$(`), resilient 1 MiB fail-open stdin decoding with robust UTF-8 replacement, and recursive scanning of `bash`, `sh`, `zsh` and `dash -c` strings up to depth 3.
+Round-2 coverage extends checks through leading command wrappers (`sudo`, `env`, `command`, `nohup`, `time`, `exec`, `nice`, `setsid`, `timeout`, `builtin`), flag assignments (`--print="..."`), clustered short flags, backslash-escaped triggers in unquoted heredoc bodies (`\` and `\$(`), resilient 1 MiB fail-open stdin decoding with robust UTF-8 replacement, and recursive scanning of `bash`, `sh`, `zsh` and `dash -c` strings up to depth 3. Any single-dash letters-only word containing p is treated as -p, so clusters with unknown letters and words like -prefix, -print, -pretty, -help are over-denied on a dirty prompt: harmless, listed under known false positives.
 
 Nobody should rely on the hook beyond its reach: the hook only looks at the FIRST word of a command (after the wrapper words it knows and inside `bash|sh|zsh|dash -c` strings), so these are NOT covered:
 - subshells and groups `( ... )`, `{ ...; }`
@@ -101,12 +101,13 @@ Nobody should rely on the hook beyond its reach: the hook only looks at the FIRS
 - process substitution <( )
 - author-written substitutions outside a heredoc or claude prompt
 - -c nesting deeper than 3
+- a raw NUL byte inside the JSON command string makes the payload invalid JSON and the guard fails open (Claude Code escapes control characters, so this is theoretical)
 
 Known false positives (over-deny is the safe direction):
 - text in a comment (`# ... $(x)`)
 - redirect targets (`> "$(date).out"`)
 - `$$(id)` and arithmetic `$((1+2))` inside an unquoted heredoc body
-- the remaining -p cluster edge cases
+- clusters with unknown letters and words like `-prefix`, `-print`, `-pretty`, `-help` on a dirty prompt
 
 ## Tests
 

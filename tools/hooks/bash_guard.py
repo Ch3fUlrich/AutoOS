@@ -50,9 +50,6 @@ import sys
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _CLAUDE_BG_OR_PRINT_FLAGS = ("--bg", "-p", "--print")
-# Known claude CLI short option letters: p (print), c (continue), r (resume),
-# d (debug), v (version), h (help), i, q (quiet).
-_CLAUDE_SHORT_FLAGS = frozenset("cdhipqrv")
 _SEPARATORS = ";&|\n"
 _MAX_INPUT_BYTES = 1024 * 1024  # 1 MiB
 
@@ -421,14 +418,12 @@ def _basename(token):
 
 
 def _is_short_p_cluster(word):
-    """True if word is a short flag cluster containing 'p' (e.g. -pq, -qp),
-    where every letter in the cluster is a known claude CLI short option."""
+    """True if word is a single-dash option made only of ASCII letters
+    that contains 'p'."""
     if not word.startswith("-") or word.startswith("--"):
         return False
     cluster = word[1:]
-    if not cluster or "p" not in cluster:
-        return False
-    return set(cluster).issubset(_CLAUDE_SHORT_FLAGS)
+    return bool(cluster) and cluster.isascii() and cluster.isalpha() and "p" in cluster
 
 
 def _extract_flag_hit(word):
