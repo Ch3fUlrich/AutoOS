@@ -10,18 +10,28 @@ touches the network.
 
 Asserted: the Authorization header equals the fake env key (and reaches the
 gateway only via `exec`), the session-tag/run-id headers match the spawner's
-shape, every evidence.json field (including finish_reason and verdict,
-recorded on every run), served_model taken from the response, the request
-carries NO `temperature` by default (`--temperature 0.2` is sent verbatim -
-measured, a temperature-0 request is cut at 64 completion tokens on this
-gateway) and `max_tokens` 16000 UNLESS `--max-tokens` is given, the fake key
-(and the prompt) never in stdout/stderr nor in any output file, no response
-header VALUE recorded besides the correlation id, missing key -> exit 2,
-non-200 -> exit 3 + error.json, a finish_reason 'length' empty answer ->
-exit 4 + stderr warning + evidence.json finish_reason, and the VERDICT parse
-(the tolerant D-337 rules, called directly on the loaded module: bold heading
-and `**Verdict:** pass` accepted, quotes/tables/fences/diff hunks rejected,
-the last qualifying line wins, an open fence fails closed).
+shape, every evidence.json field (including finish_reason, verdict and the
+standing-question outcome `test_gaming`, recorded on every run), served_model
+taken from the response, the request carries NO `temperature` by default
+(`--temperature 0.2` is sent verbatim - measured, a temperature-0 request is
+cut at 64 completion tokens on this gateway) and `max_tokens` 16000 UNLESS
+`--max-tokens` is given, the fake key (and the prompt) never in stdout/stderr
+nor in any output file, no response header VALUE recorded besides the
+correlation id, missing key -> exit 2, non-200 -> exit 3 + error.json, a
+finish_reason 'length' empty answer -> exit 4 + stderr warning +
+evidence.json finish_reason, and the VERDICT parse (the tolerant D-337
+rules, called directly on the loaded module: bold heading and `**Verdict:**
+pass` accepted, quotes/tables/fences/diff hunks rejected, the last qualifying
+line wins, an open fence fails closed).
+
+STANDING QUESTION (StandingQuestionTests + StandingAnswerParseTests): the
+sent request body ALWAYS ends with STANDING_QUESTION (appended as its own
+paragraph), the answer's `TEST-GAMING: no|yes|unsure` line is REQUIRED and
+parsed with the verdict parse's indent/fence/ANSI discipline - a missing or
+malformed line is evidence `missing` + exit 5 (truncation keeps exit 4), a
+`yes` quote must be a strict verbatim substring of the SENT prompt
+(`yes_unverified_quote` + exit 5 when it is not), and `unsure` is recorded
+but not counted (exit 5). The first answer line at line start wins.
 
 Run directly:
 
@@ -58,10 +68,16 @@ FAKE_KEY = "fake-review-key-DO-NOT-LEAK-0123456789abcdef"
 MODEL = "ovh/gpt-oss-120b"
 SERVED_MODEL = "gateway-server/served-model-9"
 PROMPT = "REVIEW-PROMPT-SENTINEL: paste of the diff to review.\nExplain it.\n"
+# The standing question the tool appends to EVERY prompt (verbatim, and there
+# is no flag/env var that turns it off - see compose_prompt's `standing`
+# argument, the only seam) plus the answer its fake reviewer gives by default.
+STANDING = review_call.STANDING_QUESTION
+STANDING_ANSWER = "TEST-GAMING: no - searched src/ for __eq__: 0 hits"
 # Two VERDICT lines: the LAST qualifying one wins (neither value outside
-# pass / fail-with-findings counts - see VerdictParseTests).
+# pass / fail-with-findings counts - see VerdictParseTests). Every existing
+# answer also carries the mandatory standing-question line.
 ANSWER = ("first pass\nVERDICT: pass\nthen a finding\n"
-          "VERDICT: fail-with-findings\n")
+          "VERDICT: fail-with-findings\n" + STANDING_ANSWER + "\n")
 CORRELATION = "corr-id-abc-123"
 # A response header whose VALUE must never be recorded (names only).
 DIAG_HEADER_VALUE = "diag-trace-value-must-not-be-recorded"
@@ -69,7 +85,7 @@ DIAG_HEADER_VALUE = "diag-trace-value-must-not-be-recorded"
 RUN_ID_RE = re.compile(r"^\d{8}-\d{6}-[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{6}$")
 UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 EXPECTED_TOKENS = {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33}
-SUCCESS_LINES = 4
+SUCCESS_LINES = 5  # paths (2), model, VERDICT, TEST-GAMING
 
 
 class FakeGateway:
@@ -232,6 +248,7 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(lines[2], "model: " + SERVED_MODEL)
         self.assertEqual(lines[3],
                          "VERDICT: fail-with-findings")  # the LAST verdict
+        self.assertEqual(lines[4], "TEST-GAMING: no")  # the standing answer
 
         review = (self.out_dir / "review.txt").read_text(encoding="utf-8")
         self.assertEqual(review, ANSWER)
@@ -242,6 +259,8 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(ev["served_model"], SERVED_MODEL)  # from the response
         self.assertEqual(ev["status"], 200)
         self.assertEqual(ev["finish_reason"], "stop")  # recorded on every run
+        self.assertEqual(ev["test_gaming"], "no")  # standing answer, every run
+        self.assertNotIn("test_gaming_quote", ev)  # a `no` never carries one
         self.assertEqual(ev["session_tag"], "review/my-review")
         self.assertRegex(ev["run_id"], RUN_ID_RE)
         self.assertEqual(ev["prompt_sha256"],
@@ -283,8 +302,12 @@ class ReviewCallTests(unittest.TestCase):
 
         body = seen["body"]
         self.assertEqual(body["model"], MODEL)
+        # THE STANDING QUESTION is appended to every prompt the tool sends:
+        # caller text, one blank line, STANDING_QUESTION as its own trailing
+        # paragraph (no flag, no env var removes it - see compose_prompt).
         self.assertEqual(body["messages"],
-                         [{"role": "user", "content": PROMPT}])
+                         [{"role": "user",
+                           "content": PROMPT + "\n\n" + STANDING}])
         self.assertEqual(body["stream"], False)
         # No temperature BY DEFAULT: measured on this gateway, a
         # temperature-0 request is cut at 64 completion tokens (finish_reason
@@ -348,7 +371,8 @@ class ReviewCallTests(unittest.TestCase):
         # the bold) and the old `startswith("VERDICT:")` scan printed
         # `VERDICT: missing`.
         gateway = self.start_gateway(answer="reviewed, looks good\n"
-                                             "**Verdict:** pass\n")
+                                             "**Verdict:** pass\n"
+                                             + STANDING_ANSWER + "\n")
         result = self.run_tool(gateway, "--title", "bold-verdict")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
@@ -424,7 +448,8 @@ class ReviewCallTests(unittest.TestCase):
         self.assert_no_leak(result)
 
     def test_no_verdict_line_prints_the_missing_sentinel(self):
-        gateway = self.start_gateway(answer="no verdict in this answer.\n")
+        gateway = self.start_gateway(answer="no verdict in this answer.\n"
+                                             + STANDING_ANSWER + "\n")
         result = self.run_tool(gateway, "--title", "no-verdict")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         lines = result.stdout.splitlines()
@@ -433,6 +458,173 @@ class ReviewCallTests(unittest.TestCase):
         self.assertIsNone(self.read_evidence()["verdict"])  # null, not a word
         self.assertEqual(self.read_evidence()["served_model"], SERVED_MODEL)
         self.assert_no_leak(result)
+
+
+    # --- the standing question -------------------------------------------
+
+    def test_sent_request_body_always_ends_with_the_standing_question(self):
+        # The one test for requirement (2): EVERY prompt the tool sends ends
+        # with STANDING_QUESTION as its own trailing paragraph.
+        gateway = self.start_gateway()
+        result = self.run_tool(gateway, "--title", "standing-question")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        content = gateway.requests[0]["body"]["messages"][0]["content"]
+        self.assertEqual(content, PROMPT + "\n\n" + STANDING)
+        self.assertTrue(content.endswith(STANDING))
+        self.assertIn("\n\n" + STANDING, content)  # one blank line before it
+        # The ONLY seam (module-level function argument, no CLI flag and no
+        # environment variable in the shipped tool - see compose_prompt):
+        self.assertEqual(review_call.compose_prompt(PROMPT, standing=""), PROMPT)
+        self.assertEqual(review_call.compose_prompt(PROMPT),
+                         PROMPT + "\n\n" + STANDING)
+        self.assert_no_leak(result)
+
+    def test_no_answer_line_is_missing_and_exits_5_with_evidence(self):
+        gateway = self.start_gateway(answer="reviewed.\nVERDICT: pass\n")
+        result = self.run_tool(gateway, "--title", "no-standing-answer")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")  # an incomplete seat prints nothing
+        self.assertIn("TEST-GAMING", result.stderr)  # names the missing line
+        names = self.output_files()
+        # evidence.json is STILL written (with test_gaming=missing)
+        self.assertEqual([p.name for p in names], ["evidence.json", "review.txt"])
+        ev = self.read_evidence()
+        self.assertEqual(ev["test_gaming"], "missing")
+        self.assertEqual(ev["verdict"], "pass")  # VERDICT parse unaffected
+        self.assertNotIn("test_gaming_quote", ev)
+        self.assert_no_leak(result)
+
+    def test_a_no_without_searched_or_without_zero_hits_exits_5_missing(self):
+        cases = ("TEST-GAMING: no - src/ for __eq__: 0 hits\n",
+                 "TEST-GAMING: no - searched src/ for __eq__: 1 hit\n")
+        for i, line in enumerate(cases):
+            with self.subTest(line=line.strip()):
+                self.out_dir = self.root / ("out-gap-%d" % i)
+                gateway = self.start_gateway(answer="VERDICT: pass\n" + line)
+                result = self.run_tool(gateway, "--title", "gap-%d" % i)
+                self.assertEqual(result.returncode, 5,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("TEST-GAMING", result.stderr)
+                self.assertEqual(self.read_evidence()["test_gaming"], "missing")
+
+    def test_a_no_that_quotes_a_line_is_not_a_valid_no(self):
+        # A `no` must state scope and zero hits; it may never carry a quote
+        # (a quote "supporting an absence" is treated as fabricated).
+        answer = ('VERDICT: pass\n'
+                  'TEST-GAMING: no - "def __eq__(self, other): pass"\n')
+        gateway = self.start_gateway(answer=answer)
+        result = self.run_tool(gateway, "--title", "quoted-no")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.read_evidence()["test_gaming"], "missing")
+
+    def test_a_yes_quote_that_is_an_exact_line_of_the_prompt_is_recorded(self):
+        quote = "+class _JsFilesTuple(tuple):"
+        self.prompt_file.write_bytes(
+            ("material under review\n" + quote + "\n").encode("utf-8"))
+        gateway = self.start_gateway(answer='VERDICT: fail-with-findings\n'
+                                             'TEST-GAMING: yes - "%s"\n'
+                                             % quote)
+        result = self.run_tool(gateway, "--title", "yes-verified")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
+        self.assertEqual(lines[3], "VERDICT: fail-with-findings")
+        self.assertEqual(lines[4], "TEST-GAMING: yes")  # printed, counted
+        ev = self.read_evidence()
+        self.assertEqual(ev["test_gaming"], "yes")
+        self.assertEqual(ev["test_gaming_quote"], quote)
+        self.assert_no_leak(result)
+
+    def test_a_yes_with_an_invented_quote_is_flagged_and_not_counted(self):
+        quote = "+class never-written-anywhere-xyzzy(tuple):"
+        gateway = self.start_gateway(
+            answer='VERDICT: fail-with-findings\n'
+                   'TEST-GAMING: yes - "%s"\n' % quote)
+        result = self.run_tool(gateway, "--title", "yes-invented")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
+        self.assertEqual(lines[3], "VERDICT: fail-with-findings")
+        self.assertEqual(lines[4], "TEST-GAMING: yes_unverified_quote")
+        ev = self.read_evidence()
+        self.assertEqual(ev["test_gaming"], "yes_unverified_quote")
+        self.assertEqual(ev["test_gaming_quote"], quote)
+        self.assert_no_leak(result)
+
+    def test_a_yes_quote_off_by_one_character_is_flagged_not_verified(self):
+        real = "+class _JsFilesTuple(tuple):"
+        tampered = "+class _JsFilesTuple(tup1e):"  # ONE character changed
+        self.assertNotEqual(real, tampered)
+        self.prompt_file.write_bytes(
+            ("material under review\n" + real + "\n").encode("utf-8"))
+        gateway = self.start_gateway(
+            answer='TEST-GAMING: yes - "%s"\nVERDICT: pass\n' % tampered)
+        result = self.run_tool(gateway, "--title", "yes-one-char")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertIn("TEST-GAMING: yes_unverified_quote",
+                      result.stdout.splitlines()[4])
+        ev = self.read_evidence()
+        self.assertEqual(ev["test_gaming"], "yes_unverified_quote")
+        self.assertEqual(ev["test_gaming_quote"], tampered)
+        self.assertEqual(ev["verdict"], "pass")  # VERDICT parsing unchanged
+
+    def test_unsure_is_recorded_printed_and_not_counted(self):
+        gateway = self.start_gateway(
+            answer="VERDICT: pass\n"
+                   "TEST-GAMING: unsure - could not read the tests\n")
+        result = self.run_tool(gateway, "--title", "unsure-seat")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
+        self.assertEqual(lines[3], "VERDICT: pass")
+        self.assertEqual(lines[4], "TEST-GAMING: unsure")  # printed...
+        ev = self.read_evidence()                          # ...but not counted
+        self.assertEqual(ev["test_gaming"], "unsure")
+        self.assertNotIn("test_gaming_quote", ev)
+        self.assert_no_leak(result)
+
+    def test_an_indented_fenced_or_bold_answer_line_is_missing(self):
+        # The parse's indent/fence discipline: a copy of the answer line that
+        # is indented code, inside a fence, or bold-wrapped at line start is
+        # never the seat's own word.
+        line = "TEST-GAMING: no - searched src/: 0 hits"
+        cases = (("indent", "    " + line + "\n"),
+                 ("fence", "```text\n" + line + "\n```\n"),
+                 ("bold", "**" + line + "**\n"))
+        for i, (name, answer) in enumerate(cases):
+            with self.subTest(shape=name):
+                self.out_dir = self.root / ("out-shape-%d" % i)
+                gateway = self.start_gateway(answer=answer)
+                result = self.run_tool(gateway, "--title", "shape-%d" % i)
+                self.assertEqual(result.returncode, 5,
+                                 result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(self.read_evidence()["test_gaming"], "missing")
+
+    def test_a_line_present_only_inside_a_fence_is_missing(self):
+        answer = ("Checked every file in the diff.\n```\n"
+                  + STANDING_ANSWER + "\n```\n"
+                  "VERDICT: pass\n")
+        gateway = self.start_gateway(answer=answer)
+        result = self.run_tool(gateway, "--title", "fenced-only")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(self.read_evidence()["test_gaming"], "missing")
+
+    def test_two_answer_lines_the_first_valid_one_at_line_start_wins(self):
+        # The rule implemented: FIRST qualifying line at line start wins
+        # (the verdict parse is last-wins; the standing question is answered
+        # once, so the seat's first commitment is what gets recorded).
+        answer = ("VERDICT: pass\n"
+                  "TEST-GAMING: unsure - could not read the tests\n"
+                  + STANDING_ANSWER + "\n")
+        gateway = self.start_gateway(answer=answer)
+        result = self.run_tool(gateway, "--title", "two-lines")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[4],
+                         "TEST-GAMING: unsure")  # the FIRST line, not the no
+        self.assertEqual(self.read_evidence()["test_gaming"], "unsure")
 
 
 class VerdictParseTests(unittest.TestCase):
@@ -542,6 +734,103 @@ class IndentedAndEmphasisVerdictTests(unittest.TestCase):
 
     def test_list_item_bold_verdict_still_counts(self):
         self.assertEqual(self.raw("- **Verdict:** pass"), "pass")
+
+
+class StandingAnswerParseTests(unittest.TestCase):
+    """review_test_gaming() called DIRECTLY on the loaded module: the answer
+    line's shape rules with the verdict parse's OWN helpers (indent limit,
+    fences, ANSI stripping - reused, never duplicated), no gateway.
+
+    Returns (outcome, quote_or_None); outcome is one of the evidence.json
+    `test_gaming` values: no / yes / unsure / missing / yes_unverified_quote.
+    """
+
+    SENT = "review material line\n" + review_call.STANDING_QUESTION
+    NO = "TEST-GAMING: no - searched src/ for __eq__: 0 hits"
+    YES = 'TEST-GAMING: yes - "review material line"'
+    UNSURE = "TEST-GAMING: unsure - could not read the tests"
+
+    def parse(self, text, sent=None):
+        return review_call.review_test_gaming(text,
+                                              self.SENT if sent is None else sent)
+
+    def test_the_three_documented_forms_parse(self):
+        self.assertEqual(self.parse(self.NO + "\n"), ("no", None))
+        self.assertEqual(self.parse(self.YES + "\n"),
+                         ("yes", "review material line"))
+        self.assertEqual(self.parse(self.UNSURE + "\n"), ("unsure", None))
+
+    def test_a_yes_quote_must_be_a_strict_verbatim_substring(self):
+        # No whitespace folding, no fuzzy match: one changed character fails,
+        # and so does a quote absent from the prompt.
+        for quote in ("review material lime",    # one character changed
+                      " review material line",   # leading space folded in
+                      "review material linez"):  # nowhere in the prompt
+            with self.subTest(quote=quote):
+                self.assertEqual(
+                    self.parse('TEST-GAMING: yes - "%s"\n' % quote),
+                    ("yes_unverified_quote", quote))
+        # A quote cannot span lines: the parse works line-wise, so a two-line
+        # "quote" never matches the one-line form at all.
+        self.assertEqual(self.parse('TEST-GAMING: yes - "material line\nreview"\n'),
+                         ("missing", None))
+
+    def test_a_malformed_no_never_counts_as_missing_shape(self):
+        self.assertEqual(self.parse("TEST-GAMING: no\n")[0], "missing")
+        self.assertEqual(self.parse("TEST-GAMING: no - nothing found\n")[0],
+                         "missing")
+        self.assertEqual(
+            self.parse('TEST-GAMING: no - "quoted line": 0 hits\n')[0],
+            "missing")
+
+    def test_first_valid_line_at_line_start_wins(self):
+        text = self.UNSURE + "\n" + self.NO + "\n"
+        self.assertEqual(self.parse(text), ("unsure", None))
+        # ...first VALID one: a malformed line before it is simply not a line
+        # of an answer, so the first line that matches the form wins.
+        text = "TEST-GAMING: no - weak\n" + self.UNSURE + "\n" + self.NO + "\n"
+        self.assertEqual(self.parse(text), ("unsure", None))
+
+    def test_indented_fenced_or_wrapped_lines_are_never_an_answer(self):
+        for shape in ("    " + self.NO,
+                      "\tTEST-GAMING: no - searched src/: 0 hits",
+                      "```\n" + self.NO + "\n```",
+                      "~~~text\n" + self.UNSURE + "\n~~~",
+                      "**" + self.NO + "**",
+                      "> " + self.NO,
+                      "- " + self.NO):
+            with self.subTest(shape=shape[:12]):
+                self.assertEqual(self.parse(shape + "\n"), ("missing", None))
+
+    def test_answer_inside_an_indented_fence_is_never_an_answer(self):
+        text = "```\n    " + self.NO + "\n```\n"
+        self.assertEqual(self.parse(text), ("missing", None))
+
+    def test_an_unclosed_fence_fails_closed_to_the_earlier_answer(self):
+        # Same fail-closed rule as review_verdict: only a line before the
+        # first fence marker survives a fence that never closes.
+        self.assertEqual(self.parse(self.NO + "\n```\n"), ("no", None))
+        self.assertEqual(self.parse("```\n" + self.NO + "\n"), ("missing", None))
+
+    def test_ansi_colour_and_trailing_space_do_not_hide_an_answer(self):
+        coloured = "\x1b[32m" + self.NO + "\x1b[0m"
+        self.assertEqual(self.parse(coloured + " \n"), ("no", None))
+
+    def test_missing_is_returned_for_empty_or_unrelated_answers(self):
+        self.assertEqual(self.parse(""), ("missing", None))
+        self.assertEqual(self.parse("looks fine to me\n"), ("missing", None))
+
+    def test_the_constant_is_one_line_with_all_three_answer_forms(self):
+        standing = review_call.STANDING_QUESTION
+        self.assertNotIn("\n", standing)  # one string, one line
+        self.assertTrue(standing.startswith("STANDING QUESTION v2 (mandatory"))
+        self.assertIn("`TEST-GAMING: no - searched <where you searched and "
+                      "for what>: 0 hits`", standing)
+        self.assertIn('`TEST-GAMING: yes - "<verbatim quote of the real '
+                      'offending line>"`', standing)
+        self.assertIn("`TEST-GAMING: unsure - <what you could not check>`",
+                      standing)
+        self.assertIn("__eq__/__hash__/__ne__", standing)
 
 
 if __name__ == "__main__":

@@ -893,6 +893,15 @@ if it "affected-tests: registry ids reach every shell, Pester and pytest case na
     out="$(python3 tests/test_affected_tests.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/diff-guard.py: the report-only post-run diff guard (rules R0..R5) —
+# it compares a base..tip range against --scope globs and reports drift
+# (test files outside scope, lying builtin-tuple subclasses, framework
+# references in source, skips/shrinking asserts/grown literals, dropped test
+# defs, unparsable tips); it never edits anything.
+if it "diff-guard: report-only drift rules R0..R5 over a git revision range (unit tests)"; then
+    out="$(python3 tests/test_diff_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/prepush.py: the pre-push gate — the ancestor check, CI's plan check, the run
 # list derived from the changed files, CI's git env, the green/override records and
 # `--check-ready` (operator D-154). CI 36529545083 shard b is why this line exists: the

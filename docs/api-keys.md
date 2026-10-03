@@ -221,6 +221,12 @@ text): `evidence.json` is still written with its `finish_reason`, and
 `review-call: answer truncated/empty (finish_reason=<x>)` goes to stderr
 instead of a `VERDICT: missing` success line.
 
+Every prompt this tool sends **ends with the standing question** (`STANDING_QUESTION`: one blank line after the caller's text; no flag and no environment variable disables it), and its answer is required as exactly one line: `TEST-GAMING: no - searched <where and what>: 0 hits` (state the scope in your own words, never a quote), `TEST-GAMING: yes - "<verbatim quote of the real offending line>"` (an exact line of the material), or `TEST-GAMING: unsure - <what you could not check>`.
+
+`evidence.json` records it as `test_gaming` — `no` / `yes` / `unsure` / `missing` / `yes_unverified_quote` (plus `test_gaming_quote` for the two `yes` outcomes) — and stdout prints `TEST-GAMING: <outcome>` beside the verdict line. A missing or malformed answer line (a `no` without `searched` and `0 hits` counts as missing) is exit **5** — stderr names the missing line, `evidence.json` is still written, truncation keeps exit 4 — as is a `yes` quote that is not a strict verbatim substring of the sent prompt (`yes_unverified_quote`) or an `unsure`; both print but are not counted.
+
+Cross-check: paste `tools/diff-guard.py`'s one-line `R1`-`R5` findings into the seat prompt so a seat's `no` can be compared against the guard's own findings instead of taken on trust.
+
 ### Example
 
 ```yaml

@@ -5186,6 +5186,15 @@ Test-Case 'review-call: one tool-less gateway review call, key only via exec (un
     Assert-Equal $rc 0 "review-call unit tests failed: $out"
 }
 
+Test-Case 'diff-guard: report-only drift rules R0..R5 over a git revision range (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_diff_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "diff-guard unit tests failed: $out"
+}
+
 Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
