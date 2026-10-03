@@ -468,6 +468,13 @@ script_is_installed() {
         # pair counts as installed and silently skips.
         taildrop-sort)   [[ -f "$SYS_HOME/.local/share/autoos/taildrop-sort.sh" && \
                            -f "$SYS_HOME/.config/systemd/user/taildrop-sort.timer" ]] ;;
+        # Both halves install_memguard writes, or neither: the script the
+        # unit runs (the INSTALLED copy — the unit's ExecStart never names the
+        # checkout) and the timer that runs it. One without the other is a
+        # half-install a rerun should repair (it reports installed), so only
+        # the pair counts as installed and silently skips.
+        memguard)        [[ -f "$SYS_HOME/.local/share/autoos/memguard.sh" && \
+                           -f "$SYS_HOME/.config/systemd/user/memguard.timer" ]] ;;
         # A HS_SCOPE=system install (configuration/herdr-sessions/install.sh, the
         # headless-root branch) puts its restore unit in /etc/systemd/system, never
         # under $SYS_HOME - check both, or a system-scope herdr-sessions is invisible

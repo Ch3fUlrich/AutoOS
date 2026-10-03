@@ -585,6 +585,7 @@ install_script() {
         ollama)          install_ollama ;;
         claude-autostart) install_claude_autostart ;;
         taildrop-sort)   install_taildrop_sort ;;
+        memguard)        install_memguard ;;
         herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
@@ -1959,6 +1960,114 @@ install_claude_autostart() {
 
     claude_autostart_enable_linger
     claude_autostart_report_host
+}
+
+# MEMGUARD (D-438): the guard script ships in this repository, but the unit
+# must NOT run it from here — moving or deleting the checkout would leave the
+# timer with a dead ExecStart (D-493: ExecStart runs an INSTALLED copy,
+# never the checkout). So this is two kinds of copy on the shape of
+# install_taildrop_sort below: the script is staged into
+# ~/.local/share/autoos/memguard.sh (the path the unit names, %h-expanded by
+# systemd at run time) with cmp-based change detection, and the two unit
+# templates are rendered next to it. Nothing is downloaded and nothing runs
+# until the timer fires, at which point memguard.sh decides unpressured
+# machines are a no-op.
+install_memguard() {
+    INSTALL_SCRIPT_STATE=""
+
+    local appdir="${AUTOOS_ROOT}/lib/linux"
+    local script_dest="${SYS_HOME}/.local/share/autoos/memguard.sh"
+    local udest="${SYS_HOME}/.config/systemd/user"
+    local units=(memguard.service memguard.timer)
+
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install the memguard guard script to $script_dest"
+        ui_muted "would install ${#units[@]} systemd user units into $udest"
+        ui_muted "would start the memguard timer (checks MemAvailable every 10s)"
+        return 0
+    fi
+
+    if ! has_cmd systemctl; then
+        # Writing unit files nothing will ever read is how a feature reports
+        # success on a machine where it could not possibly work.
+        ui_err "systemd is required for memguard and systemctl was not found"
+        return 1
+    fi
+
+    # Every source is checked before anything is written: a missing file is a
+    # broken checkout, not a condition of this machine, and it must not be
+    # discovered half-way through replacing the installed copy.
+    local src="${appdir}/memguard.sh"
+    if [[ ! -f "$src" ]]; then
+        ui_err "missing script: $src"
+        return 1
+    fi
+    local u usrc
+    for u in "${units[@]}"; do
+        usrc="${appdir}/systemd/user/${u}"
+        if [[ ! -f "$usrc" ]]; then
+            ui_err "missing unit template: $usrc"
+            return 1
+        fi
+    done
+
+    mkdir -p -- "$(dirname "$script_dest")" "$udest"
+
+    # One "changed" flag for both kinds of copy: taildrop_copy reports through
+    # TAILDROP_CHANGED (identical bytes = "already current" = untouched), the
+    # unit loop below reports through `changed`.
+    local changed=0 tmp
+    TAILDROP_CHANGED=0
+    taildrop_copy "$src" "$script_dest" || return 1
+    # systemd execs ExecStart directly: a 0644 script is a 203/EXEC the journal
+    # only explains. The checkout's mode is not ours to trust, so the installed
+    # copy's mode is set here, on every run.
+    chmod 0755 -- "$script_dest"
+    if (( TAILDROP_CHANGED )); then
+        changed=1
+        ui_ok "installed $script_dest"
+    fi
+
+    for u in "${units[@]}"; do
+        src="${appdir}/systemd/user/${u}"
+        # Render to a temp file first so an unchanged unit is genuinely
+        # untouched: rewriting it would restart the timer on every run of an
+        # idempotent script (AGENTS.md §4).
+        tmp="$(mktemp)"
+        sed -e "s#@APPDIR@#${appdir}#g" \
+            -e "s#@APPROOT@#${AUTOOS_ROOT}#g" "$src" > "$tmp"
+        if [[ -f "${udest}/${u}" ]] && cmp -s "$tmp" "${udest}/${u}"; then
+            ui_info "$u is already current"
+            rm -f "$tmp"
+        else
+            if [[ -f "${udest}/${u}" ]] && ! backup_file "${udest}/${u}" >/dev/null; then
+                ui_err "could not back up ${udest}/${u} - left as it was"
+                rm -f "$tmp"
+                return 1
+            fi
+            mv -f "$tmp" "${udest}/${u}"
+            ui_ok "installed $u"
+            changed=1
+        fi
+    done
+
+    if (( changed )); then
+        systemctl --user daemon-reload && ui_ok "reloaded the user unit files" \
+            || ui_warn "systemctl --user daemon-reload failed — is there a user manager on this session?"
+    fi
+
+    if systemctl --user enable --now memguard.timer >/dev/null 2>&1; then
+        ui_ok "enabled memguard.timer (checks MemAvailable every 10s)"
+    else
+        ui_warn "could not enable memguard.timer — memory guard is installed but not running"
+    fi
+
+    # Nothing to change = nothing happened: the next run must report skipped,
+    # not installed, or an idempotent feature re-installs forever (AGENTS.md §4).
+    if (( changed == 0 )); then
+        INSTALL_SCRIPT_STATE=skipped
+        ui_info "memguard: skipped: already installed and current"
+    fi
 }
 
 # Without lingering, the user manager only exists while somebody is logged in, so

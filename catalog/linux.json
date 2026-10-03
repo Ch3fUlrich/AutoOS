@@ -364,6 +364,20 @@
           "notes": "Snapshots every Herdr pane every 5 minutes and restores them at boot, on machines that run Herdr as their terminal host. Mutually exclusive with Claude autostart - only one session-restore mechanism may be installed at a time; remove the other first."
         },
         {
+          "id": "memguard",
+          "name": "Memory guard",
+          "description": "Stops the newest agent run when memory runs low",
+          "provider": "script",
+          "package": "memguard",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/docs/ai/memory-guard.md",
+          "notes": "Checks MemAvailable every 10s and, only below the floor, stops the newest autoos-worker-*.scope - one run per shot, never the session, sshd or the gateways."
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",
