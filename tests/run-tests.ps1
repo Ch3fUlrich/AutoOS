@@ -5204,6 +5204,24 @@ Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)'
     Assert-Equal $rc 0 "debtcap nebius unit tests failed: $out"
 }
 
+Test-Case 'gateway quota patch: loud-fail substitution for quota windows without a total (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_quota_patch.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway quota patch unit tests failed: $out"
+}
+
+Test-Case 'gateway quota patch CLI: CLI invocation, arguments, and dry-run (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_quota_patch_cli.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway quota patch CLI unit tests failed: $out"
+}
+
 Test-Case 'credential files: vertex/service-account JSONs are ignored, never tracked (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

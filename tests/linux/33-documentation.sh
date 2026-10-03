@@ -765,6 +765,14 @@ if it "debtcap nebius: provider excluded from free/trial tiers (unit tests)"; th
     out="$(python3 tests/test_debtcap_nebius.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "gateway quota patch: loud-fail substitution for quota windows without a total (unit tests)"; then
+    out="$(python3 tests/test_gateway_quota_patch.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "gateway quota patch CLI: CLI invocation, arguments, and dry-run (unit tests)"; then
+    out="$(python3 tests/test_gateway_quota_patch_cli.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Credential-JSON ignore gate (operator 2026-10-01): asserts .gitignore covers
 # configuration/*-credentials*.json and no credential-shaped path is tracked.
 # Path and git state only; never reads a credential's contents.
