@@ -19,6 +19,7 @@ Start here. Each page is short and answers one question.
 | [Troubleshooting](troubleshooting.md) | It broke. Now what? |
 | [WSL native agent home](wsl-agent-home.md) | Why do agent tools need native ext4 state on WSL? |
 | [Memory guard](ai/memory-guard.md) | Why did my agent run stop itself when memory ran out? |
+| [Fleet hooks](ai/fleet-hooks.md) | What stops an agent's own shell command from re-running the netplan-apply incident? |
 | [Model routing](models.md) | Which AI model answers, and how do free-first fallbacks work? |
 | [Routing map](routing.md) | Which script creates each routing edge? |
 | [Combos evaluation — refreshed 2026-09-30](models-proposed.md) | Which combos stay, go, or merge? **Operator decision sheet — gateway apply pending (OS-32).** |

@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""FLEET-HOOKS (P0): tests/hooks/bash_guard.py, the PreToolUse guard for the
+Bash tool.
+
+Every case runs the hook as a real subprocess with the hook's own PreToolUse
+JSON on stdin - exactly the shape and transport Claude Code uses - and reads
+back the exit code and stderr text. Nothing here imports the hook module
+directly: a hook that behaves correctly when called but not when run is not
+proven at all.
+
+CASES is one table: each row is a shell command plus whether the guard must
+deny it and, when it denies, a substring its stderr message must carry. The
+rows cover the two deny shapes (an unquoted heredoc whose body carries a
+backtick/`$(`, and a `claude --bg`/`-p`/`--print` call whose double-quoted
+argument carries one) and every false-positive guard named in the brief:
+quoted heredoc delimiters (`'EOF'`, `"EOF"`, `\\EOF`), a literal `<<` inside
+a double-quoted string, the `$((...))` arithmetic shift operator, a
+single-quoted or escaped backtick, a bare `$VAR`, an unrelated flag, and text
+after a heredoc's terminator line.
+
+Run directly:
+
+    python3 tests/test_bash_guard.py
+"""
+import json
+import subprocess
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+HOOK = ROOT / "tools" / "hooks" / "bash_guard.py"
+
+
+def run_hook_raw(stdin_text):
+    return subprocess.run([sys.executable, str(HOOK)], input=stdin_text,
+                           capture_output=True, text=True)
+
+
+def run_hook(payload):
+    return run_hook_raw(json.dumps(payload))
+
+
+def run_bash(command):
+    return run_hook({"tool_name": "Bash", "tool_input": {"command": command}})
+
+
+# (name, command, expect_deny, expect_substring_in_stderr_or_None)
+CASES = [
+    # ─── heredoc: the incident shape and its variants (DENY) ──────────
+    ("incident_shape_unquoted_heredoc_backtick_prose",
+     "cat <<EOF\nIf this fails, run:\n`netplan apply`\nEOF\n",
+     True, "heredoc"),
+    ("dash_heredoc_tab_terminator_with_command_substitution",
+     "cat <<-EOF\n\tsome text $(whoami)\n\tEOF\n",
+     True, "heredoc"),
+    ("unquoted_heredoc_dollar_paren_no_backtick",
+     "cat <<EOF\nrun $(id)\nEOF\n",
+     True, "heredoc"),
+    ("delimiter_reuse_first_clean_second_dirty",
+     "cat <<EOF\nclean body\nEOF\ncat <<EOF\ndirty `id`\nEOF\n",
+     True, "heredoc"),
+    ("delimiter_reuse_first_dirty_second_clean",
+     "cat <<EOF\ndirty `id`\nEOF\ncat <<EOF\nclean body\nEOF\n",
+     True, "heredoc"),
+    ("heredoc_inside_command_substitution",
+     "x=$(cat <<EOF\nhello `id`\nEOF\n)\n",
+     True, "heredoc"),
+    ("heredoc_before_pipe_with_dirty_body",
+     "cat <<EOF | grep x\nbad `id`\nEOF\n",
+     True, "heredoc"),
+    ("custom_delimiter_name_dirty",
+     "cat <<PROMPT\ntext `id`\nPROMPT\n",
+     True, "heredoc"),
+
+    # ─── heredoc false-positive guards (ALLOW) ─────────────────────────
+    ("single_quoted_delimiter_allows_backtick_body",
+     "cat <<'EOF'\n`id`\nEOF\n",
+     False, None),
+    ("double_quoted_delimiter_allows_backtick_body",
+     'cat <<"EOF"\n`id`\nEOF\n',
+     False, None),
+    ("backslash_escaped_delimiter_allows_backtick_body",
+     "cat <<\\EOF\n`id`\nEOF\n",
+     False, None),
+    ("literal_angle_brackets_in_double_quoted_string",
+     'echo "a << b"',
+     False, None),
+    ("arithmetic_left_shift_not_heredoc",
+     "echo $((1<<3))",
+     False, None),
+    ("clean_heredoc_body_allows",
+     "cat <<EOF\nnothing dangerous here\nEOF\n",
+     False, None),
+    ("text_after_terminator_is_not_body",
+     "cat <<EOF\nfoo\nEOF\necho 'bar `cmd`'\n",
+     False, None),
+    ("comment_hides_heredoc_operator",
+     "echo hi # cat <<EOF",
+     False, None),
+
+    # ─── claude --bg / -p / --print (DENY) ─────────────────────────────
+    ("claude_bg_backtick_prompt",
+     'claude --bg "do `whoami`"',
+     True, "claude"),
+    ("claude_dash_p_dollar_paren_prompt",
+     'claude -p "run $(id)"',
+     True, "claude"),
+    ("claude_print_long_flag_backtick_prompt",
+     'claude --print "text `ls`"',
+     True, "claude"),
+    ("claude_prompt_before_bg_flag",
+     'claude "cmd `id`" --bg',
+     True, "claude"),
+    ("claude_other_flags_interspersed",
+     'claude --model x --bg --verbose "report $(pwd)"',
+     True, "claude"),
+    ("claude_absolute_path_invocation",
+     '/usr/local/bin/claude --bg "r `id`"',
+     True, "claude"),
+    ("claude_env_assignment_prefix",
+     'FOO=bar claude --bg "x `id`"',
+     True, "claude"),
+    ("claude_after_and_and",
+     'echo hi && claude --bg "x `id`"',
+     True, "claude"),
+    ("claude_after_pipe",
+     'echo hi | claude -p "x `id`"',
+     True, "claude"),
+
+    # ─── claude false-positive guards (ALLOW) ──────────────────────────
+    ("claude_bg_plain_text_allows",
+     'claude --bg "plain text"',
+     False, None),
+    ("claude_bg_single_quoted_backtick_allows",
+     "claude --bg 'has a backtick `here`'",
+     False, None),
+    ("claude_bg_escaped_backtick_allows",
+     r'claude --bg "uses \`escaped\` backtick"',
+     False, None),
+    ("claude_bg_plain_dollar_var_allows",
+     'claude --bg "uses $HOME only"',
+     False, None),
+    ("claude_no_bg_or_print_flag_allows",
+     'claude "no bg or print flag `here`"',
+     False, None),
+    ("claude_unrelated_flag_allows",
+     'claude --verbose "no special flag `here`"',
+     False, None),
+    ("claude_dash_p_prefix_is_not_the_p_flag_allows",
+     'claude -prefix "not the -p flag `here`"',
+     False, None),
+    ("non_claude_command_with_bg_flag_allows",
+     'somecmd --bg "x `id`"',
+     False, None),
+
+    # ─── combined ───────────────────────────────────────────────────
+    ("heredoc_and_claude_both_clean_allows",
+     'cat <<EOF\nfine\nEOF\nclaude --bg "ok"\n',
+     False, None),
+]
+
+
+class BashGuardCaseTests(unittest.TestCase):
+    """One test per CASES row, generated below."""
+
+
+def _make_case_test(command, expect_deny, expect_substr):
+    def test(self):
+        r = run_bash(command)
+        if expect_deny:
+            self.assertEqual(r.returncode, 2,
+                              "command=%r stdout=%r stderr=%r"
+                              % (command, r.stdout, r.stderr))
+            if expect_substr:
+                self.assertIn(expect_substr, r.stderr,
+                               "stderr=%r" % r.stderr)
+        else:
+            self.assertEqual(r.returncode, 0,
+                              "command=%r stdout=%r stderr=%r"
+                              % (command, r.stdout, r.stderr))
+    return test
+
+
+for _name, _command, _deny, _substr in CASES:
+    setattr(BashGuardCaseTests, "test_" + _name,
+            _make_case_test(_command, _deny, _substr))
+
+
+class BashGuardPayloadShapeTests(unittest.TestCase):
+    """The hook contract around the Bash-only filter and fail-open parsing,
+    independent of any one command's shell syntax."""
+
+    def test_non_bash_tool_is_ignored_even_with_a_dangerous_command(self):
+        r = run_hook({"tool_name": "Read",
+                       "tool_input": {"command": "cat <<EOF\n`id`\nEOF\n"}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr, "")
+
+    def test_malformed_json_fails_open_with_a_note(self):
+        r = run_hook_raw("{not json")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("could not parse", r.stderr)
+
+    def test_json_not_an_object_fails_open_with_a_note(self):
+        r = run_hook_raw("[1, 2, 3]")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("not a JSON object", r.stderr)
+
+    def test_bash_tool_without_tool_input_fails_open_with_a_note(self):
+        r = run_hook({"tool_name": "Bash"})
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("missing or malformed", r.stderr)
+
+    def test_bash_tool_without_command_allows_silently(self):
+        r = run_hook({"tool_name": "Bash", "tool_input": {}})
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr, "")
+
+    def test_empty_command_allows_silently(self):
+        r = run_bash("")
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stderr, "")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

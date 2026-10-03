@@ -922,6 +922,16 @@ if it "no-cao: no CAO path, section, or config ships (unit tests)"; then
     out="$(python3 tests/test_no_cao.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# FLEET-HOOKS (P0): tools/hooks/bash_guard.py is the Claude Code PreToolUse
+# guard for the Bash tool (docs/ai/fleet-hooks.md) — denies an unquoted
+# heredoc whose body carries a backtick/$(...) (the netplan-apply incident
+# shape) and a claude --bg/-p/--print call whose double-quoted argument
+# carries one; everything else, including every false-positive guard in the
+# table, allows silently.
+if it "bash-guard: PreToolUse heredoc + claude --bg/-p/--print guard (unit tests)"; then
+    out="$(python3 tests/test_bash_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

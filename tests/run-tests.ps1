@@ -5222,6 +5222,15 @@ Test-Case 'omnigraph gateway policy: static refusal and least-privilege checks (
     Assert-Equal $rc 0 "gateway policy unit tests failed: $out"
 }
 
+Test-Case 'bash-guard: PreToolUse heredoc + claude --bg/-p/--print guard (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_bash_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "bash-guard unit tests failed: $out"
+}
+
 Test-Case 'mirror-litellm-env projects keys without printing them' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
