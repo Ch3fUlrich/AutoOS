@@ -309,3 +309,17 @@ Not a cause, but watch for it: `trust_worktree.py` (vendored at
 `OMNIGRAPH_GRAPH_ID=<folder name>` (`AutoOS`) into worktree `.env` files.
 Graph ids are case-sensitive, the server only has `autoos`, and nothing in
 this repo reads that file; the probe warns about it.
+
+## Cluster policies
+
+Policy bundles in `infra/mcp-servers/cluster/` govern actor permissions across graphs:
+
+- `cluster.policy.yaml`: server-scoped actions (`graph_list`) for `operators`.
+- `memory.policy.yaml`: full read/write access to the shared `memory` graph.
+- `project-graphs.policy.yaml`: operator access to isolated per-project graphs.
+- `gateway.policy.yaml`: dedicated read-only policy for the AI gateway actor (`gateway`). Allows `[read, invoke_query]` ONLY; refuses every write-class action (`change`, `schema_apply`, `branch_*`, `export`, `load`, `mutate`, `admin`).
+- `users.policy.yaml.example`: multi-user template for per-user graphs (the real `users.policy.yaml` is gitignored).
+
+Policies are wired into `cluster.yaml` under the `policies:` key with `file` and `applies_to` targets (defined by `cluster.schema.json` and demonstrated in `cluster.yaml.example`).
+Bearer token mapping to actor name lives on the server (`omnigraph-server`), never in this repository.
+Real HTTP 200/403 acceptance happens at the deploy window against `omnigraph-server` (prox); `tests/test_gateway_policy.py` provides the static verification guarantee.

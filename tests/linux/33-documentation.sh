@@ -772,6 +772,10 @@ if it "credential files: vertex/service-account JSONs are ignored, never tracked
     out="$(python3 tests/test_credential_files_ignored.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "omnigraph gateway policy: static refusal and least-privilege checks (unit tests)"; then
+    out="$(python3 tests/test_gateway_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # REVFIX: no unit test file may be invisible to every harness. This guard
 # fails when a tests/test_*.py is not named by any suite entry point.
 if it "suite wiring: every tests/test_*.py is wired into a harness"; then

@@ -28,6 +28,8 @@ groups:
   owners-alice: [alice]
   owners-bob:   [bob]
   everyone:     [alice, bob, default]
+  # AI gateway actor (read-only query access; see gateway.policy.yaml for canonical bundle):
+  # gateway-readers: [gateway]
 
 rules:
   # Alice fully owns her graph; nobody else is listed for it.
@@ -47,3 +49,11 @@ rules:
     allow:
       actors:  { group: everyone }
       actions: [read, export, invoke_query]
+
+  # AI gateway read-only access (see gateway.policy.yaml for the canonical bundle).
+  # Operators consolidating policies into users.policy.yaml can declare group `gateway-readers: [gateway]`
+  # and include this rule:
+  # - id: gateway-read-only
+  #   allow:
+  #     actors:  { group: gateway-readers }
+  #     actions: [read, invoke_query]

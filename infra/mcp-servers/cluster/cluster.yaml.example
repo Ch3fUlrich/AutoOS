@@ -74,3 +74,7 @@ policies:
   # users-access:
   #   file: users.policy.yaml
   #   applies_to: [memory, agent-skills]
+  # AI GATEWAY (read-only actor `gateway`; bearer token mapping lives on the server by name).
+  # gateway-access:
+  #   file: gateway.policy.yaml
+  #   applies_to: [memory, agent-skills]

@@ -1,0 +1,14 @@
+version: 1
+
+# Purpose: The AI gateway's read-only actor (`gateway`).
+# bearer token mapping lives on the server by actor NAME, never here.
+# Which graphs this bundle applies to is set in cluster.yaml via applies_to
+# (e.g. applies_to: [memory, agent-skills]).
+groups:
+  gateway-readers: [gateway]
+
+rules:
+  - id: gateway-read-only
+    allow:
+      actors: { group: gateway-readers }
+      actions: [read, invoke_query]
