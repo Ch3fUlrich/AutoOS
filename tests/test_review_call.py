@@ -519,6 +519,25 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(self.read_evidence()["test_gaming"], "missing")
 
+    def test_a_no_with_a_quote_inside_the_searched_scope_is_also_rejected(self):
+        # The `no` form rejects a quote ANYWHERE between `searched` and
+        # `: 0 hits`, not just a `no` that is wholly a quoted line.
+        answer = ('VERDICT: pass\n'
+                  'TEST-GAMING: no - searched src/ "x": 0 hits\n')
+        gateway = self.start_gateway(answer=answer)
+        result = self.run_tool(gateway, "--title", "quoted-scope-no")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.read_evidence()["test_gaming"], "missing")
+
+    def test_a_no_without_any_quote_still_passes(self):
+        answer = ('VERDICT: pass\n'
+                  'TEST-GAMING: no - searched src/ for __eq__: 0 hits\n')
+        gateway = self.start_gateway(answer=answer)
+        result = self.run_tool(gateway, "--title", "plain-no")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.read_evidence()["test_gaming"], "no")
+
     def test_a_yes_quote_that_is_an_exact_line_of_the_prompt_is_recorded(self):
         quote = "+class _JsFilesTuple(tuple):"
         self.prompt_file.write_bytes(
@@ -569,6 +588,26 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(ev["test_gaming"], "yes_unverified_quote")
         self.assertEqual(ev["test_gaming_quote"], tampered)
         self.assertEqual(ev["verdict"], "pass")  # VERDICT parsing unchanged
+
+    def test_a_yes_quoting_the_standing_question_itself_is_unverified(self):
+        # The quote is checked against the CALLER's prompt only, never the
+        # appended STANDING_QUESTION - otherwise a model could satisfy `yes`
+        # by quoting the question back at itself instead of the material.
+        sentences = [s.strip() for s in STANDING.split(". ") if s.strip()]
+        quote = next(s for s in sentences if '"' not in s)
+        gateway = self.start_gateway(
+            answer='VERDICT: fail-with-findings\n'
+                   'TEST-GAMING: yes - "%s"\n' % quote)
+        result = self.run_tool(gateway, "--title", "yes-quotes-the-question")
+        self.assertEqual(result.returncode, 5, result.stdout + result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual(len(lines), SUCCESS_LINES, repr(result.stdout))
+        self.assertEqual(lines[3], "VERDICT: fail-with-findings")
+        self.assertEqual(lines[4], "TEST-GAMING: yes_unverified_quote")
+        ev = self.read_evidence()
+        self.assertEqual(ev["test_gaming"], "yes_unverified_quote")
+        self.assertEqual(ev["test_gaming_quote"], quote)
+        self.assert_no_leak(result)
 
     def test_unsure_is_recorded_printed_and_not_counted(self):
         gateway = self.start_gateway(

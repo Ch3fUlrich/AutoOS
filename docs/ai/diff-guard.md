@@ -67,3 +67,10 @@ so nobody retypes it. Placement, the post-run step and the follow-up lane:
   R4/R5 only look at test-file endpoints (rename check feeds both endpoints,
   change detection keying prefers the new path).
 - Every finding's text is clipped to 160 characters on a single line.
+
+## Known limits
+
+- R2 resolves no aliases: `import builtins`/`builtins.tuple` or a
+  module-level `Base = tuple` alias of a builtin base is not seen.
+- Every rule looks at added lines only; a pre-existing issue is never flagged.
+- A `--scope` glob with no `/` matches the file's basename in any directory.

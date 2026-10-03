@@ -134,15 +134,18 @@ STANDING_QUESTION = (
 # The ONE answer line a seat must state at line start, in the three forms the
 # standing question documents: `no - searched <scope>: 0 hits` (a `no` must
 # carry BOTH `searched` and `0 hits` - without them the line does not match
-# and the seat is incomplete, never a pass), `yes - "<verbatim quote>"` (the
-# captured quote is then checked against the SENT prompt as a strict
-# verbatim substring), or `unsure - <what>`. Same shape as _VERDICT_LINE_RE:
-# run against the ANSI-stripped line AFTER the CommonMark indent (>= 4
-# columns) and fenced-block exclusions, so a pasted, indented or fenced copy
-# of the line is never an answer.
+# and the seat is incomplete, never a pass; the scope text may not contain a
+# double quote - a `no` is never allowed to carry a quote, which is how the
+# standing question's "a quote supporting an absence is fabricated" rule is
+# enforced mechanically), `yes - "<verbatim quote>"` (the captured quote is
+# then checked against the CALLER's prompt as a strict verbatim substring),
+# or `unsure - <what>`. Same shape as _VERDICT_LINE_RE: run against the
+# ANSI-stripped line AFTER the CommonMark indent (>= 4 columns) and
+# fenced-block exclusions, so a pasted, indented or fenced copy of the line
+# is never an answer.
 _STANDING_ANSWER_RE = re.compile(
     r"^TEST-GAMING: (?:"
-    r"(?P<no>no - searched .+: 0 hits)"
+    r'(?P<no>no - searched [^"]+: 0 hits)'
     r'|(?P<yes>yes - "(?P<quote>.+)")'
     r"|(?P<unsure>unsure - .+)"
     r")$"
@@ -498,12 +501,17 @@ def review_test_gaming(text: str, sent_prompt: str) -> tuple:
     verdict's last-wins - the standing question is answered once, and the
     first answer a seat committed to is the one recorded).
 
-    `yes` additionally requires the captured quote to occur in `sent_prompt`
-    (the exact text this tool POSTed) as a STRICT verbatim substring - no
-    whitespace folding, no fuzzy match - else the outcome is
-    `yes_unverified_quote` (the quote is still returned, for evidence).
-    `missing` covers no line at all and every malformed shape, including a
-    `no` without `searched` and `0 hits`.
+    `sent_prompt` despite its name is the CALLER's part of the prompt only -
+    the text read from --prompt-file, BEFORE compose_prompt appended
+    STANDING_QUESTION. `yes` requires the captured quote to occur in that
+    text as a STRICT verbatim substring - no whitespace folding, no fuzzy
+    match - else the outcome is `yes_unverified_quote` (the quote is still
+    returned, for evidence). The standing question itself is part of what
+    is sent to the model, but a quote of it is never accepted as
+    verification, because a model answering `yes` could otherwise just
+    quote the question's own text back instead of the material it is
+    reviewing. `missing` covers no line at all and every malformed shape,
+    including a `no` without `searched` and `0 hits`.
     """
     raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
     found = None               # first qualifying answer outside fences
@@ -545,9 +553,10 @@ def review_test_gaming(text: str, sent_prompt: str) -> tuple:
 def _standing_outcome(match, sent_prompt: str) -> tuple:
     """(outcome, quote) for one line that matched _STANDING_ANSWER_RE.
 
-    A `yes` quote must occur in the SENT prompt as a strict verbatim
-    substring; anything less is an invented quote - recorded (with the
-    quote, for evidence) as `yes_unverified_quote`, never as `yes`.
+    A `yes` quote must occur in the CALLER's prompt text (never the
+    appended STANDING_QUESTION) as a strict verbatim substring; anything
+    less is an invented quote - recorded (with the quote, for evidence) as
+    `yes_unverified_quote`, never as `yes`.
     """
     if match.group("yes") is not None:
         quote = match.group("quote") or ""
@@ -757,8 +766,10 @@ def main(argv=None) -> int:
     # The same parse discipline as the verdict, captured as the machine-
     # readable evidence.json `test_gaming` field: no / yes / unsure /
     # missing / yes_unverified_quote. The yes quote is checked against
-    # `message`, the exact text that was sent.
-    test_gaming, test_gaming_quote = review_test_gaming(text, message)
+    # `prompt`, the CALLER's text only - the standing question is part of
+    # what `message` sends, but a quote of it is never verification (a
+    # model could otherwise satisfy `yes` by quoting the question itself).
+    test_gaming, test_gaming_quote = review_test_gaming(text, prompt)
 
     review_path = os.path.join(args.out_dir, "review.txt")
     evidence_path = os.path.join(args.out_dir, "evidence.json")
