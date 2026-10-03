@@ -81,6 +81,33 @@ merely follows a heredoc's terminator line. The `claude` check only flags a
 **double-quoted** argument — a single-quoted or escaped backtick, and a
 bare `$VAR`, are never expanded by the shell and are always allowed.
 
+Round-2 coverage extends checks through leading command wrappers (`sudo`, `env`, `command`, `nohup`, `time`, `exec`, `nice`, `setsid`, `timeout`, `builtin`), flag assignments (`--print="..."`), clustered short flags (`-pq`, `-cp`, `-pc`), backslash-escaped triggers in unquoted heredoc bodies (`\` and `\$(`), resilient 1 MiB fail-open stdin decoding with robust UTF-8 replacement, and recursive scanning of `bash`, `sh`, `zsh` and `dash -c` strings up to depth 3.
+
+Nobody should rely on the hook beyond its reach: the hook only looks at the FIRST word of a command (after the wrapper words it knows and inside `bash|sh|zsh|dash -c` strings), so these are NOT covered:
+- subshells and groups `( ... )`, `{ ...; }`
+- compound statements (`if/for/while ... do ... done`, `! cmd`)
+- command substitutions around claude (`x=$(claude ...)`, `echo "$(claude ...)"`)
+- `eval`
+- wrapper OPTION forms it does not know (`sudo --user root`, `env -C/--chdir/--unset/-S`, `exec -a name`, `stdbuf`, `ionice`, `time -f`)
+- other spellings of the program (`claude.exe`, `claude.cmd`, `npx claude`)
+- `su -c` and `script -qc`
+- `bash -O opt -c` / `bash +o opt -c` (options with an argument before -c)
+- `bash -c $'...'`
+- a line continuation without indent before the flag
+- an outer double-quoted `bash -c "claude -p '\`id\`'"` whose backtick the OUTER shell expands
+- claude started through xargs/ssh/other unknown wrappers
+- a prompt passed through a variable
+- here-strings <<<
+- process substitution <( )
+- author-written substitutions outside a heredoc or claude prompt
+- -c nesting deeper than 3
+
+Known false positives (over-deny is the safe direction):
+- text in a comment (`# ... $(x)`)
+- redirect targets (`> "$(date).out"`)
+- `$$(id)` and arithmetic `$((1+2))` inside an unquoted heredoc body
+- the remaining -p cluster edge cases
+
 ## Tests
 
 [`tests/test_bash_guard.py`](../../tests/test_bash_guard.py) runs the hook

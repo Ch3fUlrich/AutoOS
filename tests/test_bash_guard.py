@@ -37,6 +37,11 @@ def run_hook_raw(stdin_text):
                            capture_output=True, text=True)
 
 
+def run_hook_bytes(stdin_bytes):
+    return subprocess.run([sys.executable, str(HOOK)], input=stdin_bytes,
+                           capture_output=True)
+
+
 def run_hook(payload):
     return run_hook_raw(json.dumps(payload))
 
@@ -150,6 +155,12 @@ CASES = [
     ("claude_dash_p_prefix_is_not_the_p_flag_allows",
      'claude -prefix "not the -p flag `here`"',
      False, None),
+    ("claude_dash_print_allows",
+     'claude -print "not the -p flag `here`"',
+     False, None),
+    ("claude_dash_pretty_allows",
+     'claude -pretty "not the -p flag `here`"',
+     False, None),
     ("non_claude_command_with_bg_flag_allows",
      'somecmd --bg "x `id`"',
      False, None),
@@ -157,6 +168,193 @@ CASES = [
     # ─── combined ───────────────────────────────────────────────────
     ("heredoc_and_claude_both_clean_allows",
      'cat <<EOF\nfine\nEOF\nclaude --bg "ok"\n',
+     False, None),
+
+    # ─── round 2: wrappers (item 1) ───────────────────────────────────
+    ("sudo_claude_bg_denied",
+     'sudo claude --bg "do $(whoami)"',
+     True, "claude"),
+    ("sudo_claude_bg_allows",
+     'sudo claude --bg "plain text"',
+     False, None),
+    ("sudo_u_root_claude_p_denied",
+     'sudo -u root claude -p "run $(id)"',
+     True, "claude"),
+    ("sudo_u_root_claude_p_allows",
+     'sudo -u root claude -p "plain text"',
+     False, None),
+    ("env_var_claude_p_denied",
+     'env VAR=1 claude -p "run $(id)"',
+     True, "claude"),
+    ("env_var_claude_p_allows",
+     'env VAR=1 claude -p "plain text"',
+     False, None),
+    ("env_i_claude_print_denied",
+     'env -i claude --print "text $(whoami)"',
+     True, "claude"),
+    ("env_i_claude_print_allows",
+     'env -i claude --print "plain text"',
+     False, None),
+    ("nohup_claude_bg_denied",
+     'nohup claude --bg "run $(id)"',
+     True, "claude"),
+    ("nohup_claude_bg_allows",
+     'nohup claude --bg "plain text"',
+     False, None),
+    ("time_claude_p_denied",
+     'time claude -p "run $(id)"',
+     True, "claude"),
+    ("time_claude_p_allows",
+     'time claude -p "plain text"',
+     False, None),
+    ("exec_claude_bg_denied",
+     'exec claude --bg "run $(id)"',
+     True, "claude"),
+    ("exec_claude_bg_allows",
+     'exec claude --bg "plain text"',
+     False, None),
+    ("timeout_claude_p_denied",
+     'timeout 5 claude -p "run $(id)"',
+     True, "claude"),
+    ("timeout_claude_p_allows",
+     'timeout 5 claude -p "plain text"',
+     False, None),
+    ("nice_claude_print_denied",
+     'nice -n 5 claude --print "text $(id)"',
+     True, "claude"),
+    ("nice_claude_print_allows",
+     'nice -n 5 claude --print "plain text"',
+     False, None),
+    ("wrapper_non_claude_backtick_allows",
+     'sudo ls "`id`"',
+     False, None),
+    ("env_u_claude_p_denied",
+     'env -u HOME claude -p "$(id)"',
+     True, "claude"),
+    ("env_u_claude_p_allows",
+     'env -u HOME claude -p "plain text"',
+     False, None),
+    ("command_claude_p_denied",
+     'command claude -p "$(id)"',
+     True, "claude"),
+    ("command_claude_p_allows",
+     'command claude -p "plain text"',
+     False, None),
+    ("builtin_claude_p_denied",
+     'builtin claude -p "$(id)"',
+     True, "claude"),
+    ("builtin_claude_p_allows",
+     'builtin claude -p "plain text"',
+     False, None),
+    ("setsid_claude_p_denied",
+     'setsid claude -p "$(id)"',
+     True, "claude"),
+    ("setsid_claude_p_allows",
+     'setsid claude -p "plain text"',
+     False, None),
+    ("sudo_terminator_claude_p_denied",
+     'sudo -- claude -p "$(id)"',
+     True, "claude"),
+    ("sudo_terminator_claude_p_allows",
+     'sudo -- claude -p "plain text"',
+     False, None),
+    ("sudo_u_root_terminator_claude_p_denied",
+     'sudo -u root -- claude -p "$(id)"',
+     True, "claude"),
+    ("sudo_u_root_terminator_claude_p_allows",
+     'sudo -u root -- claude -p "plain text"',
+     False, None),
+
+    # ─── round 2: flag with = (item 2) ────────────────────────────────
+    ("claude_print_equals_denied",
+     'claude --print="$(id)"',
+     True, "claude"),
+    ("claude_print_equals_allows",
+     'claude --print="plain"',
+     False, None),
+
+    # ─── round 2: clustered short flags (item 3) ─────────────────────
+    ("claude_clustered_short_flags_denied",
+     'claude -pq "text `id`"',
+     True, "claude"),
+    ("claude_clustered_short_flags_allows",
+     'claude -pq "plain text"',
+     False, None),
+    ("claude_cluster_pq_denied",
+     'claude -pq "backtick `id`"',
+     True, "claude"),
+    ("claude_cluster_cp_denied",
+     'claude -cp "backtick `id`"',
+     True, "claude"),
+    ("claude_cluster_cp_allows",
+     'claude -cp "plain text"',
+     False, None),
+    ("claude_cluster_pc_denied",
+     'claude -pc "backtick `id`"',
+     True, "claude"),
+    ("claude_cluster_pc_allows",
+     'claude -pc "plain text"',
+     False, None),
+
+    # ─── round 2: heredoc body escapes (item 4) ──────────────────────
+    ("heredoc_escaped_backtick_allows",
+     'cat <<EOF\n\\`id\\`\nEOF\n',
+     False, None),
+    ("heredoc_escaped_dollar_paren_allows",
+     'cat <<EOF\nuse \\$(whoami) literally\nEOF\n',
+     False, None),
+    ("heredoc_escaped_backslash_live_backtick_denied",
+     'cat <<EOF\n\\\\`id`\nEOF\n',
+     True, "heredoc"),
+
+    # ─── round 2: recursive shell -c scan (item 5) ───────────────────
+    ("bash_c_claude_bg_denied",
+     'bash -c \'claude --bg "$(whoami)"\'',
+     True, "claude"),
+    ("sh_c_claude_p_denied",
+     'sh -c \'claude -p "`id`"\'',
+     True, "claude"),
+    ("zsh_c_claude_bg_denied",
+     'zsh -c \'claude --bg "$(whoami)"\'',
+     True, "claude"),
+    ("dash_c_claude_p_denied",
+     'dash -c \'claude -p "`id`"\'',
+     True, "claude"),
+    ("nested_bash_c_claude_print_denied",
+     'bash -c "bash -c \'claude --print=\\"$(id)\\"\'"',
+     True, "claude"),
+    ("sudo_bash_c_inner_escaped_denied",
+     'sudo bash -c "claude -p \\"`id`\\""',
+     True, "claude"),
+    ("bash_c_ls_dollar_paren_allows",
+     'bash -c \'ls "$(pwd)"\'',
+     False, None),
+    ("bash_c_echo_plain_allows",
+     'bash -c \'echo plain\'',
+     False, None),
+    ("bash_lc_claude_p_denied",
+     'bash -lc \'claude -p "$(id)"\'',
+     True, "claude"),
+    ("bash_lc_claude_p_allows",
+     'bash -lc \'claude -p "plain text"\'',
+     False, None),
+    ("bash_ec_claude_p_denied",
+     'bash -ec \'claude -p "$(id)"\'',
+     True, "claude"),
+    ("bash_ec_claude_p_allows",
+     'bash -ec \'claude -p "plain text"\'',
+     False, None),
+    ("bin_bash_c_claude_p_denied",
+     '/bin/bash -c \'claude -p "$(id)"\'',
+     True, "claude"),
+    ("bin_bash_c_claude_p_allows",
+     '/bin/bash -c \'claude -p "plain text"\'',
+     False, None),
+    ("usr_bin_env_bash_c_claude_p_denied",
+     '/usr/bin/env bash -c \'claude -p "$(id)"\'',
+     True, "claude"),
+    ("usr_bin_env_bash_c_claude_p_allows",
+     '/usr/bin/env bash -c \'claude -p "plain text"\'',
      False, None),
 ]
 
@@ -179,6 +377,8 @@ def _make_case_test(command, expect_deny, expect_substr):
             self.assertEqual(r.returncode, 0,
                               "command=%r stdout=%r stderr=%r"
                               % (command, r.stdout, r.stderr))
+            self.assertEqual(r.stderr, "",
+                             "command=%r stderr=%r" % (command, r.stderr))
     return test
 
 
@@ -221,6 +421,36 @@ class BashGuardPayloadShapeTests(unittest.TestCase):
         r = run_bash("")
         self.assertEqual(r.returncode, 0)
         self.assertEqual(r.stderr, "")
+
+    def test_non_utf8_stdin_fails_open_without_traceback(self):
+        r = run_hook_bytes(b"\xff\xfe\x00\x80")
+        self.assertEqual(r.returncode, 0)
+        stderr_text = r.stderr.decode("utf-8", errors="replace")
+        self.assertNotIn("Traceback", stderr_text)
+        self.assertNotIn("UnicodeDecodeError", stderr_text)
+
+    def test_invalid_utf8_byte_in_command_denied_and_allowed(self):
+        dirty = b'{"tool_name":"Bash","tool_input":{"command":"claude -p \\"$(id)\\" \xff"}}'
+        r_dirty = run_hook_bytes(dirty)
+        self.assertEqual(r_dirty.returncode, 2)
+        self.assertIn("claude", r_dirty.stderr.decode("utf-8", errors="replace"))
+
+        clean = b'{"tool_name":"Bash","tool_input":{"command":"claude -p \\"plain prompt\\" \xff"}}'
+        r_clean = run_hook_bytes(clean)
+        self.assertEqual(r_clean.returncode, 0)
+        self.assertEqual(r_clean.stderr, b"")
+
+    def test_oversized_payload_fails_open_with_note(self):
+        payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "x" * (2 * 1024 * 1024)}})
+        r = run_hook_raw(payload)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("1 MiB", r.stderr)
+
+    def test_shell_c_depth_4_nesting_allowed_with_note(self):
+        cmd = 'bash -c "bash -c \\"bash -c \\\\\\\"bash -c \'claude -p \\\\\\\\\\\\\\\"$(id)\\\\\\\\\\\\\\\"\'\\\\\\\"\\\""'
+        r = run_bash(cmd)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("nesting", r.stderr)
 
 
 if __name__ == "__main__":
