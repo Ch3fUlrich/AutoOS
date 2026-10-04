@@ -28,6 +28,7 @@ runs this project. Read this file fully. Then read `AGENTS.md`. Do what they say
 9. First edit within 6 calls. A run with no edit after 6 calls is stopped.
 10. Never kill a process by name (`pkill`, `killall`, `taskkill /IM`, `Stop-Process -Name`). Kill by PID only.
 11. Never edit connections, credentials or `~/.omniroute`. Never print a key.
+    Standing operator yes (2026-10-04): you may restart the gateway after a confirmed crash (official restart only) and do temporary pip installs (throwaway venv, removed afterwards). Reboots, WSL restarts and connection or credential edits are NOT covered.
 12. Never push to `main` red. Never force-push. Never merge a branch you did not review.
 
 ## 3. Start the OpenCode L1 (the pilot launcher)
