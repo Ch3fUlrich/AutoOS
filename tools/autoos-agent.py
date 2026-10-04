@@ -3342,6 +3342,37 @@ def _parse_gate_num(val, default: float) -> float:
     return num
 
 
+def default_daily_gate_path(env=None, is_windows=None):
+    """Where the refresh script writes the gate when nobody names a file.
+
+    Linux: ${XDG_STATE_HOME:-~/.local/state}/autoos/daily-gate.json
+    Windows: %LOCALAPPDATA%\\autoos\\daily-gate.json
+
+    `env` is the environment to read XDG_STATE_HOME / LOCALAPPDATA from; when
+    it is None, os.environ is used. `is_windows` overrides the platform check
+    so a test can reach the Windows branch without touching os.name. Returns
+    None when the base directory the platform needs is absent.
+    """
+    if env is None:
+        env = os.environ
+    if is_windows is None:
+        is_windows = (os.name == "nt")
+    if is_windows:
+        base = (env.get("LOCALAPPDATA") or "").strip()
+        if not base:
+            return None
+        return os.path.join(base, "autoos", "daily-gate.json")
+    state = (env.get("XDG_STATE_HOME") or "").strip()
+    if not state:
+        # `~` is $HOME, read from the passed env (not the process home) so an
+        # injected env is honoured; an env with no HOME has no default path.
+        home = (env.get("HOME") or "").strip()
+        if not home:
+            return None
+        state = os.path.join(home, ".local", "state")
+    return os.path.join(state, "autoos", "daily-gate.json")
+
+
 def daily_gate_refusal(args=None, plan=None, env=None, now=None) -> str | None:
     """Return refusal message if this start is Google-paid and the daily gate
     says block, else None.
@@ -3365,7 +3396,11 @@ def daily_gate_refusal(args=None, plan=None, env=None, now=None) -> str | None:
 
     gate_path = (env.get(DAILY_GATE_ENV_VAR) or "").strip()
     if not gate_path:
-        return unavailable("env var not set")
+        # No env var: the default gate file, if present, speaks for today.
+        # A missing default file fails open - an absent guard is not a block.
+        gate_path = default_daily_gate_path(env) or ""
+        if not gate_path or not os.path.exists(gate_path):
+            return unavailable("env var not set and no default gate file")
 
     try:
         mtime = os.path.getmtime(gate_path)

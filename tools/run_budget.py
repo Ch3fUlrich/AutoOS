@@ -63,9 +63,10 @@ DAY_DEFAULT_BUDGET_USD = 25.0
 
 CENT = Decimal("0.000001")
 UNPRICED_DEFAULT_MODEL = "gemini-3.8-flash"
-# Last resort when the prices file does not carry the AI Studio default model:
-# the published AI Studio gemini-3.8-flash rates.
-HARDCODED_DEFAULT_RATES = {"price_in": 7.5e-07, "price_cache_read": 7.5e-08, "price_out": 3.75e-06}
+# Last resort when the prices file has no priced Gemini Flash model at all:
+# the highest known Flash rate, per token. The published Flash list prices are
+# expected to double from 2027; that is a known limit, not code.
+WORST_CASE_FLASH_RATES = {"price_in": 7.5e-07, "price_cache_read": 1.875e-07, "price_out": 3.75e-06}
 
 # Providers that are never Google-paid: internal quotas or separate billing.
 EXCLUDED_PROVIDERS = ("antigravity", "agy", "ovh", "ovhcloud", "openrouter", "jules")
@@ -263,41 +264,33 @@ def get_price(model, provider=None, table=None):
 
 
 def default_google_prices(table=None):
-    """AI Studio gemini-3.8-flash rates, used for Google-paid rows whose model
-    has no price row (they would otherwise cost $0 silently).
+    """Worst-case rate for a Google-paid row whose model has no price row.
 
-    The rates come from the prices file itself so a corrected file is picked
-    up; only when the file does not carry the default model at all do the
-    published constants stand in (and the result is marked unverified).
+    An unpriced model must never be under-counted, so instead of the AI
+    Studio default it is priced at the highest known Gemini Flash rate among
+    the rows of the prices file that are Google-paid Flash models: highest
+    price_in, highest price_out and highest cache-read, each taken
+    independently. Only when the file has no priced Flash model at all do the
+    built-in worst-case constants stand in (marked unverified).
     """
-    entry = {}
-    p_entry = {}
+    best = {"price_in": 0.0, "price_out": 0.0, "price_cache_read": 0.0}
     if table is not None:
         fb_models = (table.get("fallback") or {}).get("models") or {}
-        entry = fb_models.get(UNPRICED_DEFAULT_MODEL) or {}
-        if isinstance(entry, dict):
-            p_entry = (entry.get("providers") or {}).get("gemini") or {}
-        if not isinstance(p_entry, dict):
-            p_entry = {}
-
-    def grab(field):
-        obj = p_entry.get(field) or {}
-        if isinstance(obj, dict):
-            v = _price_float(obj)
-            if v > 0:
-                return v
-        return HARDCODED_DEFAULT_RATES[field]
-
-    unverified = bool(
-        p_entry.get("price_in", {}).get("unverified")
-        or p_entry.get("price_out", {}).get("unverified")
-        or p_entry.get("price_cache_read", {}).get("unverified")
-    ) if p_entry else True
+        for model, entry in fb_models.items():
+            if not isinstance(entry, dict) or "flash" not in str(model).lower():
+                continue
+            for p_entry in (entry.get("providers") or {}).values():
+                if not isinstance(p_entry, dict):
+                    continue
+                for field in ("price_in", "price_out", "price_cache_read"):
+                    v = _price_float(p_entry.get(field) or {})
+                    if v > best[field]:
+                        best[field] = v
     return {
-        "price_in": grab("price_in"),
-        "price_out": grab("price_out"),
-        "price_cache_read": grab("price_cache_read"),
-        "unverified": unverified,
+        "price_in": best["price_in"] or WORST_CASE_FLASH_RATES["price_in"],
+        "price_out": best["price_out"] or WORST_CASE_FLASH_RATES["price_out"],
+        "price_cache_read": best["price_cache_read"] or WORST_CASE_FLASH_RATES["price_cache_read"],
+        "unverified": True,
         "source": "unpriced-default",
     }
 
@@ -474,7 +467,8 @@ def _row_cost_dec(r, prices, unpriced):
     pr = get_price(r.get("model"), prov if prov else r.get("provider"), prices)
     if pr["source"] == "unpriced" and prov:
         # A Google-paid row whose model has no price row would otherwise be
-        # priced at $0: price it at the AI Studio default rates and say so.
+        # priced at $0: price it at the highest known Gemini Flash rate and
+        # say so.
         pr = default_google_prices(prices)
         name = str(r.get("model") or "").strip() or "(unknown model)"
         unpriced[name] = unpriced.get(name, 0) + 1

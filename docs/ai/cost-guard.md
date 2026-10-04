@@ -171,6 +171,110 @@ The MCP spawn path is gated the same way: the MCP server's preflight and detache
 
 ---
 
+## Activation: refresh job, default gate path and staleness alarm
+
+The spawner gate from the section above is **INACTIVE** until a fresh gate file exists: with no gate file on disk there is nothing to refuse, so every start passes (the fail-open reason is printed to stderr). Activation means three things: a refresh job that keeps the gate file fresh, a default path the spawner finds the file at without any environment variable, and a status alarm for when the job has stopped writing.
+
+### The refresh job (`tools/cost-gate-refresh.py`)
+
+```bash
+python tools/cost-gate-refresh.py [--gateway | --rows FILE ...] [--state-dir DIR] [--config FILE] [--run-budget PATH]
+```
+
+- With no `--rows` the refresh uses `--gateway` (the host's own gateway call log).
+- It runs `tools/run_budget.py day` as a subprocess with `--rows`/`--gateway`, `--budget <block>` and `--warn <warn>` taken from the config file (below).
+- It writes the gate file **atomically**: a temporary file in the same directory, then `os.replace` over `daily-gate.json` — a spawner never reads a half-written gate.
+- It writes the one status line described below next to the gate file.
+- The exit codes of `run_budget.py day` — 0 (`ok`), 20 (`warn`), 21 (`block`) — with valid JSON are all **success** for the refresh (it exits 0). Any other exit code or invalid JSON is a **failure**: the old gate file is kept, the status line becomes `UNAVAILABLE: <reason>`, and the refresh exits 3.
+- The refresh never prints key material.
+
+### The gateway key (`--gateway` route)
+
+On the `--gateway` route the refresh script never reads or prints a key: it lets `tools/run_budget.py` fetch the rows itself, and `run_budget.py` reads the **manage key** the way it already does. The key is the whole contents of a file named `manage.key` (surrounding whitespace stripped; an empty file is an error), and the directory it lives in is chosen in this order:
+
+1. the directory named by the `AUTOOS_AI_STACK_CONFIG` environment variable, when it is set;
+2. otherwise `${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack`.
+
+A host whose gateway rejects that key (HTTP 401) cannot use the `--gateway` route and must use the `--rows` route instead — the Windows wrapper does exactly that, exporting the call-log rows through its own authenticated gateway CLI session (see the Installers note).
+
+### State dir, config dir, and the files
+
+| | Linux | Windows |
+|---|---|---|
+| State dir | `${XDG_STATE_HOME:-~/.local/state}/autoos/` | `%LOCALAPPDATA%\autoos\` |
+| Config | `${XDG_CONFIG_HOME:-~/.config}/autoos/daily-gate.conf` | `%APPDATA%\autoos\daily-gate.conf` |
+
+Files in the state dir:
+
+- `daily-gate.json` — the gate file, UTF-8 no BOM, written by `python tools/run_budget.py day` (through the refresh).
+- `daily-gate.status` — the one status line (below).
+- `daily-gate-rows.json` (Windows only) — the exported call-log rows.
+
+The config file holds exactly two lines and nothing else: `warn=<number>` and `block=<number>`. When the file is absent, the built-in defaults apply: **warn 20, block 25**.
+
+### The status line and the staleness alarm
+
+`daily-gate.status` is ONE line, UTC ISO time first:
+
+```
+<UTC iso> verdict=<ok|warn|block> usd=<x> budget=<y> truncated=<true|false> unpriced=<n> unpriced_default_used=<true|false> bad_rows=<n>
+```
+
+or, when the refresh could not produce a gate:
+
+```
+<UTC iso> UNAVAILABLE: <reason>
+```
+
+When the config file is ignored (garbage, unknown key, non-numeric, `warn >= block`) the built-in defaults are used and ` ; daily gate config ignored: <reason>` is appended to the same line.
+
+`tools/cost-gate-status.py [--state-dir DIR] [--now ISO]` prints the status line plus one suffix:
+
+- ` STALE` when the status file is missing, older than 30 minutes (29:59 is fresh, 30:01 is STALE), or says `UNAVAILABLE`;
+- ` PRICE-GAP` when `unpriced_default_used=true` (the day total counted a model at the fallback price);
+- nothing otherwise.
+
+It exits 0 **always** — the alarm is in the suffix, not the exit code.
+
+### Default gate path
+
+When `AUTOOS_DAILY_GATE_FILE` is unset, the gate file is the default path `<state dir>/daily-gate.json` **if it exists**. The order: the environment variable wins; else the default file; else fail open with `daily gate unavailable: env var not set and no default gate file`.
+
+### Per-host budgets as config values, not code
+
+The operator's $25/day is a total split across hosts, and each host's share lives in its own `daily-gate.conf` — a config value, never a number in the code:
+
+- workstation: `warn=12`, `block=15`
+- central (coding.vm): `warn=8`, `block=10`
+
+The built-in defaults `warn=20`, `block=25` are the operator's total and remain the fallback for a host with no config file.
+
+The catalog install passes no arguments to the installer, so a catalog-driven install creates the config with the built-in `warn=20` / `block=25`. To give a host its per-host values, run the installer directly for that host:
+
+- Linux: `bash lib/linux/cost-gate.sh --warn 12 --block 15` (workstation) or `bash lib/linux/cost-gate.sh --warn 8 --block 10` (coding.vm)
+- Windows: `Import-Module lib/windows/AutoOS.CostGate.psm1` then `Install-CostGateTask -Warn 12 -Block 15 -RepoRoot <path>` (workstation) or `-Warn 8 -Block 10` (coding.vm)
+
+The config file is created **only when absent** — a direct run over an existing config never rewrites it. To change the values later, edit `warn=` and `block=` in the config file by hand.
+
+### Installers
+
+- Linux: `lib/linux/cost-gate.sh` installs the user units `cost-gate.service` and `cost-gate.timer` (the timer fires 2 minutes after boot and every 10 minutes after the last run), catalog id `cost-gate` (provider `script`).
+- Windows: `lib/windows/AutoOS.CostGate.psm1` registers the scheduled task `AutoOS cost gate` (every 10 minutes) plus the `lib/windows/cost-gate-export.ps1` export wrapper; catalog id `cost-gate` (provider `script`).
+
+Both create the config **only when absent** and install **files only**: enable/start is an explicit opt-in (`AUTOOS_COST_GATE_ENABLE=1` on Linux, `-Start` on Windows). The Windows host exports its rows through its own gateway CLI session, because the default manage key is not accepted there.
+
+### Rollback
+
+Disable the timer / unregister the `AutoOS cost gate` task and delete the files (`daily-gate.json`, `daily-gate.status`, `daily-gate-rows.json` on Windows, the config file). The spawner falls back to the default-path rule above: no gate file, fail open.
+
+### Unpriced models
+
+An unpriced model now counts at the **highest known Gemini Flash rate** (never under-counted). The `vertex-gemini-3.8-flash` price row exists but is **UNVERIFIED** until the billing SKUs arrive (see the Price Table section).
+
+**KNOWN LIMIT:** each host's gate counts only its own gateway's call log, so the daily budget is applied **per host** — that is why the operator's total is split into per-host budgets instead of being enforced centrally.
+
+---
+
 ## Price Table and Billing SKUs
 
 Pricing is loaded by `run_budget.load_price_table()`, first checking registry model price fields, and falling back to `configuration/google-prices.json`.
@@ -200,6 +304,9 @@ When official Google Cloud Platform billing SKUs or verified invoice numbers are
 ## Known Limits
 
 - A 1M-row file takes about 22 s for `day`, about 13 s for `run --tag <tag>` and about 31 to 33 s for `run` over all rows.
+- Cost gate, Linux: the installer renders the checkout root straight into the unit's `ExecStart` and does not refuse a checkout path containing a space, a double quote, a backslash or a newline — such a path yields a unit systemd cannot parse or run reliably.
+- Cost gate, Windows: `cost-gate-refresh.py` and `cost-gate-status.py` default the state dir to `%LOCALAPPDATA%\autoos`, but fall back to `~\AppData\Local\autoos` when `LOCALAPPDATA` is unset — a location the PowerShell module and export wrapper never use. On such a host the scripts need `--state-dir` so they find the files the wrapper writes.
+- Cost gate, staleness alarm: a status line whose timestamp cannot be parsed is reported `STALE` (a line dated in the future is, as it stands, treated as fresh).
 - When `run` is given both `--rows` and `--gateway`, it reads rows only (the gateway is not queried).
 - Duplicate rows across two row files are counted twice (errs towards blocking).
 - Behaviours that are true but not pinned by a test: the `run` path counting a row with a missing or garbage timestamp as a bad row, a gate value given as the number `0` (it is falsy, so it means the default), and a gate value given as the string `"0"` (it is a number, so a budget of `"0"` means $0.00).

@@ -586,6 +586,7 @@ install_script() {
         claude-autostart) install_claude_autostart ;;
         taildrop-sort)   install_taildrop_sort ;;
         memguard)        install_memguard ;;
+        cost-gate)       install_cost_gate ;;
         herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
@@ -2068,6 +2069,26 @@ install_memguard() {
         INSTALL_SCRIPT_STATE=skipped
         ui_info "memguard: skipped: already installed and current"
     fi
+}
+
+# COST GATE: the daily spend verdict the agent spawner reads before it spawns
+# anything expensive. The refresh script stays in the checkout (it is part of
+# the repository, like the budget data it reads); the two user units are
+# rendered from templates into the user's systemd directory, and the config
+# file ${XDG_CONFIG_HOME:-~/.config}/autoos/daily-gate.conf is created ONLY
+# when it is absent - once the user has tuned warn/block, no run of this
+# installer touches the file again. Enabling the timer is opt-in through
+# AUTOOS_COST_GATE_ENABLE=1 (AGENTS.md hard rule 3: destructive and running
+# actions are announced and chosen, not assumed).
+install_cost_gate() {
+    # The installer body lives in lib/linux/cost-gate.sh next to the script it
+    # installs: one home for the XDG path logic and the argument parsing, and
+    # the test drives that file directly with a stub systemctl on PATH. The
+    # ui_* helpers, has_cmd, backup_file, AUTOOS_ROOT and SYS_HOME are
+    # already in scope here because install.sh is sourced after them.
+    # shellcheck source=lib/linux/cost-gate.sh
+    . "${AUTOOS_ROOT}/lib/linux/cost-gate.sh"
+    install_cost_gate "$@"
 }
 
 # Without lingering, the user manager only exists while somebody is logged in, so

@@ -808,6 +808,42 @@ if it "cost guard: spawner gate numeric values, no-override rule and model sourc
     out="$(python3 tests/test_run_budget_spawner_v3.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "cost gate: price table, unpriced-at-highest-flash-rate and price file (unit tests)"; then
+    out="$(python3 tests/test_run_budget_prices.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: refresh script, atomic gate file, status line and config handling (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_refresh.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: rows pass-through and the status/staleness alarm script (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_refresh_more.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: default gate path rule and fail-open reason (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_default_path.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: Linux installer, user units and catalog entry (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_units.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: additional Linux tests (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_units_more.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: additional Linux tests 2 (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_units_more2.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: Windows live run (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_windows_run.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "cost gate: Windows module, export wrapper and scheduled task (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_windows.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # REVFIX: no unit test file may be invisible to every harness. This guard
 # fails when a tests/test_*.py is not named by any suite entry point.
 if it "suite wiring: every tests/test_*.py is wired into a harness"; then

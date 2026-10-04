@@ -1,0 +1,205 @@
+#!/usr/bin/env python3
+"""tests/test_run_budget_prices.py — pricing of unpriced Google-paid models.
+
+A Google-paid model with no price row must never be under-counted: it is
+priced at the highest known Gemini Flash rate in the prices file (highest
+price_in, highest price_out and highest cache-read, each taken
+independently), falling back to built-in worst-case constants when the file
+has no priced Flash model at all.
+
+Run with: python tests/test_run_budget_prices.py
+"""
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "tools"))
+sys.path.insert(0, str(REPO_ROOT))
+
+import tools.run_budget as rb  # noqa: E402
+
+PRICES_FILE = REPO_ROOT / "configuration" / "google-prices.json"
+REGISTRY_NONE = str(REPO_ROOT / "no-such-registry.json")
+
+
+def _row(model, provider, tin, tout, cache, ts="2026-10-03T10:00:00Z"):
+    return {"timestamp": ts, "model": model, "provider": provider,
+            "tokens": {"in": tin, "out": tout, "cacheRead": cache}}
+
+
+def _provider_block(price_in, price_out, cache_read, unverified=True):
+    """A providers/vertex block shaped like the real price rows."""
+    def _obj(per_million):
+        return {"per_million": per_million, "per_token": per_million / 1e6,
+                "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+                "date": "2026-10-03", "unverified": unverified,
+                "notes": "test rate"}
+    return {"vertex": {"price_in": _obj(price_in), "price_out": _obj(price_out),
+                       "price_cache_read": _obj(cache_read)}}
+
+
+def _table(model_blocks):
+    """name -> providers/vertex block, wrapped into a full price table."""
+    return {"fallback": {"models": {name: {"providers": block}
+                                     for name, block in model_blocks.items()}},
+            "registry": {}}
+
+
+def write_temp_prices(data):
+    f = tempfile.NamedTemporaryFile("w", delete=False, suffix=".prices.json", encoding="utf-8")
+    json.dump(data, f)
+    f.close()
+    return Path(f.name)
+
+
+class TestVertexSpellingsPriced(unittest.TestCase):
+    """(a) The Vertex spellings the call log carries must now be priced from
+    the real price file, not defaulted."""
+
+    def test_vertex_flash_spellings_priced_from_real_file(self):
+        table = rb.load_price_table()
+        spellings = ["vertex-gemini-3.8-flash",
+                     "vertex/gemini-3.8-flash",
+                     "omniroute/vertex-gemini-3.8-flash"]
+        # 230 rows total across the three spellings (the call log carries 230
+        # on vertex-gemini-3.8-flash alone).
+        rows = [_row(spellings[i % 3], "vertex", 20_000, 1_000, 5_000)
+                for i in range(230)]
+        res = rb.evaluate_run(rows, prices=table)
+        self.assertEqual(res["calls"], 230)
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertFalse(res["unpriced_default_used"])
+        # Per row: 15000 uncached * 0.75/1M + 5000 cached * 0.1875/1M
+        # + 1000 out * 3.75/1M = 0.01125 + 0.0009375 + 0.00375 = 0.0159375
+        # 230 rows: 230 * 0.0159375 = 3.665625
+        self.assertAlmostEqual(res["est_usd"], 3.665625, places=6)
+
+    def test_each_spelling_resolves_at_075_375_01875(self):
+        table = rb.load_price_table()
+        for model in ("vertex-gemini-3.8-flash", "vertex/gemini-3.8-flash",
+                      "omniroute/vertex-gemini-3.8-flash"):
+            pr = rb.get_price(model, "vertex", table)
+            self.assertEqual(pr["source"], "google-prices.json", model)
+            self.assertEqual(pr["price_in"], 7.5e-07, model)
+            self.assertEqual(pr["price_out"], 3.75e-06, model)
+            self.assertEqual(pr["price_cache_read"], 1.875e-07, model)
+            self.assertTrue(pr["unverified"], model)
+
+
+class TestHighestFlashRateWins(unittest.TestCase):
+    """(b) An unpriced model takes the highest price_in, highest price_out
+    and highest cache-read independently from the priced Flash models."""
+
+    def test_unpriced_takes_each_rate_independently(self):
+        # A: higher price_in (1.2), lower price_out (3.0), lower cache (0.05)
+        # B: lower price_in (0.9), higher price_out (4.5), higher cache (0.2)
+        # C: unpriced third Flash model
+        table = _table({
+            "vertex-flash-a": _provider_block(1.2, 3.0, 0.05),
+            "vertex-flash-b": _provider_block(0.9, 4.5, 0.2),
+        })
+        row = _row("vertex-flash-c", "vertex", 1_500_000, 200_000, 500_000)
+        res = rb.evaluate_run([row], prices=table)
+        # Uncached 1_000_000 * 1.2/1M = 1.2 (A's in)
+        # Cached   500_000 * 0.2/1M = 0.1 (B's cache)
+        # Out      200_000 * 4.5/1M = 0.9 (B's out)
+        # Total = 2.2
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex-flash-c", "count": 1}])
+        self.assertAlmostEqual(res["est_usd"], 2.2, places=6)
+
+    def test_only_flash_models_are_considered(self):
+        # A non-Flash row with a higher rate must not win the max.
+        table = _table({
+            "gemini-3.8-pro": _provider_block(9.0, 9.0, 9.0),
+            "vertex-flash-a": _provider_block(1.2, 3.0, 0.05),
+        })
+        row = _row("vertex-flash-c", "vertex", 1_000_000, 0, 0)
+        res = rb.evaluate_run([row], prices=table)
+        # 1M uncached * 1.2/1M (the Flash max, not the Pro 9.0)
+        self.assertAlmostEqual(res["est_usd"], 1.2, places=6)
+
+
+class TestNoPricedFlashModel(unittest.TestCase):
+    """(c) A prices file with no priced Flash model: built-in worst-case
+    constants 0.75 / 3.75 / 0.1875 per 1M apply."""
+
+    def test_builtin_constants_when_no_flash_model(self):
+        data = {"models": {"gemini-3.8-pro": {"providers":
+                _provider_block(0.5, 1.0, 0.05, unverified=False)}}}
+        p = write_temp_prices(data)
+        self.addCleanup(p.unlink)
+        table = rb.load_price_table(registry_path=REGISTRY_NONE, prices_path=str(p))
+        row = _row("vertex-gemini-9.0-flash-mystery", "vertex", 1_000_000, 300_000, 200_000)
+        res = rb.evaluate_run([row], prices=table)
+        # 800_000 uncached * 0.75/1M = 0.6
+        # 200_000 cached   * 0.1875/1M = 0.0375
+        # 300_000 out      * 3.75/1M   = 1.125
+        # Total = 1.7625
+        self.assertAlmostEqual(res["est_usd"], 1.7625, places=6)
+        self.assertTrue(res["unpriced_default_used"])
+
+    def test_empty_table_uses_builtin_constants(self):
+        pr = rb.default_google_prices({"fallback": {}, "registry": {}})
+        self.assertAlmostEqual(pr["price_in"], 7.5e-07, places=12)
+        self.assertAlmostEqual(pr["price_out"], 3.75e-06, places=12)
+        self.assertAlmostEqual(pr["price_cache_read"], 1.875e-07, places=12)
+        self.assertTrue(pr["unverified"])
+        self.assertEqual(pr["source"], "unpriced-default")
+
+
+class TestUnpricedFlagSemantics(unittest.TestCase):
+    """(d) unpriced_default_used stays true for an unpriced model and false
+    when everything is priced; the unpriced_models list names the model."""
+
+    def test_flag_true_for_unpriced_model(self):
+        table = rb.load_price_table()
+        row = _row("gemini-3.8-pro-mystery", "vertex", 1_000_000, 0, 0)
+        res = rb.evaluate_run([row], prices=table)
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "gemini-3.8-pro-mystery", "count": 1}])
+
+    def test_flag_false_when_all_priced(self):
+        table = rb.load_price_table()
+        row = _row("gemini-3.8-flash", "vertex", 1_000_000, 0, 0)
+        res = rb.evaluate_run([row], prices=table)
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertAlmostEqual(res["est_usd"], 0.75, places=6)
+
+    def test_day_unpriced_flag(self):
+        table = rb.load_price_table()
+        rows = [_row("vertex-gemini-3.8-flash", "vertex", 1_000_000, 0, 0)]
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=table)
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertAlmostEqual(res["usd"], 0.75, places=6)
+
+
+class TestRealPriceFileConsistency(unittest.TestCase):
+    """(e) The real configuration/google-prices.json passes the same
+    consistency check the existing tests apply: it loads without raising,
+    and the new rows are present with the exact rates."""
+
+    def test_real_file_loads_and_rows_present(self):
+        table = rb.load_price_table()
+        models = (table.get("fallback") or {}).get("models") or {}
+        for name in ("vertex-gemini-3.8-flash", "vertex/gemini-3.8-flash",
+                     "omniroute/vertex-gemini-3.8-flash", "gemini-3.8-flash"):
+            entry = models.get(name)
+            self.assertIsInstance(entry, dict, name)
+            p_entry = (entry.get("providers") or {}).get("vertex")
+            self.assertIsInstance(p_entry, dict, name)
+            self.assertEqual(_rate(p_entry, "price_in"), 7.5e-07, name)
+            self.assertEqual(_rate(p_entry, "price_out"), 3.75e-06, name)
+            self.assertEqual(_rate(p_entry, "price_cache_read"), 1.875e-07, name)
+
+
+def _rate(p_entry, field):
+    return rb._price_float(p_entry.get(field) or {})
+
+
+if __name__ == "__main__":
+    unittest.main()

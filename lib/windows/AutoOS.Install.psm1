@@ -650,6 +650,7 @@ function Invoke-AutoOSScriptProvider {
         'meslo-nerd-font' { return Install-AutoOSNerdFont }
         'herdr'           { return Install-AutoOSHerdr }
         'claude-autostart'{ return Install-AutoOSClaudeAutostart }
+        'cost-gate'       { return Install-AutoOSCostGate }
         'qodercli'        { return Install-AutoOSQoderCli }
         default           { return @{ ExitCode = 1; Output = "no script for '$($Component.Package)'" } }
     }
@@ -906,6 +907,47 @@ function Install-AutoOSClaudeAutostart {
         }
     } catch {
         Write-AutoOSLine "could not configure Claude autostart: $($_.Exception.Message)" -Level warn
+        return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
+    }
+}
+
+function Install-AutoOSCostGate {
+    <#
+      .SYNOPSIS
+        Register the daily cost gate: the warn/block config and the
+        "AutoOS cost gate" Scheduled Task that refreshes it.
+      .DESCRIPTION
+        Thin registration over AutoOS.CostGate.psm1. The thresholds are the
+        built-in defaults (warn 20, block 25); the config file is only
+        created when absent, so hand-edits to it survive a reinstall. A
+        second run finds the task already current and reports `skipped`.
+    #>
+    $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+
+    if ($script:DryRun) {
+        Import-Module (Join-Path $PSScriptRoot 'AutoOS.CostGate.psm1') -DisableNameChecking -Force
+        [void](Install-CostGateTask -RepoRoot $repoRoot -DryRun)
+        return @{ ExitCode = 0; Success = $true }
+    }
+
+    try {
+        Import-Module (Join-Path $PSScriptRoot 'AutoOS.CostGate.psm1') -DisableNameChecking -Force
+        # Install-CostGateTask prints its status lines and then returns the
+        # outcome word, so the call's output stream holds several lines: the
+        # outcome is the last element, and the rest stay visible to whoever
+        # reads this function's output.
+        $lines = @(Install-CostGateTask -RepoRoot $repoRoot)
+        $outcome = $lines[-1]
+        if ($lines.Count -gt 1) {
+            $lines[0..($lines.Count - 2)] | ForEach-Object { Write-Host $_ }
+        }
+        switch ($outcome) {
+            'skipped'  { return @{ ExitCode = $script:ExitCodeAlreadyInstalled; Success = $true } }
+            'failed'   { return @{ ExitCode = 1; Success = $false; Output = 'could not register the cost gate' } }
+            default    { return @{ ExitCode = 0; Success = $true } }
+        }
+    } catch {
+        Write-AutoOSLine "could not configure the cost gate: $($_.Exception.Message)" -Level warn
         return @{ ExitCode = 1; Output = $_.Exception.Message; Success = $false }
     }
 }
@@ -4251,7 +4293,7 @@ Export-ModuleMember -Function `
     Write-AutoOSOmnigraphReadiness, Set-AutoOSOmnigraphEnv, Protect-AutoOSUserFile, Copy-AutoOSBackup, ConvertTo-AutoOSCanonicalJson,
     Test-AutoOSInstalled, Get-AutoOSInstalledComponents, Install-AutoOSComponent, Invoke-AutoOSPostInstall,
     Add-AutoOSGitToPath, Set-AutoOSGitConfig, Add-AutoOSCondaToPath, New-AutoOSCondaEnv, Install-AutoOSNerdFont,
-    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart,
+    Install-AutoOSHerdr, Install-AutoOSClaudeAutostart, Install-AutoOSCostGate,
     Write-AutoOSClaudeHostReadiness, Install-AutoOSPoshTheme, Add-AutoOSProfileLine,
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,

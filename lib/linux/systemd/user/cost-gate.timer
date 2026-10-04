@@ -1,0 +1,22 @@
+# Re-check the daily cost-gate verdict two minutes after boot and ten minutes
+# after each refresh. This file is a template; @APPROOT@ is substituted by
+# install_cost_gate.
+#
+# OnUnitActiveSec (not OnCalendar) is deliberate: this is a periodic refresh of
+# a verdict, not a fixed daily chore, so it must tick on the wall clock since
+# boot regardless of when the previous refresh landed.
+#
+# Persistent=false on purpose: a machine that was off during a due refresh
+# must not fire a catch-up burst of refreshes when it comes back; the next
+# scheduled tick is the right time to look at the log again.
+[Unit]
+Description=Periodic daily cost-gate refresh
+Documentation=file://@APPROOT@/docs/ai/cost-guard.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

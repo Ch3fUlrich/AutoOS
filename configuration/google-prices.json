@@ -1,5 +1,5 @@
 {
-  "_comment": "AutoOS Google model prices fallback table. Values cited 2026-10-03. Per 1M tokens.",
+  "_comment": "AutoOS Google model prices fallback table. Values cited 2026-10-03. Per 1M tokens. Sources: AI Studio https://ai.google.dev/gemini-api/docs/pricing; Vertex https://cloud.google.com/vertex-ai/generative-ai/pricing (both accessed 2026-10-03). The Gemini Flash rates are expected to double from 2027 (known limit, not code): the vertex-gemini-3.8-flash rows are marked unverified until the cloud billing SKUs arrive.",
   "models": {
     "gemini-3.8-flash": {
       "providers": {
@@ -53,6 +53,96 @@
             "date": "2026-10-03",
             "unverified": false,
             "notes": "same numbers as AI Studio intro"
+          }
+        }
+      }
+    },
+    "vertex-gemini-3.8-flash": {
+      "providers": {
+        "vertex": {
+          "price_in": {
+            "per_million": 0.75,
+            "per_token": 7.5e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
+          },
+          "price_cache_read": {
+            "per_million": 0.1875,
+            "per_token": 1.875e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "CONSERVATIVE 0.1875 until the GCP billing SKUs are known"
+          },
+          "price_out": {
+            "per_million": 3.75,
+            "per_token": 3.75e-06,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
+          }
+        }
+      }
+    },
+    "vertex/gemini-3.8-flash": {
+      "providers": {
+        "vertex": {
+          "price_in": {
+            "per_million": 0.75,
+            "per_token": 7.5e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
+          },
+          "price_cache_read": {
+            "per_million": 0.1875,
+            "per_token": 1.875e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "CONSERVATIVE 0.1875 until the GCP billing SKUs are known"
+          },
+          "price_out": {
+            "per_million": 3.75,
+            "per_token": 3.75e-06,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
+          }
+        }
+      }
+    },
+    "omniroute/vertex-gemini-3.8-flash": {
+      "providers": {
+        "vertex": {
+          "price_in": {
+            "per_million": 0.75,
+            "per_token": 7.5e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
+          },
+          "price_cache_read": {
+            "per_million": 0.1875,
+            "per_token": 1.875e-07,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "CONSERVATIVE 0.1875 until the GCP billing SKUs are known"
+          },
+          "price_out": {
+            "per_million": 3.75,
+            "per_token": 3.75e-06,
+            "url": "https://cloud.google.com/vertex-ai/generative-ai/pricing",
+            "date": "2026-10-03",
+            "unverified": true,
+            "notes": "same rate as the AI Studio row; UNVERIFIED until the GCP billing SKUs are known"
           }
         }
       }

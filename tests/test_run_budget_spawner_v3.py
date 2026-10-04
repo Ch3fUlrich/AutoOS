@@ -283,7 +283,7 @@ class NonDictGateFileAndReasonLineTests(GateFileBaseCase):
 
     def test_all_seven_unavailable_reason_lines_pinned(self):
         # 1: env var not set
-        self.assert_fail_open({}, "env var not set", reason="env var not set")
+        self.assert_fail_open({}, "env var not set", reason="env var not set and no default gate file")
 
         # 2: file stale (future mtime)
         path = self.write_gate()

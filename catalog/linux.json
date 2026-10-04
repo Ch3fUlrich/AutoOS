@@ -378,6 +378,20 @@
           "notes": "Checks MemAvailable every 10s and, only below the floor, stops the newest autoos-worker-*.scope - one run per shot, never the session, sshd or the gateways."
         },
         {
+          "id": "cost-gate",
+          "name": "Cost gate refresh",
+          "description": "Refreshes the daily cost-gate verdict from the call log",
+          "provider": "script",
+          "package": "cost-gate",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/docs/ai/cost-guard.md",
+          "notes": "Renders the cost-gate user units and, only when absent, the daily-gate.conf with warn/block (defaults 20/25). Enable the timer with AUTOOS_COST_GATE_ENABLE=1."
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",

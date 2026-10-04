@@ -248,6 +248,19 @@
           "launcher": "none"
         },
         {
+          "id": "cost-gate",
+          "name": "Daily cost gate",
+          "description": "Checks today's gateway spend and blocks runs past the cap",
+          "provider": "script",
+          "package": "cost-gate",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/ai/cost-guard.md",
+          "launcher": "none"
+        },
+        {
           "id": "agy",
           "name": "Antigravity CLI",
           "description": "Google's terminal coding agent",

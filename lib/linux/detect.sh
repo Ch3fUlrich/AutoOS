@@ -475,6 +475,12 @@ script_is_installed() {
         # the pair counts as installed and silently skips.
         memguard)        [[ -f "$SYS_HOME/.local/share/autoos/memguard.sh" && \
                            -f "$SYS_HOME/.config/systemd/user/memguard.timer" ]] ;;
+        # Both halves install_cost_gate writes, or neither: the unit that
+        # runs the refresh and the timer that runs it. One without the other
+        # is a half-install a rerun should repair, so only the pair counts as
+        # installed and silently skips.
+        cost-gate)       [[ -f "$SYS_HOME/.config/systemd/user/cost-gate.service" && \
+                           -f "$SYS_HOME/.config/systemd/user/cost-gate.timer" ]] ;;
         # A HS_SCOPE=system install (configuration/herdr-sessions/install.sh, the
         # headless-root branch) puts its restore unit in /etc/systemd/system, never
         # under $SYS_HOME - check both, or a system-scope herdr-sessions is invisible

@@ -176,7 +176,7 @@ class ExclusionTests(GateFileCase):
 
 class FailOpenTests(GateFileCase):
     def test_unset_env_fail_open(self):
-        self.assert_fail_open({}, "unset environment variable", reason="env var not set")
+        self.assert_fail_open({}, "unset environment variable", reason="env var not set and no default gate file")
 
     def test_missing_file_fail_open(self):
         missing = os.path.join(self.tmp.name, "nope.json")
