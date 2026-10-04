@@ -359,7 +359,8 @@ def worktree_of(path: str) -> str:
     checkout for a non-repo path, which would read "somewhere else" as "my tree"."""
     try:
         top = subprocess.run(["git", "-C", path, "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True).stdout.strip()
+                             capture_output=True, text=True,
+                             stdin=subprocess.DEVNULL).stdout.strip()
     except OSError:
         return os.path.realpath(path)
     return os.path.realpath(top or path)
