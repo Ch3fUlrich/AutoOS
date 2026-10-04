@@ -964,6 +964,10 @@ if it "bash-guard: PreToolUse heredoc + claude --bg/-p/--print guard (unit tests
     out="$(python3 tests/test_bash_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "opencode bash-guard: OpenCode plugin hook guard (unit tests)"; then
+    out="$(python3 tests/test_opencode_bash_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then
     out="$(python3 tests/test_render_opencode_config.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

@@ -5259,6 +5259,15 @@ Test-Case 'bash-guard: PreToolUse heredoc + claude --bg/-p/--print guard (unit t
     Assert-Equal $rc 0 "bash-guard unit tests failed: $out"
 }
 
+Test-Case 'opencode bash-guard: OpenCode plugin hook guard (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_opencode_bash_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "opencode bash-guard unit tests failed: $out"
+}
+
 Test-Case 'cost guard: run and daily budget evaluations (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
