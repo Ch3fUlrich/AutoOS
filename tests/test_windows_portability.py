@@ -39,40 +39,69 @@ _SIGNAL_ATTRS = frozenset({"SIGKILL", "SIGTERM", "SIGALRM", "SIGPIPE", "SIGUSR1"
 _SHEBANG_PREFIXES = ("#!/bin/sh", "#!/usr/bin/env sh", "#!/usr/bin/env bash")
 
 
-def _posix_call_names(node: ast.AST) -> set[str]:
-    """Return the set of POSIX-only call/attribute names found in *node*."""
-    found: set[str] = set()
+def _posix_call_name(call: ast.Call) -> str | None:
+    """Return the POSIX name of the call *call* (`os.chmod`, `Path.chmod`,
+    `fcntl`, ...) or None when it is not a POSIX-only call."""
+    if not isinstance(call.func, ast.Attribute):
+        return None
+    func = call.func
+    value = func.value
+    # os.chmod(x), os.killpg(...), etc.
+    if isinstance(value, ast.Name):
+        if value.id == "os" and func.attr in _OS_POSIX_FUNCS:
+            return f"os.{func.attr}"
+        if value.id in _POSIX_MODULES:
+            return value.id
+        return None
+    # signal.SIGKILL(...)
+    if isinstance(value, ast.Attribute) and \
+            isinstance(value.value, ast.Name) and value.value.id == "signal":
+        if value.attr in _SIGNAL_ATTRS:
+            return f"signal.{value.attr}"
+        return None
+    # Path(...).chmod() - pathlib.Path methods that are POSIX-only
+    if isinstance(value, ast.Call) and \
+            isinstance(value.func, ast.Name) and value.func.id == "Path" and \
+            func.attr == "chmod":
+        return "Path.chmod"
+    return None
+
+
+def _posix_call_sites(node: ast.AST) -> list[tuple[ast.AST, str]]:
+    """Return `(site, name)` for every POSIX-only reference in *node*.
+
+    A site is the AST node that would have to sit in a non-Windows branch
+    for the reference to be safe: the `Call` for a call, the `Attribute`
+    for a bare reference, the `Constant` for a shebang string.
+    """
+    sites: list[tuple[ast.AST, str]] = []
 
     for child in ast.walk(node):
-        # os.chmod(x), os.killpg(...), etc.
-        if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
-            if isinstance(child.func.value, ast.Name) and child.func.value.id == "os":
-                if child.func.attr in _OS_POSIX_FUNCS:
-                    found.add(f"os.{child.func.attr}")
-            elif isinstance(child.func.value, ast.Attribute) and \
-                    isinstance(child.func.value.value, ast.Name) and \
-                    child.func.value.value.id == "signal":
-                if child.func.value.attr in _SIGNAL_ATTRS:
-                    found.add(f"signal.{child.func.value.attr}")
-            elif isinstance(child.func.value, ast.Name) and \
-                    child.func.value.id in _POSIX_MODULES:
-                found.add(child.func.value.id)
+        if isinstance(child, ast.Call):
+            name = _posix_call_name(child)
+            if name:
+                sites.append((child, name))
 
         # Bare references like `signal.SIGKILL` as a name constant (e.g. in kill)
         if isinstance(child, ast.Attribute) and isinstance(child.value, ast.Name):
             if child.value.id == "signal" and child.attr in _SIGNAL_ATTRS:
-                found.add(f"signal.{child.attr}")
-            if child.value.id in _POSIX_MODULES:
-                found.add(child.value.id)
+                sites.append((child, f"signal.{child.attr}"))
+            elif child.value.id in _POSIX_MODULES:
+                sites.append((child, child.value.id))
 
         # String constants with shebang prefixes
         if isinstance(child, ast.Constant) and isinstance(child.value, str):
             for prefix in _SHEBANG_PREFIXES:
                 if child.value.startswith(prefix):
-                    found.add("shebang:" + prefix)
+                    sites.append((child, "shebang:" + prefix))
                     break
 
-    return found
+    return sites
+
+
+def _posix_call_names(node: ast.AST) -> set[str]:
+    """Return the set of POSIX-only call/attribute names found in *node*."""
+    return {name for _site, name in _posix_call_sites(node)}
 
 
 def _is_guarded(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
@@ -83,7 +112,10 @@ def _is_guarded(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
     - it has a @unittest.skipIf / @unittest.skipUnless decorator whose
       expression mentions os.name or sys.platform, OR
     - (for functions) the body contains a comparison of os.name / sys.platform
-      followed by self.skipTest(...) or raise unittest.SkipTest.
+      followed by self.skipTest(...) or raise unittest.SkipTest, OR
+    - (for functions) every POSIX-only reference it makes sits in the branch
+      of a platform check that does not run on Windows: the body of
+      `if os.name != "nt":` or the else of `if os.name == "nt":`.
     """
     # Check decorators
     for d in node.decorator_list:
@@ -103,6 +135,20 @@ def _is_guarded(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
                 except _NotGuarded:
                     pass
         if _found_guard:
+            return True
+
+        # A POSIX-only call needs no skip at all when the call itself sits in
+        # the non-Windows branch of a platform check:
+        #     if os.name != "nt":
+        #         os.chmod(path, 0o755)
+        # Every POSIX reference must be there; one that also runs on Windows
+        # (no platform check, or the Windows branch) leaves the function
+        # unguarded.
+        sites = _posix_call_sites(node)
+        if sites and all(
+                _in_non_windows_branch(site, node)
+                for site, _name in sites
+        ):
             return True
 
     return False
@@ -204,6 +250,26 @@ def _find_containing_platform_check(skip_stmt: ast.AST, func_node: ast.AST) -> b
         if any(child is skip_stmt for stmt in branch for child in ast.walk(stmt)):
             return True
     raise _NotGuarded()
+
+
+def _in_non_windows_branch(site: ast.AST, func_node: ast.AST) -> bool:
+    """True when *site* (a POSIX-only reference inside *func_node*) sits in
+    the branch that does not run on Windows - the body of
+    `if os.name != "nt":` or the else of `if os.name == "nt"` (and the same
+    for a ``sys.platform`` check) - of at least one platform check in
+    *func_node*. On Windows that branch is never taken, so the reference
+    cannot run there. A site in no such branch may still run on Windows and
+    is not guarded."""
+    for node in ast.walk(func_node):
+        if not isinstance(node, ast.If):
+            continue
+        polarity = _true_on_windows(node.test)
+        if polarity is None:
+            continue
+        branch = node.orelse if polarity else node.body
+        if any(child is site for stmt in branch for child in ast.walk(stmt)):
+            return True
+    return False
 
 
 def lint_posix_guards(repo: Path | None = None) -> list[str]:
@@ -462,6 +528,120 @@ class PosixGuardLintTests(unittest.TestCase):
                     os.chmod("x", 0o755)
         """)
         self.assertEqual(self._lint_source(right), [])
+
+    def test_unguarded_path_chmod_is_flagged(self):
+        src = textwrap.dedent("""\
+            from pathlib import Path
+            import unittest
+
+            class T(unittest.TestCase):
+                def test_path_chmod(self):
+                    Path("x").chmod(0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertTrue(any("Path.chmod" in r for r in results), results)
+
+    def test_inline_guard_accepts_not_equals_nt(self):
+        """Inline guard `if os.name != "nt": self.skipTest(...)` should be accepted."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            from pathlib import Path
+
+            class T(unittest.TestCase):
+                def test_path_chmod_guarded(self):
+                    if os.name != "nt":
+                        pass
+                    else:
+                        self.skipTest("posix only")
+                    Path("x").chmod(0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertFalse(results, f"Expected no findings for inline-guarded Path.chmod, got: {results}")
+
+    def test_wrong_polarity_inline_guard_is_flagged(self):
+        """Inline guard with wrong polarity (skips on POSIX) should be flagged."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            from pathlib import Path
+
+            class T(unittest.TestCase):
+                def test_path_chmod_wrong_polarity(self):
+                    if os.name != "nt":
+                        self.skipTest("backwards")
+                    Path("x").chmod(0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertTrue(any("test_path_chmod_wrong_polarity" in r for r in results), results)
+
+    def test_path_chmod_with_decorator_guard(self):
+        """Path.chmod with @unittest.skipIf decorator should be accepted."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            from pathlib import Path
+
+            class T(unittest.TestCase):
+                @unittest.skipIf(os.name == "nt", "posix only")
+                def test_path_chmod_decorated(self):
+                    Path("x").chmod(0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertFalse(results, f"Expected no findings for decorator-guarded Path.chmod, got: {results}")
+
+    def test_inline_guard_call_in_not_equals_nt_branch(self):
+        """Call directly in `if os.name != "nt":` branch should be ACCEPTED."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            class T(unittest.TestCase):
+                def test_guarded_call(self):
+                    if os.name != "nt":
+                        os.chmod("x", 0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertFalse(results, f"Expected inline-guarded os.chmod to be accepted, got: {results}")
+
+    def test_wrong_polarity_call_in_equals_nt_branch(self):
+        """Call in `if os.name == "nt":` branch should be FLAGGED (runs on Windows)."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            class T(unittest.TestCase):
+                def test_wrong_polarity(self):
+                    if os.name == "nt":
+                        os.chmod("x", 0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertTrue(any("test_wrong_polarity" in r for r in results), f"Expected wrong-polarity to be flagged, got: {results}")
+
+    def test_path_chmod_inline_guard(self):
+        """Path.chmod in `if os.name != "nt":` branch should be ACCEPTED."""
+        src = textwrap.dedent("""\
+            import os
+            from pathlib import Path
+            class T(unittest.TestCase):
+                def test_path_guarded(self):
+                    if os.name != "nt":
+                        Path("x").chmod(0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertFalse(results, f"Expected inline-guarded Path.chmod to be accepted, got: {results}")
+
+    def test_mutation_wrong_polarity_fails(self):
+        """Mutation proof: wrong-polarity must be flagged."""
+        src = textwrap.dedent("""\
+            import os
+            import unittest
+            class T(unittest.TestCase):
+                def test_mutation_target(self):
+                    if os.name == "nt":
+                        os.chmod("x", 0o755)
+        """)
+        results = self._lint_source(src)
+        self.assertTrue(any("test_mutation_target" in r for r in results),
+                        f"Mutation proof failed: wrong-polarity must be flagged, got: {results}")
 
 
 class BomLintTests(unittest.TestCase):
