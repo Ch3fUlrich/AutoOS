@@ -27,7 +27,7 @@ Read this card first. Do exactly what it says. If a step is unclear, stop and as
    `C:\fleet\oc\seat4\seat-run7.ps1`). The reviewer must quote real lines. A review without quotes is void.
 7. Make ONE commit. Build the bundle with a branch name: `git bundle create <file> <base>..<branch>`.
    Check that the bundle is not empty. Verify it with `git bundle verify`.
-8. Send it: `tailscale file cp <owner>__<name>.bundle coding-vm:`. The name must start with the owner
+8. Send it: `tailscale file cp <owner>__<name>.bundle <central-host>:`. The name must start with the owner
    (`autoos__`, `plangraph__`, `server__`).
 9. Report with: commit sha, bundle sha256, test counts, mutation table, writer model, reviewer result.
    Say which steps a Claude model wrote.
