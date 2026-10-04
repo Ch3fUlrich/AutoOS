@@ -37,7 +37,8 @@ Read this card first. Do exactly what it says. If a step is unclear, stop and as
 - Status line: `python tools/cost-gate-status.py` in `C:\fleet\tools\AutoOS`.
 - Read the first words: `verdict=ok` is fine. `STALE` means the gate data is old: refresh it before you launch
   anything that costs money. `PRICE-GAP` means a model has no price: do not launch that model.
-- Limits for the Google total of the day: warn at $12, stop your own runs at $12, the gate blocks at $15.
+- The per-host warn and block values live in `daily-gate.conf`: read the status line, do not hard-code numbers.
+  Stop your own runs at the warn value; the gate blocks at the block value.
 - Above $8 do not start any new Vertex run. Use OVH or agy.
 - Report the gate line to the L1 only on an incident or when asked.
 
