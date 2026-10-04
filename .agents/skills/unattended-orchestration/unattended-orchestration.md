@@ -399,3 +399,7 @@ owning t2, one live `ack` probe per touched tier.
   when down (currently only gateway + container); the web Router-tiers
   card is display-only until backend apply/switch endpoints exist;
   `docs/README.md` still lacks the unattended-orchestration row.
+
+## OpenCode fleet lessons (2026-10-04)
+
+Running OpenCode sessions (L0 router, L1 orchestrator, L3 writers and seats) without Claude: what hangs, what costs, what overclaims and which rules must be mechanical. Read [references/opencode-fleet-lessons.md](references/opencode-fleet-lessons.md) before you start, restart or supervise a session. Handoff cards for a session without memory: `docs/handoff/OPENCODE-L1-AUTOOS.md`, `docs/handoff/OPENCODE-L1-WORKST.md`.
