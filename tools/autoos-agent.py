@@ -9623,7 +9623,8 @@ def workers_dir() -> str:
         try:
             out = subprocess.run(["git", "rev-parse", "--path-format=absolute",
                                   "--git-common-dir"],
-                                 cwd=ROOT, capture_output=True, text=True)
+                                 cwd=ROOT, capture_output=True, text=True,
+                                 stdin=subprocess.DEVNULL)
             common = out.stdout.strip()
             if out.returncode == 0 and common:
                 base = os.path.dirname(common)
