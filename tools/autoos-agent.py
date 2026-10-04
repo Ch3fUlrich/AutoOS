@@ -648,7 +648,7 @@ def isolate_source(cwd: str | None = None) -> str:
     cwd = cwd or os.getcwd()
     try:
         top = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True).stdout.strip()
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
     except OSError:
         return ROOT
     return top or ROOT
@@ -786,7 +786,7 @@ def _isolate_agentignore_patterns(root: str) -> list:
     `#` comments and blanks are skipped, absent file means no patterns.
     """
     proc = subprocess.run(["git", "-C", root, "show", "HEAD:.agentignore"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if proc.returncode != 0:
         return []
     out = []
@@ -916,12 +916,12 @@ def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
     """
     proc = subprocess.run(["git", "-C", root, "config", "--bool",
                            "core.sparseCheckout"],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if proc.stdout.strip() != "true":
         return None
     head_set = set(head_files)
     verbose = subprocess.run(["git", "-C", root, "ls-files", "-v"],
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
     wanted = set()
     seen_any = False
     for line in verbose.stdout.splitlines():
@@ -939,7 +939,7 @@ def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
         return wanted
     # No index to ask: read the pattern file and reconstruct the cone.
     gitdir = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
     gd = (gitdir.stdout.strip() or ".git")
     if not os.path.isabs(gd):
         gd = os.path.join(root, gd)
@@ -975,10 +975,10 @@ def _isolate_allowed_files(root: str) -> tuple:
     """`(source_sha, allowed, agentignore)`: HEAD files minus every exclusion."""
     source_sha = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                                 capture_output=True, text=True,
-                                check=True).stdout.strip()
+                                check=True, stdin=subprocess.DEVNULL).stdout.strip()
     proc = subprocess.run(["git", "-C", root, "ls-tree", "-r", "--name-only",
                            "-z", "HEAD"], capture_output=True, text=True,
-                          check=True)
+                          check=True, stdin=subprocess.DEVNULL)
     head_files = [p for p in proc.stdout.split("\0") if p]
     agentignore = _isolate_agentignore_patterns(root)
     sparse = _isolate_sparse_allowed(root, head_files)
@@ -1003,7 +1003,7 @@ def isolate_preflight_refuse(root: str) -> None:
         if not _isolate_secret_name(rel):
             continue
         blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
-                               "HEAD:" + rel], capture_output=True)
+                               "HEAD:" + rel], capture_output=True, stdin=subprocess.DEVNULL)
         if blob.returncode != 0:
             continue
         if not _isolate_blob_plain(blob.stdout):
@@ -1036,7 +1036,7 @@ def _isolate_batch_entries(root: str, sha: str, allowed) -> list:
     """
     listing = subprocess.run(
         ["git", "-C", root, "ls-tree", "-r", "-z", "--full-tree", sha],
-        capture_output=True, check=True)
+        capture_output=True, check=True, stdin=subprocess.DEVNULL)
     wanted = set(allowed)
     entries = []
     for rec in listing.stdout.split(b"\0"):
@@ -1313,15 +1313,15 @@ def _isolate_build(root: str, path: str, source_sha: str, allowed: list) -> None
     Runs inside isolate_clone's cleanup, so a raise at any step of it leaves no
     sandbox directory at all (I11).
     """
-    subprocess.run(["git", "init", "-q", path], check=True)
+    subprocess.run(["git", "init", "-q", path], check=True, stdin=subprocess.DEVNULL)
     _isolate_materialise(root,
                          _isolate_batch_entries(root, source_sha, allowed), path)
-    subprocess.run(["git", "-C", path, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", path, "add", "-A"], check=True, stdin=subprocess.DEVNULL)
     subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
                     "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
-                    "sandbox base (source %s)" % source_sha], check=True)
+                    "sandbox base (source %s)" % source_sha], check=True, stdin=subprocess.DEVNULL)
     subprocess.run(["git", "-C", path, "config", "--local",
-                    "autoos.sandboxSource", source_sha], check=True)
+                    "autoos.sandboxSource", source_sha], check=True, stdin=subprocess.DEVNULL)
 
 
 def sandbox_root_prepare(source: str, path: str) -> None:
@@ -1429,7 +1429,7 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
         # keeps the parent safe (worker_env, FF1b).
         fence_sandbox_push(path)
         subprocess.run(["git", "-C", path, "switch", "-q", "-c", branch],
-                       check=True)
+                       check=True, stdin=subprocess.DEVNULL)
         # FF1c: the clone gets its own identity, local to itself. The worker's
         # git no longer reads any global config (GIT_CONFIG_GLOBAL is a dead
         # path), so the operator's `user.name` is gone - and a worker that ends
@@ -1439,7 +1439,7 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
         for name, value in (("user.name", "autoos-worker"),
                             ("user.email", WORKER_EMAIL)):
             subprocess.run(["git", "-C", path, "config", "--local", name,
-                            value], check=True)
+                            value], check=True, stdin=subprocess.DEVNULL)
         if not is_autoos_source(root):
             # S4: a foreign repo's sandbox is owner-only, like its fleet parents.
             os.chmod(path, 0o700)
@@ -1452,7 +1452,7 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
             shutil.rmtree(path, ignore_errors=True)
         raise
     return subprocess.run(["git", "-C", path, "rev-parse", "HEAD"],
-                          capture_output=True, text=True, check=True).stdout.strip()
+                          capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
 
 # FF1 (D-106): what a spawned worker inherits. The caller's environment on this
 # host carries GitHub, provider and cloud credentials plus an ssh-agent socket,
@@ -1953,10 +1953,10 @@ def fence_sandbox_push(sandbox: str) -> None:
     carries no credential, no ssh transport and no config channel to push with.
     """
     remotes = subprocess.run(["git", "-C", sandbox, "remote"],
-                             capture_output=True, text=True).stdout.split()
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.split()
     for remote in remotes:
         subprocess.run(["git", "-C", sandbox, "remote", "set-url", "--push",
-                        remote, ISOLATE_PUSH_DISABLED], check=True)
+                        remote, ISOLATE_PUSH_DISABLED], check=True, stdin=subprocess.DEVNULL)
     hooks = os.path.join(sandbox, ".git", "hooks")
     os.makedirs(hooks, exist_ok=True)
     path = os.path.join(hooks, "pre-push")
@@ -3491,7 +3491,7 @@ def key_files(root: str) -> list:
     """
     roots = [root]
     r = subprocess.run(["git", "-C", root, "rev-parse", "--path-format=absolute",
-                        "--git-common-dir"], capture_output=True, text=True)
+                        "--git-common-dir"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode == 0 and r.stdout.strip():
         main = os.path.dirname(r.stdout.strip())
         if os.path.realpath(main) != os.path.realpath(root):
@@ -4322,7 +4322,7 @@ def remote_branch_tip(repo, branch):
     ref = "refs/heads/%s" % branch
     try:
         proc = subprocess.run(["git", "-C", repo, "ls-remote", "origin", ref],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, "%s" % exc
     if proc.returncode != 0:
@@ -7427,7 +7427,7 @@ def _filtered_parent_status(root: str) -> dict:
     # Untracked files count too: a worker with write rights (qoder
     # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
-                        "--untracked-files=all"], capture_output=True, text=True)
+                        "--untracked-files=all"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     out = {}
     if r.returncode != 0:
         return out
@@ -7451,7 +7451,7 @@ def _scan_first_parent_range(root: str, old: str, new: str) -> list:
         return out
     r = subprocess.run(["git", "-C", root, "log", "--first-parent",
                         "--format=%H%x00%ae%x00%ce", old + ".." + new],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         return out
     for line in r.stdout.splitlines():
@@ -7471,7 +7471,7 @@ def _branch_reflog_entries(root: str, branch: str, count: int) -> list:
     """
     r = subprocess.run(["git", "-C", root, "reflog", "show", "--format=%H%x00%ae%x00%ce",
                         "-n", str(count), "refs/heads/" + branch],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     out = []
     if r.returncode != 0:
         return out
@@ -7493,19 +7493,19 @@ def parent_snapshot(root=None):
         root = ROOT
     head = None
     r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode == 0 and r.stdout.strip():
         head = r.stdout.strip()
     branch = None
     r = subprocess.run(["git", "-C", root, "symbolic-ref", "-q", "--short", "HEAD"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode == 0 and r.stdout.strip():
         branch = r.stdout.strip()
     reflog_count = _reflog_len(root, branch) if branch else 0
     refs = {}
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                         "--format=%(refname)%00%(objectname)"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode == 0:
         for line in r.stdout.splitlines():
             name, _, sha = line.partition("\x00")
@@ -7524,7 +7524,7 @@ def _worktree_branches(root):
     nothing - the strict reading of every moved ref.
     """
     r = subprocess.run(["git", "-C", root, "worktree", "list", "--porcelain"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         return {}
     out, path = {}, None
@@ -7613,7 +7613,7 @@ def parent_leak(snapshot, root=None, sandbox=None):
     leaks = []
     after_head = None
     r = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode == 0 and r.stdout.strip():
         after_head = r.stdout.strip()
     shas = _scan_first_parent_range(root, before_head, after_head)
@@ -7626,7 +7626,7 @@ def parent_leak(snapshot, root=None, sandbox=None):
         leaks.append("worker commits in the parent checkout: %s" % ", ".join(shas))
     r = subprocess.run(["git", "-C", root, "for-each-ref", "refs/heads",
                         "--format=%(refname)%00%(objectname)"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     moved = {}
     if r.returncode == 0:
         for line in r.stdout.splitlines():
@@ -7677,14 +7677,14 @@ def sandbox_mode_only(path: str, base: str, rev: str) -> str | None:
     rows = [
         _git_stdout(subprocess.run(
             ["git", "-C", path, "diff", "--raw", "--no-renames", base + ".." + rev],
-            capture_output=True, text=True)),
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)),
         _git_stdout(subprocess.run(
             ["git", "-C", path, "diff", "--raw", "--no-renames", "HEAD"],
-            capture_output=True, text=True)),
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)),
     ]
     status = _git_stdout(subprocess.run(
         ["git", "-C", path, "status", "--porcelain", "--untracked-files=all"],
-        capture_output=True, text=True))
+        capture_output=True, text=True, stdin=subprocess.DEVNULL))
     if any(ln.startswith("??") or ln.startswith("A ") for ln in status.splitlines()):
         return None
     entries = [ln for block in rows for ln in block.splitlines() if ln.strip()]
@@ -7711,14 +7711,14 @@ def sandbox_diffstat(path: str, base: str) -> str:
     verdict does not depend on this string, only its detail does.
     """
     proc = subprocess.run(["git", "-C", path, "diff", "--shortstat", base],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return proc.stdout.strip()
 
 
 def _reflog_count(root: str, ref: str) -> int:
     """How many entries `ref`'s own reflog has (0 when it has none at all)."""
     r = subprocess.run(["git", "-C", root, "reflog", "show", ref],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if r.returncode != 0:
         return 0
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
@@ -7746,7 +7746,7 @@ def sandbox_reflog_snapshot(path: str, branch: str) -> dict:
     """
     refs = list(SANDBOX_REFLOG_REFS) + ["refs/heads/" + branch]
     r = subprocess.run(["git", "-C", path, "rev-list", "--all"],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     known = set(r.stdout.split()) if r.returncode == 0 else set()
     return {"counts": {ref: _reflog_count(path, ref) for ref in refs},
             "known": known}
@@ -7778,7 +7778,7 @@ def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
         if new <= 0:
             continue
         r = subprocess.run(["git", "-C", path, "reflog", "show", "--format=%H",
-                            "-n", str(new), ref], capture_output=True, text=True)
+                            "-n", str(new), ref], capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             continue
         for sha in [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]:
@@ -7786,7 +7786,7 @@ def sandbox_reflog_writes(path: str, snapshot, base: str) -> list:
                 continue
             probe = subprocess.run(["git", "-C", path, "rev-list", "--max-count=1",
                                     base + ".." + sha],
-                                   capture_output=True, text=True)
+                                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
             if probe.returncode == 0 and probe.stdout.strip():
                 found.add(sha[:10])
     return sorted(found)
@@ -7796,7 +7796,7 @@ def sandbox_ref_heads(sandbox: str) -> dict:
     """``{refname: sha}`` for every ref the sandbox clone carries."""
     out = subprocess.run(["git", "-C", sandbox, "for-each-ref",
                           "--format=%(refname) %(objectname)"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
     heads = {}
     for line in out.stdout.splitlines():
         name, _, sha = line.partition(" ")
@@ -7836,7 +7836,7 @@ def sandbox_committed_work(sandbox: str, base: str, branch: str, start: dict) ->
         moved.add(end[name])
         found.append(sandbox_ref_subject(sandbox, name, end[name]))
     head = subprocess.run(["git", "-C", sandbox, "rev-parse", "-q", "--verify", "HEAD"],
-                          capture_output=True, text=True).stdout.strip()
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
     tip = end.get("refs/heads/" + branch)
     if head and head not in known and head != tip and head not in moved:
         found.append(sandbox_ref_subject(sandbox, "HEAD-detached", head))
@@ -7846,7 +7846,7 @@ def sandbox_committed_work(sandbox: str, base: str, branch: str, start: dict) ->
 def sandbox_ref_subject(sandbox: str, ref: str, sha: str) -> str:
     """One line naming a ref, its short sha and its subject (worker text)."""
     out = subprocess.run(["git", "-C", sandbox, "log", "-1", "--format=%h %s", sha],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return "%s %s" % (ref, out.stdout.strip() or sha[:10])
 
 
@@ -8054,33 +8054,33 @@ def wip_commit(sandbox: str, rc: int, stop: str | None, branch: str | None = Non
         fh.write("configuration/api-keys.yml\nlogs/\n")
     others = subprocess.run(["git", "-C", sandbox, "ls-files", "--others",
                              "--exclude-standard", "-z"],
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL)
     add = [p for p in others.stdout.split("\0")
            if p and not _porcelain_path_is_logs(p)]
     if add:
         subprocess.run(["git", "-C", sandbox, "add", "--", *add],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
     done = subprocess.run(["git", "-C", sandbox, "-c", "user.name=autoos-worker",
                            "-c", "user.email=" + WORKER_EMAIL, "commit", "-am", msg],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if done.returncode != 0:
         reason = done.stderr.strip() or done.stdout.strip()
         print("WIP-COMMIT FAILED: %s" % (reason.splitlines()[0] if reason else
               "git commit exited %d" % done.returncode), file=sys.stderr)
         return None
     sha = subprocess.run(["git", "-C", sandbox, "rev-parse", "HEAD"],
-                         capture_output=True, text=True).stdout.strip()
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
     if not sha:
         return None
     if branch:
         current = subprocess.run(["git", "-C", sandbox, "branch", "--show-current"],
-                                 capture_output=True, text=True).stdout.strip()
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
         if current != branch:
             # A detached sandbox HEAD (the worker checked out a sha) leaves
             # the WIP commit on no branch; point the sandbox branch at it so
             # `take it: git fetch <path> <branch>` has something to fetch.
             subprocess.run(["git", "-C", sandbox, "branch", "-f", branch, "HEAD"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
     return sha
 
 
@@ -10489,7 +10489,7 @@ def cmd_run(args, cfg: dict) -> int:
         except PrivacyRefused as exc:
             return refuse(str(exc))
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
-                                    capture_output=True, text=True, check=True).stdout.strip()
+                                    capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
         # SB-A (D-103) item 2 (NOOPCOMMIT): the ref tips as the clone stands up.
         # A `--local` clone carries every branch of the parent, so the run's own
         # commits are only identifiable against this baseline, and the baseline
@@ -10787,7 +10787,7 @@ def cmd_run(args, cfg: dict) -> int:
                 if plan["sandbox"]:
                     sb = plan["sandbox"]
                     changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                             capture_output=True, text=True).stdout.strip()
+                                             capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
                     if changed and not plan["route"].get("review"):
                         wip_sha = wip_commit(sb["path"], child_rc, stop, sb["branch"])
                         if wip_sha:
@@ -10893,7 +10893,7 @@ def cmd_run(args, cfg: dict) -> int:
         sb = plan["sandbox"]
         branch = sb["branch"]
         changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                 capture_output=True, text=True).stdout.strip()
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
         # WIPfix: never lose a worker's uncommitted work. Commit it on the
         # sandbox branch, then re-read changed/ahead so a run that only ever
         # produced this WIP commit is no longer a NO-OP. A review run's
@@ -10903,10 +10903,10 @@ def cmd_run(args, cfg: dict) -> int:
             if wip_sha:
                 print("WIP-COMMITTED: %s" % wip_sha)
                 changed = subprocess.run(["git", "-C", sb["path"], "status", "--short"],
-                                         capture_output=True, text=True).stdout.strip()
+                                         capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
         ahead = subprocess.run(["git", "-C", sb["path"], "log", "--oneline",
                                 sb["base"] + ".." + branch],
-                               capture_output=True, text=True).stdout.strip()
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
         # SPAWNREDACT item 2: a filename or a commit subject is worker text too.
         print("\nsandbox changes (uncommitted):\n" + redact_output(changed or "  (none)"))
         if ahead:
