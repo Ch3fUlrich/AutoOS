@@ -146,7 +146,7 @@ class TestCostGateWindowsRunA3(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="cg-test-") as td:
             tmp = Path(td)
             now = datetime.now(timezone.utc)
-            p0 = [{"timestamp": (now - timedelta(days=1, seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+            p0 = [{"timestamp": (now - timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
                    "model": "vertex-gemini-3.8-flash", "provider": "vertex", "tokens": {"in": 100, "out": 10, "cacheRead": 0}}
                   for i in range(500)]
             p1 = [{"timestamp": (now - timedelta(days=3, seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",

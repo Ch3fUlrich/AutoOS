@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- COST-GATE-CULTURE-FIX (2026-10-04): the Windows rows export (`lib/windows/cost-gate-export.ps1`) no longer stops paging after the first page on non-US cultures (PowerShell turned the call-log timestamps into DateTime objects and re-parsed them with the current culture: de-DE read 4 October as 10 April, so the daily gate counted only ~500 rows and under-reported spend); dates are now used without a culture round trip, the cutoff is the start of the current UTC day minus 1 h (page cap 60 x 500), and an export that ended for any other reason (page error, unreadable timestamp, page cap, a cutoff the raw ISO timestamps do not confirm) writes `UNAVAILABLE: rows export incomplete: <reason>` and keeps the old gate file. Proving tests: `tests/test_cost_gate_culture.py`.
 - opencode: bash-guard plugin (shell tool) sharing the FLEET-HOOKS core (O4)
 - OVH-PRICE-ROWS (2026-10-04): cited OVH price row for Qwen3.5-397B-A17B ($0.708/M in, $4.248/M out, converted at 1.18 USD/EUR from 0.6 EUR/M in and 3.6 EUR/M out on OVH catalogue, USD table cross-check pending).
 - OVH-TEXT: the three `ovh-direct-*` hand entries in `opencode.jsonc` no longer say OVH is public work only; T1-CLEAN (D-502) cited the no-training terms, so the entries now read private-safe, trial credit, cap per D-567 (name strings only, no behaviour change).

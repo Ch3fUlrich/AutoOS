@@ -840,6 +840,10 @@ if it "cost gate: Windows live run (unit tests)"; then
     out="$(python3 tests/test_cost_gate_windows_run.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "cost gate: Windows culture invariance and export completeness (unit tests)"; then
+    out="$(python3 tests/test_cost_gate_culture.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "cost gate: Windows module, export wrapper and scheduled task (unit tests)"; then
     out="$(python3 tests/test_cost_gate_windows.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

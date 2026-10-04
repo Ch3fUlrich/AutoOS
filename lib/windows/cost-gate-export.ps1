@@ -24,8 +24,9 @@
   Pages /api/usage/call-logs?limit=<n>&offset=<k>&excludeTests=1 through the
   omniroute CLI's own authenticated helper (node, `npm root -g` +
   omniroute/bin/cli/api.mjs, function apiFetch(path, {method:'GET', raw:true}))
-  and repeats with offset += 500 until the rows are older than two days or a
-  page cap (20 pages) is reached.
+  and repeats with offset += 500 until the rows are older than the start of the
+  current UTC day (minus one hour), a page is short, or the page cap (60 pages)
+  is reached; any other end is an INCOMPLETE export (see EXIT CODES).
 
   NO CREDENTIALS TOUCHED: the helper authenticates from inside its own
   omniroute install; this script reads, prints, writes and passes no
@@ -35,9 +36,11 @@
 
   EXIT CODES
     0  rows written and the refresh ran (the refresh decides the verdict)
-    3  export failed (node missing, non-200, non-JSON, or empty): the
-       status file says "UNAVAILABLE: rows export failed", the old gate
-       file is kept, and nothing else changed.
+    3  export failed or incomplete (node missing, non-200, non-JSON, empty,
+       an unreadable timestamp, the page cap, or a cutoff the raw timestamps do
+       not confirm): the status file says "UNAVAILABLE: rows export failed"
+       or "UNAVAILABLE: rows export incomplete: <reason>", the old gate file
+       and rows file are kept, and nothing else changed.
 #>
 param([Parameter(Mandatory)][string]$RepoRoot)
 
@@ -49,8 +52,7 @@ $autoosDir  = Join-Path $env:LOCALAPPDATA 'autoos'
 $rowsPath   = Join-Path $autoosDir 'daily-gate-rows.json'
 $statusPath = Join-Path $autoosDir 'daily-gate.status'
 $pageLimit  = 500
-$maxPages   = 20
-$cutoffDays = 2
+$maxPages   = 60
 
 # Resolve the helper module the same way the operator's CLI does.
 $apiModule = $null
@@ -66,7 +68,7 @@ if ($apiModule -and -not (Test-Path -LiteralPath $apiModule)) { $apiModule = $nu
 function Write-StatusUnavailable {
     param([string]$Reason)
     # One line, UTC time first, in the shared daily-gate status format.
-    $iso = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $iso = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
     try {
         if (-not (Test-Path -LiteralPath $autoosDir)) {
             [void](New-Item -ItemType Directory -Path $autoosDir -Force)
@@ -129,42 +131,108 @@ try {
     process.stdout.write('0\n' + String(e && e.message || 'network error'));
 }
 "@
+    $script:exportIncompleteReason = $null
     $rows = @()
+    $complete = $false
+    $lastPageRaw = ''
+    $cutoff = [DateTime]::SpecifyKind((Get-Date).ToUniversalTime().Date, [System.DateTimeKind]::Utc).AddHours(-1)
     for ($page = 0; $page -lt $maxPages; $page++) {
+        $pageNumber = $page + 1
         $env:AUTOS_API = $apiModule
         $env:AUTOS_LIMIT = "$pageLimit"
         $env:AUTOS_OFFSET = "$($page * $pageLimit)"
         $out = Invoke-NativeNoError -Command 'node' -Arguments @('--input-type=module', '-e', $nodeScript)
         Remove-Item Env:\AUTOS_API, Env:\AUTOS_LIMIT, Env:\AUTOS_OFFSET -ErrorAction SilentlyContinue
-        if ($LASTEXITCODE -ne 0) { return $null }
+        if ($LASTEXITCODE -ne 0) {
+            $script:exportIncompleteReason = "page $pageNumber failed: process exit $LASTEXITCODE"
+            return $null
+        }
         $nl = $out.IndexOf("`n")
-        if ($nl -lt 1) { return $null }
+        if ($nl -lt 1) {
+            $script:exportIncompleteReason = "page $pageNumber failed: invalid response"
+            return $null
+        }
         $status = 0
-        if (-not [int]::TryParse($out.Substring(0, $nl).Trim(), [ref]$status) -or $status -ne 200) { return $null }
+        if (-not [int]::TryParse($out.Substring(0, $nl).Trim(), [ref]$status) -or $status -ne 200) {
+            $script:exportIncompleteReason = if ($status -ne 0) { "page $pageNumber failed: $status" } else { "page $pageNumber failed: non-numeric status" }
+            return $null
+        }
+        $lastPageRaw = $out.Substring($nl + 1)
         try {
-            $pageRows = $out.Substring($nl + 1) | ConvertFrom-Json
+            $pageRows = $lastPageRaw | ConvertFrom-Json
         } catch {
+            $script:exportIncompleteReason = "page $pageNumber failed: invalid JSON"
             return $null
         }
         $count = @($pageRows).Count
         if ($count -eq 0) {
             # An empty log on the very first page is not a valid export.
-            if ($page -eq 0) { return $null }
+            if ($page -eq 0) {
+                $script:exportIncompleteReason = "page 1 failed: empty log"
+                return $null
+            }
+            $complete = $true
             break
         }
         $rows += $pageRows
-        $cutoff = (Get-Date).ToUniversalTime().AddDays(-$cutoffDays)
         $oldest = $null
+        $readCount = 0
         foreach ($r in $pageRows) {
-            if (-not $r.PSObject.Properties['timestamp']) { continue }
+            if (-not $r.PSObject.Properties['timestamp'] -or $null -eq $r.timestamp) {
+                $script:exportIncompleteReason = "unreadable timestamp on page $pageNumber"
+                return $null
+            }
             $stamp = [DateTime]::MinValue
-            if (-not [DateTime]::TryParse($r.timestamp, [ref]$stamp)) { continue }
-            if ($stamp.Kind -ne [System.DateTimeKind]::Utc) { $stamp = $stamp.ToUniversalTime() }
+            if ($r.timestamp -is [DateTime]) {
+                $stamp = $r.timestamp
+            } elseif (-not [DateTime]::TryParse([string]$r.timestamp, [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal), [ref]$stamp)) {
+                $script:exportIncompleteReason = "unreadable timestamp on page $pageNumber"
+                return $null
+            }
+            if ($stamp.Kind -eq [System.DateTimeKind]::Utc) {
+                # Utc stays
+            } elseif ($stamp.Kind -eq [System.DateTimeKind]::Local) {
+                $stamp = $stamp.ToUniversalTime()
+            } else {
+                $stamp = [DateTime]::SpecifyKind($stamp, [System.DateTimeKind]::Utc)
+            }
             if ($null -eq $oldest -or $stamp -lt $oldest) { $oldest = $stamp }
+            $readCount++
         }
-        if ($count -lt $pageLimit -or $null -ne $oldest -and $oldest -lt $cutoff) { break }
+        if ($readCount -eq 0) {
+            $script:exportIncompleteReason = "unreadable timestamp on page $pageNumber"
+            return $null
+        }
+        $shortPage = ($count -lt $pageLimit)
+        $cutoffReached = (($null -ne $oldest) -and ($oldest -lt $cutoff))
+        if ($shortPage -or $cutoffReached) {
+            if ($cutoffReached) {
+                $rawMatches = [regex]::Matches($lastPageRaw, '"timestamp"\s*:\s*"([^"]+)"')
+                $minRaw = $null
+                foreach ($m in $rawMatches) {
+                    $rawTs = $m.Groups[1].Value
+                    if ($null -eq $minRaw -or [string]::CompareOrdinal($rawTs, $minRaw) -lt 0) {
+                        $minRaw = $rawTs
+                    }
+                }
+                $cutoffIso = $cutoff.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [System.Globalization.CultureInfo]::InvariantCulture)
+                if ($null -eq $minRaw -or -not ([string]::CompareOrdinal($minRaw, $cutoffIso) -lt 0)) {
+                    $script:exportIncompleteReason = "cutoff not confirmed by raw timestamps"
+                    return $null
+                }
+            }
+            $complete = $true
+            break
+        }
     }
-    if ($rows.Count -eq 0) { return $null }
+    if (-not $complete) {
+        $script:exportIncompleteReason = "page cap reached"
+        return $null
+    }
+    if ($rows.Count -eq 0) {
+        $script:exportIncompleteReason = "no rows exported"
+        return $null
+    }
     $rows
 }
 
@@ -189,6 +257,10 @@ try {
         [void](New-Item -ItemType Directory -Path $autoosDir -Force)
     }
     $rows = Export-CallLogRows
+    if ($script:exportIncompleteReason) {
+        Write-StatusUnavailable "rows export incomplete: $script:exportIncompleteReason"
+        exit 3
+    }
     if ($null -eq $rows) {
         Write-StatusUnavailable 'rows export failed'
         exit 3

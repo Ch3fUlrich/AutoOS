@@ -5394,6 +5394,15 @@ Test-Case 'cost gate: Windows live run (unit tests)' {
     Assert-Equal $rc 0 "cost_gate_windows_run unit tests failed: $out"
 }
 
+Test-Case 'cost gate: Windows culture invariance and export completeness (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_culture.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_culture unit tests failed: $out"
+}
+
 Test-Case 'cost gate: Windows module, export wrapper and scheduled task (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
