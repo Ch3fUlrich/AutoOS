@@ -10,7 +10,7 @@ runs this project. Read this file fully. Then read `AGENTS.md`. Do what they say
   - `verdict=ok` and no `STALE` or `PRICE-GAP` suffix: go on.
   - `STALE` or `unavailable`: stop starting paid runs. Tell the operator.
   - `PRICE-GAP` alone is known (two unpriced non-Google seat calls). It is not an overspend.
-  - Budgets: central host block `$10`, workstation block `$15`. Never start Google-paid work above the block.
+  - Budgets: each host has its own warn and block in `daily-gate.conf` (the sum stays $25; today central 12/14, workstation 9/11). Read the status line, do not hard-code numbers. Never start Google-paid work above the block.
 - The OpenCode L1 pilot is launched with `tools/oc_l1.py` (section 3).
 - Writers and seats run through the `autoos-agent` MCP tool or its CLI twin `tools/autoos-agent.py`. Nothing else.
 
