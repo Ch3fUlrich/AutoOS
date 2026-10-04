@@ -1647,6 +1647,23 @@
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
       "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
     },
+    "Qwen3.5-397B-A17B": {
+      "id": "Qwen3.5-397B-A17B",
+      "family": "qwen",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "output_max": 32768,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "unproven",
+      "price_in": 7.08e-07,
+      "price_out": 4.248e-06,
+      "price_source": "OVH AI Endpoints catalogue https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/ 2026-10-04 (0.6 EUR in / 3.6 EUR out per 1M tokens as shown; converted at 1.18 USD/EUR, the factor implied by the Qwen3.8-27B row; the USD price table was not readable: UNVERIFIED in USD)",
+      "$comment": "Added for OC pilot 2026-10-04: cited from OVH AI Endpoints catalogue https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/ 2026-10-04: '0.6€ /Mtoken(input)' and '3.6€ /Mtoken(output)'. Converted at 1.18 USD/EUR, the factor implied by the Qwen3.8-27B row ($0.708 in / $4.248 out per 1M tokens => 7.08e-07 in / 4.248e-06 out per-token); USD cross-check against the OVH price table is pending. context_advertised 128000 / context_usable 64000 / output_max 32768 mirror the existing OVH Qwen rows. reasoning true and effort_ladder [] follow the Qwen family pattern. tool_calls unproven pending live gateway probe. trains_on_prompts inherits providers.ovhcloud (null = unverified)."
+    },
     "Qwen3.8-27B": {
       "id": "Qwen3.8-27B",
       "family": "qwen",
@@ -1662,7 +1679,7 @@
       "price_in": 4.7e-07,
       "price_out": 3.19e-06,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000)."
+      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000). 2026-10-04 catalogue re-confirmed: '0.4€ /Mtoken(input)' and '2.7€ /Mtoken(output)' ($0.47 in / $3.19 out per 1M at 1.18 USD/EUR)."
     },
     "cohere/north-mini-code:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/cohere/north-mini-code:free answered ack 200 and one get_weather tool call ok (809 ms); gateway /v1/models row context_length 256000, output 64000. tier 'free' is a MODEL-level override so the leg can stay in a *-free-only route and is honestly priced ($0 at the vendor), while providers.openrouter.tier stays paid. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
