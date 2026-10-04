@@ -441,17 +441,17 @@
         // Endpoints connection: ids are the gateway's `ovh/<Model>` spellings.
         "ovh-direct-gpt-oss-120b": {
           "modelID": "ovh/gpt-oss-120b",
-          "name": "ovh-direct-gpt-oss-120b — direct OVH AI Endpoints (trial credit, public work only until T1-CLEAN cites privacy)",
+          "name": "ovh-direct-gpt-oss-120b — direct OVH AI Endpoints (private-safe (T1-CLEAN, D-502); trial credit; cap per D-567)",
           "limit": { "context": 131072, "output": 32768 }
         },
         "ovh-direct-qwen3-coder-30b": {
           "modelID": "ovh/Qwen3-Coder-30B-A3B-Instruct",
-          "name": "ovh-direct-qwen3-coder-30b — direct OVH AI Endpoints (trial credit, public work only until T1-CLEAN cites privacy)",
+          "name": "ovh-direct-qwen3-coder-30b — direct OVH AI Endpoints (private-safe (T1-CLEAN, D-502); trial credit; cap per D-567)",
           "limit": { "context": 128000, "output": 32768 }
         },
         "ovh-direct-qwen3.8-27b": {
           "modelID": "ovh/Qwen3.8-27B",
-          "name": "ovh-direct-qwen3.8-27b — direct OVH AI Endpoints (trial credit, public work only until T1-CLEAN cites privacy)",
+          "name": "ovh-direct-qwen3.8-27b — direct OVH AI Endpoints (private-safe (T1-CLEAN, D-502); trial credit; cap per D-567)",
           "limit": { "context": 128000, "output": 32768 }
         },
         "deepinfra-mimo-v2.6-flash": {
