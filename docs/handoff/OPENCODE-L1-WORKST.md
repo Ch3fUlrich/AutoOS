@@ -60,9 +60,14 @@ Read this card first. Do exactly what it says. If a step is unclear, stop and as
 ## 5. The gateway
 
 - Check: `node C:\fleet\ps\gw-get.mjs /api/usage/call-logs?limit=1` must answer.
-- Restart only if the operator said yes in the chat. Use the official command, started detached:
+- STANDING YES from the operator (2026-10-04): you may restart the gateway AFTER a confirmed crash (the check above fails
+  and no gateway process answers). Use only the official command, started detached:
   `Start-Process pwsh -ArgumentList '-NoProfile','-Command','omniroute restart --port 20128'`.
-  Never kill the gateway process by name. Report the restart afterwards.
+  Never kill the gateway process by name. Report the restart afterwards. For any other restart ask the operator first.
+- STANDING YES: temporary `pip install` only into a throwaway venv that you delete afterwards. Never into the system
+  Python or a shared venv.
+- NOT covered, always ask the operator: a reboot, a WSL restart, any edit of connections or credentials, anything else
+  on the operator-only list.
 
 ## 6. Start the OpenCode pilot with oc_l1.py
 
