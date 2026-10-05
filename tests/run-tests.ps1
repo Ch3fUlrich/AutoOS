@@ -9846,11 +9846,15 @@ print('%s|%s|%s' % (
         't1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
-        't2-worker-clean' = '1M'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '1M'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '128k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        # L1-CLEAN wave 2026-10-05: the -clean routes carry the 128k credit band
+        # legs (registry surfaces declare 128000), so they clamp to 128k.
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
         't4-researcher' = '128k'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
+        # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
+        'opus-5-5' = '1M'
         # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
         # out, so the 128k clamp was stale data (models.deepseek-flash).
@@ -9888,8 +9892,10 @@ print('%s|%s|%s' % (
     # contract) is banned in t2-worker-clean/t3-driver-clean
     # (t1-orchestrator-clean is omitted, see above). Direct-key legs
     # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
-    # on the same key, so they stay.
-    $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen'
+    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
+    # metered credit-tier provider (providers.ovhcloud tier credit), not a
+    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
+    $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
         $free = @($c.models | Where-Object { $_ -match $freeRe })
