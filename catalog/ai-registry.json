@@ -1748,6 +1748,74 @@
       "reasoning": false,
       "tier": "free",
       "tool_calls": "proven"
+    },
+    "claude-opus-5-5-medium": {
+      "$comment": "CLAUDE55 2026-10-05 (operator): swap target for the retired claude-opus-4-6-thinking - the agy CLI model list (measured 2026-10-05) carries only the 5-5 generation; the live gateway /v1/models serves agy/claude-opus-5-5-medium at context 1000000. price stays $0 marginal (antigravity seat-metered, same basis as the 4-6 row). tool_calls unproven until a live seat quotes one. low/high spellings can be added when a lane needs them.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "medium"
+      ],
+      "family": "anthropic",
+      "id": "claude-opus-5-5-medium",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-sonnet-5-5-medium": {
+      "$comment": "CLAUDE55 2026-10-05 (operator): the L1/L2 orchestrator seat spelling - live gateway agy/claude-sonnet-5-5-medium at context 1000000 (2026-10-05). $0 marginal (antigravity seat-metered). tool_calls unproven until a live seat quotes one.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "medium"
+      ],
+      "family": "anthropic",
+      "id": "claude-sonnet-5-5-medium",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "glm-5.3-flash": {
+      "$comment": "GLM55 2026-10-05 (operator): implementation/review leg via the OpenCode connection - live oc/glm-5.3-flash at context 1000000, thinking + tool_calling in the catalog's capabilities (2026-10-05). Front band in the worker/driver/researcher combos: an expiring grant is used up first (D-346 pattern). Site data: unmeasured - never referenced by a -clean route.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "zhipu",
+      "id": "glm-5.3-flash",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "llama-4-maverick": {
+      "$comment": "AINATIVE 2026-10-05 (operator): the FREEKEYS-1 tool-call-proven ainative trial leg (probe 2026-09-30, 2x tool_calls ok) - the trial carries $9.79 until 2026-11-02 and the operator ordered it burned for development, so it enters the front free band of the worker/driver/researcher combos. Site data: unmeasured - never referenced by a -clean route.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "meta",
+      "id": "llama-4-maverick",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "proven"
     }
   },
   "policy": {
@@ -2794,17 +2862,17 @@
       "available": false
     },
     "antigravity": {
-      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome. model_prefix is null (AGYCANON 2026-09-30, re-measured): the live OmniRoute catalog lists canonical antigravity/* ids again (19 rows) and zero agy/*, both spellings route, so gateway_ref() emits this provider's legs unchanged - the AGYID 2026-09-27 rewrite (L0 live apply skipped antigravity/* legs) is retired. omniroute_id stays 'antigravity' so apply.sh still finds the provider connection; the model_prefix mechanism itself remains for providers that genuinely diverge (scaleway -> scw). B2-AGY 2026-10-01: rate-limited for days, dead head + latency sink - removed now. available:false. Revisit-later: re-probe after 2026-10-15; if live /v1/models serves antigravity/* again and a leg acks, re-add head per combo-create skill. Declaration kept (not deleted).",
+      "$comment": "Google Antigravity OAuth bridge (agy CLI): hosts both Gemini and Claude legs (gemini-3.7-flash-high/medium, claude-opus-4-6-thinking). No published data-training policy found for this consumer surface (checked docs/ and .agents/skills/unattended-orchestration/, 2026-09-25); trains_on_prompts defaults conservatively to true (unmeasured, D8's 'assume the less private option' pattern). Never referenced by a -clean route today, so this default changes no filter outcome. model_prefix is null (AGYCANON 2026-09-30, re-measured): the live OmniRoute catalog lists canonical antigravity/* ids again (19 rows) and zero agy/*, both spellings route, so gateway_ref() emits this provider's legs unchanged - the AGYID 2026-09-27 rewrite (L0 live apply skipped antigravity/* legs) is retired. omniroute_id stays 'antigravity' so apply.sh still finds the provider connection; the model_prefix mechanism itself remains for providers that genuinely diverge (scaleway -> scw). B2-AGY 2026-10-01: rate-limited for days, dead head + latency sink - removed now. available:false. Revisit-later: re-probe after 2026-10-15; if live /v1/models serves antigravity/* again and a leg acks, re-add head per combo-create skill. Declaration kept (not deleted). CLAUDE55-GLM55 2026-10-05 (operator): B2-AGY's available:false is LIFTED for the Claude 5.5 generation - the upstream retired the 4-6 models (the agy CLI model list no longer carries claude-opus-4-6-thinking) and the operator ordered the swap to agy/claude-opus-5-5* / agy/claude-sonnet-5-5*. model_prefix 'agy' re-declared: the live /v1/models lists agy/* as canonical again (2026-10-05), superseding AGYCANON's null. trains_on_prompts stays true: still never referenced by a -clean route. Gemini legs on this provider stay governed by the repeated-429 backoff policy; no route references them today.",
       "api_base": null,
       "id": "antigravity",
       "litellm_env": null,
       "litellm_prefix": null,
-      "model_prefix": null,
+      "model_prefix": "agy",
       "omniroute_id": "antigravity",
       "provider_data": null,
       "tier": "free",
       "trains_on_prompts": true,
-      "available": false
+      "available": true
     },
     "vertex_ai": {
       "$comment": "Google Vertex AI (direct Gemini, the operator's GCP project). Key in api-keys.yml as 'vertex_ai'; the gateway connection id is 'vertex' (apply registers it with `providers add vertex` and refreshes it with `omniroute models vertex`). The project grants gemini-3-flash-preview / gemini-3.1-flash-lite / gemini-3.1-pro-preview and gemini-3.8-flash (the last added by the operator 2026-09-30). Combo and direct since L1-CLEAN 2026-10-01: vertex/gemini-3.8-flash is a live leg of t2-worker-clean and t3-driver-clean, and its `trains_on_prompts: false` is backed by the cited `privacy` block that tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2), while the opencode direct entries (vertex-flash, vertex-flash-lite, vertex-pro, vertex-3.8-flash) still address it as vertex/<model> outside the generated region of opencode.jsonc. trains_on_prompts false: Google Cloud's Vertex AI terms do not use customer prompts to train models. region us-central1 matches the registered connection. B2-VERTEX 2026-10-01 (documentation only): vertex authenticates from the GCP service-account JSON credential file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full file content is the credential, NOT a plain API key; git-ignored per .gitignore configuration/vertex-credentials-*.json, CREDIGNORE; expected to live at configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json in the checkout; worktree has none, main has it). L0 probed vertex works (gemini-3.8-flash combo acked via vertex; direct leg 200 at 08:46:52Z). Live connection list shows TWO vertex/meta rows: vertex (cc63eabf, active) + vertex-partner (2bb78365, active), and openai-compatible-chat meta-api (627d8593, active) + openai-compatible-chat-d9427825 main (8cc83b8c, active); L1-alpha measured one vertex attempt 401 [Encryption] Decryption failed (Auth tag) while direct 200 - likely one undecryptable key among the two; credential-store repair is L0s, not this lane.",
@@ -3299,7 +3367,9 @@
       "litellm_env": null,
       "litellm_prefix": null,
       "api_base": null,
-      "provider_data": {"validationModelId": "auto:free"},
+      "provider_data": {
+        "validationModelId": "auto:free"
+      },
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
@@ -3660,8 +3730,8 @@
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
-      "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ainative' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ainative', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "available": true,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ainative' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ainative', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. AINATIVE 2026-10-05 (operator): available:false LIFTED - the 2026-09-28 probe predated the connection's current catalog (live /v1/models now exposes 116 ainative/* rows). The FREEKEYS2 ledger separately proved llama-4-maverick's tool calls x2. The trial carries $9.79 until 2026-11-02; the operator ordered it burned for development. Only legs a route references become servable; trains_on_prompts stays unverified, so no -clean route may reference this provider."
     },
     "felo": {
       "id": "felo",
@@ -3694,7 +3764,7 @@
     "opencode_gateway": {
       "id": "opencode_gateway",
       "omniroute_id": "opencode",
-      "model_prefix": null,
+      "model_prefix": "oc",
       "litellm_env": null,
       "litellm_prefix": null,
       "api_base": null,
@@ -3702,8 +3772,8 @@
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
-      "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "available": true,
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. GLM55 2026-10-05 (operator): glm-5.3-flash is served through this connection; the live catalog's canonical spelling is oc/* (opencode/* is the alias row), so model_prefix 'oc' makes gateway_ref() emit oc/glm-5.3-flash. The ZCode provider stays a local-process spawn (not installed on the gateway host): the operator's 'ZCode glm-5.3-flash' grant lands through this OpenCode connection centrally; the workstation holds the ZCode connection. GLM55 2026-10-05 (operator): available:false LIFTED - the FREEKEYS-1 400s measured 2026-09-28 predate the connection's current catalog (live /v1/models now exposes 129 oc/* rows incl. oc/glm-5.3-flash, thinking + tool_calling). Only legs a route references become servable; glm-5.3-flash is the first and its tool_calls stay 'unproven' until a live seat quotes one."
     },
     "ai_horde": {
       "id": "ai_horde",
@@ -4076,34 +4146,6 @@
         }
       }
     },
-    "opus-4-6": {
-      "class": "frontier",
-      "id": "opus-4-6",
-      "legs": [
-        "cc/claude-opus-4-6"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed",
-            "openhands"
-          ],
-          "context": 1048576,
-          "context_declared": "1M",
-          "display_name": "opus-4-6 — agy free → cc subscription (1M)",
-          "openhands_profile": {
-            "max_input_tokens": 1048576,
-            "max_output_tokens": 32768,
-            "reasoning": true
-          },
-          "output": 32768
-        }
-      },
-      "unavailable_legs": {},
-      "$comment": " B2-AGY 2026-10-01: antigravity leg deleted (dead head); [cc] remains but provider cc available:false so route lands in omitted (declared, none servable) and apply prunes live stale combo. Revisit 2026-10-15."
-    },
     "samba/MiniMax-M3": {
       "$comment": "Pinned single-model route (mapping doc Open choice 11: a route id may coincide with a model id/leg spelling): samba's paid-credit MiniMax-M3 leg, S1-S2 implement + tests, from the 2026-09-26 16:4xZ 'Claude budget' worker table (briefs/common.md). Exists so `--model omniroute/samba/MiniMax-M3` is independently addressable (declared_models() in tools/autoos-agent.py needs an opencode.jsonc modelID, which only a named route - not a bare route leg - ever renders into), per this lane's 'still wanted' item: `--client opencode --model omniroute/samba/MiniMax-M3 --dry-run` must pass.",
       "class": "cheap",
@@ -4191,11 +4233,12 @@
       "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/meta/muse-spark-1.3-contributor'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted."
     },
     "t1-orchestrator": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven; providers.groq tier free; 128k) added to the free band after the scaleway legs so this route keeps TWO distinct proven providers once nebius is removed (L1-beta); the leg answered a live gateway ack+tool-call probe (200, get_weather, max_tokens 512) at 05:58:58Z. Chosen over huggingface/zai-org/GLM-5.2 (401 'no active credentials' on this host) and openrouter/*:free (provider tier paid, which fails test_on_t1_it_follows_the_free_band - only a provider-tier-free leg may precede the paid contributor). The matching combos.json combo carries the same leg with its nebius legs already dropped (NEBREMOVAL). TORDER 2026-10-01 (D-TORDER-1 option b, threshold >=600k per operator update 3): t1 keeps only >=1M legs (all 1048576, renders 1M); free gemini head + free_ai 1M second free, vertex credit, meta paid, deepseek paid LAST. Sub-1M scaleway/nebius/groq legs removed to t2/t3. TORDER-OR 2026-10-01: deleted orphaned unavailable_legs (openrouter/meta TASK1-removed + morph/deepinfra/zen tails not in 1M band); t1 has no unavailable (all 5 legs servable).",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven; providers.groq tier free; 128k) added to the free band after the scaleway legs so this route keeps TWO distinct proven providers once nebius is removed (L1-beta); the leg answered a live gateway ack+tool-call probe (200, get_weather, max_tokens 512) at 05:58:58Z. Chosen over huggingface/zai-org/GLM-5.2 (401 'no active credentials' on this host) and openrouter/*:free (provider tier paid, which fails test_on_t1_it_follows_the_free_band - only a provider-tier-free leg may precede the paid contributor). The matching combos.json combo carries the same leg with its nebius legs already dropped (NEBREMOVAL). TORDER 2026-10-01 (D-TORDER-1 option b, threshold >=600k per operator update 3): t1 keeps only >=1M legs (all 1048576, renders 1M); free gemini head + free_ai 1M second free, vertex credit, meta paid, deepseek paid LAST. Sub-1M scaleway/nebius/groq legs removed to t2/t3. TORDER-OR 2026-10-01: deleted orphaned unavailable_legs (openrouter/meta TASK1-removed + morph/deepinfra/zen tails not in 1M band); t1 has no unavailable (all 5 legs servable). CLAUDE55 2026-10-05 (operator): antigravity/claude-sonnet-5-5-medium joins the free band after the gemini head (subscription $0 marginal, 1M window >= the 600k t1 floor, caching).",
       "class": "cheap",
       "id": "t1-orchestrator",
       "legs": [
         "gemini/gemini-3.8-flash",
+        "antigravity/claude-sonnet-5-5-medium",
         "free_ai/google/gemini-3.8-flash",
         "vertex/gemini-3.8-flash",
         "meta_api/muse-spark-1.3-contributor",
@@ -4358,8 +4401,6 @@
       "class": "frontier",
       "id": "t2-orchestrator",
       "legs": [
-        "ovhcloud/gpt-oss-120b",
-        "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ],
@@ -4383,13 +4424,15 @@
           "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
         }
       },
-      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15)."
+      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). CACHEORCH 2026-10-05 (operator): orchestrator tiers (L0-L2) serve long sessions, so only prompt-caching providers may serve them; OVH does not cache and is moved to implementation work only - its two legs are removed here. Claude 4-6 generation retired upstream: agy/claude-sonnet-5-5-medium heads the combo (subscription $0 marginal, caching). L2-CLEAN reconciliation: antigravity/claude-sonnet-5-5-medium was considered as the head but is EXCLUDED - this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01) and antigravity trains_on_prompts is true. The two remaining legs are the caching ∩ trains-nothing intersection (vertex trial credit; deepseek's cited no-training terms, D-393)."
     },
     "t2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15).",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
       "class": "mid",
       "id": "t2-worker",
       "legs": [
+        "opencode_gateway/glm-5.3-flash",
+        "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -4523,8 +4566,10 @@
     "t2-worker-free-only": {
       "class": "free",
       "id": "t2-worker-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15).",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only: it takes no `credit` grant. groq/cerebras stay gated (deny-groq, 402 billing) and free_ai/qwen7b stays the documented stopgap last leg. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
       "legs": [
+        "opencode_gateway/glm-5.3-flash",
+        "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -4601,10 +4646,12 @@
       }
     },
     "t3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
       "class": "cheap",
       "id": "t3-driver",
       "legs": [
+        "opencode_gateway/glm-5.3-flash",
+        "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -4737,8 +4784,10 @@
     "t3-driver-free-only": {
       "class": "free",
       "id": "t3-driver-free-only",
-      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune.",
+      "$comment": "FREEKEYS-2 (D-141 item 3): the free band is ordered ahead of the paid legs and gained the probe-passed free grants (scaleway Mistral Small 3.2, nebius GLM-5.3-Flash, scaleway Qwen3-235B). Every combo keeps its legs on distinct providers so an OmniRoute priority fall-through on a 429 lands on another provider, not on the same rate limit. Reset-aware cooldowns (PLAN section 18) untouched. Free-only, so groq/cerebras stay gated (deny-groq 400/413, 401 credits) and free_ai/qwen7b stays the last-resort stopgap. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
       "legs": [
+        "opencode_gateway/glm-5.3-flash",
+        "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -4873,8 +4922,10 @@
     "t4-researcher": {
       "class": "free",
       "id": "t4-researcher",
-      "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors t3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context.",
+      "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors t3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
       "legs": [
+        "opencode_gateway/glm-5.3-flash",
+        "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "scaleway/qwen3-235b-a22b-instruct-2507",
         "free_ai/qwen7b"
@@ -4964,6 +5015,34 @@
           "output": 65536
         }
       }
+    },
+    "opus-5-5": {
+      "class": "frontier",
+      "id": "opus-5-5",
+      "legs": [
+        "antigravity/claude-opus-5-5-medium"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed",
+            "openhands"
+          ],
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "opus-4-6 — agy free → cc subscription (1M)",
+          "openhands_profile": {
+            "max_input_tokens": 1048576,
+            "max_output_tokens": 32768,
+            "reasoning": true
+          },
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {},
+      "$comment": " B2-AGY 2026-10-01: antigravity leg deleted (dead head); [cc] remains but provider cc available:false so route lands in omitted (declared, none servable) and apply prunes live stale combo. Revisit 2026-10-15. CLAUDE55 2026-10-05 (operator): renamed from opus-4-6 - the cc/claude-opus-4-6 leg is dead (upstream retired the 4-6 generation); the combo now carries the antigravity Opus 5.5 medium spelling the agy CLI and the live catalog serve. Renders ACTIVE again (the omitted state died with the old leg)."
     }
   },
   "version": "2026-09-30"

@@ -233,29 +233,34 @@ class RenderMatchesTodayTests(unittest.TestCase):
 
 
 class GatewayRefTests(unittest.TestCase):
-    """AGYID/AGYCANON: the live OmniRoute catalog flipped antigravity's ids back
-    to canonical antigravity/* (re-measured /v1/models 2026-09-30: 19
-    antigravity/* rows, zero agy/*), so providers.antigravity.model_prefix is
-    null and an omniroute render emits the registry spelling unchanged - the
-    exact ids apply's validation checks. The model_prefix mechanism itself
+    """AGYID/AGYCANON/CLAUDE55: the live OmniRoute catalog flipped twice - to
+    canonical antigravity/* (re-measured 2026-09-30, AGYCANON retired the agy
+    prefix) and back to agy/* (re-measured 2026-10-05, CLAUDE55: the 4-6
+    generation is retired upstream and the operator ordered the swap to the
+    agy/claude-{opus,sonnet}-5-5* spellings) - so
+    providers.antigravity.model_prefix is 'agy' again and gateway_ref()
+    rewrites this provider's legs to it. The model_prefix mechanism itself
     stays live for providers that genuinely diverge (scaleway -> scw)."""
 
     def test_render_omniroute_renders_antigravity_by_its_canonical_id(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY deleted every
-        # antigravity leg from the bands, provider available:false, revisit
-        # 2026-10-15): no combo can carry one, so the AGYCANON pin moves to
-        # the unit that owns it - gateway_ref emits the canonical
-        # antigravity spelling (no agy/ rewrite while
-        # providers.antigravity.model_prefix is null) - and the real render
-        # is pinned to contain no resurrected agy/ spelling.
-        self.assertIsNone(
-            real_registry()["providers"]["antigravity"].get("model_prefix"))
+        # antigravity leg, 2026-10-01) and moved back by the operator's
+        # CLAUDE55 order (2026-10-05): the provider is re-opened with
+        # model_prefix 'agy' (the live catalog's canonical spelling again),
+        # so gateway_ref emits agy/* and the real render carries exactly the
+        # 5-5 spellings apply's validation checks.
         self.assertEqual(
-            registry.gateway_ref("antigravity/gemini-3.7-flash-high",
+            real_registry()["providers"]["antigravity"].get("model_prefix"),
+            "agy")
+        self.assertEqual(
+            registry.gateway_ref("antigravity/claude-sonnet-5-5-medium",
                                  real_registry()),
-            "antigravity/gemini-3.7-flash-high")
+            "agy/claude-sonnet-5-5-medium")
         rendered = registry.render_omniroute(real_registry())
-        self.assertNotIn("agy/", json.dumps(rendered))
+        self.assertIn("agy/claude-opus-5-5-medium", json.dumps(rendered))
+        self.assertIn("agy/claude-sonnet-5-5-medium", json.dumps(rendered))
+        # No pre-CLAUDE55 agy spelling may resurrect.
+        self.assertNotIn("claude-opus-4-6", json.dumps(rendered))
 
     def test_render_omniroute_still_applies_a_declared_model_prefix(self):
         # The mechanism AGYID added (and this AGYCANON change must not break):
@@ -406,14 +411,16 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
             self.assertIn(managed, rendered)
 
     def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
-        # An all-gateway-only route (opus-4-6) and the samba one-leg routes
-        # (provider available:false) render no block at all - the same shape
+        # An all-gateway-only route (opus-5-5: CLAUDE55 2026-10-05 renamed the
+        # opus-4-6 route; its antigravity leg has no litellm_env, so it renders
+        # no block either) and the samba one-leg routes (provider
+        # available:false) render no block at all - the same shape
         # render_omniroute() gives an all-dead route, not an empty model list.
         # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
         # servable leg. t3-driver-free-only left this set when FREEAI gave it
         # a servable free_ai/qwen7b leg.
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        for gone in ("opus-4-6", "samba/gpt-oss-120b", "samba/MiniMax-M3"):
+        for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, rendered)
 
     def test_a_legless_hand_group_is_never_rendered(self):
@@ -704,15 +711,18 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
     def test_effort_ladder_derived_from_head_leg(self):
         reg = copy.deepcopy(real_registry())
         # Pick a route whose first leg's model actually carries an effort_ladder
-        # (t2-worker heads gemini-3.8-flash; t1-orchestrator was the example
-        # until it fail-closed 2026-09-27 and left the ide render).
-        route = reg["routes"]["t2-worker"]
+        # (t2-orchestrator heads antigravity/claude-sonnet-5-5-medium since the
+        # operator's CLAUDE55 order; t2-worker was the fixture until GLM55
+        # 2026-10-05 put oc/glm-5.3-flash - no ladder - at its head;
+        # t1-orchestrator was the example before that until it fail-closed
+        # 2026-09-27 and left the ide render).
+        route = reg["routes"]["t2-orchestrator"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         model_entry = reg["models"][mid]
         self.assertIn("effort_ladder", model_entry)
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["t2-worker"]["effort_ladder"],
+        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"],
                          [e for e in model_entry["effort_ladder"] if e != "none"])
 
     def test_none_is_dropped_from_effort_ladder(self):
@@ -730,16 +740,18 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         # Ensure the model has no effort_ladder
         reg["models"][mid].pop("effort_ladder", None)
-        # t2-worker still has a ladder via the first leg's model
-        # (t1-orchestrator was the control until it fail-closed 2026-09-27).
-        t2_route = reg["routes"]["t2-worker"]
+        # t2-orchestrator still has a ladder via the first leg's model
+        # (t2-worker was the control until GLM55 2026-10-05 put
+        # oc/glm-5.3-flash - no ladder - at its head; t1-orchestrator was the
+        # control before that until it fail-closed 2026-09-27).
+        t2_route = reg["routes"]["t2-orchestrator"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["t3-driver-clean"])
-        self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
+        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"], expected)
 
     def test_no_effort_ladder_when_route_has_no_legs(self):
         # The rule is about a route that declares no legs at all, so it is
@@ -748,15 +760,16 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # drift out of the fixture the moment anyone legs them too.
         reg = copy.deepcopy(real_registry())
         reg["routes"]["t1-orchestrator-paid"]["legs"] = []
-        # t2-worker has legs whose first model carries a ladder
-        t2_route = reg["routes"]["t2-worker"]
+        # t2-orchestrator has legs whose first model carries a ladder (the
+        # t2-worker control moved with GLM55 2026-10-05, see above).
+        t2_route = reg["routes"]["t2-orchestrator"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["t1-orchestrator-paid"])
-        self.assertEqual(by_id["t2-worker"]["effort_ladder"], expected)
+        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"], expected)
 
     def test_the_contributor_ladder_reaches_every_surface_that_carries_one(self):
         # MUSEAPI step 3: the effort aliases for the contributor writer are the
@@ -1091,12 +1104,14 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         reg = copy.deepcopy(real_registry())
         # CIGREEN: expectation moved by c4c3654b (TORDER-OR removed the paid
         # openrouter legs from t2-orchestrator) + aced9915 (removed its
-        # antigravity leg too): the route carries ovhcloud legs now, so the
-        # provider-wide flip uses ovhcloud - still a provider the route
-        # actually reaches through, which is what this test needs.
+        # antigravity leg too): the route carried ovhcloud legs then. Moved
+        # again by the operator's CACHEORCH order (2026-10-05: t2-orchestrator
+        # dropped its OVH legs - orchestrators serve long sessions and OVH does
+        # not cache), so the provider-wide flip uses t2-worker, which still
+        # reaches through ovhcloud.
         reg["providers"]["ovhcloud"]["available"] = False
         rendered = registry.render_models_doc(reg)
-        row = row_for(rendered, "t2-orchestrator")
+        row = row_for(rendered, "t2-worker")
         self.assertIn("~~ovhcloud", row)
         self.assertIn("(unavailable)", row)
 
@@ -1471,8 +1486,10 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
             "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = (
                 "2026-10-01T09:05:00Z")
         # One leg with an until but no available:false at all.
-        reg["routes"]["opus-4-6"]["unavailable_legs"] = {
-            "antigravity/claude-opus-4-6-thinking": {
+        # CLAUDE55 2026-10-05: the fixture moved from opus-4-6 (renamed
+        # opus-5-5; its antigravity leg now spells the 5-5 generation).
+        reg["routes"]["opus-5-5"]["unavailable_legs"] = {
+            "antigravity/claude-opus-5-5-medium": {
                 "unavailable_until": "2026-10-01T09:05:00Z"},
         }
         reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
@@ -1642,12 +1659,16 @@ class FreeAiRenderTests(unittest.TestCase):
         # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
         # trial-free-credits-paid order - gemini trial head, free band, the
         # self-hosted free_ai mid-list, scaleway grants trail it, deepseek
-        # last where present). The T2FREE-era free-ai-last invariant is
-        # superseded; the band head and tail below pin the new order.
+        # last where present). Moved again by the operator's GLM55/AINATIVE
+        # order (2026-10-05): oc/glm-5.3-flash (expiring grant) and
+        # ainative/llama-4-maverick (trial burn-down) lead the band. The
+        # band head and tail below pin the new order.
         self.assertEqual(models[-1], "scw/qwen3-235b-a22b-instruct-2507")
         self.assertIn("free-ai/qwen7b", models)
-        self.assertEqual(models[:5],
-                         ["gemini/gemini-3.8-flash",
+        self.assertEqual(models[:7],
+                         ["oc/glm-5.3-flash",
+                          "ainative/llama-4-maverick",
+                          "gemini/gemini-3.8-flash",
                           "groq/qwen/qwen3.8-27b",
                           "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
                           "openrouter/poolside/laguna-s-2.1:free",

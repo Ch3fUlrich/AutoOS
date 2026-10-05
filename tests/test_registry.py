@@ -207,14 +207,15 @@ class GatewayRefTests(unittest.TestCase):
                                  self.reg),
             "scw/mistral-small-3.2-24b-instruct-2506")
 
-    def test_antigravity_model_prefix_is_retired(self):
-        # AGYCANON 2026-09-30: the live catalog serves canonical antigravity/*
-        # ids again (re-measured /v1/models: 19 antigravity/* rows, zero
-        # agy/*), so the prefix is null and the leg renders unchanged.
-        self.assertIsNone(self.reg["providers"]["antigravity"]["model_prefix"])
+    def test_antigravity_model_prefix_is_declared(self):
+        # AGYCANON 2026-09-30 retired the prefix; the operator's CLAUDE55
+        # order (2026-10-05) re-declared it: the live catalog serves canonical
+        # agy/* again (the 4-6 generation is retired upstream), so
+        # gateway_ref() rewrites this provider's legs to agy/*.
+        self.assertEqual(self.reg["providers"]["antigravity"]["model_prefix"], "agy")
         self.assertEqual(
-            registry.gateway_ref("antigravity/claude-opus-4-6-thinking", self.reg),
-            "antigravity/claude-opus-4-6-thinking")
+            registry.gateway_ref("antigravity/claude-opus-5-5-medium", self.reg),
+            "agy/claude-opus-5-5-medium")
 
     def test_provider_without_model_prefix_is_unchanged(self):
         self.assertEqual(
@@ -2712,7 +2713,12 @@ class MistralPlanLimitsTests(unittest.TestCase):
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
         # TORDER 2026-10-01: gemini restored head (operator reversal, GEMRESTORE
         # + TASK2); scaleway kept but NOT as head (dead head); nebius removed.
-        self.assertEqual(legs[0], "gemini/gemini-3.8-flash")
+        # GLM55/AINATIVE 2026-10-05 (operator): the expiring grants lead the
+        # band ahead of gemini - oc/glm-5.3-flash (1M, OpenCode-served) then
+        # ainative/llama-4-maverick (FREEKEYS-proven tool calls).
+        self.assertEqual(legs[0], "opencode_gateway/glm-5.3-flash")
+        self.assertEqual(legs[1], "ainative/llama-4-maverick")
+        self.assertEqual(legs[2], "gemini/gemini-3.8-flash")
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
         paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
@@ -3232,27 +3238,30 @@ class ThirdPartyClaudeLegTests(unittest.TestCase):
     # and dropped from this branch — see docs/handoff/2026-09-30-laneA-providers.md.)
     # Like the 11 FREEKEYS-1 providers above, none may carry a
     # Claude-named model row or serve a Claude leg in any route.
-    MISSING_19 = (
+    # AINATIVE/OPENCODE-GATEWAY left this set 2026-10-05 (operator): both
+    # connections are live again with grown catalogs (116 / 129 rows) and
+    # serve operator-ordered legs (llama-4-maverick, glm-5.3-flash).
+    MISSING_17 = (
         "api_airforce", "llm7", "nscale", "siliconflow", "sealion",
         "routeway", "requesty", "aion_labs", "agnes", "pollinations",
-        "g4f", "kilo_gateway", "ainative", "felo",
-        "uncloseai", "opencode_gateway", "ai_horde", "z_ai", "qoder_ai",
+        "g4f", "kilo_gateway", "felo",
+        "uncloseai", "ai_horde", "z_ai", "qoder_ai",
     )
 
-    def test_each_of_the_19_missing_providers_is_registered(self):
+    def test_each_of_the_17_missing_providers_is_registered(self):
         reg = load_registry()
-        for pid in self.MISSING_19:
+        for pid in self.MISSING_17:
             self.assertIn(pid, reg["providers"], "%s missing from providers" % pid)
 
-    def test_each_of_the_19_missing_providers_is_available_false(self):
+    def test_each_of_the_17_missing_providers_is_available_false(self):
         reg = load_registry()
-        for pid in self.MISSING_19:
+        for pid in self.MISSING_17:
             self.assertIs(reg["providers"][pid].get("available"), False,
                           "providers.%s available is not false" % pid)
 
-    def test_each_of_the_19_missing_providers_has_a_measured_comment(self):
+    def test_each_of_the_17_missing_providers_has_a_measured_comment(self):
         reg = load_registry()
-        for pid in self.MISSING_19:
+        for pid in self.MISSING_17:
             comment = reg["providers"][pid].get("$comment", "")
             self.assertTrue(comment, "providers.%s has no $comment" % pid)
             self.assertIn("2026-09-28", comment,
@@ -3260,28 +3269,28 @@ class ThirdPartyClaudeLegTests(unittest.TestCase):
             self.assertIn("available is false", comment,
                          "providers.%s $comment lacks 'available is false'" % pid)
 
-    def test_the_19_missing_providers_register_no_claude_model(self):
-        """D-102 held the probe off Claude, so none of the 19 missing providers
+    def test_the_17_missing_providers_register_no_claude_model(self):
+        """D-102 held the probe off Claude, so none of the 17 missing providers
         may carry a Claude-named model row or serve a Claude leg."""
         reg = load_registry()
-        legs = {"%s/%s" % (pid, model_key) for pid in self.MISSING_19
+        legs = {"%s/%s" % (pid, model_key) for pid in self.MISSING_17
                 for model_key in self.claude_models(reg)}
         served = {leg for route in reg["routes"].values()
                   for leg in (route.get("legs") or []) if leg in legs}
         self.assertEqual(served, set())
 
-    def test_the_19_missing_providers_appear_in_no_route_legs(self):
+    def test_the_17_missing_providers_appear_in_no_route_legs(self):
         """An available:false provider that never answered must not appear in
         any route's legs list."""
         reg = load_registry()
-        pids = set(self.MISSING_19)
+        pids = set(self.MISSING_17)
         for route_id, route in reg["routes"].items():
             for leg in (route.get("legs") or []):
                 if not isinstance(leg, str):
                     continue
                 prefix = leg.split("/", 1)[0]
                 self.assertNotIn(prefix, pids,
-                                 "route %s carries leg %s from a missing-19 provider"
+                                 "route %s carries leg %s from a missing-17 provider"
                                  % (route_id, leg))
 
 
@@ -3805,8 +3814,24 @@ class CleanTierRouteTests(unittest.TestCase):
 
     def test_sensitive_routes_lead_with_the_trial_credits(self):
         for rid in self.SENSITIVE:
+            if rid == "t2-orchestrator":
+                continue
             self.assertEqual(self.reg["routes"][rid]["legs"][:3],
                              list(self.TRIAL_LEGS), rid)
+
+    def test_t2_orchestrator_leads_with_caching_trains_nothing_legs(self):
+        # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
+        # sessions, so only prompt-caching providers may serve them - the two
+        # OVH legs are gone (OVH does not cache; it is for implementation work
+        # only). L2-CLEAN still holds: this route is privacy=sensitive-capable,
+        # so the antigravity claude 5-5 head was excluded (trains_on_prompts
+        # true) and the remaining legs are the caching ∩ trains-nothing
+        # intersection, >= 2 distinct providers, deepseek last.
+        legs = self.reg["routes"]["t2-orchestrator"]["legs"]
+        self.assertEqual(legs, ["vertex/gemini-3.8-flash",
+                                "deepseek/deepseek-flash"])
+        for leg in legs:
+            self._leg(leg)
 
     def test_sensitive_routes_end_with_paid_deepseek(self):
         for rid in self.SENSITIVE:

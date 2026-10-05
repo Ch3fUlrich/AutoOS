@@ -75,11 +75,6 @@
       "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
       "context": 128000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -128,11 +123,6 @@
       "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
       "context": 128000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -169,11 +159,6 @@
       "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
       "context": 128000,
       "output": 16384,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -222,11 +207,6 @@
       "name": "t3 cheap-driver-128k — zero spend (free legs only)",
       "context": 128000,
       "output": 16384,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -261,6 +241,22 @@
       }
     },
     {
+      "id": "opus-5-5",
+      "name": "opus-4-6 — agy free → cc subscription (1M)",
+      "context": 1048576,
+      "output": 32768,
+      "effort_ladder": [
+        "medium"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
       "id": "t4-rag",
       "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
       "context": 131072,
@@ -282,11 +278,6 @@
       "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
       "context": 128000,
       "output": 8192,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
