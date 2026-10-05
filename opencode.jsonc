@@ -83,6 +83,10 @@
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-resilience-env2-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebius-combos-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebius2-combos-20260930", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-mergemap", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebius2", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebiuswave", "effect": "allow" },
+    { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebiuswave2", "effect": "allow" },
     { "action": "shell", "resource": "git merge --continue", "effect": "allow" },
     { "action": "shell", "resource": "git merge --abort", "effect": "allow" },
     { "action": "shell", "resource": "git fetch origin", "effect": "allow" }
