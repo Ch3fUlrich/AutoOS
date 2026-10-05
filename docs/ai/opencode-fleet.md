@@ -61,3 +61,68 @@ OpenCode L1 sessions MUST load the `bash-guard` plugin before they run unattende
 - **Fail-open design:** Missing dependencies, execution timeouts (> 5 s), or Python runtime errors fail open with a diagnostic stderr log line.
 - **Tool scope:** Inspects only the `shell` and `bash` tools; calls via custom tools or external runners bypass this hook.
 - **Rule set:** Currently covers unquoted heredocs with backticks/subshells and `claude --bg/-p/--print` nested calls. The kill-by-image-name rule is added to the core with FLEET-HOOKS v2.3 later.
+
+## oc_l1.py launcher
+
+`tools/oc_l1.py` starts ONE OpenCode orchestrator (an "L1") for ONE lane from a host-local config: one `opencode serve`
+bound to 127.0.0.1, one session, relaunchable from a handoff card. It has three subcommands:
+
+```bash
+python3 tools/oc_l1.py render --name <lane> [--config PATH]   # write the scratch opencode config, nothing else
+python3 tools/oc_l1.py start  --name <lane> [--config PATH]   # render, start the server, create the session, run the canary
+python3 tools/oc_l1.py status --name <lane> [--config PATH]   # live | silent | dead
+```
+
+### Config
+
+The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/autoos/oc-l1.json` on POSIX,
+`%LOCALAPPDATA%\autoos\oc-l1.json` on Windows (override with `--config`). Copy
+`configuration/oc-l1.example.json` and fill in real values; every key is documented in its `_comment`. Important rules:
+
+- `password_env` holds only the NAME of an environment variable. `start` refuses (exit 2, nothing started) when that variable
+  is not set in the process environment; the value is never written to a file, a command line or the rendered config.
+- `opencode_bin` is the explicit path of the npm `opencode` binary. It is never looked up on PATH and never the desktop app's
+  background service.
+- The server binds to 127.0.0.1 only (`--hostname 127.0.0.1`), on `serve_port` (default: a stable hash of the lane name in
+  47200-47299).
+- `render` writes a scratch config under `scratch_dir`; the user's own opencode config is never touched. Only the MCP servers
+  listed in the lane's `mcp` are enabled; every other server of the repo `opencode.jsonc` is disabled.
+- `plugins` lists plugin DIRECTORIES (each holding an `index.mjs`), for example the bash-guard plugin of the section above.
+- The scratch file uses opencode's OWN config schema (singular `provider`, models keyed by the gateway model id, a flat `mcp` map,
+  `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
+- The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
+  tools run `git rev-parse` with an inherited stdin and, under opencode's stdio transport, the first `ps` call hangs.
+
+### start, relaunch and the canary
+
+`start` renders the config, starts the server with scratch XDG directories (so no other tool's skills load), waits for health,
+creates the pilot session and writes the state file atomically (mode 0600 on POSIX). It then runs the bash-guard CANARY: a
+second throwaway session on the same server is asked to run a command that the guard must refuse (an unquoted heredoc with a
+backticked command). The result `{denied, ts, plugin_path, session_id}` is stored in the state file and merged into
+`heartbeat.json`. Only after a DENIED canary does `start` post the pilot's first prompt (the handoff head plus a hint line about
+MCP tools): a pilot that is not known to be guarded never runs.
+
+- Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended.
+- Canary NOT denied (the command ran, no tool call happened, timeout, error): NO prompt is posted, the pilot session stays idle,
+  the server stays up for supervised use, `start` prints `UNATTENDED-REFUSED` and exits 5. The plugin fails open on purpose, so
+  an unproven guard means no unattended run.
+- A second `start` on a live session posts nothing new and prints the stored canary line; if that stored canary was not denied
+  it prints `UNATTENDED-REFUSED` and exits 5 again (it never reports a refused start as live). A `start` that finds the server
+  dead is a RELAUNCH: it starts a new server and runs the canary again, and `heartbeat.json` gets the new result.
+- The server child inherits the launcher's FULL environment (opencode, `uv` and the MCP servers need PATH, the profile
+  directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
+  shell that holds only what the pilot may see.
+
+Exit codes of `start`: 0 started or already live, 2 config or validation error, 4 health timeout (the child is killed by its
+recorded PID), 5 canary not denied.
+
+### status
+
+`status` asks the server (v2 API, Basic auth from the same environment variable): `live` (exit 0), `silent` (exit 1: alive, but
+no new assistant message or tool item for `silent_minutes`, default 10) or `dead` (exit 2: no answer, or the session ended as
+failed or interrupted).
+
+### Templates
+
+- `configuration/oc-l1/autoos-oc-l1.service`: example systemd user unit that runs `start`.
+- `configuration/oc-l1/windows-task.md`: the Windows Scheduled Task equivalent.

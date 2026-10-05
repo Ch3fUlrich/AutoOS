@@ -1,0 +1,39 @@
+# autoos-oc-l1.service — example systemd USER unit for an oc_l1.py L1 lane
+#
+# O1-LITE launcher lane (O1-LITE). Start the ONE-lane launcher from a
+# scheduled trigger instead of a shell:
+#
+#     python3 <checkout>/tools/oc_l1.py start --name <lane>
+#
+# Every value below is a placeholder - replace <checkout> and <lane> before
+# use, and keep the filled-in unit + env file git-ignored (never committed):
+#   * <checkout>   absolute path of this repo checkout
+#   * <lane>       the lane's top-level key in the host-local config
+#
+# The unit is a USER unit (not a system unit):
+#   cp configuration/oc-l1/autoos-oc-l1.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user start autoos-oc-l1
+#
+# Type=oneshot + RemainAfterExit=yes: `start` is a oneshot that LEAVES the
+# opencode server running (it detaches the child and exits), so the unit must
+# keep reporting "active (exited)" after the launcher command returns.
+#
+# The password travels through the environment, never through the unit:
+# EnvironmentFile= points at a protected host-local file that holds ONLY the
+# NAME of the env var the lane config references (password_env) - the file
+# carries the value of that variable, the unit and the config never do.
+# `start` refuses to run (exit 2) unless that variable is set.
+
+[Unit]
+Description=AutoOS oc_l1.py L1 lane (O1-LITE) - <lane>
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=<path/to/host-local/oc-l1-<lane>.env>
+ExecStart=/usr/bin/python3 <checkout>/tools/oc_l1.py start --name <lane>
+
+[Install]
+WantedBy=default.target

@@ -848,6 +848,10 @@ if it "cost gate: Windows module, export wrapper and scheduled task (unit tests)
     out="$(python3 tests/test_cost_gate_windows.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "autoos-agent: git subprocess calls on MCP paths do not inherit stdin (unit tests)"; then
+    out="$(python3 tests/test_mcp_stdin_devnull.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # REVFIX: no unit test file may be invisible to every harness. This guard
 # fails when a tests/test_*.py is not named by any suite entry point.
 if it "suite wiring: every tests/test_*.py is wired into a harness"; then
@@ -1006,6 +1010,26 @@ fi
 
 if it "opencode bash-guard: OpenCode plugin hook guard (unit tests)"; then
     out="$(python3 tests/test_opencode_bash_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "oc_l1 launcher: config and render (unit tests)"; then
+    out="$(python3 tests/test_oc_l1.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "oc_l1 launcher: start (unit tests)"; then
+    out="$(python3 tests/test_oc_l1_serve.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "oc_l1 launcher: status (unit tests)"; then
+    out="$(python3 tests/test_oc_l1_status.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "oc_l1 launcher: bash-guard canary (unit tests)"; then
+    out="$(python3 tests/test_oc_l1_canary.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "oc_l1 launcher: rendered opencode config shape (unit tests)"; then
+    out="$(python3 tests/test_oc_l1_render.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "render-opencode-container-config survives a malformed port (unit tests)"; then

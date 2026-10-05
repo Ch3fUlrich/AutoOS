@@ -1,0 +1,8 @@
+[Unit]
+Description=Throttling proxy for the OpenCode L0 (min 30 s between turns) - routing D-615
+[Service]
+ExecStart=/usr/bin/python3 %h/fleet/oc-pilot/throttle.py 47180 30
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=default.target

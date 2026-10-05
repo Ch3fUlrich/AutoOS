@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenCode session watcher for oc-pilot (nudge, restart, rotation, run caps)
+[Service]
+Environment="PATH=%h/.local/bin:%h/.cargo/bin:%h/.nvm/versions/node/v24.19.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment=LANE=oc-pilot
+Environment=CLONE=%h/code/AutoOS-worktrees/oc-pilot/AutoOS
+Environment=BLOCK_GATE=1
+Environment="ROLE_TEXT=You are the AutoOS L1: work through your lane queue (inbox) one lane at a time, spawn writers via the autoos-agent MCP spawn tool."
+ExecStart=/usr/bin/python3 %h/code/AutoOS/tools/autoos_gateway_key.py exec --no-notice -- /usr/bin/python3 %h/fleet/oc-pilot/watch2.py
+Environment=NUDGE_EVERY=600
+Environment=SESSION_GATEWAY_URL=http://127.0.0.1:47181
+Environment=STATUS_FILE=%h/code/AutoOS-worktrees/oc-l0/AutoOS/.oc-pilot/L1-STATUS.txt
+Environment='OPENCODE_CONFIG_CONTENT=<json overlay, see README: edit deny outside .oc-pilot/, provider baseURL -> this lane's throttle proxy, scoped external_directory>'
+Environment=AUTOOS_GUARD_ROLE=orchestrator
+Environment=ROTATE_MSGS=130
+KillMode=process
+Restart=always
+RestartSec=20
+[Install]
+WantedBy=default.target

@@ -24,6 +24,7 @@ every L1 session needs before touching a brief.
 | File | Holds |
 |---|---|
 | [`references/main-orchestrator.md`](references/main-orchestrator.md) | L1 standing orders: navigate, spawn/brief L2, cross-family review, off-peak timing, machine checks, token discipline, evidence rules |
+| [`references/opencode-fleet-lessons.md`](references/opencode-fleet-lessons.md) | OpenCode sessions without Claude (L0/L1/L3): idle sessions, approval hangs, context cost, weak-model overclaims, mechanical rules, canary, gates |
 | [`references/l3-routing.md`](references/l3-routing.md) | Choosing an L3 leaf model (cost/time/urgency/privacy) and the leaf gate |
 | [`references/lanes.md`](references/lanes.md) | Lanes, sessions, `resources`, `dependsOn`, per-session model choice |
 | [`references/state-file.md`](references/state-file.md) | The status/state file template an orchestrator rewrites every wave and hands off from |
