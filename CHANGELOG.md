@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- spawner: read-only git subprocesses on the MCP tool paths no longer inherit stdin (MCP-STDIN)
 - opencode: oc_l1.py launcher (render|start|status) with the bash-guard CANARY for unattended OpenCode L1 sessions (O1-LITE)
 - COST-GATE-CULTURE-FIX (2026-10-04): the Windows rows export (`lib/windows/cost-gate-export.ps1`) no longer stops paging after the first page on non-US cultures (PowerShell turned the call-log timestamps into DateTime objects and re-parsed them with the current culture: de-DE read 4 October as 10 April, so the daily gate counted only ~500 rows and under-reported spend); dates are now used without a culture round trip, the cutoff is the start of the current UTC day minus 1 h (page cap 60 x 500), and an export that ended for any other reason (page error, unreadable timestamp, page cap, a cutoff the raw ISO timestamps do not confirm) writes `UNAVAILABLE: rows export incomplete: <reason>` and keeps the old gate file. Proving tests: `tests/test_cost_gate_culture.py`.
 - opencode: bash-guard plugin (shell tool) sharing the FLEET-HOOKS core (O4)
