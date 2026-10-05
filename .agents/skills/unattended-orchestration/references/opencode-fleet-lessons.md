@@ -51,3 +51,14 @@ An opencode session is turn based. When the model ends its turn, the session goe
 - Compare failure SETS against main when your container is not faithful to CI (root, no network namespace); one known test hangs in that container (part 34).
 - Never kill by process name. Kill the recorded pid, or stop the recorded systemd unit.
 - Ask the operator only for secrets, permission settings, deletes, public publishing, money, host-level changes (reboot, WSL restart, firewall/exposure). Everything else: decide, log, go.
+
+## 8. Added 2026-10-05
+
+- **Verify a throttle with connections, not env vars.** The project `opencode.jsonc` of an AutoOS clone pins the gateway address and overrides the scratch config: an env var for the proxy URL was silently ignored and the sessions ran unthrottled (about 22 calls a minute, 8 USD/h). Force the address with the `OPENCODE_CONFIG_CONTENT` overlay (`provider.<id>.options.baseURL`) and check `ss -tnp state established '( dport = :20128 )'`.
+- **A weak orchestrator re-runs every old order.** It re-reads the whole inbox after each restart. Keep ONE current task file (the watcher archives the rest) and name it in the restart note.
+- **It resets its own clone.** Keep work on `lane/<name>` branches and install a git `reference-transaction` hook that refuses a backward move; git passes an all-zero old value for `update-ref`, so the hook must read the ref itself. Never test such a hook on a live clone.
+- **It edits things it should not.** Two real bad edits: a global monkey-patch of `subprocess.run` (infinite recursion, no spawn worked) and a one-line change that would have disabled the cost gate. Review every uncommitted hunk; a pure change can be proven with an AST compare after removing the intended keyword.
+- **Rotation costs progress.** A rotation limit below the orientation cost of a restart means no work gets done; and stopping a session kills its spawned runs (process group): rotate only when no run is active. Restarting the watcher service must not kill the sessions: `KillMode=process`.
+- **Cost gates must cover the orchestrator's own turns.** The spawner gate only refuses Google-paid spawns. Let the watcher read the host gate and switch the lane model at block (then back at the UTC roll).
+- **A session with no state file is not restarted by a watcher that only looks at state files**: start a lane that has no state.
+- Handoff cards for a session without memory: `docs/handoff/OPENCODE-L1-AUTOOS.md` (section 0 = today's changes, exact restart commands) and `docs/handoff/OPENCODE-L1-WORKST.md`; runtime sources: `docs/ai/oc-runtime-sources/`.

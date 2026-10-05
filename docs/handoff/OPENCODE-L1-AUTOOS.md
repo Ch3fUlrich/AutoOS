@@ -3,6 +3,30 @@
 You are the AutoOS L1 orchestrator, running in OpenCode. Claude usage ran out, so a Claude session no longer
 runs this project. Read this file fully. Then read `AGENTS.md`. Do what they say. Do not improvise.
 
+## 0. What changed on 2026-10-05 (read this first)
+
+- **Roles.** Two OpenCode sessions run on the central host: the L0 router (lane `oc-l0`) and the AutoOS L1 (lane `oc-pilot`). The L0 reviews the L1's records and writes the next task into the L1's inbox. The L1 spawns writers and seats and pushes AutoOS main only after an ACCEPT. Neither writes project code: the edit and write tools are denied outside `.oc-pilot/` (config overlay), code comes only from spawned writers. The bash tool can still write files: the guard hardening is backlog item c0.
+- **Budget.** The $25/day Google total is split per host in `daily-gate.conf` (D-613: central warn 12 / block 14, workstation warn 9 / block 11). OVH models (voucher-paid) are only for L3 work (writers, seats, research), except for today's exception: when the host gate reaches block, the watchers switch both orchestrator lanes to `ovh/gpt-oss-120b` until the UTC day rolls, then back to AI Studio `gemini/gemini-3.8-flash` (cached). OVH alert: $3/h.
+- **Throttle.** Each session talks to the gateway through its own throttling proxy (L0 port 47180, L1 port 47181; 30 s minimum between model calls, 60 s while a spawned run is active). The project `opencode.jsonc` pins the gateway address and overrides the scratch config, so the proxy address is forced by the overlay `provider.omniroute.options.baseURL`. Verify with `ss -tnp state established '( dport = :20128 )'`: an orchestrator server must hold NO direct connection.
+- **Watchers** (user services `oc-pilot-watch`, `oc-l0-watch`, `KillMode=process`): nudge after 4 idle minutes (L0 only when the L1 wrote a new envelope; L1 never while a spawned run is active), restart a dead session or one with a tool running over 10 minutes, start a lane that has no state, rotate after 130 assistant messages (never while a spawned run is active: stopping a session kills its process group), cap a spawned run at 850k input tokens, keep only the newest task message in the inbox (older orders move to `inbox-done/`, an `ack` envelope archives a task).
+- **Git safety.** The L1 clone keeps its work on `lane/<name>` branches; a git `reference-transaction` hook blocks any backward move of `lane/*` (a restarted model reset its clone twice and lost finished commits).
+- **Host-local pieces** (watch2.py, throttle.py, units, overlays) are saved in `docs/ai/oc-runtime-sources/` and move into `tools/oc_runtime/` with tests in lane c2.
+- **Backlog, in this order:** c0 bash-guard ORCHESTRATOR mode (deny shell writes outside `.oc-pilot/`; env `AUTOOS_GUARD_ROLE=orchestrator`, already set by both watcher units) -> c render keys (`external_directory`, compaction/prune, tool-output truncation, real per-turn-input rotation) -> c2 (`oc_start(lane)`/`oc_status(lane)` MCP tools + `tools/oc_runtime/`) -> d canary retry loop -> b launcher heartbeat refresh -> f fleet-bus relay port 47100 -> g lessons -> OPENCODE-PUBLISH-GUARD, OVH-GUARD. Done: MCP-STDIN (main 2333b2c6).
+
+### Restart from the card (exact commands, run on the central host from the AutoOS checkout)
+
+```bash
+cd <AutoOS checkout>
+export AUTOOS_OCL1_PW="$(cat ~/.config/autoos/oc-l1.pw)"      # never print it
+python3 tools/oc_l1.py status --name oc-pilot                  # live | silent | dead   (same for --name oc-l0)
+systemctl --user is-active oc-l0-watch oc-pilot-watch oc-throttle-l0 oc-throttle-l1
+tail -n 5 ~/fleet/oc-pilot/watch.log ~/fleet/oc-l0/watch.log
+```
+
+A dead session is restarted by its watcher within about 2 minutes. To force a restart: kill the recorded pid (`state` file under `~/fleet/<lane>/state/`), delete that state file, the watcher then starts the lane (it has no state). Never kill by process name. To change a lane's model edit `~/.config/autoos/oc-l1.json` (`model.key`, `model.modelID`: `gemini/gemini-3.8-flash` or `ovh/gpt-oss-120b`), then restart the lane the same way. After `systemctl --user restart <watcher>` the sessions keep running. A restarted session reads `inbox/progress.json` (names its current task file) and that file only.
+
+Where things are: L1 clone `~/code/AutoOS-worktrees/oc-pilot/AutoOS` (mailboxes in `.oc-pilot/outbox` and `.oc-pilot/inbox`, card `.oc-pilot/CARD.md`), L0 clone `~/code/AutoOS-worktrees/oc-l0/AutoOS` plus its routing clone `~/code/AutoOS-worktrees/oc-l0/routing` (bash only). If the stack is lost, rebuild from `docs/ai/oc-runtime-sources/README.md`.
+
 ## 1. What is running now
 
 - `main` is green. Find the last green commit with `gh run list --branch main --limit 5`. Use that sha as your base.
