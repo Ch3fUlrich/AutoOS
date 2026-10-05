@@ -727,12 +727,16 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
 
     def test_none_is_dropped_from_effort_ladder(self):
         reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["t2-worker"]
+        # GLM55 2026-10-05: the fixture moved from t2-worker - its head legs
+        # changed twice (oc/glm-5.3-flash then the gate) and the render derives
+        # the ladder from the first SERVABLE leg. t2-worker-clean's ovh head is
+        # stable and carries a ladder.
+        route = reg["routes"]["t2-worker-clean"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         reg["models"][mid]["effort_ladder"] = ["none", "low", "medium", "high"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["t2-worker"]["effort_ladder"], ["low", "medium", "high"])
+        self.assertEqual(by_id["t2-worker-clean"]["effort_ladder"], ["low", "medium", "high"])
 
     def test_no_effort_ladder_when_model_has_no_ladder(self):
         reg = copy.deepcopy(real_registry())
@@ -1665,9 +1669,12 @@ class FreeAiRenderTests(unittest.TestCase):
         # band head and tail below pin the new order.
         self.assertEqual(models[-1], "scw/qwen3-235b-a22b-instruct-2507")
         self.assertIn("free-ai/qwen7b", models)
-        self.assertEqual(models[:7],
-                         ["oc/glm-5.3-flash",
-                          "ainative/llama-4-maverick",
+        # GLM55 gate amendment (2026-10-05): the oc leg is gated (402 - the
+        # connection's account auth does not cover the paid Zen model), so
+        # ainative/llama-4-maverick leads the render until the operator adds
+        # an OpenCode API key.
+        self.assertEqual(models[:6],
+                         ["ainative/llama-4-maverick",
                           "gemini/gemini-3.8-flash",
                           "groq/qwen/qwen3.8-27b",
                           "openrouter/nvidia/nemotron-3-super-120b-a12b:free",

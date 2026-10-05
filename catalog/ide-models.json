@@ -138,13 +138,11 @@
     },
     {
       "id": "t2-orchestrator",
-      "name": "t2 orchestrator-128k — small-scope orchestration",
-      "context": 128000,
+      "name": "t2 orchestrator-1M — small-scope orchestration",
+      "context": 1048576,
       "output": 32768,
       "effort_ladder": [
-        "low",
-        "medium",
-        "high"
+        "medium"
       ],
       "surfaces": {
         "omniroute": [

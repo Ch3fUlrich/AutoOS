@@ -146,7 +146,7 @@
     "TORDER 2026-10-01: t1 1M-only (>=600k gate, D-TORDER-1b), t2/t3 trial->free->credits->paid deepseek LAST, gemini head restored + output 65536/usable 1048576, providers.google_ai_studio re-opened with 3x429/120s->300s cooldown +30min park (gateway 08:07Z ACTIVE), 4 credit singles (ovh-qwen3.8-27b, ovh-gpt-oss-120b, ovh-qwen3-coder-30b, vertex-gemini-3.8-flash), nebius removed (6 legs), openrouter NO credits -> :free only (7 paid legs dropped, t1-clean kept declared+gated so stays omitted), combos regenerated from render (fixpoint).",
     "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). t2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
-    "CACHEORCH amendment (same order): t2-orchestrator renders [vertex/gemini-3.8-flash, deepseek/deepseek-flash] - the antigravity sonnet head was excluded because this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01, antigravity trains_on_prompts true); the two legs are the caching ∩ trains-nothing intersection. The agy claude 5-5 orchestrator seats serve via the opus-5-5 combo, t1-orchestrator's free band and AGY_DEFAULT_MODEL."
+    "CTX1M/PRIVACY 2026-10-05 (operator): t2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time)."
   ],
   "retired": [
     "tier1",
@@ -303,8 +303,9 @@
     {
       "name": "t2-orchestrator",
       "strategy": "priority",
-      "context": "128k",
+      "context": "1M",
       "models": [
+        "agy/claude-sonnet-5-5-medium",
         "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ]
@@ -314,7 +315,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "oc/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
@@ -350,7 +350,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "oc/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
@@ -370,7 +369,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "oc/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
@@ -407,7 +405,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "oc/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "groq/qwen/qwen3.8-27b",
@@ -436,7 +433,6 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "oc/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
         "scw/qwen3-235b-a22b-instruct-2507",

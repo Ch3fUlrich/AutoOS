@@ -2706,9 +2706,11 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # still be served by. CIGREEN (aced9915, B2-AGY): antigravity is kept
         # cooled too. GLM55/AINATIVE 2026-10-05: the two providers the
         # operator's order put at t2-worker's head join the fixture, so the
-        # earliest return a reason can name is opencode_gateway; antigravity
-        # backs legs again (CLAUDE55) and is cooled after it.
-        "antigravity": "2026-09-28T12:15:00Z",
+        # earliest cooled still-leggable provider a reason can name is
+        # ainative (the oc glm leg is gated unavailable, GLM55 gate); antigravity
+        # backs legs again (CLAUDE55, t1-orchestrator/opus-5-5) and is cooled
+        # after it, so the reason's earliest return stays ainative.
+        "antigravity": "2026-09-28T12:25:00Z",
         "opencode_gateway": "2026-09-28T12:10:00Z",
         "ainative": "2026-09-28T12:20:00Z",
         "google_ai_studio": "2026-09-28T12:30:00Z",
@@ -2752,20 +2754,22 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # retry -- a caller reading it must not wait for the last one.
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity legs, so no reason can name an antigravity cooldown).
-        # Moved again by GLM55/AINATIVE 2026-10-05: the earliest cooled
-        # provider still legged on t2-worker is opencode_gateway.
-        self.assertIn("unavailable: opencode_gateway until 2026-09-28T12:10:00Z",
+        # Moved again by GLM55/AINATIVE 2026-10-05 + the GLM55 gate: the
+        # earliest cooled provider still legged on t2-worker is ainative
+        # (the oc glm leg is gated unavailable, not cooling).
+        self.assertIn("unavailable: ainative until 2026-09-28T12:20:00Z",
                       result["reason"], result["reason"])
         dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
                            result["reason"])
-        self.assertEqual(min(dates), "2026-09-28T12:10:00Z", result["reason"])
+        self.assertEqual(min(dates), "2026-09-28T12:20:00Z", result["reason"])
 
     def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity legs, and the provider is available=false, so cooling it
         # changes nothing). GLM55/AINATIVE 2026-10-05: the earliest
-        # still-legged cooled provider on t2-worker is opencode_gateway;
-        # google_ai_studio and meta_api are still legged too.
+        # still-legged cooled provider on t2-worker is ainative (the oc glm
+        # leg is gated unavailable, GLM55 gate); google_ai_studio and meta_api
+        # are still legged too.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "t2-worker"}}
@@ -2773,7 +2777,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("t2-worker", result["reason"])
-        self.assertIn("unavailable: opencode_gateway until 2026-09-28T12:10:00Z",
+        self.assertIn("unavailable: ainative until 2026-09-28T12:20:00Z",
                       result["reason"])
         self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
                       result["reason"])
@@ -4136,14 +4140,19 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                 [x for x in skipped[leg] if x.startswith("claude_budget:")],
                 ["claude_budget: %s held for finals" % leg],
                 "%s of %s" % (leg, "opus-5-5"))
+        # PRIVACY 2026-10-05 (operator): the sensitive-capable pin no longer
+        # keeps t2-orchestrator Claude-free - the route carries the antigravity
+        # sonnet 5-5 head again, so a non-final card holds it too.
         _kept, skipped, _ = self.legs("implement", "t2-orchestrator",
                                       registry=on)
         held = [leg for leg, reasons in skipped.items()
                 if any(x.startswith("claude_budget:") for x in reasons)]
-        self.assertEqual(held, [], "t2-orchestrator")
+        self.assertEqual(held, ["antigravity/claude-sonnet-5-5-medium"],
+                         "t2-orchestrator")
         self.assertEqual(
             [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)], [])
+             if r.is_claude_leg(leg, on)],
+            ["antigravity/claude-sonnet-5-5-medium"])
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
         on = self.on_registry()
@@ -4189,10 +4198,9 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity leg from t2-orchestrator). CACHEORCH 2026-10-05 kept the
-        # route Claude-free (sensitive-capable): with the declaration set, the
-        # caching legs are kept and nothing is budget-held. The declaration's
-        # unlock half is proven on opus-5-5, whose antigravity Claude leg is
-        # servable on shipped data (CLAUDE55).
+        # route on caching providers; PRIVACY (same day) re-allowed the
+        # antigravity claude head, so with the orchestrator declaration set
+        # the sonnet leg is KEPT (not budget-held) alongside the caching legs.
         # The same card, same route, with the declaration set by the spawner,
         # under the ON budget (the shipped value is mode=normal, so the ON
         # case is built from a copy).
@@ -4206,12 +4214,10 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
         self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
+        self.assertIn(("antigravity", "claude-sonnet-5-5-medium"), kept)
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
-        self.assertEqual(
-            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)], [])
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in on["clients"]}
         kept, skipped, _ = r.usable_legs(

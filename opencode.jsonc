@@ -547,12 +547,10 @@
         },
         "t2-orchestrator": {
           "modelID": "t2-orchestrator",
-          "name": "t2 orchestrator-128k — small-scope orchestration",
-          "limit": { "context": 128000, "output": 32768 },
+          "name": "t2 orchestrator-1M — small-scope orchestration",
+          "limit": { "context": 1048576, "output": 32768 },
           "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } }
           ]
         },
         "t3-driver": {

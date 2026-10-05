@@ -4401,6 +4401,7 @@
       "class": "frontier",
       "id": "t2-orchestrator",
       "legs": [
+        "antigravity/claude-sonnet-5-5-medium",
         "vertex/gemini-3.8-flash",
         "deepseek/deepseek-flash"
       ],
@@ -4412,19 +4413,19 @@
             "zed",
             "openhands"
           ],
-          "context": 128000,
-          "context_declared": "128k",
-          "display_name": "t2 orchestrator-128k — small-scope orchestration",
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "t2 orchestrator-1M — small-scope orchestration",
           "openhands_profile": {
-            "max_input_tokens": 128000,
+            "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
             "reasoning": true
           },
           "output": 32768,
-          "$comment": "L1-CLEAN 2026-10-01: the trial-first legs top out at 128k (ovh gpt-oss-120b 131072, Qwen3.8-27B 128000, vertex flash); the 1M promise left with the deepseek head, so the declared context follows the served legs."
+          "$comment": "CTX1M 2026-10-05 (operator): the 128k declaration was a stale clamp - every serving leg advertises 1M (agy claude-sonnet-5-5-medium, vertex flash, deepseek-flash per its registry row), and orchestrator layers L0/L1/L2 need long contexts, so the route declares 1M. PRIVACY 2026-10-05 (operator): the L2-CLEAN sensitive-capable classification is narrowed - privacy sensitive means only what is risky to share (credentials and the like); nearly all projects are not privacy sensitive, so the antigravity claude head is allowed here again. A privacy=sensitive CARD is still filtered per-leg at routing time (private_safe), so credential-adjacent work never reaches the trains-on-prompts leg. CACHEORCH still holds: all three legs are prompt-caching providers; OVH stays out of orchestrator tiers."
         }
       },
-      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). CACHEORCH 2026-10-05 (operator): orchestrator tiers (L0-L2) serve long sessions, so only prompt-caching providers may serve them; OVH does not cache and is moved to implementation work only - its two legs are removed here. Claude 4-6 generation retired upstream: agy/claude-sonnet-5-5-medium heads the combo (subscription $0 marginal, caching). L2-CLEAN reconciliation: antigravity/claude-sonnet-5-5-medium was considered as the head but is EXCLUDED - this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01) and antigravity trains_on_prompts is true. The two remaining legs are the caching ∩ trains-nothing intersection (vertex trial credit; deepseek's cited no-training terms, D-393)."
+      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). CACHEORCH 2026-10-05 (operator): orchestrator tiers (L0-L2) serve long sessions, so only prompt-caching providers may serve them; OVH does not cache and is moved to implementation work only - its two legs are removed here. Claude 4-6 generation retired upstream: agy/claude-sonnet-5-5-medium heads the combo (subscription $0 marginal, caching). L2-CLEAN reconciliation: antigravity/claude-sonnet-5-5-medium was considered as the head but is EXCLUDED - this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01) and antigravity trains_on_prompts is true. The two remaining legs are the caching ∩ trains-nothing intersection (vertex trial credit; deepseek's cited no-training terms, D-393). CTX1M/PRIVACY 2026-10-05 (operator): legs restored to [antigravity/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] with declared context 1M (see the surfaces.omniroute $comment)."
     },
     "t2-worker": {
       "$comment": "free_ai/qwen7b trails the route as a last-resort leg so t2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg t2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it.",
@@ -4522,6 +4523,10 @@
         },
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
           "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
+          "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
           "available": false
         }
       }
@@ -4623,6 +4628,10 @@
       "unavailable_legs": {
         "cerebras/gpt-oss-120b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
           "available": false
         }
       }
@@ -4741,6 +4750,10 @@
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
           "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
           "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
+          "available": false
         }
       }
     },
@@ -4840,6 +4853,10 @@
       "unavailable_legs": {
         "cerebras/qwen-3.8-27b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
           "available": false
         }
       }
@@ -4950,6 +4967,12 @@
           "context_declared": "128k",
           "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
           "output": 8192
+        }
+      },
+      "unavailable_legs": {
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
+          "available": false
         }
       }
     },
