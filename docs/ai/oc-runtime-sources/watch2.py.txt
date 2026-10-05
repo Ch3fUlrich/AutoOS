@@ -220,8 +220,11 @@ FALLBACK_FILE = HOME + "/fleet/%s/ovh-fallback-day" % LANE
 
 
 def gate_fallback(st, recs, gate):
-    """routing D-616: at the HOST gate block do not stop the Google lane: switch it to ovh gpt-oss-120b (voucher, same proxy) until the
-    UTC day rolls, then back to AI Studio Gemini. Never while a spawned run is active (a restart kills its process group)."""
+    """routing D-616, CACHEORCH 2026-10-05: at the HOST gate block do not stop the Google lane: switch it to
+    ds/deepseek-flash (gateway-served, prompt-caching, paid from the deepseek credits) until the UTC day rolls, then
+    back to AI Studio Gemini. Was ovh/gpt-oss-120b: OVH does not cache, and the operator's caching rule keeps the
+    orchestrator lanes (L0/L1) on caching providers - OVH is for implementation work only. Never while a spawned run
+    is active (a restart kills its process group)."""
     today = time.strftime("%Y-%m-%d", time.gmtime())
     try:
         flagged = open(FALLBACK_FILE).read().strip()
@@ -229,11 +232,11 @@ def gate_fallback(st, recs, gate):
         flagged = ""
     if gate == "block" and lane_is_google() and not flagged:
         if recs:
-            log("gate block: fallback to OVH deferred, %d spawned run(s) active" % len(recs))
+            log("gate block: fallback to deepseek deferred, %d spawned run(s) active" % len(recs))
             return False
-        set_lane_model("ovh-direct-gpt-oss-120b", "ovh/gpt-oss-120b")
+        set_lane_model("ds-deepseek-flash", "ds/deepseek-flash")
         open(FALLBACK_FILE, "w").write(today)
-        log("GATE BLOCK: lane switched to ovh/gpt-oss-120b until the UTC day rolls")
+        log("GATE BLOCK: lane switched to ds/deepseek-flash until the UTC day rolls")
         stop_server(st)
         return True
     if flagged and flagged != today and not recs:
