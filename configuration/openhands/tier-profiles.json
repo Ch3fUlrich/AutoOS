@@ -102,7 +102,7 @@
     {
       "id": "omniroute-t2-orchestrator",
       "model": "openai/t2-orchestrator",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 1048576,
       "max_output_tokens": 32768,
       "reasoning": true
     },

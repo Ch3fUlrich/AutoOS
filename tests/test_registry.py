@@ -3791,11 +3791,17 @@ class CleanTierEvidenceTests(unittest.TestCase):
 
 class CleanTierRouteTests(unittest.TestCase):
     """L2-CLEAN (2026-10-01): privacy=sensitive routes lead with the trial
-    credits (ovh + vertex), span >= 2 families, and end on paid deepseek."""
+    credits (ovh + vertex), span >= 2 families, and end on paid deepseek.
+    PRIVACY 2026-10-05 (operator): the sensitive-capable set is narrowed to
+    the -clean worker routes only - privacy sensitive means only what is
+    risky to share (credentials and the like), nearly all projects are not
+    privacy sensitive, so t2-orchestrator is no longer pinned to the trial
+    legs and may carry the antigravity claude head (a privacy=sensitive CARD
+    is still filtered per-leg at routing time via private_safe)."""
 
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
-    SENSITIVE = ("t2-worker-clean", "t3-driver-clean", "t2-orchestrator")
+    SENSITIVE = ("t2-worker-clean", "t3-driver-clean")
     TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
 
     @classmethod
@@ -3819,19 +3825,22 @@ class CleanTierRouteTests(unittest.TestCase):
             self.assertEqual(self.reg["routes"][rid]["legs"][:3],
                              list(self.TRIAL_LEGS), rid)
 
-    def test_t2_orchestrator_leads_with_caching_trains_nothing_legs(self):
+    def test_t2_orchestrator_is_1m_caching_with_the_claude_head(self):
         # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
         # sessions, so only prompt-caching providers may serve them - the two
         # OVH legs are gone (OVH does not cache; it is for implementation work
-        # only). L2-CLEAN still holds: this route is privacy=sensitive-capable,
-        # so the antigravity claude 5-5 head was excluded (trains_on_prompts
-        # true) and the remaining legs are the caching ∩ trains-nothing
-        # intersection, >= 2 distinct providers, deepseek last.
+        # only). CTX1M (same day): every serving leg advertises 1M, so the
+        # stale 128k declaration is raised to 1M. PRIVACY (same day): the
+        # sensitive-capable pin no longer applies to this route, so the
+        # antigravity claude sonnet 5-5 head is allowed (deepseek stays last).
         legs = self.reg["routes"]["t2-orchestrator"]["legs"]
-        self.assertEqual(legs, ["vertex/gemini-3.8-flash",
+        self.assertEqual(legs, ["antigravity/claude-sonnet-5-5-medium",
+                                "vertex/gemini-3.8-flash",
                                 "deepseek/deepseek-flash"])
-        for leg in legs:
-            self._leg(leg)
+        self.assertEqual(
+            self.reg["routes"]["t2-orchestrator"]["surfaces"]["omniroute"]
+            ["context_declared"], "1M")
+        self.assertEqual(legs[-1], "deepseek/deepseek-flash")
 
     def test_sensitive_routes_end_with_paid_deepseek(self):
         for rid in self.SENSITIVE:

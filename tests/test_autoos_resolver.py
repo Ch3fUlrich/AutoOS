@@ -4140,14 +4140,19 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                 [x for x in skipped[leg] if x.startswith("claude_budget:")],
                 ["claude_budget: %s held for finals" % leg],
                 "%s of %s" % (leg, "opus-5-5"))
+        # PRIVACY 2026-10-05 (operator): the sensitive-capable pin no longer
+        # keeps t2-orchestrator Claude-free - the route carries the antigravity
+        # sonnet 5-5 head again, so a non-final card holds it too.
         _kept, skipped, _ = self.legs("implement", "t2-orchestrator",
                                       registry=on)
         held = [leg for leg, reasons in skipped.items()
                 if any(x.startswith("claude_budget:") for x in reasons)]
-        self.assertEqual(held, [], "t2-orchestrator")
+        self.assertEqual(held, ["antigravity/claude-sonnet-5-5-medium"],
+                         "t2-orchestrator")
         self.assertEqual(
             [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)], [])
+             if r.is_claude_leg(leg, on)],
+            ["antigravity/claude-sonnet-5-5-medium"])
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
         on = self.on_registry()
@@ -4193,10 +4198,9 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity leg from t2-orchestrator). CACHEORCH 2026-10-05 kept the
-        # route Claude-free (sensitive-capable): with the declaration set, the
-        # caching legs are kept and nothing is budget-held. The declaration's
-        # unlock half is proven on opus-5-5, whose antigravity Claude leg is
-        # servable on shipped data (CLAUDE55).
+        # route on caching providers; PRIVACY (same day) re-allowed the
+        # antigravity claude head, so with the orchestrator declaration set
+        # the sonnet leg is KEPT (not budget-held) alongside the caching legs.
         # The same card, same route, with the declaration set by the spawner,
         # under the ON budget (the shipped value is mode=normal, so the ON
         # case is built from a copy).
@@ -4210,12 +4214,10 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
         self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
+        self.assertIn(("antigravity", "claude-sonnet-5-5-medium"), kept)
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
-        self.assertEqual(
-            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)], [])
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in on["clients"]}
         kept, skipped, _ = r.usable_legs(
