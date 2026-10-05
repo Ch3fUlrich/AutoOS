@@ -71,6 +71,7 @@
     { "action": "shell", "resource": "git push origin main --dry-run", "effect": "allow" },
     { "action": "shell", "resource": "git merge --no-ff L1-backlog/*", "effect": "allow" },
     { "action": "shell", "resource": "git merge --no-ff origin/main*", "effect": "allow" },
+    { "action": "shell", "resource": "git merge --ff-only origin/main", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebius2-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebiuswave-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebiuswave2-20260930", "effect": "allow" },
