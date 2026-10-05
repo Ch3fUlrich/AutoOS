@@ -2409,7 +2409,10 @@ combos = {c["name"]: c["models"]
 # name. Same independence rule as known_drops: pinned here, not read from
 # catalog/ai-registry.json, or the file that writes the ref and the file that
 # checks the mirror would agree by construction.
-namespace = {"scw": "scaleway"}
+# GLM55 2026-10-05 (operator): combos render the opencode_gateway legs under
+# the gateway's canonical `oc/*` prefix (providers.opencode_gateway
+# model_prefix), while LiteLLM addresses the provider by name.
+namespace = {"scw": "scaleway", "oc": "opencode_gateway"}
 transport = {"opencode-zen": "openai", "cheaperinference": "openai",
              "free-ai": "openai"}
 def litellm_model(ref):

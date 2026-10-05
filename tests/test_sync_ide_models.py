@@ -298,10 +298,13 @@ class WriteTests(SandboxCase):
             [v["id"] for v in
              oc["providers"]["omniroute"]["models"]["t3-driver-clean"]["variants"]],
             ["low", "medium", "high"])
-        self.assertEqual(
-            [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["t3-driver"]["variants"]],
-            ["low", "medium", "high"])
+        # GLM55 2026-10-05 (operator): t3-driver heads on oc/glm-5.3-flash,
+        # whose model row carries no effort ladder - the variants block drops
+        # (the render's rule), and t2-worker moves with it.
+        self.assertNotIn("variants",
+                         oc["providers"]["omniroute"]["models"]["t3-driver"])
+        self.assertNotIn("variants",
+                         oc["providers"]["omniroute"]["models"]["t2-worker"])
 
 
 class CommaDisciplineTests(SandboxCase):

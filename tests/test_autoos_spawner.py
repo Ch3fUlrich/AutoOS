@@ -522,7 +522,9 @@ class ClientCommandTests(unittest.TestCase):
         # working default (claude-opus-4-6-thinking, PONG in 8 s), not its
         # own default Gemini whose quota is out until ~2026-10-01.
         r = plan_of("--client", "agy", "t", env=claude_env())
-        self.assertIn("would run: agy --model claude-opus-4-6-thinking -p t", r.stdout)
+        # CLAUDE55 2026-10-05 (operator): the 4-6 generation is retired upstream;
+        # the default is the balanced 5-5 rung (see AGY_DEFAULT_MODEL).
+        self.assertIn("would run: agy --model claude-opus-5-5-medium -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
 
     def test_agy_puts_an_explicit_model_before_the_print_prompt(self):
@@ -535,11 +537,14 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_agy_default_model_is_the_measured_working_one(self):
         # AGYFIX item 2 (K3 audit addendum 08:1xZ): agy with no --model runs
-        # its default Gemini -> 157 s then rc 3 quota. The spawner supplies
-        # claude-opus-4-6-thinking as data when the caller gives none.
-        self.assertEqual(clients.AGY_DEFAULT_MODEL, "claude-opus-4-6-thinking")
+        # its default Gemini -> 157 s then rc 3 quota. The spawner supplies a
+        # model as data when the caller gives none. CLAUDE55 2026-10-05
+        # (operator): the 4-6 generation is retired upstream - the agy CLI's
+        # own model list (measured 2026-10-05) carries only the 5-5
+        # generation - so the default is the balanced 5-5 rung.
+        self.assertEqual(clients.AGY_DEFAULT_MODEL, "claude-opus-5-5-medium")
         cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit", None)
-        self.assertEqual(cmd, ["agy", "--model", "claude-opus-4-6-thinking", "-p", "task"])
+        self.assertEqual(cmd, ["agy", "--model", "claude-opus-5-5-medium", "-p", "task"])
 
     def test_free_default_is_the_operators_muse_spark_leg(self):
         # AGYFIX item 4 (operator 2026-09-26): the free default is Zen Muse
@@ -1011,8 +1016,10 @@ class SignInProbeTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # AGYFIX item 1+2 (measured 2026-09-27): the working form is
         # `agy --model <m> -p <task>`, and with no caller model the spawner
-        # supplies claude-opus-4-6-thinking rather than agy's default Gemini.
-        self.assertEqual(self.calls(d), ["models", "--model claude-opus-4-6-thinking -p t"])
+        # supplies the AGY_DEFAULT_MODEL (claude-opus-5-5-medium since
+        # CLAUDE55 2026-10-05: the 4-6 generation is retired upstream) rather
+        # than agy's default Gemini.
+        self.assertEqual(self.calls(d), ["models", "--model claude-opus-5-5-medium -p t"])
 
     def test_mcp_list_clients_carries_usability(self):
         d, env = self.stub(self.SIGNED_OUT)

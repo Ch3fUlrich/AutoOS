@@ -2704,10 +2704,13 @@ class UnavailableUntilResolverTests(unittest.TestCase):
     REAL_UNTILS = {
         # FREEWIRE 2026-09-30 cooled every provider a t2-worker combo could
         # still be served by. CIGREEN (aced9915, B2-AGY): antigravity is kept
-        # cooled too but backs no leg anywhere since the removal (and reads
-        # provider-unavailable anyway), so the earliest return a reason can
-        # name is now google_ai_studio, the earliest still-legged entry here.
-        "antigravity": "2026-09-28T12:00:37Z",
+        # cooled too. GLM55/AINATIVE 2026-10-05: the two providers the
+        # operator's order put at t2-worker's head join the fixture, so the
+        # earliest return a reason can name is opencode_gateway; antigravity
+        # backs legs again (CLAUDE55) and is cooled after it.
+        "antigravity": "2026-09-28T12:15:00Z",
+        "opencode_gateway": "2026-09-28T12:10:00Z",
+        "ainative": "2026-09-28T12:20:00Z",
         "google_ai_studio": "2026-09-28T12:30:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
         "scaleway": "2026-09-28T15:00:00Z",
@@ -2749,19 +2752,20 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # retry -- a caller reading it must not wait for the last one.
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity legs, so no reason can name an antigravity cooldown).
-        # The earliest cooled provider still legged anywhere is now
-        # google_ai_studio.
-        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
+        # Moved again by GLM55/AINATIVE 2026-10-05: the earliest cooled
+        # provider still legged on t2-worker is opencode_gateway.
+        self.assertIn("unavailable: opencode_gateway until 2026-09-28T12:10:00Z",
                       result["reason"], result["reason"])
         dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
                            result["reason"])
-        self.assertEqual(min(dates), "2026-09-28T12:30:00Z", result["reason"])
+        self.assertEqual(min(dates), "2026-09-28T12:10:00Z", result["reason"])
 
     def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity legs, and the provider is available=false, so cooling it
-        # changes nothing). The earliest still-legged cooled provider on
-        # t2-worker is now google_ai_studio; meta_api is still legged too.
+        # changes nothing). GLM55/AINATIVE 2026-10-05: the earliest
+        # still-legged cooled provider on t2-worker is opencode_gateway;
+        # google_ai_studio and meta_api are still legged too.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "t2-worker"}}
@@ -2769,6 +2773,8 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("t2-worker", result["reason"])
+        self.assertIn("unavailable: opencode_gateway until 2026-09-28T12:10:00Z",
+                      result["reason"])
         self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
                       result["reason"])
         self.assertIn("unavailable: meta_api until 2026-09-28T14:00:00Z",
@@ -3661,7 +3667,12 @@ class ClaudeBudgetLegTests(unittest.TestCase):
 
     def test_the_real_registry_has_exactly_the_known_claude_legs(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity leg); the post-AGY registry carries only the cc leg.
+        # antigravity leg); the post-AGY registry carried only the cc leg.
+        # CLAUDE55 2026-10-05 (operator): the opus-4-6 route (and its cc leg)
+        # was renamed opus-5-5 with an antigravity Opus 5.5 leg, and the
+        # t1-orchestrator free band gained the antigravity Sonnet 5.5 seat -
+        # so the registry now carries exactly those two antigravity legs
+        # (cc/claude-opus-4-6 is gone with the renamed route).
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
@@ -3670,7 +3681,8 @@ class ClaudeBudgetLegTests(unittest.TestCase):
             for leg in route.get("legs") or []:
                 if r.is_claude_leg(leg, registry):
                     claude.add(leg)
-        self.assertEqual(claude, {"cc/claude-opus-4-6"})
+        self.assertEqual(claude, {"antigravity/claude-opus-5-5-medium",
+                                  "antigravity/claude-sonnet-5-5-medium"})
 
     # --- the hold ----------------------------------------------------------
 
@@ -4107,43 +4119,35 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
 
     def test_a_non_final_card_holds_every_claude_leg_it_offers(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity legs) and 60191348 (B2-PRUNE: cc unavailable, so the one
-        # surviving Claude leg never reaches the hold). The hold is a resolver
-        # rule, not the shipped number: the shipped registry is mode=normal
-        # now, so this builds the ON case from a copy (deepcopy + mutate).
-        # Post-prune, neither route budget-holds anything on shipped data; the
-        # hold itself is then proven alive on a copy with cc flipped servable.
-        import copy
+        # antigravity legs) and 60191348 (B2-PRUNE: cc unavailable). CLAUDE55
+        # 2026-10-05 (operator): the opus-4-6 route was renamed opus-5-5 with
+        # an antigravity Opus 5.5 leg and the provider is servable on shipped
+        # data again, so the hold is proven directly on the shipped catalog
+        # (built ON from a copy): a non-final card holds the Claude leg.
+        # t2-orchestrator still offers none (CACHEORCH kept it
+        # sensitive-capable with no Claude leg).
         on = self.on_registry()
-        for route_id in ("opus-4-6", "t2-orchestrator"):
-            _kept, skipped, _ = self.legs("implement", route_id, registry=on)
-            held = [leg for leg, reasons in skipped.items()
-                    if any(x.startswith("claude_budget:") for x in reasons)]
-            self.assertEqual(held, [], route_id)
-        self.assertEqual(
-            [x for x in
-             self.legs("implement", "opus-4-6", registry=on)[1]
-             ["cc/claude-opus-4-6"] if not x.startswith("claude_budget:")],
-            ["unavailable"], "opus-4-6")
-        self.assertEqual(
-            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)], [])
-        servable = copy.deepcopy(on)
-        servable["providers"]["cc"]["available"] = True
-        _kept, skipped, _ = self.legs("implement", "opus-4-6",
-                                      registry=servable)
+        _kept, skipped, _ = self.legs("implement", "opus-5-5", registry=on)
         held = [leg for leg, reasons in skipped.items()
                 if any(x.startswith("claude_budget:") for x in reasons)]
-        self.assertEqual(held, ["cc/claude-opus-4-6"], "opus-4-6")
+        self.assertEqual(held, ["antigravity/claude-opus-5-5-medium"], "opus-5-5")
         for leg in held:
             self.assertEqual(
                 [x for x in skipped[leg] if x.startswith("claude_budget:")],
                 ["claude_budget: %s held for finals" % leg],
-                "%s of %s" % (leg, "opus-4-6"))
+                "%s of %s" % (leg, "opus-5-5"))
+        _kept, skipped, _ = self.legs("implement", "t2-orchestrator",
+                                      registry=on)
+        held = [leg for leg, reasons in skipped.items()
+                if any(x.startswith("claude_budget:") for x in reasons)]
+        self.assertEqual(held, [], "t2-orchestrator")
+        self.assertEqual(
+            [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
+             if r.is_claude_leg(leg, on)], [])
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
         on = self.on_registry()
-        for route_id in ("opus-4-6", "t2-orchestrator"):
+        for route_id in ("opus-5-5", "t2-orchestrator"):
             _kept, skipped, _ = self.legs(
                 "final", route_id,
                 env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"}, registry=on)
@@ -4160,38 +4164,35 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
 
     def test_a_critical_card_is_held_by_the_budget_now(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity leg from t2-orchestrator, which now offers no Claude leg
-        # at all). Retargeted to opus-4-6, the one route that still offers a
-        # Claude leg: with its provider flipped servable in a copy (shipped cc
-        # available=false), a self-declared-critical card without the
-        # orchestrator declaration is still budget-held, not kept.
-        # CLAUDEBUDGET-b item 1 rewrote this test: on the shipped registry, a
-        # card that only carries its own `critical` field keeps NO Claude leg.
-        # It was the self-grantable override, and the operator's D-102 answer is
-        # that the orchestrator, not the card, declares a critical path.
-        import copy
-        registry = copy.deepcopy(self.registry)
-        registry["policy"]["claude_budget"].update(self.ON)
-        registry["providers"]["cc"]["available"] = True
+        # antigravity leg from t2-orchestrator). CLAUDE55 2026-10-05
+        # (operator): opus-5-5 is now the one route that offers a Claude leg,
+        # with its provider servable on shipped data - so a
+        # self-declared-critical card without the orchestrator declaration is
+        # budget-held, not kept, straight off the shipped catalog.
+        # CLAUDEBUDGET-b item 1 still holds: the card's own `critical` field
+        # is the self-grantable override the operator's D-102 answer removed;
+        # the orchestrator, not the card, declares a critical path.
+        registry = self.on_registry()
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in registry["clients"]}
         kept, skipped, _ = r.usable_legs(
-            registry["routes"]["opus-4-6"],
+            registry["routes"]["opus-5-5"],
             {"kind": "review", "privacy": "public", "critical": True},
             {"need_tokens": 1000}, state, registry, {},
             "opencode", self.NOW, {})
         self.assertEqual([leg for leg, reasons in skipped.items()
                           if any(x.startswith("claude_budget:")
                                  for x in reasons)],
-                         ["cc/claude-opus-4-6"])
-        self.assertNotIn(("cc", "claude-opus-4-6"), kept)
+                         ["antigravity/claude-opus-5-5-medium"])
+        self.assertNotIn(("antigravity", "claude-opus-5-5-medium"), kept)
 
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity leg, so no declaration can keep a leg the route no
-        # longer offers). With the declaration set, the non-Claude legs are
-        # kept and nothing is budget-held; the declaration's unlock half is
-        # then proven on a copy with cc flipped servable.
+        # antigravity leg from t2-orchestrator). CACHEORCH 2026-10-05 kept the
+        # route Claude-free (sensitive-capable): with the declaration set, the
+        # caching legs are kept and nothing is budget-held. The declaration's
+        # unlock half is proven on opus-5-5, whose antigravity Claude leg is
+        # servable on shipped data (CLAUDE55).
         # The same card, same route, with the declaration set by the spawner,
         # under the ON budget (the shipped value is mode=normal, so the ON
         # case is built from a copy).
@@ -4204,25 +4205,23 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("ovhcloud", "Qwen3.8-27B"), kept)
+        self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
         self.assertEqual(
             [leg for leg in on["routes"]["t2-orchestrator"]["legs"]
              if r.is_claude_leg(leg, on)], [])
-        servable = self.on_registry()
-        servable["providers"]["cc"]["available"] = True
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
-                 for name in servable["clients"]}
+                 for name in on["clients"]}
         kept, skipped, _ = r.usable_legs(
-            servable["routes"]["opus-4-6"],
+            on["routes"]["opus-5-5"],
             {"kind": "review", "privacy": "public", "critical": True},
-            {"need_tokens": 1000}, state, servable, {},
+            {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("cc", "claude-opus-4-6"), kept)
-        self.assertNotIn("cc/claude-opus-4-6", skipped)
+        self.assertIn(("antigravity", "claude-opus-5-5-medium"), kept)
+        self.assertNotIn("antigravity/claude-opus-5-5-medium", skipped)
 
     def test_a_budget_on_copy_refuses_claude_and_the_env_unlocks_it(self):
         # The CLI half of the same rule (item 3(d)): see ClaudeBudgetSpawnTests

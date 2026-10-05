@@ -358,8 +358,10 @@ LEGACY_OVERLAY_PATH = overlay_mod.legacy_path(ROOT)
 PROVIDER_STATE_PATH = os.path.join(ROOT, "logs", "routing", "provider-state.json")
 PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jsonl")
 # `route`'s default orchestrator model (spec 6.1): a registry model id billed
-# for verification cost when the caller does not pin one.
-DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-4-6"
+# for verification cost when the caller does not pin one. CLAUDE55 2026-10-05
+# (operator): the 4-6 generation is retired upstream, so the default moves to
+# the 5-5 spelling the agy CLI and the live gateway catalog serve.
+DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-5-5-medium"
 # A v1 combo (t1-orchestrator, t2-worker, t3-driver, their -clean twins) always
 # carries one of these prefixes. A resolver v2 route id (RUNV2) may or may not
 # (e.g. "t1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
