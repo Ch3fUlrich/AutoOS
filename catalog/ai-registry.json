@@ -4523,6 +4523,10 @@
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
           "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
           "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
+          "available": false
         }
       }
     },
@@ -4623,6 +4627,10 @@
       "unavailable_legs": {
         "cerebras/gpt-oss-120b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 402 billing_error payment_required; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
           "available": false
         }
       }
@@ -4741,6 +4749,10 @@
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
           "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
           "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
+          "available": false
         }
       }
     },
@@ -4840,6 +4852,10 @@
       "unavailable_legs": {
         "cerebras/qwen-3.8-27b": {
           "$comment": "L0 decision 2026-09-26T11:44Z (measured): 401 credits exhausted; OmniRoute deactivated the cerebras connection itself. Re-probe weekly.",
+          "available": false
+        },
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
           "available": false
         }
       }
@@ -4950,6 +4966,12 @@
           "context_declared": "128k",
           "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
           "output": 8192
+        }
+      },
+      "unavailable_legs": {
+        "opencode_gateway/glm-5.3-flash": {
+          "$comment": "GLM55 2026-10-05: gated - a live completion probe answers HTTP 402 \"This model requires an opencode API key - add one in Settings -> Providers\"; the connection's account auth does not cover the paid Zen glm-5.3-flash. Re-open the leg the moment the operator adds an OpenCode API key to the gateway (or registers the ZCode local-process grant); until then the combos fall through to the next leg instead of paying a dead-head attempt on every spawn.",
+          "available": false
         }
       }
     },

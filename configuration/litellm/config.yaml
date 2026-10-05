@@ -48,10 +48,6 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker
   - model_name: t2-worker
     litellm_params:
-      model: opencode_gateway/glm-5.3-flash
-      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: ainative/llama-4-maverick
       api_key: os.environ/AINATIVE_API_KEY
   - model_name: t2-worker
@@ -144,10 +140,6 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker-free-only
   - model_name: t2-worker-free-only
     litellm_params:
-      model: opencode_gateway/glm-5.3-flash
-      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
       model: ainative/llama-4-maverick
       api_key: os.environ/AINATIVE_API_KEY
   - model_name: t2-worker-free-only
@@ -215,10 +207,6 @@ model_list:
   # ── t3-driver: daily driver, cheapest capable ──────────────────────────
   # Mirror of registry routes.t3-driver (see the t2-worker note above).
   # AUTOOS-MANAGED-START t3-driver
-  - model_name: t3-driver
-    litellm_params:
-      model: opencode_gateway/glm-5.3-flash
-      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: ainative/llama-4-maverick
@@ -316,10 +304,6 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver-free-only
   - model_name: t3-driver-free-only
     litellm_params:
-      model: opencode_gateway/glm-5.3-flash
-      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
       model: ainative/llama-4-maverick
       api_key: os.environ/AINATIVE_API_KEY
   - model_name: t3-driver-free-only
@@ -396,10 +380,6 @@ model_list:
   # AUTOOS-MANAGED-END t4-rag
 
   # AUTOOS-MANAGED-START t4-researcher
-  - model_name: t4-researcher
-    litellm_params:
-      model: opencode_gateway/glm-5.3-flash
-      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
   - model_name: t4-researcher
     litellm_params:
       model: ainative/llama-4-maverick
