@@ -1,0 +1,1 @@
+PARKED (2026-10-05): tools/check-provider-coverage.py is the FREEKEYS-2 read-only gateway coverage check (47-provider list -> gateway prefixes -> live). It was an untracked file in the central AutoOS checkout from an earlier L1 generation; it has no tests and is not wired into CI, so it is parked here and not merged. To use it: review it, add a test, wire it, then merge.
