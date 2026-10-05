@@ -9846,9 +9846,10 @@ print('%s|%s|%s' % (
         't1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         't2-worker' = '128k'
-        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '128k'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
         # L1-CLEAN wave 2026-10-05: the -clean routes carry the 128k credit band
         # legs (registry surfaces declare 128000), so they clamp to 128k.
+        # 2026-10-05 operator: t2-orchestrator is 1M again (agy claude head).
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
         't4-researcher' = '128k'
