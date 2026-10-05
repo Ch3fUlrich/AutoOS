@@ -48,6 +48,14 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker
   - model_name: t2-worker
     litellm_params:
+      model: opencode_gateway/glm-5.3-flash
+      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
+  - model_name: t2-worker
+    litellm_params:
+      model: ainative/llama-4-maverick
+      api_key: os.environ/AINATIVE_API_KEY
+  - model_name: t2-worker
+    litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   - model_name: t2-worker
@@ -136,6 +144,14 @@ model_list:
   # AUTOOS-MANAGED-START t2-worker-free-only
   - model_name: t2-worker-free-only
     litellm_params:
+      model: opencode_gateway/glm-5.3-flash
+      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
+      model: ainative/llama-4-maverick
+      api_key: os.environ/AINATIVE_API_KEY
+  - model_name: t2-worker-free-only
+    litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   - model_name: t2-worker-free-only
@@ -199,6 +215,14 @@ model_list:
   # ── t3-driver: daily driver, cheapest capable ──────────────────────────
   # Mirror of registry routes.t3-driver (see the t2-worker note above).
   # AUTOOS-MANAGED-START t3-driver
+  - model_name: t3-driver
+    litellm_params:
+      model: opencode_gateway/glm-5.3-flash
+      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
+  - model_name: t3-driver
+    litellm_params:
+      model: ainative/llama-4-maverick
+      api_key: os.environ/AINATIVE_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: gemini/gemini-3.8-flash
@@ -292,6 +316,14 @@ model_list:
   # AUTOOS-MANAGED-START t3-driver-free-only
   - model_name: t3-driver-free-only
     litellm_params:
+      model: opencode_gateway/glm-5.3-flash
+      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
+      model: ainative/llama-4-maverick
+      api_key: os.environ/AINATIVE_API_KEY
+  - model_name: t3-driver-free-only
+    litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   - model_name: t3-driver-free-only
@@ -366,6 +398,14 @@ model_list:
   # AUTOOS-MANAGED-START t4-researcher
   - model_name: t4-researcher
     litellm_params:
+      model: opencode_gateway/glm-5.3-flash
+      api_key: os.environ/OPENCODE_GATEWAY_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
+      model: ainative/llama-4-maverick
+      api_key: os.environ/AINATIVE_API_KEY
+  - model_name: t4-researcher
+    litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
   - model_name: t4-researcher
@@ -433,14 +473,6 @@ model_list:
   # AUTOOS-MANAGED-END t1-orchestrator-paid
 
   # AUTOOS-MANAGED-START t2-orchestrator
-  - model_name: t2-orchestrator
-    litellm_params:
-      model: ovhcloud/gpt-oss-120b
-      api_key: os.environ/OVHCLOUD_API_KEY
-  - model_name: t2-orchestrator
-    litellm_params:
-      model: ovhcloud/Qwen3.8-27B
-      api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t2-orchestrator
     litellm_params:
       model: deepseek/deepseek-flash

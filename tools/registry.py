@@ -1177,6 +1177,10 @@ OMNIROUTE_RETIRED_IDS = [
     "rag",
     "tier1-paid", "tier2-paid", "tier3-paid",
     "tier2-credit", "tier3-credit",
+    # CLAUDE55 2026-10-05 (operator): the route was renamed opus-5-5 (the 4-6
+    # generation is retired upstream); the id retires so apply prunes the live
+    # store's orphaned combo instead of leaving it servable.
+    "opus-4-6",
 ]
 
 
@@ -1561,7 +1565,7 @@ IDE_MODEL_ORDER = (
     "t2-orchestrator",
     "t3-driver", "t3-driver-clean", "t3-driver-paid", "t3-driver-free-only",
     "spark-1.3-contributor",
-    "opus-4-6",
+    "opus-5-5",
     "t4-rag",
     "t4-researcher",
     "gemini-3.8-flash",
@@ -1800,7 +1804,7 @@ OPENHANDS_TIER_ORDER = (
     "omniroute-t2-worker-clean",
     "omniroute-t3-driver-clean",
     "omniroute-t4-rag",
-    "omniroute-opus-4-6",
+    "omniroute-opus-5-5",
     "omniroute-gemini-3.8-flash",
     "omniroute-t2-worker-free-only",
     "omniroute-deepseek-v4.1-flash",

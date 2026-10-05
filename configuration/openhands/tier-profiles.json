@@ -128,6 +128,13 @@
       "reasoning": false
     },
     {
+      "id": "omniroute-opus-5-5",
+      "model": "openai/opus-5-5",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 32768,
+      "reasoning": true
+    },
+    {
       "id": "omniroute-gemini-3.8-flash",
       "model": "openai/gemini-3.8-flash",
       "max_input_tokens": 1048576,
