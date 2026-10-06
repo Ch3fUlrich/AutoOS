@@ -4336,7 +4336,13 @@ if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is di
     for f in "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile"; do
         froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null || true)"
         pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true)"
-        (( froms >= 1 && froms == pinned )) || { ok=0; echo "${pinned:-0} of ${froms:-0} FROM lines are @sha256:-pinned in $f" >&2; }
+        # A multi-stage `FROM <stage>` is pinned through its stage: it counts only when an
+        # EARLIER line declared `... @sha256:<digest> AS <stage>` (the stage name is not a registry ref).
+        staged="$(awk 'BEGIN{IGNORECASE=1}
+            /^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]+[[:space:]]+AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1; next }
+            /^[[:space:]]*FROM[[:space:]]+[^[:space:]@:\/]+[[:space:]]*$/ { if (tolower($2) in st) n++ }
+            END{print n+0}' "$f" 2>/dev/null || echo 0)"
+        (( froms >= 1 && froms == pinned + staged )) || { ok=0; echo "${pinned:-0} pinned + ${staged:-0} pinned-stage of ${froms:-0} FROM lines in $f" >&2; }
     done
     if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
 fi
@@ -4350,7 +4356,7 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
-    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}$/\1/p' "$f" 2>/dev/null)"
+    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}\( AS [a-z][a-z0-9-]*\)\{0,1\}$/\1/p' "$f" 2>/dev/null)"
     [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
     # The local tag names the upstream version it is built on: bumped together.
     grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
@@ -4359,8 +4365,43 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
         || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
     grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
     [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
-    grep -qiE '^(COPY|ADD)[[:space:]]' "$f" 2>/dev/null && { ok=0; echo "COPY/ADD: a vendor binary would be committed; npm fetches at build" >&2; }
+    # No file from the build context: the only COPYs allowed are between build stages
+    # (`--from=<stage declared earlier>`) and the reviewed patcher script from the `tools`
+    # named context (a .py from this repo, never a binary). ADD stays forbidden.
+    bad_copy="$(awk 'BEGIN{IGNORECASE=1}
+        /^[[:space:]]*FROM[[:space:]].*[[:space:]]AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1 }
+        /^[[:space:]]*ADD[[:space:]]/ { print; next }
+        /^[[:space:]]*COPY[[:space:]]/ {
+            if (match($0, /--from=[^[:space:]]+/)) {
+                src=tolower(substr($0, RSTART+7, RLENGTH-7))
+                if (src in st) next
+                if (src == "tools" && $(NF-1) ~ /^[A-Za-z0-9_.-]+\.py$/) next
+            }
+            print }' "$f" 2>/dev/null)"
+    [[ -z "$bad_copy" ]] || { ok=0; echo "COPY/ADD from the build context (vendor binary risk): $bad_copy" >&2; }
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: the omniroute U2 stage patches at build time and fails the build unless 12 patched then 12 skipped"; then
+    # autoos3 (D-626): the runtime rootfs is read-only and has no python, so the reviewed
+    # tools/apply-vertex-patch.py runs in a python build stage over a copy of the chunks. The
+    # stage must stop the build on a patcher error or on any other count (renamed chunks after
+    # a FROM bump), must not pipe (no pipefail in /bin/sh), and must drop the backups.
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    grep -qE '^FROM python:[0-9.]+-slim[a-z-]*@sha256:[0-9a-f]{64} AS vertex-patch$' "$f" || { ok=0; echo "no digest-pinned python stage named vertex-patch" >&2; }
+    grep -qx 'COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py' "$f" || { ok=0; echo "the patcher is not taken from the tools context" >&2; }
+    grep -qx 'RUN set -e; \\' "$f" || { ok=0; echo "the patch RUN does not start with set -e" >&2; }
+    grep -qF "grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt" "$f" || { ok=0; echo "run 1 count is not asserted" >&2; }
+    grep -qF "grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt" "$f" || { ok=0; echo "run 2 (idempotent) count is not asserted" >&2; }
+    grep -qF 'rm -f /chunks/*.autoos-backup-*' "$f" || { ok=0; echo "patch backups are not removed" >&2; }
+    stage="$(sed -n '/^FROM python:.* AS vertex-patch$/,/^FROM /p' "$f")"
+    grep -qE 'apply-vertex-patch\.py[^|]*\|' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
+    [[ "$(grep -E '^FROM ' "$f" | tail -n1)" == "FROM base" ]] || { ok=0; echo "the final stage is not FROM base" >&2; }
+    grep -qx 'COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/' "$f" || { ok=0; echo "the patched chunks are not copied back" >&2; }
+    grep -qE '^      additional_contexts:$' "$AISTACK/compose.yml" && grep -qE '^        tools: \.\./\.\./\.\./tools$' "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml does not pass the tools build context" >&2; }
+    if (( ok )); then pass; else fail "the omniroute U2 build stage contract is broken"; fi
 fi
 
 if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then
