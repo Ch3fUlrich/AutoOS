@@ -132,6 +132,17 @@ def state_root() -> str:
 # comes back as the exact remediation instead of a stack trace.
 
 _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
+# The oc_l1 children get an ALLOWLIST env, not the caller's whole environment
+# (the same hygiene test_every_non_plumbing_child_call_passes_an_env enforces
+# everywhere else): only what the launcher and its canary need.
+_OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+                   "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL",
+                   "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME",
+                   "AUTOOS_OMNIROUTE_URL")
+
+
+def _oc_l1_env() -> dict:
+    return {k: os.environ[k] for k in _OC_L1_ENV_KEYS if k in os.environ}
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 _OC_EXIT_HINT = {
     0: "ok",
@@ -156,7 +167,7 @@ def oc_status(lane: str) -> dict:
     """Lane status through tools/oc_l1.py: live (exit 0), silent (1), dead (2)."""
     argv = _oc_l1_args(lane, "status")
     r = subprocess.run(argv, capture_output=True, text=True, timeout=60,
-                       stdin=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, env=_oc_l1_env())
     combined = (r.stdout + r.stderr).strip().lower()
     if r.returncode == 2 and ("password" in combined or "not set" in combined):
         # oc_l1.py exits 2 for BOTH "dead" and "config/password error"; a
@@ -180,7 +191,7 @@ def oc_start(lane: str) -> dict:
     it is never read, printed or logged here."""
     argv = _oc_l1_args(lane, "start")
     r = subprocess.run(argv, capture_output=True, text=True, timeout=420,
-                       stdin=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, env=_oc_l1_env())
     out = {"lane": lane, "exit_code": r.returncode,
            "outcome": _OC_EXIT_HINT.get(r.returncode, "unknown")}
     tail = (r.stdout.strip().splitlines() or [""])[-1][:200]
