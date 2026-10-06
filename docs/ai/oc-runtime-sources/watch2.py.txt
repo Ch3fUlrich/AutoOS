@@ -151,14 +151,14 @@ def progress_note():
             subj.append("%s: %s" % (d.get("kind"), d.get("subject")))
         except (OSError, ValueError):
             pass
-    git = subprocess.run(["git", "-C", CLONE, "log", "--oneline", "origin/main..lane/mcp-stdin"], capture_output=True, text=True,
+    git = subprocess.run(["git", "-C", CLONE, "log", "--oneline", "origin/main..HEAD"], capture_output=True, text=True,
                          stdin=subprocess.DEVNULL).stdout
     dirty = subprocess.run(["git", "-C", CLONE, "status", "--short"], capture_output=True, text=True,
                            stdin=subprocess.DEVNULL).stdout
     running = [r["id"] for r in worker_records() if not r.get("ended")]
     current = archive_inbox()
     body = ("YOUR CURRENT TASK is the file inbox/%s: read ONLY that file; every older order is archived in inbox-done/ and must NEVER be re-run. " % (current or "(none)")
-            + "SESSION RESTARTED by the watcher (fresh context, same role). Re-read your card and rules first. NEVER git reset / checkout -B / re-plan from step 1: your finished steps are the commits on branch lane/mcp-stdin (`git checkout lane/mcp-stdin`; `git log origin/main..lane/mcp-stdin`); continue at the first unfinished step. Recent outbox: "
+            + "SESSION RESTARTED by the watcher (fresh context, same role). Re-read your card and rules first. NEVER git reset / checkout -B / re-plan from step 1: your finished steps are the commits on your lane branch (`git log origin/main..HEAD`); continue at the first unfinished step. Recent outbox: "
             + " | ".join(subj) + "\nClone log:\n" + git + "Uncommitted:\n" + dirty + "Spawned runs still running: " + ", ".join(running))
     json.dump({"id": "progress", "from": "watcher", "to": LANE, "kind": "message", "subject": "restarted: short progress note",
                "body": body[:1900]}, open(INBOX + "/progress.json", "w"), indent=1)
@@ -172,6 +172,13 @@ def start_lane():
     if os.environ.get("SESSION_GATEWAY_URL"):   # route this session's model calls through its throttling proxy (D-615)
         env["AUTOOS_OMNIROUTE_URL"] = os.environ["SESSION_GATEWAY_URL"]
     for i in range(3):
+        if i:
+            # lane d (2026-10-05): back off between start attempts - an rc=5
+            # canary is usually a transient gateway error (503 resource
+            # pressure, measured during the 11:0xZ incident), not a broken
+            # guard; immediate retries just re-pay the ~90 s canary against
+            # the same broken gateway. 60 s lets the error clear.
+            time.sleep(60)
         r = subprocess.run([sys.executable, REPO + "/tools/oc_l1.py", "start", "--name", LANE], env=env, capture_output=True,
                            text=True, cwd=REPO, stdin=subprocess.DEVNULL, timeout=400)
         if r.returncode == 0:
@@ -206,11 +213,19 @@ def gate_verdict():
         return "ok"
 
 
-def set_lane_model(key, model_id):
+def set_lane_model(key, model_id, limit_context=None):
+    """Lane c (2026-10-05): the third argument pins the rendered client limit
+    alongside the model swap - a 1M leg must not render at the hardcoded
+    131072 (the client would compact at 128k), and the deepseek fallback's
+    catalog claims 128000 so it keeps the safe 131072."""
     p = HOME + "/.config/autoos/oc-l1.json"
     d = json.load(open(p))
     m = d[LANE]["model"]
     m["key"], m["modelID"] = key, model_id
+    if limit_context:
+        m["limit"] = {"context": limit_context, "output": 16000}
+    else:
+        m.pop("limit", None)
     m.pop("fallback_key", None); m.pop("fallback_modelID", None)
     json.dump(d, open(p, "w"), indent=2)
     os.chmod(p, 0o600)
@@ -234,18 +249,61 @@ def gate_fallback(st, recs, gate):
         if recs:
             log("gate block: fallback to deepseek deferred, %d spawned run(s) active" % len(recs))
             return False
-        set_lane_model("ds-deepseek-flash", "ds/deepseek-flash")
+        set_lane_model("ds-deepseek-flash", "ds/deepseek-flash", 131072)
         open(FALLBACK_FILE, "w").write(today)
         log("GATE BLOCK: lane switched to ds/deepseek-flash until the UTC day rolls")
         stop_server(st)
         return True
-    if flagged and flagged != today and not recs:
-        set_lane_model("gemini-gemini-3.8-flash", "gemini/gemini-3.8-flash")
+    if flagged and not recs and (flagged != today or gate != "block"):
+        # Lane d fix (2026-10-06): restore when the day rolled OR when the
+        # block has lifted. The old condition (flagged != today only) let a
+        # midnight flap stick the lane on OVH for a whole fresh day: at 00:0x
+        # the gate file still carried yesterday's block verdict with a fresh
+        # mtime, so the restore to gemini was immediately followed by a
+        # re-fallback (measured: both flag files rewritten 2026-10-06T00:01Z,
+        # lanes stuck on ovh while the new day's gate read ok $0.28/$14).
+        # The fallback exists only while the gate is at block.
+        set_lane_model("gemini-gemini-3.8-flash", "gemini/gemini-3.8-flash", 1048576)
         os.remove(FALLBACK_FILE)
-        log("UTC day rolled: lane switched back to gemini/gemini-3.8-flash")
+        log("gate no longer block (flag %s, verdict %s): lane switched back to gemini/gemini-3.8-flash"
+            % (flagged, gate))
         stop_server(st)
         return True
     return False
+
+
+def refresh_heartbeat(st, alive, outcome, n_asst, newest, recs):
+    """Lane b (2026-10-05): oc_l1_canary.write_heartbeat fires once at start
+    (state=started, current_step=canary) and nothing ever updates it, so the
+    heartbeat file says "canary" forever. The watcher refreshes it each cycle
+    from the live session view - the file becomes a real liveness record
+    (state, assistant count, newest assistant age, spawned runs) instead of a
+    stale birth certificate. The canary/turn keys are preserved."""
+    try:
+        hb = json.load(open(HOME + "/.config/autoos/oc-l1.json"))[LANE].get("heartbeat_file")
+        if not hb:
+            return
+        data = {}
+        try:
+            loaded = json.load(open(hb))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, ValueError):
+            pass
+        now = time.time()
+        data["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        data["state"] = "dead" if not alive else ("silent" if newest and now - newest > 600 else "live")
+        data["current_step"] = str(outcome) if outcome else ("working" if alive else "stopped")
+        data["assistant_messages"] = n_asst
+        data["newest_assistant_age_s"] = int(now - newest) if newest else None
+        data["spawned_runs_running"] = len(recs or [])
+        tmp = hb + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, hb)
+    except (OSError, ValueError, KeyError):
+        pass
 
 
 def session_view(st):

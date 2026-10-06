@@ -98,7 +98,8 @@ class RenderGoldenTest(unittest.TestCase):
             self.assertIn("AUTOOS_OMNIROUTE_URL", text)
             self.assertIn("AUTOOS_OMNIROUTE_KEY", text)
             self.assertEqual(
-                set(rendered), {"$schema", "model", "provider", "instructions", "mcp", "permission", "plugins"})
+                set(rendered), {"$schema", "model", "provider", "instructions", "mcp", "permission", "plugins",
+                                "compaction", "tool_output"})
             prov = rendered["provider"]["omniroute"]
             self.assertEqual(prov["npm"], "@ai-sdk/openai-compatible")
             self.assertEqual(prov["options"]["baseURL"], "{env:AUTOOS_OMNIROUTE_URL}/v1")

@@ -221,6 +221,11 @@ def validate_lane(lane, name):
         "heartbeat_file": hb or str(Path(scratch_dir) / "heartbeat.json"),
         "canary_timeout_s": tout if tout is not None else 120,
         "workers_dir": workers_dir or str(Path(cwd) / "logs" / "workers"),
+        # Lane c (2026-10-05): optional outside-folder allowlist, rendered
+        # into permission.external_directory by oc_l1_render.py (validated
+        # there); absent by default - the host overlay stays authoritative
+        # for the live lanes.
+        "external_directory": lane.get("external_directory"),
     }
 
 
