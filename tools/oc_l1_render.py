@@ -162,7 +162,20 @@ def render(lane, repo_config_path):
     # model.limit {"context","output"} explicitly (the watcher's set_lane_model
     # does this when it swaps gemini <-> deepseek); the default stays the safe
     # 128k the 128k fallback legs need.
-    limit = m.get("limit") if isinstance(m.get("limit"), dict) else MODEL_LIMIT
+    def _limit(raw):
+        """muse-spark seat 2026-10-06, finding 4: a pinned limit is rendered
+        straight into the client config - validate its shape here (positive
+        int context/output) instead of passing any dict through."""
+        if not isinstance(raw, dict):
+            return dict(MODEL_LIMIT)
+        ctx, out = raw.get("context"), raw.get("output")
+        if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+            return dict(MODEL_LIMIT)
+        if isinstance(out, bool) or not isinstance(out, int) or out <= 0:
+            return {"context": ctx, "output": MODEL_LIMIT["output"]}
+        return {"context": ctx, "output": out}
+
+    limit = _limit(m.get("limit"))
     models = {
         mid: {
             "name": _display_name(mid, m.get("key")),
@@ -171,9 +184,14 @@ def render(lane, repo_config_path):
     }
     if m.get("fallback_modelID"):
         fid = m["fallback_modelID"]
+        # muse-spark seat 2026-10-06, finding 3: the fallback leg must NOT
+        # inherit the primary's limit - a 1M primary would render a 128k
+        # fallback as 1M and the client would overshoot it mid-conversation.
+        # The fallback renders the safe default unless fallback_limit is pinned.
+        flimit = _limit(m.get("fallback_limit")) if m.get("fallback_limit") else dict(MODEL_LIMIT)
         models[fid] = {
             "name": _display_name(fid, m.get("fallback_key")),
-            "limit": dict(limit),
+            "limit": flimit,
         }
 
     cfg = {

@@ -177,10 +177,20 @@ def start_lane():
             # canary is usually a transient gateway error (503 resource
             # pressure, measured during the 11:0xZ incident), not a broken
             # guard; immediate retries just re-pay the ~90 s canary against
-            # the same broken gateway. 60 s lets the error clear.
-            time.sleep(60)
-        r = subprocess.run([sys.executable, REPO + "/tools/oc_l1.py", "start", "--name", LANE], env=env, capture_output=True,
-                           text=True, cwd=REPO, stdin=subprocess.DEVNULL, timeout=400)
+            # the same broken gateway. 30 s (muse-spark seat finding 6: the
+            # sleep blocks the whole watcher cycle, so keep it short).
+            time.sleep(30)
+        try:
+            r = subprocess.run([sys.executable, REPO + "/tools/oc_l1.py", "start", "--name", LANE], env=env, capture_output=True,
+                               text=True, cwd=REPO, stdin=subprocess.DEVNULL, timeout=400)
+        except subprocess.TimeoutExpired:
+            # muse-spark seat 2026-10-06, finding 1: a hung start must count as a failed
+            # attempt, not kill the watcher (TimeoutExpired escaped start_lane).
+            st = read_state()
+            if st:
+                stop_server(st)
+            log("start attempt %d timeout after 400s" % (i + 1))
+            continue
         if r.returncode == 0:
             log("lane (re)started")
             return True
@@ -227,7 +237,12 @@ def set_lane_model(key, model_id, limit_context=None):
     else:
         m.pop("limit", None)
     m.pop("fallback_key", None); m.pop("fallback_modelID", None)
-    json.dump(d, open(p, "w"), indent=2)
+    # muse-spark seat 2026-10-06, finding 2: atomic write - a crash mid-dump
+    # truncated oc-l1.json in place and took both lanes down with it.
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
     os.chmod(p, 0o600)
 
 
@@ -292,7 +307,9 @@ def refresh_heartbeat(st, alive, outcome, n_asst, newest, recs):
             pass
         now = time.time()
         data["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        data["state"] = "dead" if not alive else ("silent" if newest and now - newest > 600 else "live")
+        # muse-spark seat 2026-10-06, finding 7: a session with no assistant
+        # message yet is "starting", not "live" (None newest read as live forever).
+        data["state"] = "dead" if not alive else ("live" if newest and now - newest <= 600 else ("silent" if newest else "starting"))
         data["current_step"] = str(outcome) if outcome else ("working" if alive else "stopped")
         data["assistant_messages"] = n_asst
         data["newest_assistant_age_s"] = int(now - newest) if newest else None
