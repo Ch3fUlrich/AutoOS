@@ -30,7 +30,10 @@ services:
     build:
       context: .
       dockerfile: omniroute.Dockerfile
-    image: autoos/omniroute:3.8.50-autoos2
+      # tools/apply-vertex-patch.py for the U2 build stage (omniroute.Dockerfile).
+      additional_contexts:
+        tools: ../../../tools
+    image: autoos/omniroute:3.8.50-autoos3
     container_name: autoos-omniroute
     restart: unless-stopped
     # The image's own user is node (1000); the host user's ids keep the
