@@ -4396,7 +4396,8 @@ if it "aistack: the omniroute U2 stage patches at build time and fails the build
     grep -qF "grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt" "$f" || { ok=0; echo "run 2 (idempotent) count is not asserted" >&2; }
     grep -qF 'rm -f /chunks/*.autoos-backup-*' "$f" || { ok=0; echo "patch backups are not removed" >&2; }
     stage="$(sed -n '/^FROM python:.* AS vertex-patch$/,/^FROM /p' "$f")"
-    grep -qE 'apply-vertex-patch\.py[^|]*\|' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
+    # a single `|` after the patcher call is a pipe; `||` (the error branch) is not
+    grep -qE 'apply-vertex-patch\.py[^|]*\|([^|]|$)' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
     [[ "$(grep -E '^FROM ' "$f" | tail -n1)" == "FROM base" ]] || { ok=0; echo "the final stage is not FROM base" >&2; }
     grep -qx 'COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/' "$f" || { ok=0; echo "the patched chunks are not copied back" >&2; }
     grep -qE '^      additional_contexts:$' "$AISTACK/compose.yml" && grep -qE '^        tools: \.\./\.\./\.\./tools$' "$AISTACK/compose.yml" \
