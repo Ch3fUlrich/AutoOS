@@ -38,11 +38,14 @@ USER node
 FROM python:3.12-slim-bookworm@sha256:7753c33391fc9f01d1984375bf375eb6686d52ba10db6043a86634a5ccf90dcf AS vertex-patch
 COPY --from=base /app/.build/next/server/chunks /chunks
 COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py
-RUN python3 /apply-vertex-patch.py /chunks | tee /run1.txt \
- && grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt \
- && python3 /apply-vertex-patch.py /chunks | tee /run2.txt \
- && grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt \
- && rm -f /chunks/*.autoos-backup-*
+# set -e and no pipes (/bin/sh has no pipefail): every step must succeed, the patcher's
+# exit code included, or the build stops.
+RUN set -e; \
+    python3 /apply-vertex-patch.py /chunks > /run1.txt || { cat /run1.txt; exit 1; }; cat /run1.txt; \
+    grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt; \
+    python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }; cat /run2.txt; \
+    grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt; \
+    rm -f /chunks/*.autoos-backup-*
 
 FROM base
 COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/
