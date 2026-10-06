@@ -83,8 +83,10 @@ def run_plugin(event, env_overrides=None, plugin_path=None, timeout=20, keep_loc
         env["AUTOOS_REPO_ROOT"] = str(ROOT)  # the imported copy lives in a temp dir, so point at the real checkout
         if env_overrides:
             env.update(env_overrides)
-            if env_overrides.get("AUTOOS_REPO_ROOT") is None:
-                env.pop("AUTOOS_REPO_ROOT", None)
+            # a None value removes the key entirely (tests that must prove
+            # behaviour with the variable unset, e.g. AUTOOS_GUARD_ROLE)
+            for key in [k for k, v in env_overrides.items() if v is None]:
+                env.pop(key, None)
 
         payload = json.dumps({
             "pluginUrl": plugin_url,
@@ -259,6 +261,119 @@ class TestOpenCodeBashGuard(unittest.TestCase):
         self.assertNotIn("netplan", content.lower(), "Plugin must not contain netplan rule")
         self.assertNotIn("--bg", content, "Plugin must not contain --bg rule")
         self.assertIn("bash_guard.py", content, "Plugin must reference bash_guard.py")
+
+    # ------------------------------------------------------------------
+    # Orchestrator role (AUTOOS_GUARD_ROLE=orchestrator): the guard denies
+    # shell writes outside .oc-pilot/ while leaving the old behaviour
+    # untouched when the role is unset.
+    # ------------------------------------------------------------------
+
+    ORCH_ENV = {"AUTOOS_GUARD_ROLE": "orchestrator"}
+
+    def _orch_denied(self, cmd, *needles):
+        res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                         env_overrides=dict(self.ORCH_ENV))
+        self.assertFalse(res["allowed"], f"Orchestrator must deny: {cmd!r} (error={res['error']})")
+        self.assertIsNotNone(res["error"])
+        for needle in needles:
+            self.assertIn(needle, res["error"].lower())
+
+    def _orch_allowed(self, cmd):
+        res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                         env_overrides=dict(self.ORCH_ENV))
+        self.assertTrue(res["allowed"], f"Orchestrator must allow: {cmd!r} (error={res['error']})")
+        self.assertIsNone(res["error"])
+
+    def test_orch_redirect_single_outside_denied(self):
+        self._orch_denied("echo hi > outside.txt", "outside.txt")
+
+    def test_orch_redirect_double_outside_denied(self):
+        self._orch_denied("echo hi >> /tmp/out.log", "/tmp/out.log")
+
+    def test_orch_redirect_fd2_outside_denied(self):
+        self._orch_denied("false 2> /tmp/err.log", "/tmp/err.log")
+
+    def test_orch_redirect_noclobber_outside_denied(self):
+        self._orch_denied("echo hi >| /tmp/f.txt", "/tmp/f.txt")
+
+    def test_orch_redirect_ampsingle_outside_denied(self):
+        self._orch_denied("cmd &> /tmp/all.log", "/tmp/all.log")
+
+    def test_orch_redirect_quoted_double_outside_denied(self):
+        self._orch_denied('echo hi > "outside.txt"', "outside.txt")
+
+    def test_orch_redirect_quoted_single_outside_denied(self):
+        self._orch_denied("echo hi > 'outside.txt'", "outside.txt")
+
+    def test_orch_redirect_inside_pilot_allowed(self):
+        self._orch_allowed("echo hi > .oc-pilot/notes.txt")
+        self._orch_allowed("echo hi >> .oc-pilot/log.txt")
+        self._orch_allowed("echo hi > /dev/null")
+
+    def test_orch_tee_outside_denied(self):
+        self._orch_denied("echo hi | tee /tmp/out.txt", "/tmp/out.txt")
+
+    def test_orch_tee_inside_pilot_allowed(self):
+        self._orch_allowed("echo hi | tee .oc-pilot/out.txt")
+
+    def test_orch_sed_i_outside_denied(self):
+        self._orch_denied("sed -i 's/a/b/' /etc/hosts", "/etc/hosts")
+        self._orch_denied("sed -i 's/a/b/' outside.txt", "outside.txt")
+
+    def test_orch_sed_n_read_only_allowed(self):
+        self._orch_allowed("sed -n '1,5p' /etc/hosts")
+
+    def test_orch_python_c_write_outside_denied(self):
+        self._orch_denied(
+            'python3 -c "open(\'/tmp/x.txt\', \'w\').write(\'hi\')"', "/tmp/x.txt")
+        self._orch_denied(
+            'python -c "open(\'outside.txt\', \'a\')"', "outside.txt")
+
+    def test_orch_python_c_write_inside_pilot_allowed(self):
+        self._orch_allowed('python3 -c "open(\'.oc-pilot/x.txt\', \'w\').write(\'hi\')"')
+        self._orch_allowed('python3 -c "print(open(\'.oc-pilot/x.txt\').read())"')
+
+    def test_orch_cp_mv_outside_denied(self):
+        self._orch_denied("cp a.txt /tmp/b.txt", "/tmp/b.txt")
+        self._orch_denied("mv a.txt /tmp/b.txt", "/tmp/b.txt")
+
+    def test_orch_git_mutation_denied(self):
+        self._orch_denied("git apply patch.diff")
+        self._orch_denied("git am patch.diff")
+        self._orch_denied("git commit -m x")
+        self._orch_denied("git checkout -- file.txt")
+        self._orch_denied("git checkout file.txt")
+        self._orch_denied("git reset HEAD~1")
+        self._orch_denied("git rebase main")
+
+    def test_orch_git_read_only_and_orchestrator_allowed(self):
+        self._orch_allowed("git fetch origin")
+        self._orch_allowed("git log --oneline -5")
+        self._orch_allowed("git show HEAD")
+        self._orch_allowed("git diff")
+        self._orch_allowed("git status")
+        self._orch_allowed("git branch -a")
+        self._orch_allowed("git cherry-pick abc123")
+        self._orch_allowed("git merge --ff-only origin/main")
+        self._orch_allowed("git push")
+
+    def test_orch_read_only_commands_allowed(self):
+        self._orch_allowed("cat file.txt")
+        self._orch_allowed("grep -rn pattern .")
+        self._orch_allowed("ls -la")
+
+    def test_orch_tool_commands_allowed(self):
+        self._orch_allowed("python3 tools/autoos-agent.py list")
+        self._orch_allowed("python3 tools/autoos_gateway_key.py status")
+        self._orch_allowed("python3 tools/review-call.py")
+
+    def test_orch_role_unset_keeps_old_behaviour(self):
+        # With AUTOOS_GUARD_ROLE explicitly unset, the old flow applies:
+        # a plain redirect outside .oc-pilot/ is not a legacy incident shape.
+        res = run_plugin({"tool": "shell", "input": {"command": "echo test > outside.txt"}},
+                         env_overrides={"AUTOOS_GUARD_ROLE": None})
+        self.assertTrue(res["allowed"], f"Role unset must keep old behaviour: {res['error']}")
+        self.assertIsNone(res["error"])
 
 
 if __name__ == "__main__":
