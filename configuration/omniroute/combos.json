@@ -317,8 +317,6 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
         "free-ai/qwen7b",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "scw/mistral-small-3.2-24b-instruct-2506",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
@@ -350,9 +348,7 @@
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b",
-        "scw/qwen3-235b-a22b-instruct-2507",
-        "scw/mistral-small-3.2-24b-instruct-2506"
+        "free-ai/qwen7b"
       ]
     },
     {
@@ -369,8 +365,6 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
         "free-ai/qwen7b",
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "scw/qwen3-235b-a22b-instruct-2507",
         "ovh/gpt-oss-120b",
         "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
@@ -403,9 +397,7 @@
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
-        "free-ai/qwen7b",
-        "scw/mistral-small-3.2-24b-instruct-2506",
-        "scw/qwen3-235b-a22b-instruct-2507"
+        "free-ai/qwen7b"
       ]
     },
     {
@@ -424,7 +416,6 @@
       "models": [
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
-        "scw/qwen3-235b-a22b-instruct-2507",
         "free-ai/qwen7b"
       ]
     },

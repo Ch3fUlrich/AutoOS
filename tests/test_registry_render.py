@@ -264,10 +264,11 @@ class GatewayRefTests(unittest.TestCase):
 
     def test_render_omniroute_still_applies_a_declared_model_prefix(self):
         # The mechanism AGYID added (and this AGYCANON change must not break):
-        # scaleway's free grant renders under its declared scw prefix.
+        # ovhcloud's credit legs render under their declared ovh prefix
+        # (SCWREMOVAL 2026-10-06: scaleway example retired with the provider).
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("scw/mistral-small-3.2-24b-instruct-2506",
+        self.assertIn("ovh/Qwen3.8-27B",
                       by_name["t3-driver"]["models"])
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
@@ -471,7 +472,7 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         self.assertNotIn("claude-opus-4-6", rendered["t2-worker"])
         combos = {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
         self.assertIn(leg, combos["t2-worker"]["models"])
-        self.assertIn("scaleway/mistral-small-3.2-24b-instruct-2506",
+        self.assertIn("ovhcloud/Qwen3.8-27B",
                       rendered["t2-worker"])
 
 
@@ -1667,7 +1668,8 @@ class FreeAiRenderTests(unittest.TestCase):
         # order (2026-10-05): oc/glm-5.3-flash (expiring grant) and
         # ainative/llama-4-maverick (trial burn-down) lead the band. The
         # band head and tail below pin the new order.
-        self.assertEqual(models[-1], "scw/qwen3-235b-a22b-instruct-2507")
+        # SCWREMOVAL 2026-10-06: scaleway tails gone, free-ai rides last.
+        self.assertEqual(models[-1], "free-ai/qwen7b")
         self.assertIn("free-ai/qwen7b", models)
         # GLM55 gate amendment (2026-10-05): the oc leg is gated (402 - the
         # connection's account auth does not cover the paid Zen model), so
@@ -1684,19 +1686,15 @@ class FreeAiRenderTests(unittest.TestCase):
     def test_free_ai_is_last_in_the_free_only_combos(self):
         # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
         # trial-free-credits-paid, free_ai middle, scaleway grants trail it).
-        # Pins the new band tails: free-ai/qwen7b rides third-from-last with
-        # the scw grants behind it - the T2FREE-era free-ai-last invariant is
-        # superseded, so a future reorder back to last fails loudly here.
+        # Pins the new band tails: free-ai/qwen7b rides last among servable
+        # legs (SCWREMOVAL 2026-10-06 dropped the scw grants behind it) - a
+        # future reorder that buries it mid-list fails loudly here.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        self.assertEqual(combos["t2-worker-free-only"]["models"][-3:],
-                         ["free-ai/qwen7b",
-                          "scw/qwen3-235b-a22b-instruct-2507",
-                          "scw/mistral-small-3.2-24b-instruct-2506"])
-        self.assertEqual(combos["t3-driver-free-only"]["models"][-3:],
-                         ["free-ai/qwen7b",
-                          "scw/mistral-small-3.2-24b-instruct-2506",
-                          "scw/qwen3-235b-a22b-instruct-2507"])
+        self.assertEqual(combos["t2-worker-free-only"]["models"][-1],
+                         "free-ai/qwen7b")
+        self.assertEqual(combos["t3-driver-free-only"]["models"][-1],
+                         "free-ai/qwen7b")
 
     def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
         # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:

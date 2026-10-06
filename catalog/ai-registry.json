@@ -2818,10 +2818,10 @@
         "client": "opencode",
         "model": "omniroute/t3-driver",
         "family": "qwen",
-        "leg": "scaleway/qwen3-235b-a22b-instruct-2507",
+        "leg": "groq/qwen/qwen3.8-27b",
         "paid": false,
         "first_pass_only": true,
-        "source": "L1-routing FREEKEYS-2 (D-141 item 3) 2026-09-28, placement fixed by FREEKEYS-2b: the second new cross-provider reviewer, a 235B free providers.scaleway grant with `tool_calls: proven` in the tracked registry (FREEKEYS-1 probe) - a different family and a different vendor account from the nebius entry above, so one provider's rate limit does not bench both. Last in the free band (the anthropic row still closes the list), same first_pass_only reasoning."
+        "source": "SCWREMOVAL 2026-10-06 (operator): scaleway removed, reviewer leg moved to groq/qwen/qwen3.8-27b - same qwen family, tool_calls proven, serves (groq free tier). Previous scaleway entry: FREEKEYS-2 free providers.scaleway grant."
       },
       {
         "client": "claude",
@@ -3457,8 +3457,8 @@
       "tier": "free",
       "credit_usd": 0,
       "trains_on_prompts": null,
-      "available": true,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'scaleway' is registered and active, its catalog exposes 6 canonical model id(s) under prefix 'scw', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 400 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): scw/gpt-oss-120b, scw/mistral-small-3.2-24b-instruct-2506, scw/qwen3-235b-a22b-instruct-2507. Reuses the already-registered models row(s) 'gpt-oss-120b' instead of writing a second row for the same model id."
+      "available": false,
+      "$comment": "SCWREMOVAL 2026-10-06 (operator: scaleway is not used anymore): provider gated (available:false); legs removed from every band (t2-worker, t2-worker-free-only, t3-driver, t3-driver-free-only, t4-researcher); reviewer leg moved to groq/qwen/qwen3.8-27b (same qwen family). Rows kept for pricing history. Previous: FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'scaleway' is registered and active, its catalog exposes 6 canonical model id(s) under prefix 'scw', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 400 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): scw/gpt-oss-120b, scw/mistral-small-3.2-24b-instruct-2506, scw/qwen3-235b-a22b-instruct-2507. Reuses the already-registered models row(s) 'gpt-oss-120b' instead of writing a second row for the same model id."
     },
     "nebius": {
       "id": "nebius",
@@ -4448,8 +4448,6 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
-        "scaleway/qwen3-235b-a22b-instruct-2507",
-        "scaleway/mistral-small-3.2-24b-instruct-2506",
         "ovhcloud/gpt-oss-120b",
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
@@ -4588,8 +4586,6 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
-        "scaleway/qwen3-235b-a22b-instruct-2507",
-        "scaleway/mistral-small-3.2-24b-instruct-2506",
         "cerebras/gpt-oss-120b",
         "sambanova/gpt-oss-120b"
       ],
@@ -4673,8 +4669,6 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
-        "scaleway/mistral-small-3.2-24b-instruct-2506",
-        "scaleway/qwen3-235b-a22b-instruct-2507",
         "ovhcloud/gpt-oss-120b",
         "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
@@ -4812,8 +4806,6 @@
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
         "free_ai/qwen7b",
-        "scaleway/mistral-small-3.2-24b-instruct-2506",
-        "scaleway/qwen3-235b-a22b-instruct-2507",
         "cerebras/qwen-3.8-27b"
       ],
       "strategy": "priority",
@@ -4946,7 +4938,6 @@
         "opencode_gateway/glm-5.3-flash",
         "ainative/llama-4-maverick",
         "gemini/gemini-3.8-flash",
-        "scaleway/qwen3-235b-a22b-instruct-2507",
         "free_ai/qwen7b"
       ],
       "strategy": "priority",

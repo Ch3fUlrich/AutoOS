@@ -543,7 +543,7 @@
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
           "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "t2-orchestrator": {
           "modelID": "t2-orchestrator",
@@ -571,7 +571,7 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 131072, "output": 16384 }
         },
         "spark-1.3-contributor": {
           "modelID": "spark-1.3-contributor",
@@ -601,7 +601,7 @@
         "t4-researcher": {
           "modelID": "t4-researcher",
           "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
-          "limit": { "context": 128000, "output": 8192 }
+          "limit": { "context": 131072, "output": 8192 }
         },
         "gemini-3.8-flash": {
           "modelID": "gemini-3.8-flash",
@@ -746,7 +746,7 @@
         "t2-worker-free-only": {
           "modelID": "t2-worker-free-only",
           "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 32768 }
+          "limit": { "context": 131072, "output": 32768 }
         },
         "t3-driver": {
           "modelID": "t3-driver",
@@ -761,7 +761,7 @@
         "t3-driver-free-only": {
           "modelID": "t3-driver-free-only",
           "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 131072, "output": 16384 }
         },
         "t4-rag": {
           "modelID": "t4-rag",
@@ -771,7 +771,7 @@
         "t4-researcher": {
           "modelID": "t4-researcher",
           "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
-          "limit": { "context": 128000, "output": 8192 }
+          "limit": { "context": 131072, "output": 8192 }
         }
         // AUTOOS-MANAGED-END litellm
       }

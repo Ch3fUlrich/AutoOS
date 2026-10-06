@@ -121,7 +121,7 @@
     {
       "id": "t2-worker-free-only",
       "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
-      "context": 128000,
+      "context": 131072,
       "output": 32768,
       "surfaces": {
         "omniroute": [
@@ -203,7 +203,7 @@
     {
       "id": "t3-driver-free-only",
       "name": "t3 cheap-driver-128k — zero spend (free legs only)",
-      "context": 128000,
+      "context": 131072,
       "output": 16384,
       "surfaces": {
         "omniroute": [
@@ -274,7 +274,7 @@
     {
       "id": "t4-researcher",
       "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
-      "context": 128000,
+      "context": 131072,
       "output": 8192,
       "surfaces": {
         "omniroute": [

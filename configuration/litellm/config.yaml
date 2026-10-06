@@ -85,14 +85,6 @@ model_list:
       api_key: os.environ/FREE_AI_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t2-worker
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: ovhcloud/gpt-oss-120b
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: t2-worker
@@ -171,14 +163,6 @@ model_list:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
   # AUTOOS-MANAGED-END t2-worker-free-only
 
   # ── t2-worker-paid / t3-driver-paid: hand-curated, deepseek-funded again ────
@@ -236,14 +220,6 @@ model_list:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: ovhcloud/gpt-oss-120b
@@ -327,14 +303,6 @@ model_list:
       model: openai/qwen7b
       api_base: https://api.free.ai/v1
       api_key: os.environ/FREE_AI_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
-      model: scaleway/mistral-small-3.2-24b-instruct-2506
-      api_key: os.environ/SCALEWAY_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
   # AUTOOS-MANAGED-END t3-driver-free-only
 
   # ── t3-driver-paid: same shape as t2-worker-paid (see the note above) ──────
@@ -372,10 +340,6 @@ model_list:
     litellm_params:
       model: gemini/gemini-3.8-flash
       api_key: os.environ/GEMINI_API_KEY
-  - model_name: t4-researcher
-    litellm_params:
-      model: scaleway/qwen3-235b-a22b-instruct-2507
-      api_key: os.environ/SCALEWAY_API_KEY
   - model_name: t4-researcher
     litellm_params:
       model: openai/qwen7b

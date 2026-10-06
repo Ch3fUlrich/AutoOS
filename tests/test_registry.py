@@ -1646,9 +1646,9 @@ class FreeAiProviderTests(unittest.TestCase):
 
     def test_free_ai_leg_is_last_on_both_free_only_routes(self):
         # TORDER 2026-10-01 (trial->free->credits->paid): free_ai/qwen7b moved
-        # into free band (before scaleway/antigravity tails, no credits/paid in
-        # free-only). It is free and before the tail, not last; no free after paid
-        # (free-only has no paid). Contract gates order.
+        # into free band (no credits/paid in free-only). SCWREMOVAL 2026-10-06:
+        # with the scaleway tails gone it rides last among servable legs.
+        # Contract gates order.
         for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
             legs = self.reg["routes"][route_id]["legs"]
             self.assertIn("free_ai/qwen7b", legs, route_id)
@@ -2712,7 +2712,7 @@ class MistralPlanLimitsTests(unittest.TestCase):
         legs = self.reg["routes"]["t3-driver"]["legs"]
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
         # TORDER 2026-10-01: gemini restored head (operator reversal, GEMRESTORE
-        # + TASK2); scaleway kept but NOT as head (dead head); nebius removed.
+        # + TASK2); nebius removed. SCWREMOVAL 2026-10-06: scaleway gone too.
         # GLM55/AINATIVE 2026-10-05 (operator): the expiring grants lead the
         # band ahead of gemini - oc/glm-5.3-flash (1M, OpenCode-served) then
         # ainative/llama-4-maverick (FREEKEYS-proven tool calls).
@@ -3442,8 +3442,6 @@ AGENTIC_TIER_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
 # and that row is V4 weights, so it stays registered and routes nowhere — see
 # DeepseekV41OnlyDecisionTests.
 NEW_FREE_LEGS = {
-    "scaleway/qwen3-235b-a22b-instruct-2507",
-    "scaleway/mistral-small-3.2-24b-instruct-2506",
     "nebius/zai-org/GLM-5.2",
     "nebius/zai-org/GLM-5.3-Flash",
 }
@@ -3612,16 +3610,16 @@ class ComboCrossProviderTests(unittest.TestCase):
         counting it, while the two legs that do carry the promise stay counted.
         The small leg is the weak link, not the band."""
         reg = copy.deepcopy(self.reg)
-        small = "scaleway/mistral-small-3.2-24b-instruct-2506"
+        small = "groq/qwen/qwen3.8-27b"
         before = usable_legs(self.reg, "t3-driver")
         self.assertIn(small, before)
-        reg["models"]["mistral-small-3.2-24b-instruct-2506"]["context_advertised"] = 32000
+        reg["models"]["qwen/qwen3.8-27b"]["context_advertised"] = 32000
         after = usable_legs(reg, "t3-driver")
         self.assertNotIn(small, after,
                          "a 32k leg was still counted usable for a 128k route")
-        # TORDER: nebius removed (6 legs); remaining usable band still carries promise
-        self.assertIn("scaleway/qwen3-235b-a22b-instruct-2507", after)
-        self.assertIn("groq/qwen/qwen3.8-27b", after)
+        # TORDER: nebius removed (6 legs); SCWREMOVAL 2026-10-06: scaleway gone
+        # too; remaining usable band still carries promise
+        self.assertIn("ovhcloud/Qwen3.8-27B", after)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: t3-driver sells 128k (combos.json
         # `context`), so 128k is what a counted fallback must carry.
