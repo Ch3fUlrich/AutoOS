@@ -161,14 +161,14 @@
     "tier3-paid",
     "tier2-credit",
     "tier3-credit",
-    "opus-4-6"
+    "opus-4-6",
+    "or-qwen3.8-27b-free"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
-    "or-qwen3.8-27b-free",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "t1-orchestrator-clean"
