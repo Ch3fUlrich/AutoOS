@@ -83,6 +83,75 @@ function runProcess(pythonBin, guardPath, payloadJson, timeoutMs = 5000) {
   });
 }
 
+function stripQuotedSegments(s) {
+  let out = "";
+  let quote = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      if (c === quote && s[i - 1] !== "\\") {
+        quote = null;
+      }
+      out += " ";
+    } else if (c === '"' || c === "'") {
+      quote = c;
+      out += " ";
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+function isPilotScopedPath(p) {
+  let t = p.trim().replace(/^["']+|["']+$/g, "");
+  if (!t || t === "-" || t === "/dev/null") {
+    return true;
+  }
+  if (t === ".oc-pilot" || t.startsWith(".oc-pilot/")) {
+    return true;
+  }
+  if (t.includes("/.oc-pilot/") || t.endsWith("/.oc-pilot")) {
+    return true;
+  }
+  return false;
+}
+
+function extractShellWriteTargets(command) {
+  const stripped = stripQuotedSegments(command);
+  const targets = [];
+  const redirectRe = />{1,2}\s*([^\s;|&><]+)/g;
+  let m;
+  while ((m = redirectRe.exec(stripped)) !== null) {
+    if (m[1]) {
+      targets.push(m[1]);
+    }
+  }
+  const segments = stripped.split(/[\n;]+/);
+  for (const seg of segments) {
+    const parts = seg.split(/\s*\|\s*/);
+    for (const part of parts) {
+      const tokens = part.trim().split(/\s+/).filter(Boolean);
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i] === "tee" && i + 1 < tokens.length) {
+          for (let j = i + 1; j < tokens.length; j++) {
+            const tok = tokens[j];
+            if (tok.startsWith("-")) {
+              continue;
+            }
+            if (/^[0-9]+$/.test(tok)) {
+              continue;
+            }
+            targets.push(tok);
+          }
+          break;
+        }
+      }
+    }
+  }
+  return targets;
+}
+
 export default {
   id: "bash-guard",
   async setup(ctx) {
@@ -94,6 +163,17 @@ export default {
       const command = (e.input && typeof e.input.command === "string")
         ? e.input.command
         : "";
+
+      if (process.env.AUTOOS_GUARD_ROLE === "orchestrator") {
+        const writeTargets = extractShellWriteTargets(command);
+        for (const target of writeTargets) {
+          if (!isPilotScopedPath(target)) {
+            throw new Error(
+              `bash-guard: orchestrator writes limited to .oc-pilot/ (denied: ${target})`
+            );
+          }
+        }
+      }
 
       const repoRoot = getRepoRoot();
       const guardPath = path.join(repoRoot, "tools", "hooks", "bash_guard.py");
