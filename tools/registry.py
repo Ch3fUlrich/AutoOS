@@ -1181,6 +1181,10 @@ OMNIROUTE_RETIRED_IDS = [
     # generation is retired upstream); the id retires so apply prunes the live
     # store's orphaned combo instead of leaving it servable.
     "opus-4-6",
+    # ORQWEN404 2026-10-06 (operator task 10): the openrouter qwen3.8-27b:free
+    # leg measured 404 upstream; its single-leg route is deleted and the id
+    # retires so apply prunes the live combo.
+    "or-qwen3.8-27b-free",
 ]
 
 
@@ -1575,7 +1579,9 @@ IDE_MODEL_ORDER = (
     # because render_ide() requires this constant to name every route id (a
     # route added without it raises rather than silently mis-ordering).
     "hf-glm-5.2", "hf-qwen3.8-27b",
-    "or-nemotron-3-super-free", "or-qwen3.8-27b-free",
+    "or-nemotron-3-super-free",
+    # ORQWEN404 2026-10-06: or-qwen3.8-27b-free left IDE_MODEL_ORDER with its
+    # route (openrouter qwen3.8-27b:free measured 404 upstream).
     "or-north-mini-code-free", "or-laguna-s-2.1-free",
     "groq-qwen3.8-27b",
     # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).

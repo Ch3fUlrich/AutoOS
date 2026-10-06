@@ -125,6 +125,100 @@ def state_root() -> str:
     return os.path.join(clients.state_dir(), "agents")
 
 
+# --- lane lifecycle (c2 2026-10-06): oc_l1.py through MCP, so a calling agent
+# never has to trial-and-error shell commands to manage a lane. The lane
+# password travels in the environment variable the lane config names
+# (AUTOOS_OCL1_PW); these helpers never read, print or log it - a missing one
+# comes back as the exact remediation instead of a stack trace.
+
+_LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
+_LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+_OC_EXIT_HINT = {
+    0: "ok",
+    2: "config or password error: set the lane's password env (AUTOOS_OCL1_PW) in this session's environment, then retry",
+    4: "server did not become healthy in time: retry once; if it repeats, check the gateway and the throttle proxy ports",
+    5: "UNATTENDED-REFUSED: the canary was not denied, so the lane did not start - do NOT run the lane unattended; fix the bash-guard plugin, delete the state file under ~/fleet/<lane>/state/, and start again, then supervise until the canary says denied=yes",
+}
+
+
+def _oc_l1_args(lane: str, subcommand: str) -> list:
+    """oc_l1.py's argparse takes the SUBCOMMAND first: `oc_l1.py status --name
+    <lane>` - measured 2026-10-06 (the --name-first order parses the lane as
+    the subcommand and dies on invalid choice)."""
+    if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
+        raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
+    if subcommand not in ("render", "start", "status"):
+        raise ValueError("unsupported oc_l1.py subcommand")
+    return [sys.executable, os.path.join(TOOLS_DIR, "oc_l1.py"), subcommand, "--name", lane]
+
+
+def oc_status(lane: str) -> dict:
+    """Lane status through tools/oc_l1.py: live (exit 0), silent (1), dead (2)."""
+    argv = _oc_l1_args(lane, "status")
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=60,
+                       stdin=subprocess.DEVNULL)
+    combined = (r.stdout + r.stderr).strip().lower()
+    if r.returncode == 2 and ("password" in combined or "not set" in combined):
+        # oc_l1.py exits 2 for BOTH "dead" and "config/password error"; a
+        # missing password env is the caller's fixable problem, not a dead lane.
+        return {"lane": lane, "verdict": "config-error", "exit_code": 2,
+                "advice": "set the lane's password env (AUTOOS_OCL1_PW) in this session's environment and retry; the value is never read here"}
+    verdict = {0: "live", 1: "silent", 2: "dead"}.get(r.returncode, "error")
+    out = {"lane": lane, "verdict": verdict, "exit_code": r.returncode}
+    if verdict == "silent":
+        out["advice"] = "wait 10 minutes; still silent: force a restart with oc_restart"
+    if verdict == "dead":
+        out["advice"] = "the watcher restarts it within ~2 minutes; to force it now use oc_restart"
+    if r.returncode not in (0, 1, 2):
+        out["detail"] = (r.stdout.strip().splitlines() or [""])[-1][:200] + (r.stderr.strip().splitlines() or [""])[-1][:200]
+    return out
+
+
+def oc_start(lane: str) -> dict:
+    """Start a lane through tools/oc_l1.py (render -> serve -> canary -> first prompt).
+    Requires the lane password in this process's environment (AUTOOS_OCL1_PW);
+    it is never read, printed or logged here."""
+    argv = _oc_l1_args(lane, "start")
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=420,
+                       stdin=subprocess.DEVNULL)
+    out = {"lane": lane, "exit_code": r.returncode,
+           "outcome": _OC_EXIT_HINT.get(r.returncode, "unknown")}
+    tail = (r.stdout.strip().splitlines() or [""])[-1][:200]
+    if tail:
+        out["last_line"] = tail
+    return out
+
+
+def oc_restart(lane: str) -> dict:
+    """Force-restart a lane exactly as the handoff card prescribes: kill the
+    pid recorded in ~/fleet/<lane>/state/, delete that state file; the lane's
+    watcher then starts it fresh within ~2 minutes (never kill by process
+    name). Passwords are not touched."""
+    import glob as _glob
+    if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
+        raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
+    state_files = sorted(_glob.glob(os.path.expanduser("~/fleet/%s/state/*.json" % lane)))
+    if not state_files:
+        return {"lane": lane, "action": "none", "detail": "no state file - the watcher starts the lane on its own"}
+    killed, removed = [], []
+    try:
+        st = json.load(open(state_files[-1]))
+        pid = st.get("pid")
+        if isinstance(pid, int) and pid > 0:
+            os.kill(pid, 15)
+            killed.append(pid)
+    except (OSError, ValueError):
+        pass
+    try:
+        os.remove(state_files[-1])
+        removed.append(state_files[-1])
+    except OSError:
+        pass
+    return {"lane": lane, "action": "restarted",
+            "killed_pids": killed, "removed_state": removed,
+            "detail": "the lane's watcher starts it within ~2 minutes; verify with oc_status"}
+
+
 def kill_store_dir() -> str:
     """The runner-private store — one implementation, in the spawner.
 
@@ -1449,6 +1543,32 @@ def serve() -> None:
         percentage (spec 6.1/8.3) - the same data `autoos-agent.py context`
         prints."""
         return context_info(transcript)
+
+    @app.tool(name="oc_status")
+    def _oc_status(lane: str) -> dict:
+        """c2 (2026-10-06): one lane's status through tools/oc_l1.py - verdict
+        live / silent / dead plus the exact next step for each. The lane
+        password is never read, printed or logged; a missing password env
+        surfaces as exit_code 2 with the remediation in "outcome" (oc_start)."""
+        return oc_status(lane)
+
+    @app.tool(name="oc_start")
+    def _oc_start(lane: str) -> dict:
+        """c2 (2026-10-06): start a lane through tools/oc_l1.py (render ->
+        serve -> canary -> first prompt). Requires the lane password env
+        (AUTOOS_OCL1_PW) to be set in this session's environment. Exit-code
+        meanings travel in the answer's "outcome": 0 ok; 2 config/password;
+        4 server not healthy; 5 UNATTENDED-REFUSED (canary not denied - fix
+        the guard, delete the state file, restart, supervise)."""
+        return oc_start(lane)
+
+    @app.tool(name="oc_restart")
+    def _oc_restart(lane: str) -> dict:
+        """c2 (2026-10-06): force-restart a lane the way the handoff card
+        prescribes (kill the recorded pid, delete the state file; the watcher
+        starts the lane within ~2 minutes). Never kills by process name and
+        never touches passwords. Verify afterwards with oc_status."""
+        return oc_restart(lane)
 
     @app.tool(name="heartbeat")
     def _heartbeat(inbox: str | None = None, transcript: str | None = None,

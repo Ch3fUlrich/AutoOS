@@ -2240,14 +2240,21 @@ class GatewayOrderTests(unittest.TestCase):
         for mid in ("qwen/qwen3.8-flash", "qwen/qwen3-coder-flash",
                    "qwen/qwen3.8-max-0902"):
             self.assertIn(mid, registry["models"])
-        seen_free = False
+        # ORQWEN404 2026-10-06 (operator task 10): the :free qwen leg measured
+        # 404 upstream and left every route (declaration gated unavailable in
+        # each route that carried it), so no openrouter/qwen leg is referenced
+        # any more - the "wired" assertion below flips to the gate check.
+        seen_gated = 0
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 if not leg.startswith("openrouter/qwen/"):
                     continue
                 self.assertTrue(leg.endswith(":free"), leg)
-                seen_free = True
-        self.assertTrue(seen_free, "the :free openrouter qwen leg should be wired")
+                seen_gated += 1
+            gate = (route.get("unavailable_legs") or {}).get("openrouter/qwen/qwen3.8-27b:free")
+            if gate:
+                self.assertIs(gate.get("available"), False, route.get("id"))
+        self.assertEqual(seen_gated, 0, "the 404 :free qwen leg must be referenced by no route")
 
     def test_only_deepseek_v41_flash_survives_of_the_deepseek_family(self):
         # 16:4xZ revision: "DeepSeek = ONLY V4.1 Flash ... no v4-pro, v4-flash,

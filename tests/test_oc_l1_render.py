@@ -65,6 +65,30 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(cfg["provider"]["omniroute"]["models"]["gemini/gemini-3.8-flash"]["limit"],
                          {"context": 1048576, "output": 16000})
 
+    def test_fallback_limit_comes_from_the_registry_not_128k(self):
+        # OPERATOR 2026-10-06: "there should not be a 128k deepseek fallback" -
+        # the fallback leg's limit resolves from the registry model row
+        # (deepseek-flash advertises 1048576), not the 128k default; a pinned
+        # fallback_limit still wins.
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "limit": {"context": 1048576, "output": 16000},
+            "fallback_key": "ds", "fallback_modelID": "ds/deepseek-flash"})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["ds/deepseek-flash"]["limit"]["context"],
+                         1048576)
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "fallback_key": "ds", "fallback_modelID": "ds/deepseek-flash",
+            "fallback_limit": {"context": 262144, "output": 16000}})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["ds/deepseek-flash"]["limit"]["context"],
+                         262144)
+        # a model with no registry row falls to the safe default
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "fallback_key": "x", "fallback_modelID": "nosuchprovider/NoRow"})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["nosuchprovider/NoRow"]["limit"],
+                         {"context": 131072, "output": 16000})
+
     def test_external_directory_renders_when_pinned(self):
         # Lane c (2026-10-05): the outside-folder allowlist moves from a
         # hand-edited host overlay into the lane config.
