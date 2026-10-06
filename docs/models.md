@@ -30,9 +30,10 @@ internal-use-only clause — paid/user keys are the clean legs.
 
 Free models are rarely autonomous-grade, so tiers map to **roles**, not just
 models — one smart driver + one fast looper + provider-of-last-resort. The
-combos are priority chains: try in order, hop on 429/error, free legs first,
-paid legs from the providers whose credit tiers are sanctioned
-(cerebras, sambanova, deepseek, openrouter, zen) after them. MUSEAPI
+combos are priority chains: try in order, hop on 429/error, in operator order
+trial → free → credits → paid, with the paid tail billing only sanctioned
+sources (deepseek direct, `meta_api` contributor) after the metered credit
+grants (OVH trial, Vertex free tier). MUSEAPI
 2026-09-27 changed Meta: its contributor model now bills through the gateway
 as the `meta_api` provider (`meta-api/muse-spark-1.3-contributor`) and heads t1;
 the direct opencode `meta` provider is still how the plain `muse-spark` model
@@ -57,7 +58,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
 | `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `or-north-mini-code-free` | free | 256k | openrouter `cohere/north-mini-code:free` |
-| `or-qwen3.8-27b-free` | free | 256k | openrouter `qwen/qwen3.8-27b:free` |
+| `or-qwen3.8-27b-free` | free | 256k | ~~openrouter `qwen/qwen3.8-27b:free`~~ (unavailable) |
 | `ovh-gpt-oss-120b` | credit | 128k | ovhcloud `gpt-oss-120b` |
 | `ovh-qwen3-coder-30b` | credit | 128k | ovhcloud `Qwen3-Coder-30B-A3B-Instruct` |
 | `ovh-qwen3.8-27b` | credit | 128k | ovhcloud `Qwen3.8-27B` |
@@ -69,13 +70,13 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `t1-orchestrator-free-only` | free | 1M | gemini `gemini-3.8-flash` |
 | `t1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` |
 | `t2-orchestrator` | frontier | 1M | antigravity `claude-sonnet-5-5-medium` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
-| `t2-worker` | mid | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `qwen/qwen3.8-27b:free` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.1-flash-lite`~~ (unavailable) |
+| `t2-worker` | mid | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.1-flash-lite`~~ (unavailable) |
 | `t2-worker-clean` | mid | 128k | ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
-| `t2-worker-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `qwen/qwen3.8-27b:free` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) |
+| `t2-worker-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `qwen3-235b-a22b-instruct-2507` → scaleway `mistral-small-3.2-24b-instruct-2506` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) |
 | `t2-worker-paid` | mid | 131,072 | (none) |
-| `t3-driver` | cheap | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `qwen/qwen3.8-27b:free` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `mistral-small-3.2-24b-instruct-2506` → scaleway `qwen3-235b-a22b-instruct-2507` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → mistral `mistral-code-latest` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-glm52-744b`~~ (unavailable) → ~~deepinfra `google/gemini-3.7-flash`~~ (unavailable) |
+| `t3-driver` | cheap | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → scaleway `mistral-small-3.2-24b-instruct-2506` → scaleway `qwen3-235b-a22b-instruct-2507` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → mistral `mistral-code-latest` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-glm52-744b`~~ (unavailable) → ~~deepinfra `google/gemini-3.7-flash`~~ (unavailable) |
 | `t3-driver-clean` | cheap | 128k | ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
-| `t3-driver-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → openrouter `poolside/laguna-s-2.1:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `qwen/qwen3.8-27b:free` → free_ai `qwen7b` → scaleway `mistral-small-3.2-24b-instruct-2506` → scaleway `qwen3-235b-a22b-instruct-2507` → ~~cerebras `qwen-3.8-27b`~~ (unavailable) |
+| `t3-driver-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → openrouter `poolside/laguna-s-2.1:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → free_ai `qwen7b` → scaleway `mistral-small-3.2-24b-instruct-2506` → scaleway `qwen3-235b-a22b-instruct-2507` → ~~cerebras `qwen-3.8-27b`~~ (unavailable) |
 | `t3-driver-paid` | cheap | 131,072 | (none) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
 | `t4-researcher` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → scaleway `qwen3-235b-a22b-instruct-2507` → free_ai `qwen7b` |
@@ -87,13 +88,10 @@ from `opencode.jsonc`, not a curation rule: cost and quality decide what enters
 `t2-worker`, so a `gemini-3.8-flash`-class model is welcome whatever its window.
 The 1M gate applies to `t1-orchestrator` only, because long-horizon orchestration is the
 one role where window size is the requirement. `combos.json` carries
-`"context": "128k"` on t1-orchestrator/t2-worker/t3-driver purely to keep the picker's
+`"context": "128k"` on t2-worker/t3-driver purely to keep the picker's
 compaction threshold conservative — do not read it as "models above 128k are excluded".
-On `t1-orchestrator` it is more than conservative since PROVFIX3: the render clamps a
-route's declared window to the smallest leg it can actually fall to, and T1FREE put a
-free `gemini-3.8-flash` fallback in that route (1048576 live; the registry's 131072 is
-stale — the 128k clamp now comes from the scaleway/nebius legs, not this fallback; see
-the context rule below).
+On `t1-orchestrator` the clamp is honest since TORDER: the route keeps only
+≥600k legs (all 1048576, renders 1M).
 
 ### Notes per route
 
@@ -111,33 +109,34 @@ generated table above already shows it):
 - **`t1-orchestrator-clean`**: contributor legs train by contract, so "clean" here
   means paid-only, not trains-nothing — the plain paid spark leg was removed with
   the contributor-only block (2026-09-21).
-- **`t1-orchestrator-free-only`**: answers 429/402 when the promo is exhausted —
-  step up to `t1-orchestrator` instead; it never degrades to paid by design. The
-  agy Opus leg stays out on purpose: an effort/context mismatch is answered with a
-  400, not a degradation, and this route declares 128k on its free gemini leg
-  (PROVFIX3 clamped the 1M it used to promise — see the context rule below).
-- **`t2-worker`**: the `antigravity/gemini-3.7-flash-high` leg is a separate OAuth
-  pool with its own quota (ack 3.6s), not the throttled native 3.7 free tier.
+- **`t1-orchestrator-free-only`**: a single-leg route (`gemini/gemini-3.8-flash`,
+  1M) — zero spend, and it never degrades to paid by design; step up to
+  `t1-orchestrator` instead when the free pool is exhausted. An effort/context
+  mismatch against any other leg is answered with a 400, not a degradation.
+- **`t2-worker`**: headed by the free `gemini/gemini-3.8-flash` pool, then the
+  probe-passed free grants (groq, OpenRouter `:free`, free-ai stopgap,
+  scaleway).
   OVHLEGS 2026-09-30: three OVH credit-tier legs inserted between the free legs
   and the paid legs (operator order: trial → free → credits → paid):
   `ovh/gpt-oss-120b` (agentic), `ovh/Qwen3-Coder-30B-A3B-Instruct` (cheap code),
   `ovh/Qwen3.8-27B` (fast). All three probed ACK+TOOL+RT at max_tokens=512 through
   the gateway. `deepseek/deepseek-flash` remains the paid fallback leg.
-- **`t2-worker-free-only`**: same OAuth pool as `t2-worker`, but the `-medium`
-  variant (`antigravity/gemini-3.7-flash-medium`, ack 1.6s) — a different quota
-  bucket, not a downgrade of the `-high` leg above.
+  ORQWEN-DEAD 2026-10-06: the `openrouter/qwen/qwen3.8-27b:free` slug was
+  withdrawn upstream (live 404) and dropped from every band.
+- **`t2-worker-free-only`**: the same free band as `t2-worker` with no
+  credit or paid tail — zero spend by construction.
 - **`t2-orchestrator`**: for small-scope orchestration only; `t1-orchestrator`
-  stays the long-horizon owner. CTXFIX 2026-09-30: context updated 200k→1M
-  (gateway `computed_context_length` 1048576 for the single
-  `antigravity/claude-opus-4-6-thinking` leg). The trailing
-  `openrouter/deepseek/deepseek-v4.1-flash` tail leg is currently unavailable
-  (OpenRouter credits exhausted — see the generated table above).
+  stays the long-horizon owner. Current legs (operator 2026-10-05):
+  `antigravity/claude-sonnet-5-5-medium` → `vertex/gemini-3.8-flash` →
+  `deepseek/deepseek-flash`, declared 1M; the privacy-sensitive set is narrowed
+  to the `-clean` worker routes.
 - **`t3-driver-clean`**: no qwen free legs by design — paid review duty only, not
   a downgrade path.
 - **`t3-driver`**: OVHLEGS 2026-09-30: same three OVH credit-tier legs as `t2-worker`
   (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
   inserted after the free legs and before the paid legs. `deepseek/deepseek-flash`
-  remains the paid fallback. Not added to `t3-driver-clean` or `t3-driver-free-only`.
+  remains the paid fallback. Since L1-CLEAN (2026-10-05) the `-clean` twins also
+  carry the OVH credit legs plus vertex.
 - **`t3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
   is keyed (paid) and deliberately stays out.
 - **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
@@ -173,31 +172,24 @@ generated table above already shows it):
   `deepseek-flash` ladder, `none` stripped); since DSBACK the spawner stamps
   the rung the resolver scored on the opencode model id itself, so the aliases
   are no longer only a caller-side choice.
-- **`opus-4-6`**: pinned on purpose — `t1-orchestrator` never carries Opus, it is
-  the meta_api contributor head with a free gemini fallback; Opus is addressable
-  directly rather than smuggled into the orchestrator chain. CTXFIX 2026-09-30:
-  context updated 200k→1M (the gateway's `computed_context_length` for
-  `antigravity/claude-opus-4-6-thinking` is 1048576; the registry's
-  `context_advertised` of 200000 is stale — L1-beta to update).
-  `antigravity/claude-opus-4-6-thinking` acks in 3.4s (OAuth free);
-  `cc/claude-opus-4-6` is the subscription overflow leg (429-quota-1h at probe
-  time).
+- **`opus-5-5`** (replaces the retired `opus-4-6`): pinned on purpose —
+  `t1-orchestrator` never carries Opus, it is the meta_api contributor head with
+  a free gemini fallback; Opus is addressable directly rather than smuggled into
+  the orchestrator chain. Single leg `antigravity/claude-opus-5-5-medium`
+  (CLAUDE55 2026-10-05: the agy CLI model list carries only the 5-5 generation),
+  declared 1M.
 
 ### Per-model fallback chains (single-model routes, cheapest-first)
 
 A tier combo is a *role*; sometimes a caller pins one model. Each pinned model
 degrades along its own chain, cheapest leg first, exactly:
 
-- `spark-1.3-contributor`: **meta_api direct paid → zen (client-bound) →
-  openrouter paid**, cheapest-first. MUSEAPI 2026-09-27 put the direct Meta
+- `spark-1.3-contributor`: **meta_api direct paid → zen (client-bound)**,
+  cheapest-first. MUSEAPI 2026-09-27 put the direct Meta
   Model API leg in front: it is the one leg the gateway can address, so the
   combo is back in `combos.json` and the route is servable again. The Zen
-  contributor leg still answers only the opencode client (403 for the gateway)
-  and the OpenRouter paid fallback stays off (DSMAX 2026-09-27). The effort
-  rungs render on the surfaces that carry a ladder — opencode `variants`, IDE
-  `effort_ladder` — while a gateway combo has no per-effort alias at all, and
-  the direct Meta ladder has no `max` rung (the vendor rejects it; OpenRouter
-  advertises `max` on its own twin). When it last ran it was ack-proven
+  contributor leg still answers only the opencode client (403 for the gateway).
+  When it last ran it was ack-proven
   2026-09-22 incl. the `#low` / `#medium` / `#high` effort variants.
 - `gemini-3.8-flash`: **gemini free (until throttled) → vertex free → openrouter
   paid twin**. The head rides the Google AI Studio free pool; VTXLEG 2026-09-30
@@ -362,9 +354,9 @@ label is display only and appears identically in `combos.json` (`$comment`),
 
 | Tier id | Role label | Capability requirement |
 |---|---|---|
-| `t1-orchestrator` | **orchestrator-128k** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Its 1M `meta_api` leg answers big requests, but D-141 (FREEKEYS-2/2c) heads the route with the free band — scaleway/nebius grants at 128k, then a free `gemini` fallback (1048576 live; registry stale at 131072) — a route may only promise what its smallest served leg keeps, so the declared window is 128k (the scaleway/nebius legs clamp it, not the gemini fallback). When the window itself is the requirement, pick `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, paid). |
-| `t2-worker` | **smart-reasoning-128k** | Strong reasoning, mid context: review, second-level planning, hard debugging. Context size is *not* a boundary here — cost/quality decide; small-context models may sub-orchestrate here, never in `t1-orchestrator`. |
-| `t3-driver` | **cheap-driver-128k** | Cheapest capable loop: codegen, edits, test-fix cycles, grinding through a task list. |
+| `t1-orchestrator` | **orchestrator-1M** | Long-horizon orchestration: plans, delegates, holds whole-repo context. Legs (see the generated table above): free gemini head → antigravity claude → free-ai gemini → vertex credit → `meta_api` paid → deepseek paid. When the window itself is the requirement, this is the route — every leg is ≥600k. |
+| `t2-worker` | **smart-reasoning-128k** | Mid-weight reasoning. Exact legs: see the generated table above (free band → OVH credit band → paid tail). |
+| `t3-driver` | **cheap-driver-128k** | Cheapest capable loop. Exact legs: see the generated table above (free band → OVH credit band → paid tail). |
 | `t4-rag` | **rag-grounded-128k** | Retrieval-grounded QA over supplied documents (quotes/citations, not reasoning or codegen). |
 
 ## Proven effort ladders & costs (measured 2026-09-23 via provider catalogs)
@@ -420,10 +412,10 @@ available --search qoder`: free, alias `if`) — it needs an interactive
 promise every leg it can fall to has to keep, so the render clamps it to the smallest
 advertised window among the route's servable legs (`clamp_route_context()` in
 `tools/registry.py` — PROVFIX3). `t1-orchestrator` was curated to 1M-context models only,
-which is why it declared 1M; T1FREE added a free `gemini-3.8-flash` leg (1048576 live;
-the registry's 131072 is stale) to keep the default tier answering while credit is out.
-The route also carries scaleway/nebius legs at 128000, so its honest promise is 128k
-regardless of the gemini leg's real window. Pick
+which is why it declared 1M; T1FREE added a free `gemini-3.8-flash` leg (1048576 live)
+to keep the default tier answering while credit is out.
+The 128k routes are clamped by the 128k legs in their band (scaleway, groq,
+free-ai, OVH) regardless of any 1M leg elsewhere in the chain. Pick
 `spark-1.3-contributor` or `t1-orchestrator-paid` (1M, meta_api direct) when the window
 itself is the requirement. `t2-worker` has **no
 context gate**: 128k is a conservative display/compaction default, not a
@@ -446,11 +438,9 @@ for a combo when you need fallback routing.
 **Sensitive data work:** `*-clean` never routes a model or plan with a
 published prompt-training policy — no Zen promo `-free` models, no Gemini free
 tier, no Meta/openrouter *contributor* tiers, no Kilo Free. Assumption:
-**any big free model may train on prompts**, so `*-clean` chains use **paid
-legs only** (deepseek/openrouter/zen direct; mistral direct left the
-`*-clean` chains 2026-09-28 — see the plan-limits note below). Cheap-inference is paid (own key, own
-billing) but is a third-party reseller pool — `*-clean` stays direct-paid
-only, no reseller legs. Contributor tiers are paid but train by
+**any big free model may train on prompts**, so `*-clean` chains use
+**metered legs only** (OVH trial credit, Vertex free tier, deepseek direct —
+no free pools, no resellers). Contributor tiers are paid but train by
 contract ($0.10 pricing is the tell) — they stay in `t1-orchestrator`, never `*-clean`.
 OmniRoute's own free-tier catalog flags the known trainers; we additionally
 curate them out. If in doubt, use `tierN-clean` and check the provider's
@@ -706,72 +696,71 @@ flowchart TB
         AUTO["auto/smart · auto · auto/cheap\nzero-setup bootstrap, live 16-factor scoring"]
     end
 
-    subgraph t1["t1-orchestrator · orchestrator-128k · meta_api contributor head, free gemini fallback — SERVICABLE (T1FREE + MUSEAPI 2026-09-27)"]
+    subgraph t1["t1-orchestrator \u00b7 orchestrator-1M \u00b7 free gemini head, credit middle, paid tail \u2014 SERVICABLE"]
         direction TB
-        T1Z["1 · meta_api muse-spark-1.3-contributor\nPAID Meta Model API direct · 1M · trains by contract"]
-        T1A["2 · zen muse-spark-1.3-contributor-free\nFREE promo · 1M · trains by contract · UNAVAILABLE (client-bound)"]
-        T1B["3 · openrouter meta/muse-spark-1.3-contributor\nPAID $0.10/$0.20 per 1M · 1M · trains · UNAVAILABLE (DSMAX)"]
-        T1G["4 · gemini gemini-3.8-flash\nFREE AI Studio · 1M (1048576 live; registry stale 131072)\nscaleway/nebius at 128k now clamps the route, not this leg"]
-        T1Z --> T1A --> T1B --> T1G
+        T1G["1 \u00b7 gemini gemini-3.8-flash\nFREE AI Studio \u00b7 1M"]
+        T1S["2 \u00b7 antigravity claude-sonnet-5-5-medium\nOAuth seat \u00b7 1M"]
+        T1F["3 \u00b7 free_ai google/gemini-3.8-flash\nFREE pool \u00b7 1M"]
+        T1V["4 \u00b7 vertex gemini-3.8-flash\ncredit \u00b7 1M"]
+        T1Z["5 \u00b7 meta_api muse-spark-1.3-contributor\nPAID Meta direct \u00b7 1M \u00b7 trains by contract"]
+        T1D["6 \u00b7 deepseek deepseek-flash\nPAID direct \u00b7 last resort"]
+        T1G --> T1S --> T1F --> T1V --> T1Z --> T1D
     end
 
-    subgraph t1c["t1-orchestrator-clean · 1M · paid legs only (trains: contributor-only block) — unservable since 2026-09-27, omitted"]
+    subgraph t1c["t1-orchestrator-clean \u00b7 1M \u00b7 paid legs only (trains: contributor-only block) \u2014 omitted (leg gated)"]
         direction TB
-        T1CA["1 · openrouter meta/muse-spark-1.3-contributor\nPAID · 1M · trains by contract · UNAVAILABLE (DSMAX)"]
+        T1CA["1 \u00b7 openrouter meta/muse-spark-1.3-contributor\nPAID \u00b7 1M \u00b7 trains by contract \u00b7 UNAVAILABLE (gated)"]
     end
 
-    subgraph t2["t2-worker · smart-reasoning · NO context gate (cost + quality decide)"]
+    subgraph t2["t2-worker \u00b7 smart-reasoning-128k \u00b7 free band \u2192 OVH credit band \u2192 paid tail"]
         direction TB
-        T2A["1 · gemini gemini-3.8-flash\nFREE pooled · any window welcome"]
-        T2A2["2 · antigravity gemini-3.7-flash-high\nFREE OAuth · ack 3.6s"]
-        T2B["3 · groq gpt-oss-120b\nFREE 200K TPD · short prompts only · UNAVAILABLE (deny-groq)"]
-        T2C["4 · cerebras gpt-oss-120b\nPAID $10 credit · UNAVAILABLE"]
-        T2D["5 · sambanova gpt-oss-120b\nPAID $10 credit · UNAVAILABLE"]
-        T2E["6 · cheaperinference kimi-k3 (deepseek-v4-flash / glm-4.5-air DENIED)\nPAID $15 partner pool · own key"]
-        T2F["7 · openrouter deepseek/deepseek-v4.1-flash\nPAID · UNAVAILABLE (DSMAX)"]
-        T2G["8 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T2H["9 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
-        T2A --> T2A2 --> T2B --> T2C --> T2D --> T2E --> T2F --> T2G --> T2H
+        T2A["1 \u00b7 gemini gemini-3.8-flash\nFREE pooled"]
+        T2B["2 \u00b7 groq + openrouter-free + free-ai + scaleway\nFREE band"]
+        T2C["3 \u00b7 ovhcloud gpt-oss-120b + Qwen3.8-27B\ncredit (Qwen3-Coder leg UNAVAILABLE)"]
+        T2D["4 \u00b7 vertex gemini-3.8-flash\ncredit"]
+        T2E["5 \u00b7 meta_api muse-spark-1.3-contributor\nPAID"]
+        T2F["6 \u00b7 deepseek deepseek-flash\nPAID direct \u00b7 last resort"]
+        T2A --> T2B --> T2C --> T2D --> T2E --> T2F
     end
 
-    subgraph t2c["t2-worker-clean · paid legs only, no training"]
+    subgraph t2c["t2-worker-clean \u00b7 metered legs only, no training"]
         direction TB
-        T2CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T2CB["2 · openrouter deepseek/deepseek-v4.1-flash\nPAID · UNAVAILABLE (DSMAX)"]
-        T2CC["3 · zen deepseek-v4.1-flash\nPAID · UNAVAILABLE"]
+        T2CA["1 \u00b7 ovhcloud gpt-oss-120b + Qwen3.8-27B\ncredit"]
+        T2CB["2 \u00b7 vertex gemini-3.8-flash\ncredit"]
+        T2CC["3 \u00b7 deepseek deepseek-flash\nPAID direct"]
         T2CA --> T2CB --> T2CC
     end
 
-    subgraph t3["t3-driver · cheap-driver · cheapest capable loop"]
+    subgraph t3["t3-driver \u00b7 cheap-driver-128k \u00b7 cheapest capable loop"]
         direction TB
-        T3A["1 · mistral mistral-code-latest\nPAID direct · measured 125 rpm / 625k tpm on this plan (MISTRALFIX 2026-09-28)"]
-        T3B["2 · groq qwen3.8-27b\nFREE 200K TPD · UNAVAILABLE (deny-groq)"]
-        T3C["3 · cerebras qwen-3.8-27b\nPAID $10 credit overflow · UNAVAILABLE"]
-        T3D["4 · cheaperinference glm-5.2 / minimax-m2.7 (glm-4.5-air DENIED)\nPAID $15 partner pool · own key"]
-        T3F["5 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T3G["6 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
-        T3A --> T3B --> T3C --> T3D --> T3F --> T3G
+        T3A["1 \u00b7 gemini gemini-3.8-flash\nFREE pooled"]
+        T3B["2 \u00b7 groq + openrouter-free + free-ai + scaleway\nFREE band"]
+        T3C["3 \u00b7 ovhcloud credit band"]
+        T3D["4 \u00b7 mistral mistral-code-latest\nPAID direct \u00b7 measured 125 rpm / 625k tpm"]
+        T3E["5 \u00b7 meta_api + deepseek\nPAID tail"]
+        T3A --> T3B --> T3C --> T3D --> T3E
     end
 
-    subgraph t3c["t3-driver-clean · paid legs only, no training"]
+    subgraph t3c["t3-driver-clean \u00b7 metered legs only, no training"]
         direction TB
-        T3CA["1 · deepseek deepseek-flash\nPAID $13 bulk · direct · AVAILABLE again (DSBACK top-up 2026-09-28)"]
-        T3CC["2 · zen deepseek-v4.1-flash\nPAID · last resort · UNAVAILABLE"]
-        T3CA --> T3CC
+        T3CA["1 \u00b7 ovhcloud gpt-oss-120b + Qwen3.8-27B\ncredit"]
+        T3CB["2 \u00b7 vertex gemini-3.8-flash\ncredit"]
+        T3CC["3 \u00b7 deepseek deepseek-flash\nPAID direct"]
+        T3CA --> T3CB --> T3CC
     end
 
-    subgraph freeonly["*-free-only · zero spend, never degrade to paid"]
+    subgraph freeonly["*-free-only \u00b7 zero spend, never degrade to paid"]
         direction TB
-        F1["t1-orchestrator-free-only:\nzen spark-free (UNAVAILABLE, client-bound) → gemini gemini-3.8-flash (1M; registry stale 131072)"]
-        F2["t2-worker-free-only:\ngemini → agy gemini → groq (UNAVAILABLE) → cerebras (UNAVAILABLE) → sambanova → free-ai qwen7b"]
-        F3["t3-driver-free-only:\ngroq qwen (UNAVAILABLE) → cerebras qwen (UNAVAILABLE) → free-ai qwen7b"]
+        F1["t1-orchestrator-free-only:\nsingle gemini gemini-3.8-flash leg (1M)"]
+        F2["t2-worker-free-only:\nthe t2 free band, no credit or paid tail"]
+        F3["t3-driver-free-only:\nthe t3 free band, no credit or paid tail"]
     end
 
-    subgraph t2o["t2-orchestrator · small-scope orchestration · 1M (CTXFIX 2026-09-30)"]
+    subgraph t2o["t2-orchestrator \u00b7 small-scope orchestration \u00b7 1M"]
         direction TB
-        T2O["agy opus-4-6-thinking\nFREE OAuth · ack 3.4s"]
-        T2O2["cc opus-4-6\nsubscription overflow"]
-        T2O3["openrouter deepseek-v4.1-flash\ncheap smart tail · UNAVAILABLE (DSMAX)"]
+        T2O["agy claude-sonnet-5-5-medium\nOAuth seat"]
+        T2O2["vertex gemini-3.8-flash\ncredit"]
+        T2O3["deepseek deepseek-flash\nPAID direct"]
         T2O --> T2O2 --> T2O3
     end
 
@@ -781,12 +770,14 @@ flowchart TB
     end
 
     subgraph single["Pinned single-model routes"]
-        SP["spark-1.3-contributor:\nmeta_api paid direct → zen (client-bound)\n→ openrouter paid · SERVED since MUSEAPI"]
-        OP["opus-4-6 (1M; CTXFIX 2026-09-30):\nagy opus-4-6-thinking → cc opus-4-6\nt1 is a separate route"]
+        SP["spark-1.3-contributor:\nmeta_api paid direct → zen (client-bound)\nSERVED since MUSEAPI"]
+        OP["opus-5-5 (1M):\nagy claude-opus-5-5-medium\nt1 is a separate route"]
+        GM["gemini-3.8-flash (1M):\ngemini free → vertex credit"]
+        DK["deepseek-v4.1-flash (1M):\ndeepseek direct → zen (client-bound)"]
     end
 
     subgraph fb["Fallback client path — user picks litellm/*"]
-        LT["LiteLLM :4000 static chains\ntier1 spark · t2-worker gpt-oss\ntier3 devstral · paid flash"]
+        LT["LiteLLM :4000 static mirror\nt1-orchestrator · t2-worker · t3-driver\n(+ -clean / -free-only twins)"]
     end
 
     OC --> t1 & t1c & t2 & t2c & t3 & t3c & t2o & single
@@ -815,8 +806,8 @@ The routes still name every funded provider's legs, but several are gated
 | deepseek ($13 bulk) | `t2-worker`/`t3-driver`/`t3-driver-clean`/`t2-worker-clean` `deepseek-flash` direct — AVAILABLE again (DSBACK 2026-09-28T07:4xZ: operator top-up, router balance 19.99 USD, `providers.deepseek.available: true`, reversing the 402 Insufficient Balance of 2026-09-27T16:4xZ) · the pinned `deepseek-v4.1-flash` combo is back in every render |
 | cheap-inference ($15 partner pool) | allows only `kimi-k3`, `glm-5.2`, `minimax-m2.7`: `t2-worker` kimi-k3 · `t3-driver` glm-5.2/minimax-m2.7. `deepseek-v4-flash`/`glm-4.5-air` are DENIED by `deny-cheaperinference` |
 | meta ($10) | `meta_api` direct (OpenAI-compatible, `providers.meta_api`) at the `t1-orchestrator` / `t1-orchestrator-paid` / `spark-1.3-contributor` heads and the `t2-worker` / `t3-driver` tails (MUSEAPI 2026-09-27) · the openrouter contributor leg at `t1-orchestrator-clean` is UNAVAILABLE (openrouter off, DSMAX 2026-09-27) · also reachable outside the gateway, via the opencode `meta` provider |
-| openrouter ($1, last resort) | OFF entirely (DSMAX 2026-09-27: 401 even for BYOK); every openrouter leg is gated by `providers.openrouter.available: false` |
-| zen (promo + paid) | free contributor leg at the `t1-orchestrator` / `t1-orchestrator-free-only` heads — UNAVAILABLE *through the gateway* (client-bound: it answers the opencode client only) · paid `deepseek-v4.1-flash` at every tier tail — UNAVAILABLE (402) |
+| openrouter ($1, last resort) | ON for `:free` ids only (providers.openrouter.available: true; TORDER-OR: paid legs removed everywhere except the gated `t1-orchestrator-clean` contributor declaration). Serves the `:free` band in `t2-worker`/`t3-driver` and the free-only twins: nemotron, laguna, north-mini. The withdrawn `qwen/qwen3.8-27b:free` slug (ORQWEN-DEAD 2026-10-06) is dropped and gated. |
+| zen (promo + paid) | Zen legs live only in the `spark-1.3-contributor` and `deepseek-v4.1-flash` singles — UNAVAILABLE *through the gateway* (client-bound: they answer the opencode client only) · paid `deepseek-v4.1-flash` at the tier tail — UNAVAILABLE (402) |
 
 `providers test-all` 2026-09-22: 12/13 OK (muse-code SKIP inactive by
 design at the time — unregistered since 2026-09-23, openrouter-first;

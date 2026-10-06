@@ -76,10 +76,6 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t2-worker
     litellm_params:
-      model: openrouter/qwen/qwen3.8-27b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker
-    litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker
@@ -168,10 +164,6 @@ model_list:
       api_key: os.environ/GROQ_API_KEY
   - model_name: t2-worker-free-only
     litellm_params:
-      model: openrouter/qwen/qwen3.8-27b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: t2-worker-free-only
-    litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t2-worker-free-only
@@ -235,10 +227,6 @@ model_list:
     litellm_params:
       model: groq/openai/gpt-oss-120b
       api_key: os.environ/GROQ_API_KEY
-  - model_name: t3-driver
-    litellm_params:
-      model: openrouter/qwen/qwen3.8-27b:free
-      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t3-driver
     litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
@@ -334,10 +322,6 @@ model_list:
     litellm_params:
       model: groq/openai/gpt-oss-120b
       api_key: os.environ/GROQ_API_KEY
-  - model_name: t3-driver-free-only
-    litellm_params:
-      model: openrouter/qwen/qwen3.8-27b:free
-      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: t3-driver-free-only
     litellm_params:
       model: openai/qwen7b
@@ -513,13 +497,6 @@ model_list:
       model: openrouter/cohere/north-mini-code:free
       api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END or-north-mini-code-free
-
-  # AUTOOS-MANAGED-START or-qwen3.8-27b-free
-  - model_name: or-qwen3.8-27b-free
-    litellm_params:
-      model: openrouter/qwen/qwen3.8-27b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  # AUTOOS-MANAGED-END or-qwen3.8-27b-free
 
   # TORDER 2026-10-01: pinned single-provider credit tiers (ovh x3 + vertex)
   # AUTOOS-MANAGED-START ovh-qwen3.8-27b

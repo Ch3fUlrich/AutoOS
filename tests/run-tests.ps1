@@ -9862,7 +9862,7 @@ print('%s|%s|%s' % (
         'deepseek-v4.1-flash' = '1M'
         # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
         'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
-        'or-nemotron-3-super-free' = '256k'; 'or-qwen3.8-27b-free' = '256k'
+        'or-nemotron-3-super-free' = '256k'
         'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
         'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'; 'ovh-qwen3-coder-30b' = '128k'
         'vertex-gemini-3.8-flash' = '1M'

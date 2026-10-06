@@ -336,18 +336,6 @@
       }
     },
     {
-      "id": "or-qwen3.8-27b-free",
-      "name": "Qwen3.8-27B via OpenRouter :free",
-      "context": 262144,
-      "output": 235929,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
       "id": "or-north-mini-code-free",
       "name": "North-Mini-Code via OpenRouter :free",
       "context": 256000,

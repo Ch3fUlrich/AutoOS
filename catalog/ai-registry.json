@@ -1733,7 +1733,7 @@
       "tool_calls": "proven"
     },
     "qwen/qwen3.8-27b:free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/qwen/qwen3.8-27b:free answered ack 200 and one get_weather tool call ok (5842 ms); gateway /v1/models row context_length 262144, output 235929. Distinct from models.'qwen/qwen3.8-27b' (groq's lowercase spelling, output_max 16384) - the :free suffix is part of the vendor id. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/qwen/qwen3.8-27b:free answered ack 200 and one get_weather tool call ok (5842 ms); gateway /v1/models row context_length 262144, output 235929. Distinct from models.'qwen/qwen3.8-27b' (groq's lowercase spelling, output_max 16384) - the :free suffix is part of the vendor id. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false). ORQWEN-DEAD 2026-10-06: vendor withdrew the :free slug (live 404 'unavailable for free'; gateway pre-dispatch skips); leg dropped from every band and gated on its single (unavailable_legs) so it renders omitted. Row kept for pricing history.",
       "context_advertised": 262144,
       "context_usable": {
         "source": "default",
@@ -4126,7 +4126,7 @@
       }
     },
     "or-qwen3.8-27b-free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 5842 ms): pinned single-provider free combo for openrouter/qwen/qwen3.8-27b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 5842 ms): pinned single-provider free combo for openrouter/qwen/qwen3.8-27b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only. ORQWEN-DEAD 2026-10-06: OpenRouter withdrew the :free slug (live 404 'unavailable for free, use paid qwen/qwen3.8-27b'; gateway pre-dispatch skips the leg). Leg retained declared + gated (unavailable_legs) so the route lands in omitted (not legless) and apply prunes the live stale combo; nothing routable. Paid slug not adopted (openrouter NO-credits rule).",
       "class": "free",
       "id": "or-qwen3.8-27b-free",
       "legs": [
@@ -4143,6 +4143,12 @@
           "context_declared": "256k",
           "display_name": "Qwen3.8-27B via OpenRouter :free",
           "output": 235929
+        }
+      },
+      "unavailable_legs": {
+        "openrouter/qwen/qwen3.8-27b:free": {
+          "$comment": "ORQWEN-DEAD 2026-10-06: vendor withdrew the :free slug (live 404); gated so the route renders omitted and apply prunes it.",
+          "available": false
         }
       }
     },
@@ -4440,7 +4446,6 @@
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
-        "openrouter/qwen/qwen3.8-27b:free",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
         "scaleway/qwen3-235b-a22b-instruct-2507",
@@ -4581,7 +4586,6 @@
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
-        "openrouter/qwen/qwen3.8-27b:free",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
         "scaleway/qwen3-235b-a22b-instruct-2507",
@@ -4667,7 +4671,6 @@
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
-        "openrouter/qwen/qwen3.8-27b:free",
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
@@ -4808,7 +4811,6 @@
         "groq/openai/gpt-oss-20b",
         "openrouter/cohere/north-mini-code:free",
         "groq/openai/gpt-oss-120b",
-        "openrouter/qwen/qwen3.8-27b:free",
         "free_ai/qwen7b",
         "scaleway/mistral-small-3.2-24b-instruct-2506",
         "scaleway/qwen3-235b-a22b-instruct-2507",
