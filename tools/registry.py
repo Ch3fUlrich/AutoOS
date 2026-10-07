@@ -1595,6 +1595,9 @@ IDE_MODEL_ORDER = (
     # route id (a route added without it raises rather than silently mis-ordering).
     "ovh-qwen3.8-27b", "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
     "vertex-gemini-3.8-flash",
+    # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
+    # within the $6 grant; legs gated until per-token prices land).
+    "faik-gpt-6-sol",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",

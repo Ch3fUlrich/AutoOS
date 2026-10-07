@@ -3013,7 +3013,8 @@ class CreditSpendGuardTests(unittest.TestCase):
                    load_registry()["providers"].items()
                    if isinstance(entry, dict) and entry.get("tier") == "credit"}
         self.assertEqual(granted, {"morph": 10.0, "deepinfra": 5.0, "together_ai": 5.0,
-                                   "vertex_ai": 250.0, "ovhcloud": 200.0})
+                                   "vertex_ai": 250.0, "ovhcloud": 200.0,
+                                   "freeaiapikey": 6.0})
 
     def test_a_credit_tier_is_not_the_free_tier(self):
         # private_safe() and probe_common._skip_reason both branch on tier: a

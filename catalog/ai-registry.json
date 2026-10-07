@@ -232,6 +232,22 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "anthropic/claude-sonnet-5": {
+      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey credit-pool leg, live 200 ack probe 2026-10-07 (16-token chat, usage counted). Context 128000 from the live catalog row. Per-token prices unsourced (price 0.0 = no price on file) so credit legs stay gated until priced. tool_calls unproven (ack only, no tool-call trial yet). Operator: usable for implementation/review/research within the $6 grant.",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "effort_ladder": [],
+      "family": "anthropic",
+      "id": "anthropic/claude-sonnet-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "anthropic/claude-sonnet-4-6": {
       "$comment": "T1-CREDIT-FIX-10 M4 (D-253, operator 2026-10-01): DeepInfra leg of Claude Sonnet 4.6, reached through the deepinfra connection. List price $3.00 in / $15.00 out per 1M tokens (https://deepinfra.com/anthropic/claude-sonnet-4-6, accessed 2026-10-01). Window fields mirror the claude-sonnet-5 sibling row (1M advertised, 50 % usable, 32768 out) -- unmeasured for this id, re-measure before a leg depends on them. tool_calls unproven (never probed).",
       "context_advertised": 1000000,
@@ -872,6 +888,22 @@
       "price_in": 0,
       "price_out": 0,
       "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "openai/gpt-6-sol": {
+      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey credit-pool leg, live 200 ack probe 2026-10-07 (16-token chat, usage counted). Context 128000 from the live catalog row. Per-token prices unsourced (price 0.0 = no price on file) so credit legs stay gated until priced. output_max 32768 is the registry's conservative unknown. tool_calls unproven (ack only, no tool-call trial yet). Operator: usable within the $6 grant.",
+      "context_advertised": 128000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 64000
+      },
+      "effort_ladder": [],
+      "family": "openai",
+      "id": "openai/gpt-6-sol",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
       "tool_calls": "unproven"
     },
     "openai/gpt-oss-120b": {
@@ -3186,6 +3218,22 @@
       "tier": "free",
       "trains_on_prompts": true
     },
+    "freeaiapikey": {
+      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey account holds $6 credit (operator-stated, per-token prices unsourced); gateway connection 'freeaiapikey/main' tested by operator, live 200 probes 2026-10-07 (freeaiapikey/anthropic/claude-sonnet-5, freeaiapikey/openai/gpt-6-sol). Tier credit with monthly_cap_usd 6 (refuse at 100% of the grant). Per-token prices are NOT on file, so credit_leg_priced() refuses legs fail-closed: legs stay gated (unavailable_legs) until priced, same stance as morph/deepinfra tails. trains_on_prompts null = UNVERIFIED; private_safe() fails closed, never a -clean leg. Gateway-served only (no litellm_env), like the other built-in connections.",
+      "api_base": null,
+      "id": "freeaiapikey",
+      "omniroute_id": "freeaiapikey",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "provider_data": null,
+      "tier": "credit",
+      "credit_usd": 6,
+      "trains_on_prompts": null,
+      "available": true,
+      "monthly_cap_usd": 6,
+      "monthly_cap_source": "operator 2026-10-07: $6 freeaiapikey account credit (operator-stated, dashboard unverified by lane)",
+      "monthly_warn_fraction": 0.8
+    },
     "google_ai_studio": {
       "$comment": "Measured, not a default: docs/models.md 'Proven effort ladders & costs' records 'free head trains (AI Studio); paid twin per terms' for gemini-3.8-flash. The paid twin is reached through the openrouter provider (trains_on_prompts=false there), never through this one. FREEWIRE 2026-09-30 (measured): the gateway log for 2026-09-30 held 8088 'gemini' cooling-down lines (8218 for all providers = 98.4%), 7187 of them lastErrorCode=429 with 7136 'Model gemini-3.8-flash rate_limited', and a live probe at 2026-09-30T21:13Z returned a 429 'model_cooldown' (reset_seconds 51). Every gemini/* leg was removed from every route (the gemini-3.8-flash combo now heads on vertex/gemini-3.8-flash). This provider is marked unavailable so the dead gemini/* door cannot be re-opened by a stray leg; the google_ai_studio API key stays unwired. Re-probe after the until. TORDER 2026-10-01: gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park) (gateway restarted 08:07Z with rotation 3x429/120s->300s per-leg cooldown, 30min park, CHAT_MAX_HEAVY=8 - ACTIVE).",
       "api_base": null,
@@ -3996,6 +4044,33 @@
       "unavailable_legs": {
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
+          "available": false
+        }
+      }
+    },
+    "faik-gpt-6-sol": {
+      "$comment": "FAIK 2026-10-07 (operator): single for freeaiapikey/openai/gpt-6-sol (live 200 ack probe 2026-10-07). Operator: usable for implementation/review/research within the $6 grant. Per-token price unsourced so the leg stays gated (unavailable_legs, price reason) and the route renders omitted until priced - same stance as morph/deepinfra tails. opencode/zed only.",
+      "class": "credit",
+      "id": "faik-gpt-6-sol",
+      "legs": [
+        "freeaiapikey/openai/gpt-6-sol"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 128000,
+          "context_declared": "128k",
+          "display_name": "GPT-6 Sol via freeaiapikey (credit)",
+          "output": 32768
+        }
+      },
+      "unavailable_legs": {
+        "freeaiapikey/openai/gpt-6-sol": {
+          "$comment": "FAIK 2026-10-07: no per-token price on file (price 0.0); credit_leg_priced() refuses fail-closed. Lift by adding the measured price, then deleting this entry.",
           "available": false
         }
       }
@@ -4883,6 +4958,7 @@
       }
     },
     "t4-rag": {
+      "$comment": "RAG grounded QA over supplied cohere documents (quotes/citations), not reasoning or codegen. Trial keys (cohere free eval terms); output clamped to 4096 (measured cohere caps 2026-10-07: command-a 8192, command-r-plus 4096). opencode/zed + openhands clients.",
       "class": "cheap",
       "id": "t4-rag",
       "legs": [

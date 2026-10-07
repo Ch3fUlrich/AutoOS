@@ -50,6 +50,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `cheaperinference/glm-5.2` | cheap | 128k | ~~cheaperinference `glm-5.2`~~ (unavailable) |
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
 | `deepseek-v4.1-flash` | cheap | 1M | deepseek `deepseek-flash` → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
+| `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 1M | gemini `gemini-3.8-flash` → vertex `gemini-3.8-flash` → ~~deepinfra `google/gemini-3.5-flash`~~ (unavailable) |
 | `groq-qwen3.8-27b` | free | 128k | groq `qwen/qwen3.8-27b` |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |

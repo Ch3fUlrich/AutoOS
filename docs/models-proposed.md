@@ -184,6 +184,96 @@ by the LAYERS 2026-10-07 rename (`t1-orchestrator`, `t1-orchestrator-clean`,
 `t3-driver`, `t3-driver-clean`, `t3-driver-free-only`, `t3-driver-paid`,
 `t4-researcher`).
 
+## G. Provider x model x combo matrix (generated 2026-10-07)
+
+Regenerated from `catalog/ai-registry.json` + `configuration/omniroute/combos.json`;
+re-run `gen-prov-table.py` (operator scratch) to refresh. Qwen-CLI check
+(operator task): the qwen CLI needs no dedicated combo - it takes `--model`
+(`omniroute run --model <combo> qwen ...`, proven QWEN-OK on or-nemotron;
+groq legs 413 on large contexts, so point qwen at 128k+ combos).
+
+
+Order rationale (applies to every banded combo): trial → free →
+credits → paid, deepseek LAST, no free leg after a paid leg. Position
+numbers are 1-based indices into the committed `models` array: low =
+tried first. Singles (`ovh-*`, `groq-qwen3.8-27b`, `gemini-3.8-flash`,
+`vertex-gemini-3.8-flash`, `deepseek-v4.1-flash`, `spark-1.3-contributor`)
+are single-leg by design. `omitted` routes render no combo.
+
+| `SambaNova` | — | tier free, available False | none | no legs reference it |
+| `agentrouter` | — | tier free, available False | none | no legs reference it |
+| `agnes` | — | tier free, available False | none | no legs reference it |
+| `ai_horde` | — | tier free, available False | none | no legs reference it |
+| `ainative` | `llama-4-maverick` | free | l2-researcher (#1); l2-worker (#1); l2-worker-free-only (#1); l3-driver (#1); l3-driver-free-only (#1) |  |
+| `aion_labs` | — | tier free, available False | none | no legs reference it |
+| `antigravity` | `claude-opus-5-5-medium` | free | opus-5-5 (#1) |  |
+| `antigravity` | `claude-sonnet-5-5-medium` | free | l1-orchestrator (#2); l2-orchestrator (#1) |  |
+| `api_airforce` | — | tier free, available False | none | no legs reference it |
+| `arcee` | — | tier free, available False | none | no legs reference it |
+| `bazaarlink` | — | tier free, available True | none | no legs reference it |
+| `bluesminds` | — | tier free, available False | none | no legs reference it |
+| `cc` | — | tier subscription, available False | none | no legs reference it |
+| `cerebras` | `gpt-oss-120b` | free | — | provider gated |
+| `cerebras` | `qwen-3.8-27b` | free | — | provider gated |
+| `cheapinference` | — | tier paid, available False | none | no legs reference it |
+| `cloudflare_workers_ai` | — | tier free, available None | none | no legs reference it |
+| `cohere` | `command-a-03-2025` | free | t4-rag (#1) |  |
+| `cohere` | `command-r-plus-08-2024` | free | t4-rag (#2) |  |
+| `cohere` | `north-mini-code:free` | free | — | not wired into any band (see route $comments) |
+| `cxa` | — | tier subscription, available False | none | no legs reference it |
+| `deepinfra` | `google/gemini-3.1-flash-lite` | credit | — | not wired into any band (see route $comments) |
+| `deepinfra` | `google/gemini-3.5-flash` | credit | — | not wired into any band (see route $comments) |
+| `deepinfra` | `google/gemini-3.7-flash` | credit | — | not wired into any band (see route $comments) |
+| `deepseek` | `deepseek-flash` | paid $3e-07 | deepseek-v4.1-flash (#1); l1-orchestrator (#6); l1-orchestrator-paid (#2); l2-orchestrator (#3); l2-worker (#14); l2-worker-clean (#4); l3-driver (#15); l3-driver-clean (#4) |  |
+| `deepseek` | `deepseek-v4-flash-0731free:free` | paid | — | not wired into any band (see route $comments) |
+| `deepseek` | `deepseek-v4.1-flash` | paid $3e-07 | — | not wired into any band (see route $comments) |
+| `devin` | — | tier subscription, available None | none | no legs reference it |
+| `felo` | — | tier free, available False | none | no legs reference it |
+| `free_ai` | `google/gemini-3.8-flash` | free | l1-orchestrator (#3) |  |
+| `free_ai` | `qwen7b` | free | l2-researcher (#3); l2-worker (#9); l2-worker-free-only (#9); l3-driver (#9); l3-driver-free-only (#9) |  |
+| `freeaiapikey` | — | tier credit, available True | none | no legs reference it |
+| `g4f` | — | tier free, available False | none | no legs reference it |
+| `google_ai_studio` | — | tier free, available True | none | no legs reference it |
+| `groq` | `openai/gpt-oss-120b` | free | l2-worker (#7); l2-worker-free-only (#7); l3-driver (#7); l3-driver-free-only (#8) |  |
+| `groq` | `openai/gpt-oss-20b` | free | l2-worker (#5); l2-worker-free-only (#5); l3-driver (#5); l3-driver-free-only (#6) |  |
+| `groq` | `qwen/qwen3.8-27b` | free | groq-qwen3.8-27b (#1); l2-worker (#3); l2-worker-free-only (#3); l3-driver (#3); l3-driver-free-only (#3) |  |
+| `hugging_face` | — | tier free, available False | none | no legs reference it |
+| `kilo_gateway` | — | tier free, available False | none | no legs reference it |
+| `llm7` | — | tier free, available False | none | no legs reference it |
+| `meta` | `muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
+| `meta_api` | `muse-spark-1.3-contributor` | paid $1e-07 | l1-orchestrator (#5); l1-orchestrator-paid (#1); l2-worker (#13); l3-driver (#14); spark-1.3-contributor (#1) |  |
+| `mistral` | `mistral-code-latest` | paid | l3-driver (#13) |  |
+| `morph` | `morph-dsv4flash` | credit | — | not wired into any band (see route $comments) |
+| `morph` | `morph-glm52-744b` | credit | — | not wired into any band (see route $comments) |
+| `navyai` | — | tier free, available False | none | no legs reference it |
+| `nebius` | — | tier free, available False | none | no legs reference it |
+| `novita_ai` | — | tier free, available False | none | no legs reference it |
+| `nscale` | — | tier free, available False | none | no legs reference it |
+| `omniroute` | — | tier paid, available None | none | no legs reference it |
+| `opencode_gateway` | `glm-5.3-flash` | free | — | not wired into any band (see route $comments) |
+| `openrouter` | `cohere/north-mini-code:free` | free | l2-worker (#6); l2-worker-free-only (#6); l3-driver (#6); l3-driver-free-only (#7); or-north-mini-code-free (#1) |  |
+| `openrouter` | `meta/muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
+| `openrouter` | `nvidia/nemotron-3-super-120b-a12b:free` | free | l2-worker (#4); l2-worker-free-only (#4); l3-driver (#4); l3-driver-free-only (#4); or-nemotron-3-super-free (#1) |  |
+| `openrouter` | `poolside/laguna-s-2.1:free` | free | l2-worker (#8); l2-worker-free-only (#8); l3-driver (#8); l3-driver-free-only (#5); or-laguna-s-2.1-free (#1) |  |
+| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | ovh-qwen3-coder-30b (#1) |  |
+| `ovhcloud` | `Qwen3.8-27B` | credit $4.7e-07 | l2-worker (#11); l2-worker-clean (#2); l3-driver (#11); l3-driver-clean (#2); ovh-qwen3.8-27b (#1) |  |
+| `ovhcloud` | `gpt-oss-120b` | credit | l2-worker (#10); l2-worker-clean (#1); l3-driver (#10); l3-driver-clean (#1); ovh-gpt-oss-120b (#1) |  |
+| `pollinations` | — | tier free, available False | none | no legs reference it |
+| `qoder_ai` | — | tier free, available False | none | no legs reference it |
+| `requesty` | — | tier free, available False | none | no legs reference it |
+| `routeway` | — | tier free, available False | none | no legs reference it |
+| `samba` | `MiniMax-M3` | paid | — | provider gated |
+| `samba` | `gpt-oss-120b` | paid | — | provider gated |
+| `scaleway` | — | tier free, available False | none | no legs reference it |
+| `sealion` | — | tier free, available False | none | no legs reference it |
+| `siliconflow` | — | tier free, available False | none | no legs reference it |
+| `together_ai` | — | tier credit, available False | none | no legs reference it |
+| `uncloseai` | — | tier free, available False | none | no legs reference it |
+| `vertex_ai` | — | tier credit, available None | none | no legs reference it |
+| `z_ai` | — | tier free, available False | none | no legs reference it |
+| `zcode` | — | tier free, available False | none | no legs reference it |
+| `zen` | — | tier free, available None | none | no legs reference it |
+
 ## B. Gateway-only combos (referenced, NOT curated)
 
 `opencode.jsonc` `providers.omniroute.models` addresses these, but they exist
