@@ -369,7 +369,7 @@ DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-5-5-medium"
 # does not: the resolver has already priced and picked the model that will
 # actually run, so this only decides which local opencode agent identity
 # (l1-orchestrator/l2-worker/t3-reviewer) spawns the client.
-_TIER_PREFIX_RE = re.compile(r"^t([123])-")
+_TIER_PREFIX_RE = re.compile(r"^[tl]([123])-")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
 # (516 MB with graphify off too).

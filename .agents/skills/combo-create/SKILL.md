@@ -52,6 +52,11 @@ reference it; they do not restate it.
   `ovh-qwen3-coder-30b`, `vertex-gemini-3.8-flash`: single leg, strategy
   priority, `surfaces.omniroute` (clients `[opencode, zed]`, context/declared,
   display_name, output; no openhands_profile per groq/hf precedent).
+- **Every leg add/remove is reasoned and dated.** The reason lives in the
+  route/model `$comment` (e.g. ORQWEN-DEAD, SCWREMOVAL) AND in the
+  availability ledger (`python tools/probe-ledger.py record --leg P/M
+  --status served|failed|limited --reason TEXT`); `logs/routing/
+  availability.json` is the machine-readable mirror. No silent churn.
 
 ## Gate (fail-closed)
 
