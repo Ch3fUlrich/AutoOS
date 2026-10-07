@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Map changed registry ids to the tests that name them.
 
-    python3 tools/affected-tests.py t1-orchestrator muse-spark
+    python3 tools/affected-tests.py l1-orchestrator muse-spark
     python3 tools/affected-tests.py --from-diff HEAD~1
     bash tests/run-tests.sh  --filter "$(python3 tools/affected-tests.py --from-diff HEAD~1 --format filter)"
     pwsh tests/run-tests.ps1 -Filter (python3 tools/affected-tests.py --from-diff HEAD~1 --format filter)
@@ -21,7 +21,7 @@ changed id never run, and CI goes red twice for want of a list nobody derived. T
 list is derivable, so it is derived here: every test block whose text mentions one
 of the ids, matched only where the id ends, across all three suites. Over-inclusion
 is allowed and a miss is not, so the match is strict against a *longer* id
-(`t1-orchestrator` does not name `t1-orchestrator-clean`) and loose against a name
+(`l1-orchestrator` does not name `l1-orchestrator-clean`) and loose against a name
 this id generated (`omniroute-t1-orchestrator` is).
 
 What it reads
@@ -137,8 +137,8 @@ TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/@-]*")
 # Characters that continue an id to the right. Registry ids are kebab-case model
 # names, so `-` and `_` belong inside one; `.` does not - it is the sentence's own
 # punctuation or a file extension, and a mention followed by either is still a
-# mention. `\b` reads `-` as a word break, which is what let `t1-orchestrator`
-# match inside `t1-orchestrator-clean` (review F2).
+# mention. `\b` reads `-` as a word break, which is what let `l1-orchestrator`
+# match inside `l1-orchestrator-clean` (review F2).
 ID_CHARS = r"[A-Za-z0-9_\-]"
 
 
@@ -471,11 +471,11 @@ def _read(path: Path) -> str:
 def id_pattern(an_id: str) -> re.Pattern:
     """Match an id where that id ends: no id character may follow it.
 
-    Registry ids are kebab-case, so `-` and `_` continue one: `t1-orchestrator-clean`
-    and `auto-added` are not mentions of `t1-orchestrator` and `auto` - each is its
+    Registry ids are kebab-case, so `-` and `_` continue one: `l1-orchestrator-clean`
+    and `auto-added` are not mentions of `l1-orchestrator` and `auto` - each is its
     own registry entry or plain English - and `\\b` let both through because it
     reads `-` as a word break (review F2). A `.` is not an id character, so
-    `t1-orchestrator.json` and a sentence-ending `t1-orchestrator.` still count:
+    `l1-orchestrator.json` and a sentence-ending `l1-orchestrator.` still count:
     dropping those would be a *miss*, which - unlike over-inclusion - this tool may
     not emit. The left side keeps the plain word boundary for the same reason:
     `omniroute-t1-orchestrator` is the profile file this route generates, and a

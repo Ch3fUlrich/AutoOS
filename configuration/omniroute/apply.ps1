@@ -579,7 +579,7 @@ if ($clientKey) {
 if ($LiveIds.Count -eq 0) {
     Write-Host '  ! could not read /v1/models (check the omniroute client key in api-keys.yml)'
     Write-Host '    combos will be created without catalog validation - verify with:'
-    Write-Host '    omniroute simulate --combo t1-orchestrator'
+    Write-Host '    omniroute simulate --combo l1-orchestrator'
 }
 
 # --- Resilience: fit a reasoning model AND fast-skip a dead leg ------------

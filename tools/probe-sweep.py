@@ -96,12 +96,12 @@ def candidate_legs(registry):
             seen.add(leg)
             legs.append((leg, source))
 
-    # 1. All legs from t2-worker, t1-orchestrator, t3-driver, and their
+    # 1. All legs from l2-worker, l1-orchestrator, l3-driver, and their
     #    free-only / clean variants — these are the combos the sweep mission
     #    targets.
-    for cname in ["t2-worker", "t2-worker-free-only", "t1-orchestrator",
-                  "t1-orchestrator-free-only", "t3-driver",
-                  "t3-driver-free-only"]:
+    for cname in ["l2-worker", "l2-worker-free-only", "l1-orchestrator",
+                  "l1-orchestrator-free-only", "l3-driver",
+                  "l3-driver-free-only"]:
         combo = combo_map.get(cname)
         if not combo:
             continue

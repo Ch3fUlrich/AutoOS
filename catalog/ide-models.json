@@ -2,8 +2,8 @@
   "$comment": "generated from catalog/ai-registry.json - do not edit",
   "models": [
     {
-      "id": "t1-orchestrator",
-      "name": "L1 · t1-orchestrator · 1M",
+      "id": "l1-orchestrator",
+      "name": "L1 · l1-orchestrator · 1M",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -25,8 +25,8 @@
       }
     },
     {
-      "id": "t1-orchestrator-paid",
-      "name": "L1 · t1-orchestrator-paid · 1M",
+      "id": "l1-orchestrator-paid",
+      "name": "L1 · l1-orchestrator-paid · 1M",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -48,8 +48,8 @@
       }
     },
     {
-      "id": "t1-orchestrator-free-only",
-      "name": "L1 · t1-orchestrator-free-only · 1M",
+      "id": "l1-orchestrator-free-only",
+      "name": "L1 · l1-orchestrator-free-only · 1M",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -71,8 +71,8 @@
       }
     },
     {
-      "id": "t2-worker",
-      "name": "L2 · t2-worker · 128k",
+      "id": "l2-worker",
+      "name": "L2 · l2-worker · 128k",
       "context": 128000,
       "output": 32768,
       "surfaces": {
@@ -89,8 +89,8 @@
       }
     },
     {
-      "id": "t2-worker-clean",
-      "name": "L2 · t2-worker-clean · 128k",
+      "id": "l2-worker-clean",
+      "name": "L2 · l2-worker-clean · 128k",
       "context": 128000,
       "output": 32768,
       "effort_ladder": [
@@ -107,8 +107,8 @@
       }
     },
     {
-      "id": "t2-worker-paid",
-      "name": "L2 · t2-worker-paid · 128k",
+      "id": "l2-worker-paid",
+      "name": "L2 · l2-worker-paid · 128k",
       "context": 131072,
       "output": 32768,
       "surfaces": {
@@ -119,8 +119,8 @@
       }
     },
     {
-      "id": "t2-worker-free-only",
-      "name": "L2 · t2-worker-free-only · 128k",
+      "id": "l2-worker-free-only",
+      "name": "L2 · l2-worker-free-only · 128k",
       "context": 131072,
       "output": 32768,
       "surfaces": {
@@ -137,8 +137,8 @@
       }
     },
     {
-      "id": "t2-orchestrator",
-      "name": "L2 · t2-orchestrator · 1M",
+      "id": "l2-orchestrator",
+      "name": "L2 · l2-orchestrator · 1M",
       "context": 1048576,
       "output": 32768,
       "effort_ladder": [
@@ -153,8 +153,8 @@
       }
     },
     {
-      "id": "t3-driver",
-      "name": "L3 · t3-driver · 128k",
+      "id": "l3-driver",
+      "name": "L3 · l3-driver · 128k",
       "context": 128000,
       "output": 16384,
       "surfaces": {
@@ -171,8 +171,8 @@
       }
     },
     {
-      "id": "t3-driver-clean",
-      "name": "L3 · t3-driver-clean · 128k",
+      "id": "l3-driver-clean",
+      "name": "L3 · l3-driver-clean · 128k",
       "context": 128000,
       "output": 16384,
       "effort_ladder": [
@@ -189,8 +189,8 @@
       }
     },
     {
-      "id": "t3-driver-paid",
-      "name": "L3 · t3-driver-paid · 128k",
+      "id": "l3-driver-paid",
+      "name": "L3 · l3-driver-paid · 128k",
       "context": 131072,
       "output": 16384,
       "surfaces": {
@@ -201,8 +201,8 @@
       }
     },
     {
-      "id": "t3-driver-free-only",
-      "name": "L3 · t3-driver-free-only · 128k",
+      "id": "l3-driver-free-only",
+      "name": "L3 · l3-driver-free-only · 128k",
       "context": 131072,
       "output": 16384,
       "surfaces": {
@@ -258,7 +258,7 @@
       "id": "t4-rag",
       "name": "t4-rag · 128k (cohere trial)",
       "context": 131072,
-      "output": 16384,
+      "output": 4096,
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -272,8 +272,8 @@
       }
     },
     {
-      "id": "t4-researcher",
-      "name": "L2 · t4-researcher · 128k",
+      "id": "l2-researcher",
+      "name": "L2 · l2-researcher · 128k",
       "context": 131072,
       "output": 8192,
       "surfaces": {

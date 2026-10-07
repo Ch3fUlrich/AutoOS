@@ -291,7 +291,7 @@ class CmdRunGateTests(GateFileCase):
         # with does. Only the check on the plan can refuse this one.
         gate = self.write_gate(verdict="block", usd=26.0, budget=25.0)
         plan = {
-            "model": VERTEX, "client": "opencode", "agent": "t2-worker",
+            "model": VERTEX, "client": "opencode", "agent": "l2-worker",
             "route": {"combo": "vertex-combo", "reason": "test", "tier": 2,
                       "privacy": "public", "resolver": True},
             "depth": (2, 2), "run_id": "20261003-000000-post-plan-a1b2c3",
@@ -334,7 +334,7 @@ class CmdRunGateTests(GateFileCase):
         state = os.path.join(self.tmp.name, "state")
         plan_a = {
             "model": "omniroute/deepseek-v4-flash", "client": "opencode",
-            "agent": "t2-worker",
+            "agent": "l2-worker",
             "route": {"combo": "a-combo", "reason": "test", "tier": 2,
                       "privacy": "public", "resolver": True, "card": None},
             "depth": (2, 2), "run_id": "20261003-000001-fall-gate-a1b2c3",

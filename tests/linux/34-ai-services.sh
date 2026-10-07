@@ -457,7 +457,7 @@ _prune_apply() {
 
 if it "apply prune: deletes only the retired combos the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" tier2 t2-worker my-own-combo
+    _prune_list "$d" tier2 l2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
@@ -472,7 +472,7 @@ fi
 
 if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" tier2 t2-worker my-own-combo
+    _prune_list "$d" tier2 l2-worker my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
@@ -486,7 +486,7 @@ fi
 
 if it "apply prune: a second run finds no retired or omitted combos and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t2-worker my-own-combo
+    _prune_list "$d" l2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
@@ -498,19 +498,19 @@ fi
 # OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
 # declared legs but has no servable one left. A live combo with such an id is a
 # managed orphan, so apply prunes it - but never a user-made combo, and never a
-# current combo. t1-orchestrator-clean is the orphan on show today; DSBACK
+# current combo. l1-orchestrator-clean is the orphan on show today; DSBACK
 # 2026-09-28 re-serviced deepseek-v4.1-flash, so it is no longer one.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-clean t2-worker my-own-combo
+    _prune_list "$d" l1-orchestrator-clean l2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete t1-orchestrator-clean --yes" ]] \
+    [[ "$deletes" == "combo delete l1-orchestrator-clean --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-clean: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - l1-orchestrator-clean: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
@@ -518,12 +518,12 @@ fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" t1-orchestrator-clean my-own-combo
+    _prune_list "$d" l1-orchestrator-clean my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - l1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -532,16 +532,16 @@ fi
 
 # OR1g: a deliberately legless route (*-paid, auto*) is in neither "retired" nor
 # "omitted", so a live combo a user or OmniRoute itself named "auto" (or
-# "t2-worker-paid") is never deleted - and a dry run never even names it.
-if it "apply prune: a live legless combo (auto, t2-worker-paid) is never deleted or named"; then
+# "l2-worker-paid") is never deleted - and a dry run never even names it.
+if it "apply prune: a live legless combo (auto, l2-worker-paid) is never deleted or named"; then
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto t2-worker-paid t1-orchestrator-clean my-own-combo
+    _prune_list "$d" auto l2-worker-paid l1-orchestrator-clean my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
-    [[ "$out" == *"  - t2-worker-paid:"* ]] && { ok=0; echo "a live t2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - t1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - l2-worker-paid:"* ]] && { ok=0; echo "a live l2-worker-paid combo was named: $out" >&2; }
+    [[ "$out" == *"  - l1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
@@ -1275,7 +1275,7 @@ PY
 fi
 
 # ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
-# On a fresh machine free-ai/qwen7b only appeared in t3-driver-free-only on the
+# On a fresh machine free-ai/qwen7b only appeared in l3-driver-free-only on the
 # SECOND apply run. The first run registered the connection, then read
 # /v1/models — which the gateway had not enumerated for a provider it had just
 # added — so the leg failed the catalog check and was dropped as "catalog does
@@ -1311,18 +1311,18 @@ with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
 # front of free-ai's stopgap, so the old single-leg expectation pinned one
 # tier's pre-FREEKEYS leg list. Pinning the file's own ordered list is the
 # stronger check - it fails if ANY leg goes missing, not only if free-ai does.
-want = next(c for c in combos["combos"] if c["name"] == "t3-driver-free-only")
+want = next(c for c in combos["combos"] if c["name"] == "l3-driver-free-only")
 with open(os.path.join(d, "expected.combo"), "w", encoding="utf-8") as fh:
-    fh.write("combo create t3-driver-free-only --strategy %s --models %s\n"
+    fh.write("combo create l3-driver-free-only --strategy %s --models %s\n"
              % (want["strategy"], ",".join(want["models"])))
 PY
     out="$(_prune_apply "$d")"
     ok=1
     # The leg is in the combo the FIRST run writes.
     grep -qxF "$(cat "$d/expected.combo")" "$d/calls.log" \
-        || { ok=0; echo "created: [$(grep '^combo create t3-driver-free-only' "$d/calls.log")]" >&2; }
+        || { ok=0; echo "created: [$(grep '^combo create l3-driver-free-only' "$d/calls.log")]" >&2; }
     # ... and specifically the freshly registered provider's leg is in it.
-    grep -q '^combo create t3-driver-free-only .*--models .*free-ai/qwen7b' \
+    grep -q '^combo create l3-driver-free-only .*--models .*free-ai/qwen7b' \
         "$d/calls.log" \
         || { ok=0; echo "the new leg is not in the first combo write" >&2; }
     [[ "$out" != *"catalog does not know free-ai"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
@@ -2889,7 +2889,7 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     for _t in omniroute-t1-orchestrator omniroute-t2-worker omniroute-t3-driver; do
         [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
     done
-    [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before t2-orchestrator" >&2; }
+    [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before l2-orchestrator" >&2; }
     [[ "$first" == *"app profile litellm-t2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
@@ -3039,14 +3039,14 @@ fi
 # Spec order decides which tiers make the cap - also in an app that already
 # holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
 # the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
-# alone freed nothing and t3-driver/t4-rag still never fit).
+# alone freed nothing and l3-driver/t4-rag still never fit).
 # These seeds are the spec's two lowest ranks, which are the litellm
 # free-only twins regardless of which gateway route is servable: a tier that
 # fails closed simply stops being ranked, so this test needed no re-pin for
 # MUSEAPI 2026-09-27 (the omniroute spark tier re-entered the spec above them).
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/t3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/l2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/l3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
     _seed_pushed "$d" litellm-t2-worker-free-only litellm-t3-driver-free-only
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
@@ -3071,7 +3071,7 @@ fi
 # room for a higher tier. A prefix-named profile nobody recorded never does.
 if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/t2-worker"}, "litellm-t2-worker-free-only": {"model": "openai/t2-worker-free-only"}}}' >"$d/seed.json"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/l2-worker"}, "litellm-t2-worker-free-only": {"model": "openai/l2-worker-free-only"}}}' >"$d/seed.json"
     _seed_pushed "$d" litellm-t2-worker litellm-t2-worker-free-only
     _fake_app "$d" "$d/seed.json"
     out="$(_push_to "$d" "$url")"
@@ -3861,7 +3861,7 @@ if it "aistack: the container opencode config reaches the gateway by name"; then
     d="$(mktemp -d)"
     mkdir -p "$d/code/repo"
     cat >"$d/src.json" <<JSON
-{"model":"omniroute/t1-orchestrator",
+{"model":"omniroute/l1-orchestrator",
  "provider":{"omniroute":{"options":{"baseURL":"http://127.0.0.1:20128/v1","apiKey":"{env:AUTOOS_OMNIROUTE_KEY}"}},
              "litellm":{"options":{"baseURL":"http://127.0.0.1:4000/v1"}},
              "ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"}},
@@ -4778,8 +4778,8 @@ STUB
         'http://127.0.0.1:20128/v1/models none - 401' \
         'http://127.0.0.1:20128/v1/models key - 200' \
         'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
-        'http://127.0.0.1:20128/v1/chat/completions key t2-worker-free-only 200' \
-        'http://127.0.0.1:20128/v1/chat/completions key t2-worker-clean 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key l2-worker-free-only 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key l2-worker-clean 200' \
         'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
 }
 # _aistack_verify_route <sandbox> <url> <auth> <body> <code>: one more route,
@@ -4812,7 +4812,7 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo t2-worker-free-only' 'combo t2-worker-clean' 'omniroute has qodercli' \
+                'combo l2-worker-free-only' 'combo l2-worker-clean' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -4877,7 +4877,7 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
-    grep -q '^  ok    combo t2-worker-clean$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
+    grep -q '^  ok    combo l2-worker-clean$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
     # A key the gateway rejects: FAIL for every combo, and still no key printed.
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
@@ -4940,7 +4940,7 @@ if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
     grep -qx '  ok    combo alpha-combo' <<<"$out" || { ok=0; echo "alpha-combo not ok" >&2; }
     grep -qE '^  FAIL  combo beta-combo - HTTP 404' <<<"$out" || { ok=0; echo "beta-combo not FAIL" >&2; }
     [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
-    grep -q 't2-worker-free-only' "$d/curl-argv.log" && { ok=0; echo "a default combo was still requested" >&2; }
+    grep -q 'l2-worker-free-only' "$d/curl-argv.log" && { ok=0; echo "a default combo was still requested" >&2; }
     # 256, not 16: a reasoning leg spent 18 of 20 tokens thinking and the
     # gateway's quality check answered 502 (L0, live 2026-09-27).
     grep -q '"max_tokens":256' "$d/curl-argv.log" || { ok=0; echo "max_tokens 256 not sent" >&2; }

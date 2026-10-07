@@ -45,8 +45,8 @@ FIXTURE_SH = '''\
 
 describe "fake routing"
 
-if it "route t1-orchestrator plans three legs"; then
-    assert_eq "leg" "t1-orchestrator"
+if it "route l1-orchestrator plans three legs"; then
+    assert_eq "leg" "l1-orchestrator"
 fi
 
 if it "the registry reads muse-spark from ai-registry.json models"; then
@@ -95,7 +95,7 @@ PY
 fi
 
 # A longer id that merely starts with the queried one is a different entry.
-if it "the t1-orchestrator-clean route drops the dead leg"; then
+if it "the l1-orchestrator-clean route drops the dead leg"; then
     assert_eq "class" "mid"
 fi
 
@@ -156,7 +156,7 @@ class RegistryReads(unittest.TestCase):
         self.assertIn("muse-spark", MODELS)
 
     def test_route_t1_orchestrator_is_clean(self):
-        self.assertIn("t1-orchestrator", ROUTES)
+        self.assertIn("l1-orchestrator", ROUTES)
 
     def test_nothing_relevant_here(self):
         self.assertTrue(True)
@@ -173,7 +173,7 @@ SUB_HEREDOC_SH_CASE = "the substitution heredoc case whose mention follows the b
 SUB_PHANTOM_SH_CASE = "phantom inside the substitution heredoc"
 HEREDOC_PS_CASE = "the here-string case that asserts after the closing quote"
 PHANTOM_PS_CASE = "phantom SambaNova is not a real case"
-LONGER_ID_CASE = "the t1-orchestrator-clean route drops the dead leg"
+LONGER_ID_CASE = "the l1-orchestrator-clean route drops the dead leg"
 LITE_ONLY_CASE = "a case naming only the lite flash model"
 ZERO_TOKEN_CASE = "✓ ✗ ✗"
 COMMA_CASE = "✓ ✗, ✗"
@@ -359,7 +359,7 @@ Test-Case 'the case that must still be found' {
 
 MODELS = {"muse-spark": {"id": "muse-spark", "context_advertised": 1048576},
           "opus-4-6": {"id": "opus-4-6", "context_advertised": 200000}}
-ROUTES = {"t1-orchestrator": {"id": "t1-orchestrator", "class": "top", "legs": []},
+ROUTES = {"l1-orchestrator": {"id": "l1-orchestrator", "class": "top", "legs": []},
           "auto": {"id": "auto", "class": "mid", "legs": []},
           "opus-4-6": {"id": "opus-4-6", "class": "top", "legs": []}}
 PROVIDERS = {"samba": {"id": "samba", "trains_on_prompts": True},
@@ -420,9 +420,9 @@ class FixtureTests(unittest.TestCase):
         return run_tool(list(args) + ["--root", str(self.root)])
 
     def test_an_id_in_a_test_name_is_a_hit(self):
-        result = self.tool("t1-orchestrator", "--format", "filter")
+        result = self.tool("l1-orchestrator", "--format", "filter")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("t1-orchestrator", result.stdout)
+        self.assertIn("l1-orchestrator", result.stdout)
 
     def test_a_body_only_mention_is_still_reachable_by_the_filter(self):
         result = self.tool("opus-4-6", "--format", "filter")
@@ -435,14 +435,14 @@ class FixtureTests(unittest.TestCase):
                             "filter %r cannot select the affected test %r" % (terms, name))
 
     def test_terms_survive_both_runners_splitting(self):
-        result = self.tool("muse-spark", "samba", "opus-4-6", "t1-orchestrator",
+        result = self.tool("muse-spark", "samba", "opus-4-6", "l1-orchestrator",
                            "--format", "filter")
         for term in filter_terms(result.stdout):
             self.assertNotIn(",", term, "a comma would split this term in --filter")
             self.assertNotIn(" ", term, "a space would split this term in $( )")
 
     def test_the_filter_reaches_every_affected_shell_and_pester_case(self):
-        ids = ["muse-spark", "opus-4-6", "t1-orchestrator", "SambaNova"]
+        ids = ["muse-spark", "opus-4-6", "l1-orchestrator", "SambaNova"]
         result = self.tool(*ids, "--format", "filter")
         terms = filter_terms(result.stdout)
         for runner in ("sh", "ps1"):
@@ -499,10 +499,10 @@ class FixtureTests(unittest.TestCase):
                         "filter %r cannot select %r" % (terms, HEREDOC_PS_CASE))
 
     def test_a_dashed_id_does_not_select_a_block_naming_a_longer_id(self):
-        # Review F2 / Haiku: \b treats the `-` of t1-orchestrator-clean as a
+        # Review F2 / Haiku: \b treats the `-` of l1-orchestrator-clean as a
         # boundary, so querying the short id also selected the -clean block.
-        hit = affected_in("sh", self.root, ["t1-orchestrator"])
-        self.assertIn("route t1-orchestrator plans three legs", hit)
+        hit = affected_in("sh", self.root, ["l1-orchestrator"])
+        self.assertIn("route l1-orchestrator plans three legs", hit)
         self.assertNotIn(LONGER_ID_CASE, hit)
 
     def test_an_id_does_not_select_a_block_naming_an_id_with_a_dashed_suffix(self):
@@ -513,11 +513,11 @@ class FixtureTests(unittest.TestCase):
                       affected_in("sh", self.root, ["gemini-3.8-flash-lite"]))
 
     def test_id_pattern_boundaries_reject_a_longer_id_and_accept_a_derived_name(self):
-        short = at.id_pattern("t1-orchestrator")
-        self.assertIsNone(short.search("t1-orchestrator-clean"))
-        self.assertIsNone(short.search("t1-orchestrator-paid's"))
-        self.assertIsNotNone(short.search("the t1-orchestrator route"))
-        self.assertIsNotNone(short.search('"t1-orchestrator"'))
+        short = at.id_pattern("l1-orchestrator")
+        self.assertIsNone(short.search("l1-orchestrator-clean"))
+        self.assertIsNone(short.search("l1-orchestrator-paid's"))
+        self.assertIsNotNone(short.search("the l1-orchestrator route"))
+        self.assertIsNotNone(short.search('"l1-orchestrator"'))
         # The other direction is a miss, not over-inclusion: `omniroute-…json` is
         # the profile this route generates, and a leading `-` or a trailing `.` is
         # not part of the id.
@@ -563,19 +563,19 @@ class FixtureTests(unittest.TestCase):
                          "test_nothing_relevant_here", nodes)
 
     def test_pytest_format_reaches_module_level_and_method_hits(self):
-        result = self.tool("opus-4-6", "t1-orchestrator", "--format", "pytest")
+        result = self.tool("opus-4-6", "l1-orchestrator", "--format", "pytest")
         nodes = result.stdout.split()
         self.assertIn("tests/test_fake_registry.py::RegistryReads::"
                       "test_route_t1_orchestrator_is_clean", nodes)
         self.assertIn("tests/test_fake_registry.py::test_module_level_opus_route", nodes)
 
     def test_human_format_names_the_runner_and_the_reason(self):
-        result = self.tool("t1-orchestrator", "--format", "human")
+        result = self.tool("l1-orchestrator", "--format", "human")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("sh", result.stdout)
         self.assertIn("pytest", result.stdout)
-        self.assertIn("t1-orchestrator", result.stdout)
-        self.assertIn("route t1-orchestrator plans three legs", result.stdout)
+        self.assertIn("l1-orchestrator", result.stdout)
+        self.assertIn("route l1-orchestrator plans three legs", result.stdout)
 
     def test_no_ids_and_no_diff_is_a_usage_error(self):
         result = self.tool()
@@ -609,10 +609,10 @@ class DiffTests(unittest.TestCase):
         return run_tool(list(args) + ["--root", str(self.root)])
 
     def test_a_changed_value_reports_that_key(self):
-        self.change(lambda d: d["routes"]["t1-orchestrator"].__setitem__("class", "mid"))
+        self.change(lambda d: d["routes"]["l1-orchestrator"].__setitem__("class", "mid"))
         result = self.tool("--from-diff", "HEAD", "--format", "human")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("t1-orchestrator", result.stdout)
+        self.assertIn("l1-orchestrator", result.stdout)
         # The untouched sibling and its tests stay out of the run.
         self.assertNotIn("opus-4-6", result.stdout)
 
@@ -640,10 +640,10 @@ class DiffTests(unittest.TestCase):
         self.assertEqual(ids, [])
 
     def test_a_changed_route_selects_the_case_that_names_it(self):
-        self.change(lambda d: d["routes"]["t1-orchestrator"].__setitem__("class", "mid"))
+        self.change(lambda d: d["routes"]["l1-orchestrator"].__setitem__("class", "mid"))
         result = self.tool("--from-diff", "HEAD", "--format", "filter")
         terms = filter_terms(result.stdout)
-        self.assertTrue(any(t in "route t1-orchestrator plans three legs" for t in terms),
+        self.assertTrue(any(t in "route l1-orchestrator plans three legs" for t in terms),
                         result.stdout)
 
 
@@ -682,7 +682,7 @@ class RealRepoTests(unittest.TestCase):
                          % (len(missed), openers))
 
     def test_a_known_route_id_finds_the_real_shell_and_pester_cases(self):
-        result = run_tool(["t1-orchestrator", "--format", "filter"])
+        result = run_tool(["l1-orchestrator", "--format", "filter"])
         self.assertEqual(result.returncode, 0, result.stderr)
         terms = filter_terms(result.stdout)
         self.assertTrue(terms, "no filter emitted for a route the suites name")
@@ -697,7 +697,7 @@ class RealRepoTests(unittest.TestCase):
         self.assertTrue(reached, "the filter selects no real shell case by name")
 
     def test_the_filter_covers_every_affected_real_case(self):
-        ids = ["t1-orchestrator", "muse-spark"]
+        ids = ["l1-orchestrator", "muse-spark"]
         result = run_tool(ids + ["--format", "filter"])
         terms = filter_terms(result.stdout)
         tests = at.discover(ROOT)
@@ -712,15 +712,15 @@ class RealRepoTests(unittest.TestCase):
         # profile file this route generates. A boundary that also rejected a
         # leading `-` would hide these cases from a flip of the very route they
         # cover - a miss, which the tool's own contract does not allow.
-        hit = affected_in("sh", ROOT, ["t1-orchestrator"])
+        hit = affected_in("sh", ROOT, ["l1-orchestrator"])
         self.assertIn("svc: profile sync pushes the tiers into a running app, "
                       "idempotently and capped", hit)
         self.assertIn("svc: profile push re-sends a profile whose key was rotated", hit)
 
     def test_a_boundary_tightening_drops_only_the_case_naming_a_longer_id(self):
-        # This one mentions `t1-orchestrator-clean`, a different route, in a comment
+        # This one mentions `l1-orchestrator-clean`, a different route, in a comment
         # and nothing else: reviewing it belongs to a change of that id (review F2).
-        hit = affected_in("sh", ROOT, ["t1-orchestrator"])
+        hit = affected_in("sh", ROOT, ["l1-orchestrator"])
         self.assertNotIn("apply sets the resilience deadline and the fast-skip breaker", hit)
 
     def test_pytest_nodes_found_in_the_real_repo_are_valid_files(self):

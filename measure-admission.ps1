@@ -5,7 +5,7 @@ param(
   [string]$Label = "run",
   [int]$MaxTokens = 200,
   [int]$MessageCount = 210,   # > CHAT_HEAVY_MESSAGE_COUNT (200) to trigger "heavy"
-  [string]$Model = "t2-worker",
+  [string]$Model = "l2-worker",
   [bool]$Stream = $true
 )
 

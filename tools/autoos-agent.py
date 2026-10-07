@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Spawn one agent - any client, the right model, key, isolation and depth - one command.
 
-The 3-tier agents live in opencode.jsonc (t1-orchestrator -> t2-worker ->
+The 3-tier agents live in opencode.jsonc (l1-orchestrator -> l2-worker ->
 t3-reviewer, .agents/skills/unattended-orchestration/unattended-orchestration.md).
 Driving them by hand has
 four traps, all measured 2026-09-24 against opencode 2.0.16:
 
-  1. `opencode run --agent t2-worker` runs on the TOP-LEVEL default model
-     (omniroute/t1-orchestrator), not the agent's own - the agent/model pairing only
+  1. `opencode run --agent l2-worker` runs on the TOP-LEVEL default model
+     (omniroute/l1-orchestrator), not the agent's own - the agent/model pairing only
      holds for children spawned through the subagent tool. This tool always
      passes the agent's model explicitly.
   2. Without --standalone, `opencode run` talks to a background service that
@@ -35,7 +35,7 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is t2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
+is l2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
 sensitive 1M leg is off, so --allow-training is accepted for
 compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
@@ -89,7 +89,7 @@ Usage:
     python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --card kind=review --isolate --not-family nvidia --no-fallthrough "..."
     python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
-    python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
+    python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/l2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
     python3 tools/autoos-agent.py run --tier 3 --isolate --dry-run "..."     # print the plan only
     python3 tools/autoos-agent.py context                          # this session's fill
@@ -277,7 +277,7 @@ import autoos_usage as usage_mod  # noqa: E402
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TIERS = {1: "t1-orchestrator", 2: "t2-worker", 3: "t3-reviewer"}
+TIERS = {1: "l1-orchestrator", 2: "l2-worker", 3: "t3-reviewer"}
 # gwloopback (2026-09-30): the gateway address is resolved, not hard-coded.
 # `http://127.0.0.1:20128` is right on a host and refused inside the stack's
 # containers, where the gateway is a sibling container the compose network
@@ -362,13 +362,13 @@ PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jso
 # (operator): the 4-6 generation is retired upstream, so the default moves to
 # the 5-5 spelling the agy CLI and the live gateway catalog serve.
 DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-5-5-medium"
-# A v1 combo (t1-orchestrator, t2-worker, t3-driver, their -clean twins) always
+# A v1 combo (l1-orchestrator, l2-worker, l3-driver, their -clean twins) always
 # carries one of these prefixes. A resolver v2 route id (RUNV2) may or may not
-# (e.g. "t1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
+# (e.g. "l1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
 # not - t4 is not even a TIERS key). _tier_for_route defaults to tier 2 when it
 # does not: the resolver has already priced and picked the model that will
 # actually run, so this only decides which local opencode agent identity
-# (t1-orchestrator/t2-worker/t3-reviewer) spawns the client.
+# (l1-orchestrator/l2-worker/t3-reviewer) spawns the client.
 _TIER_PREFIX_RE = re.compile(r"^t([123])-")
 # --lean drops these MCP servers. Measured 2026-09-24, one --free opencode run,
 # peak process-tree RSS: 1406 MB with every server, 678 MB with these off
@@ -417,7 +417,7 @@ WORKER_SCOPE_PREFIX = "autoos-worker-"
 # can open configuration/api-keys.yml and put the key in its answer.
 SPAWN_GATES = ("subagent", "task")
 # Who each tier may launch: the tier contract, and nothing for a leaf.
-TIER_SPAWN_CHILD = {1: "t2-worker", 2: "t3-reviewer", 3: None}
+TIER_SPAWN_CHILD = {1: "l2-worker", 2: "t3-reviewer", 3: None}
 
 
 def spawn_gate_rules(tier: int) -> list:
@@ -2102,7 +2102,7 @@ def root_agents_block(cfg: dict) -> dict:
 
     Only the agent definitions are copied — no providers, no keys, no env.
     This is merged into the overlay for foreign-repo sandboxes so the child
-    opencode process finds t1-orchestrator / t2-worker / t3-reviewer / t4-researcher
+    opencode process finds l1-orchestrator / l2-worker / t3-reviewer / l2-researcher
     even though the foreign clone's own tree has no opencode.jsonc.
     """
     return dict(cfg.get("agents") or {})
@@ -2112,7 +2112,7 @@ def root_overlay_blocks(cfg: dict) -> dict:
     """ROOT's ``providers`` and top-level ``permissions`` (via ``cfg``).
 
     FLEET-AGENTS-2: a foreign-repo sandbox lacks these two blocks as well, so
-    opencode stops with ``Model unavailable: omniroute/t2-worker`` and the
+    opencode stops with ``Model unavailable: omniroute/l2-worker`` and the
     worker runs without the shell/tool fence every AutoOS worker gets. Only
     these two keys are copied (deep copies, so a merge never mutates ``cfg``);
     never mcp / tools / experimental / model. ``providers`` carries env var
@@ -2641,7 +2641,7 @@ def gemini_spawn_refusal(model, combo, registry, cfg=None, explicit=False) -> st
     row describes it, because the name alone says which model answers), and the
     leg that name resolves to. A combo is a different case, and `--model` naming
     one is not an aim at its off-list leg: this registry still carries one
-    off-list fall-through leg each in `t2-worker` and `gemini-3.8-flash`, and
+    off-list fall-through leg each in `l2-worker` and `gemini-3.8-flash`, and
     refusing those would bench every tier-2 spawn over a leg that only answers
     when the legs ahead of it are down — so a combo is refused only when EVERY
     leg is off-list, whether the router picked it or the caller named it
@@ -2890,7 +2890,7 @@ def effective_spawn_model(client_name: str, model=None, card=None,
             return (default, "opencode.jsonc default") if default else (None, None)
         # An absent card is the empty card the CLI parses, so the gate and the
         # plan read the same default: a gateway spawn that names nothing is
-        # t2-worker, not "unknown". A card the router refuses raises here, and
+        # l2-worker, not "unknown". A card the router refuses raises here, and
         # the caller passes its own words through — they carry the next steps,
         # and a refused card spends nothing whatever the budget says.
         combo, _ = routing.select_combo(parsed)
@@ -4867,9 +4867,9 @@ def sensitive_combo_refusal(combo: str, registry: dict):
 # is a declared route in catalog/ai-registry.json and a combo in
 # configuration/omniroute/combos.json.
 FREE_ONLY_COMBOS = {
-    "t1-orchestrator": "t1-orchestrator-free-only",
-    "t2-worker": "t2-worker-free-only",
-    "t3-driver": "t3-driver-free-only",
+    "l1-orchestrator": "l1-orchestrator-free-only",
+    "l2-worker": "l2-worker-free-only",
+    "l3-driver": "l3-driver-free-only",
 }
 
 
@@ -4880,10 +4880,10 @@ def free_only_combo(combo):
     args.free_model; no leg of route["combo"] is ever resolved — FAMILYFENCE-3
     B1), so the combo is only ever a label. But select_combo knows nothing of
     free — it stays pure, since the MCP `route` tool takes only a card — and
-    labelling that run `t1-orchestrator` names a combo with a paid tail the run
+    labelling that run `l1-orchestrator` names a combo with a paid tail the run
     never touches (T0-PAID-2a1). None (a --tier --free run names no combo) and
     combos without a twin (-clean, t4-rag, resolver ids, and paid combos with
-    no free-only twin such as t2-orchestrator and t1-orchestrator-paid) pass
+    no free-only twin such as l2-orchestrator and l1-orchestrator-paid) pass
     through: the rule is that a free run is labelled with the paid combo's
     twin whenever a twin exists, not that every free run names one.
     """
@@ -4983,7 +4983,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     combo, reason = routing.select_combo(card, args.allow_training)
     if not model_decided:
         _fence_check_route(combo, fence)
-    tier = int(re.match(r"t(\d)-", combo).group(1))  # t2-worker-clean -> 2
+    tier = int(re.match(r"[tl](\d)-", combo).group(1))  # l2-worker-clean -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
         combo, reason = model_route_id(model), reason + "+model"
@@ -5069,7 +5069,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # `build_command` hands it the pin or the registry default and never names a
         # route to OmniRoute. So the combo the resolver picked for it is a label no
         # leg of it ever serves, and `ps`, the worker record and the run log used to
-        # report `t1-orchestrator` for a run that in fact ran `Efficient` on qoder.
+        # report `l1-orchestrator` for a run that in fact ran `Efficient` on qoder.
         # Recorded as `native:<client>`: honest, and `combo_legs` answers it with no
         # legs, which is exactly what provider-benching should see. The rewrite is
         # AFTER `resolve_route` on purpose: the fence and the PRIV3 check both read
@@ -7085,14 +7085,14 @@ def stop_provider_id(line: str, registry: dict, legs, now=None) -> str | None:
     who served it, and the provider of the leg heading that model is benched
     whatever else the route happens to hold -- unless more than one provider of
     the route serves that model, when NOTHING is benched and the line says so
-    out loud (R6STOP review, SPAWNFIX3 item 7: t2-worker's route carries
+    out loud (R6STOP review, SPAWNFIX3 item 7: l2-worker's route carries
     gpt-oss-120b on both cerebras and sambanova, and a stop line names the
     model, never who served it; benching one of them on a 50/50 guess starves a
     provider that may be perfectly healthy). Only an unnamed line falls back
     to the gateway working down the route's legs in order, so the one that took
     the traffic is the first leg whose provider is up right now. Both read legs
     through `resolve_leg`, so a leg spelled with a gateway alias attributes to
-    its provider rather than being skipped (measured: a t2-worker gemini
+    its provider rather than being skipped (measured: a l2-worker gemini
     cooldown benched antigravity). A line that names nothing and has no live leg
     to choose from is attributed to no provider (recording a guess would bench
     the wrong one).
@@ -7963,7 +7963,7 @@ def sandbox_verdict(route: dict, changed: str, ahead: str, output: str = "",
                     extra: str = ""):
     """(rc override or None, message) for an --isolate run.
 
-    Measured 2026-09-25: t2-worker agents answered "all fixed" with placeholder
+    Measured 2026-09-25: l2-worker agents answered "all fixed" with placeholder
     commit hashes and changed nothing. A run whose job is to implement must
     leave a commit or a change; an agent's report is not evidence.
 
@@ -11203,7 +11203,7 @@ def _parser_ps(sub):
 def _parser_run(sub):
     run = sub.add_parser("run", help="run one task on one tier")
     run.add_argument("--tier", type=int, choices=sorted(TIERS),
-                     help="pick the tier by hand (default: resolve --card, an empty card is t2-worker)")
+                     help="pick the tier by hand (default: resolve --card, an empty card is l2-worker)")
     run.add_argument("--card", help="task card, e.g. role=review,privacy=sensitive (or JSON)")
     run.add_argument("--no-defer", dest="no_defer", action="store_true",
                      help="a v2 card (RUNV2): ignore the resolver's deferral (state=deferred) "
@@ -11218,7 +11218,7 @@ def _parser_run(sub):
     run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")
     run.add_argument("--clean", action="store_true", help="use the -clean (paid, no free legs) twin")
     run.add_argument("--model", help="pin the model: a combo declared in opencode.jsonc "
-                                     "(e.g. omniroute/t2-orchestrator) for a gateway client, "
+                                     "(e.g. omniroute/l2-orchestrator) for a gateway client, "
                                      "or the client's own model name for an own-account one "
                                      "(qodercli/claude --model; its family feeds the fence)")
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")

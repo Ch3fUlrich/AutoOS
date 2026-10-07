@@ -31,7 +31,7 @@ def load_agent():
 def entry(**overrides):
     """One fully valid record; overrides mutate a fresh copy."""
     base = {
-        "route": "t2-worker",
+        "route": "l2-worker",
         "class": "cheap",
         "served_leg": "unknown",
         "bucket": "S0",
@@ -221,7 +221,7 @@ class SpawnerRecordTests(unittest.TestCase):
     def _spawner_plan(self):
         """A plan track_entry() accepts: a gateway client on a known route."""
         return {"client": "opencode", "free": False,
-                "route": {"combo": "t2-worker-clean", "class": "cheap", "card": {}}}
+                "route": {"combo": "l2-worker-clean", "class": "cheap", "card": {}}}
 
     def test_track_entry_stamps_the_resolvers_chosen_effort(self):
         # REVFIX review 1: without the rung, every record reads as effort

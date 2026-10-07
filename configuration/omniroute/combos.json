@@ -4,49 +4,49 @@
     "validates every model against the live /v1/models catalog and skips",
     "(with a warning) anything the catalog does not know.",
     "MUSEAPI 2026-09-27: meta_api/muse-spark-1.3-contributor (the Meta Model",
-    "API contributor, providers.meta_api) is the head leg of t1-orchestrator,",
-    "t1-orchestrator-paid and spark-1.3-contributor, and a paid escalation leg",
-    "of t2-worker/t3-driver after their free legs. It trains on prompts by",
+    "API contributor, providers.meta_api) is the head leg of l1-orchestrator,",
+    "l1-orchestrator-paid and spark-1.3-contributor, and a paid escalation leg",
+    "of l2-worker/l3-driver after their free legs. It trains on prompts by",
     "contract, so it is in no *-clean route and a privacy=sensitive card never",
     "reaches it. NOTE: unlike free-ai, 'meta-api' is not a built-in gateway",
     "connection - the first apply against a live gateway registers it as a provider",
     "NODE (prefix meta-api, endpoint https://api.meta.ai/v1) plus an",
     "openai-compatible-chat connection bound to it; wired live 2026-09-30.",
-    "T1FREE 2026-09-27: t1-orchestrator and t1-orchestrator-free-only keep",
+    "T1FREE 2026-09-27: l1-orchestrator and l1-orchestrator-free-only keep",
     "a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek",
     "credit is out (L0: every tier keeps a free leg). cheaperinference legs",
     "omitted: wallet exhausted 2026-09-27T17:2xZ (402).",
     "DSBACK 2026-09-28: providers.deepseek is available again after the",
     "operator top-up (router balance 19.99 USD), so deepseek/deepseek-flash",
-    "heads t2-worker-clean/t3-driver-clean again and deepseek-v4.1-flash is",
-    "no longer omitted. t1-orchestrator-clean and samba/* still omitted",
+    "heads l2-worker-clean/l3-driver-clean again and deepseek-v4.1-flash is",
+    "no longer omitted. l1-orchestrator-clean and samba/* still omitted",
     "(contributor-only, paid, or provider-off).",
     "MISTRALFIX 2026-09-28: mistral/mistral-small-latest left the last routes",
-    "it was a leg of (t3-driver L11, t2-worker-clean, t3-driver-clean) - a",
+    "it was a leg of (l3-driver L11, l2-worker-clean, l3-driver-clean) - a",
     "direct probe of api.mistral.ai with this key measured 429 at 0",
     "requests/minute for it on this plan and the gateway's own 7-day log failed",
     "51 of 51 calls on it. Both -clean twins keep the live",
     "deepseek/deepseek-flash head, so neither is marked unavailable;",
-    "mistral/mistral-code-latest (measured 200, 125 rpm) stays t3-driver's",
+    "mistral/mistral-code-latest (measured 200, 125 rpm) stays l3-driver's",
     "head. The numbers live on providers.mistral.limits, read by",
     "tools/registry.py plan_dead_reasons() - never restated here.",
     "CTXAUDIT 2026-09-30: every combo rechecked against the LIVE gateway /v1/models catalog (router audit, key handled in-script, values never printed).",
     "Findings applied: deepseek-v4.1-flash pointed at the WRONG LEG (deepseek/deepseek-flash 128k) - leg moved to the v4-flash alias spelling (catalog 1000000), context 1M;",
     "gemini-3.8-flash 128k->1M (leg gemini/gemini-3.8-flash is 1048576); opus-4-6 200k->1M (leg agy/claude-opus-4-6-thinking is 1048576);",
-    "t2-orchestrator 200k->1M (same agy leg). Left alone, verified min-rule: t2-worker/t2-free-only/t3-driver/t3-free-only/t4-rag (128k, minima check out),",
-    "t2-worker-clean + t3-driver-clean (128k on deepseek-flash 128k - consistent; moving them to v4-flash needs trains_on_prompts verification first, lane work).",
+    "l2-orchestrator 200k->1M (same agy leg). Left alone, verified min-rule: l2-worker/t2-free-only/l3-driver/t3-free-only/t4-rag (128k, minima check out),",
+    "l2-worker-clean + l3-driver-clean (128k on deepseek-flash 128k - consistent; moving them to v4-flash needs trains_on_prompts verification first, lane work).",
     "OPEN CONFLICT, not silently fixed: meta-api/muse-spark-1.3-contributor reports 128000 in the catalog but the registry + all briefs say 1M.",
     "128000 is also the catalog's unknown-default (image/tts/tasw/devin rows), and meta-api is a custom registration the gateway may not know -",
-    "so the 128k is suspect, but unproven. t1-orchestrator/t1-free-only keep 1M (priority head gemini IS 1M; scw/nebius 128k fallbacks degrade gracefully).",
+    "so the 128k is suspect, but unproven. l1-orchestrator/t1-free-only keep 1M (priority head gemini IS 1M; scw/nebius 128k fallbacks degrade gracefully).",
     "Lane verification item: one >128k probe on the spark leg settles it. DRIFT NOTE: opencode.json enforced limits still say",
-    "deepseek-v4.1-flash 131072 / gemini-3.8-flash 131072 / opus-4-6 200000 / t2-orchestrator 200000 - the container copy is host-rendered,",
+    "deepseek-v4.1-flash 131072 / gemini-3.8-flash 131072 / opus-4-6 200000 / l2-orchestrator 200000 - the container copy is host-rendered,",
     "so the render path (ai-stack.sh init) must pick these bumps up; do NOT hand-edit the container copy.",
-    "CTXFIX 2026-09-29: t1-orchestrator and t1-orchestrator-free-only declared",
+    "CTXFIX 2026-09-29: l1-orchestrator and l1-orchestrator-free-only declared",
     "context 128k, which was wrong. The model registry",
     "(~/.config/opencode/opencode.json, provider omniroute) declares",
     "limit.context 1048576 and titles them 't1 orchestrator-1M'; both are now",
     "1M. Cross-checked every other combo against that registry:",
-    "spark-1.3-contributor and t1-orchestrator-paid 1M, t2-orchestrator and",
+    "spark-1.3-contributor and l1-orchestrator-paid 1M, l2-orchestrator and",
     "opus-4-6 200k, all the rest 128k = 131072 - those were already right.",
     "DS1M 2026-09-30: deepseek-v4.1-flash declares 1M - the vendor Models &",
     "Pricing page states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in",
@@ -65,12 +65,12 @@
     "lacks the vertex leg - L1-beta to add it to routes.gemini-3.8-flash.legs.",
     "CTXFIX 2026-09-30: context fields on five combos updated to the real",
     "/v1/models window their serving legs can use (measured live on :20128):",
-    "opus-4-6 200k->1M, t2-orchestrator 200k->1M (both",
+    "opus-4-6 200k->1M, l2-orchestrator 200k->1M (both",
     "antigravity/claude-opus-4-6-thinking, gateway computed_context_length",
-    "1048576), t2-worker-clean 128k->1M, t3-driver-clean 128k->1M (both",
+    "1048576), l2-worker-clean 128k->1M, l3-driver-clean 128k->1M (both",
     "deepseek/deepseek-flash at 1048576). Combos keeping 128k are honest",
-    "clamps: t2-worker/t3-driver and their free-only twins (t1-orchestrator/",
-    "t1-orchestrator-free-only moved to 1M by MAINPIN below),",
+    "clamps: l2-worker/l3-driver and their free-only twins (l1-orchestrator/",
+    "l1-orchestrator-free-only moved to 1M by MAINPIN below),",
     "fall to scw/nebius/free-ai legs at 128000; t4-rag falls to",
     "cohere/command-r-plus-08-2024 at 128000. Registry context_advertised is",
     "stale for gemini-3.8-flash (131072, live 1048576), command-a-03-2025",
@@ -78,8 +78,8 @@
     "1048576) - L1-beta to update; until then",
     "test_render_matches_committed_combos_semantically fails on the five",
     "changed rows, an expected cross-lane dependency, not a regression.",
-    "OVHLEGS 2026-09-30: three OVH credits legs added to t2-worker and",
-    "t3-driver ONLY (not *-free-only, not *-clean). Operator registered",
+    "OVHLEGS 2026-09-30: three OVH credits legs added to l2-worker and",
+    "l3-driver ONLY (not *-free-only, not *-clean). Operator registered",
     "connection ovhcloud (provider id 2e7f59a9, active); both ovh/ and",
     "ovhcloud/ prefixes route. L0-verified 200 acks on 6 candidates; this",
     "lane probed all 6 (ack + tool-call round trip, max_tokens=512): all",
@@ -91,14 +91,14 @@
     "combo). Non-chat OVH ids (embeddings/tts/stt/image) inventoried only,",
     "not wired. Registry ai-registry.json routes updated: ovhcloud/gpt-oss-120b,",
     "ovhcloud/Qwen3-Coder-30B-A3B-Instruct, ovhcloud/Qwen3.8-27B added to",
-    "t2-worker and t3-driver route legs; Qwen3.8-27B model row added (was",
+    "l2-worker and l3-driver route legs; Qwen3.8-27B model row added (was",
     "missing from f6f5e69). litellm/config.yaml and docs/models.md synced",
     "via sync-router-tiers.py and render models-doc.",
     "NEBREMOVAL 2026-10-01: every nebius/* leg is removed from every combo of",
     "this file - six legs in total, all mid-band, no combo head:",
-    "t1-orchestrator and t1-orchestrator-free-only (nebius/zai-org/GLM-5.3-Flash),",
-    "t2-worker, t2-worker-free-only and t3-driver (nebius/zai-org/GLM-5.2), and",
-    "t3-driver-free-only (nebius/zai-org/GLM-5.3-Flash). No replacement leg was",
+    "l1-orchestrator and l1-orchestrator-free-only (nebius/zai-org/GLM-5.3-Flash),",
+    "l2-worker, l2-worker-free-only and l3-driver (nebius/zai-org/GLM-5.2), and",
+    "l3-driver-free-only (nebius/zai-org/GLM-5.3-Flash). No replacement leg was",
     "added; the remaining legs already satisfy the >=2-distinct-usable-provider",
     "invariant on every agentic route. The live store had already skipped these",
     "legs (apply.ps1 skips a model the live /v1/models catalog does not know), so",
@@ -108,9 +108,9 @@
     "catalog/ai-registry.json is L1-beta's half; until that lands, render",
     "omniroute --check reports drift on the six combos named above, which beta clears.",
     "T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven",
-    "free grant, providers.groq tier free, 128k) added to t1-orchestrator's free",
+    "free grant, providers.groq tier free, 128k) added to l1-orchestrator's free",
     "band after the scaleway legs, before the paid meta-api/deepseek legs. Under",
-    "the registry's usable_legs metric t1-orchestrator otherwise falls to ONE",
+    "the registry's usable_legs metric l1-orchestrator otherwise falls to ONE",
     "distinct provider (scaleway) once L1-beta drops nebius, failing",
     "test_every_agentic_route_has_two_distinct_usable_providers; this leg is the",
     "second (groq). It answered a live gateway ack+tool-call probe at 05:58:58Z",
@@ -118,7 +118,7 @@
     "here: test_on_t1_it_follows_the_free_band requires every leg ahead of the",
     "paid contributor to be provider-tier free (huggingface 401s on this host;",
     "openrouter is provider-tier paid). Added at the registry source",
-    "(routes.t1-orchestrator.legs + the dated route $comment) and mirrored here so",
+    "(routes.l1-orchestrator.legs + the dated route $comment) and mirrored here so",
     "the live gateway and the tracked source agree; litellm/config.yaml and",
     "docs/models.md carry the same leg from render. Do not confuse with the",
     "NEBREMOVAL registry-vs-combos drift above, which is beta's.",
@@ -126,10 +126,10 @@
     "('pin deepseek effort ladder, vertex leaf models, stack no-OOM') so the",
     "operator's rebase/Take resolves combos.json without losing them. Enumerated",
     "from that commit: (a) deepseek-v4.1-flash context 1M + leg pin 'deepseek-v4-flash'",
-    "(b) gemini-3.8-flash context 1M; (c) opus-4-6 200k->1M; (d) t1-orchestrator 128k->1M;",
-    "(e) t1-orchestrator-free-only 128k->1M; (f) t2-orchestrator 200k->1M. Of these ours",
+    "(b) gemini-3.8-flash context 1M; (c) opus-4-6 200k->1M; (d) l1-orchestrator 128k->1M;",
+    "(e) l1-orchestrator-free-only 128k->1M; (f) l2-orchestrator 200k->1M. Of these ours",
     "already carried (a context), (b), (c), (f) - only (d)+(e) were missing, now applied.",
-    "DECISIONS (recorded, combo-named): (d)/(e) t1-orchestrator/t1-orchestrator-free-only",
+    "DECISIONS (recorded, combo-named): (d)/(e) l1-orchestrator/l1-orchestrator-free-only",
     "context 128k->1M - main's pin, and origin/main e58274a8 itself carries 1M; this",
     "supersedes the CTXFIX 2026-09-30 honest-clamp note for these two only, with no",
     "operator directive to keep them clamped, so main wins per L0's rule. (a) deepseek",
@@ -142,11 +142,11 @@
     "changes are this lineage's FREEWIRE/AGYCANON, which the task preserves. No other file",
     "in this branch's touched set overlaps main 24a98228, so no other pin applies.",
     "The six render-omniroute drift lines remain the nebius registry-vs-combos ones (beta's).",
-    "GEMRESTORE 2026-10-01: operator reversal - gemini exclusion is CANCELLED. gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park). Restored gemini/gemini-3.8-flash to its pre-freewire (a975d48) head positions: gemini-3.8-flash combo pos0 head with vertex/gemini-3.8-flash second (VTXLEG order kept), t1-orchestrator pos0, t1-orchestrator-free-only pos0, t2-worker pos0 (ahead of antigravity/gemini-3.7-flash-high), t2-worker-free-only pos0 (ahead of antigravity/gemini-3.7-flash-medium). t3-driver and t3-driver-free-only carried no gemini/* leg pre-freewire, so unchanged. Kept: 10 proven free legs + allow-rules, NEBREMOVAL (no nebius leg re-added), T1SECOND groq/qwen/qwen3.8-27b leg, OVH legs, 1M contexts, and main 24a98228 pins (d/e 1M kept; deepseek-flash kept over v4-flash per MAINPIN D2; vertex second kept). DECISIONS: where the restore would displace a free leg, the gemini head was PREPENDED (pos0) and every free leg kept in order - no free leg displaced. Registry flag (L1-beta, do NOT edit here): routes.gemini-3.8-flash.legs lacks gemini/gemini-3.8-flash (currently vertex-only render); routes.t1-orchestrator, t1-orchestrator-free-only, t2-worker, t2-worker-free-only lack the gemini head; providers.google_ai_studio stays available:false with the FREEWIRE unavailable_until until beta re-opens it under the backoff policy. Until then render omniroute --check gains the gemini combo diff on top of the six nebius ones.",
+    "GEMRESTORE 2026-10-01: operator reversal - gemini exclusion is CANCELLED. gemini retained; usage governed by the repeated-429 backoff policy (3x429/120 s -> 300 s cooldown per leg; 30 min park). Restored gemini/gemini-3.8-flash to its pre-freewire (a975d48) head positions: gemini-3.8-flash combo pos0 head with vertex/gemini-3.8-flash second (VTXLEG order kept), l1-orchestrator pos0, l1-orchestrator-free-only pos0, l2-worker pos0 (ahead of antigravity/gemini-3.7-flash-high), l2-worker-free-only pos0 (ahead of antigravity/gemini-3.7-flash-medium). l3-driver and l3-driver-free-only carried no gemini/* leg pre-freewire, so unchanged. Kept: 10 proven free legs + allow-rules, NEBREMOVAL (no nebius leg re-added), T1SECOND groq/qwen/qwen3.8-27b leg, OVH legs, 1M contexts, and main 24a98228 pins (d/e 1M kept; deepseek-flash kept over v4-flash per MAINPIN D2; vertex second kept). DECISIONS: where the restore would displace a free leg, the gemini head was PREPENDED (pos0) and every free leg kept in order - no free leg displaced. Registry flag (L1-beta, do NOT edit here): routes.gemini-3.8-flash.legs lacks gemini/gemini-3.8-flash (currently vertex-only render); routes.l1-orchestrator, l1-orchestrator-free-only, l2-worker, l2-worker-free-only lack the gemini head; providers.google_ai_studio stays available:false with the FREEWIRE unavailable_until until beta re-opens it under the backoff policy. Until then render omniroute --check gains the gemini combo diff on top of the six nebius ones.",
     "TORDER 2026-10-01: t1 1M-only (>=600k gate, D-TORDER-1b), t2/t3 trial->free->credits->paid deepseek LAST, gemini head restored + output 65536/usable 1048576, providers.google_ai_studio re-opened with 3x429/120s->300s cooldown +30min park (gateway 08:07Z ACTIVE), 4 credit singles (ovh-qwen3.8-27b, ovh-gpt-oss-120b, ovh-qwen3-coder-30b, vertex-gemini-3.8-flash), nebius removed (6 legs), openrouter NO credits -> :free only (7 paid legs dropped, t1-clean kept declared+gated so stays omitted), combos regenerated from render (fixpoint).",
-    "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). t2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
+    "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). l2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
-    "CTX1M/PRIVACY 2026-10-05 (operator): t2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time)."
+    "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time)."
   ],
   "retired": [
     "tier1",
@@ -162,16 +162,30 @@
     "tier2-credit",
     "tier3-credit",
     "opus-4-6",
-    "or-qwen3.8-27b-free"
+    "or-qwen3.8-27b-free",
+    "t1-orchestrator",
+    "t1-orchestrator-clean",
+    "t1-orchestrator-free-only",
+    "t1-orchestrator-paid",
+    "t2-orchestrator",
+    "t2-worker",
+    "t2-worker-clean",
+    "t2-worker-free-only",
+    "t2-worker-paid",
+    "t3-driver",
+    "t3-driver-clean",
+    "t3-driver-free-only",
+    "t3-driver-paid",
+    "t4-researcher"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
+    "l1-orchestrator-clean",
     "samba/MiniMax-M3",
-    "samba/gpt-oss-120b",
-    "t1-orchestrator-clean"
+    "samba/gpt-oss-120b"
   ],
   "combos": [
     {
@@ -197,6 +211,153 @@
       "context": "128k",
       "models": [
         "groq/qwen/qwen3.8-27b"
+      ]
+    },
+    {
+      "name": "l1-orchestrator",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "gemini/gemini-3.8-flash",
+        "agy/claude-sonnet-5-5-medium",
+        "free-ai/google/gemini-3.8-flash",
+        "vertex/gemini-3.8-flash",
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator-free-only",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "gemini/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator-paid",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l2-orchestrator",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "agy/claude-sonnet-5-5-medium",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l2-researcher",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ainative/llama-4-maverick",
+        "gemini/gemini-3.8-flash",
+        "free-ai/qwen7b"
+      ]
+    },
+    {
+      "name": "l2-worker",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ainative/llama-4-maverick",
+        "gemini/gemini-3.8-flash",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b",
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l2-worker-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l2-worker-free-only",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ainative/llama-4-maverick",
+        "gemini/gemini-3.8-flash",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b"
+      ]
+    },
+    {
+      "name": "l3-driver",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ainative/llama-4-maverick",
+        "gemini/gemini-3.8-flash",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "free-ai/qwen7b",
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "mistral/mistral-code-latest",
+        "meta-api/muse-spark-1.3-contributor",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/gpt-oss-120b",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash",
+        "deepseek/deepseek-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-free-only",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ainative/llama-4-maverick",
+        "gemini/gemini-3.8-flash",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "groq/openai/gpt-oss-20b",
+        "openrouter/cohere/north-mini-code:free",
+        "groq/openai/gpt-oss-120b",
+        "free-ai/qwen7b"
       ]
     },
     {
@@ -264,159 +425,12 @@
       ]
     },
     {
-      "name": "t1-orchestrator",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "gemini/gemini-3.8-flash",
-        "agy/claude-sonnet-5-5-medium",
-        "free-ai/google/gemini-3.8-flash",
-        "vertex/gemini-3.8-flash",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t1-orchestrator-free-only",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "gemini/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "t1-orchestrator-paid",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t2-orchestrator",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "agy/claude-sonnet-5-5-medium",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t2-worker",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b",
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t2-worker-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t2-worker-free-only",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b"
-      ]
-    },
-    {
-      "name": "t3-driver",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b",
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "mistral/mistral-code-latest",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t3-driver-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
-      ]
-    },
-    {
-      "name": "t3-driver-free-only",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "free-ai/qwen7b"
-      ]
-    },
-    {
       "name": "t4-rag",
       "strategy": "priority",
       "context": "128k",
       "models": [
         "cohere/command-a-03-2025",
         "cohere/command-r-plus-08-2024"
-      ]
-    },
-    {
-      "name": "t4-researcher",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "free-ai/qwen7b"
       ]
     },
     {

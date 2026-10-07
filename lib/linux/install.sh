@@ -3039,14 +3039,14 @@ route_detected_clis_to_gateway() {
         elif [[ -z "${OMNIROUTE_API_KEY:-}" ]]; then
             ui_warn "OMNIROUTE_API_KEY not set - export the OmniRoute client key before routing Qwen Code (docs/api-keys.md)"
         elif (( AUTOOS_DRY_RUN )); then
-            ui_muted "would route Qwen Code at OmniRoute (model t2-worker)"
+            ui_muted "would route Qwen Code at OmniRoute (model l2-worker)"
         else
             if [[ -f "$SYS_HOME/.qwen/settings.json" ]] && ! backup_file "$SYS_HOME/.qwen/settings.json" >/dev/null; then
                 ui_warn "could not back up $SYS_HOME/.qwen/settings.json - Qwen Code routing skipped, nothing was changed"
-            elif ! omniroute setup-qwen --model t2-worker --yes >/dev/null 2>&1; then
+            elif ! omniroute setup-qwen --model l2-worker --yes >/dev/null 2>&1; then
                 ui_warn "Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)"
             else
-                ui_ok "Qwen Code routed at OmniRoute (model t2-worker)"
+                ui_ok "Qwen Code routed at OmniRoute (model l2-worker)"
             fi
         fi
     else
@@ -3195,16 +3195,16 @@ profiles["bypass"] = {
     "tools": bypass_tools,
     "enable_all_context_servers": True,
     "context_servers": {},
-    "default_model": {"provider": "autoos-omniroute", "model": "t1-orchestrator"},
+    "default_model": {"provider": "autoos-omniroute", "model": "l1-orchestrator"},
 }
 tp = agent.setdefault("tool_permissions", {})
 tp["default"] = "allow"
 # omniroute-first: the litellm proxy currently has zero healthy endpoints,
 # so a default pointing at autoos-litellm/* is broken. Converge it to
-# {autoos-omniroute, t1-orchestrator}; never touch a default already on omniroute/*.
+# {autoos-omniroute, l1-orchestrator}; never touch a default already on omniroute/*.
 _dm = agent.get("default_model")
 if isinstance(_dm, dict) and str(_dm.get("provider", "")).startswith("autoos-litellm"):
-    agent["default_model"] = {"provider": "autoos-omniroute", "model": "t1-orchestrator"}
+    agent["default_model"] = {"provider": "autoos-omniroute", "model": "l1-orchestrator"}
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(cfg, fh, indent=2)
 PY
@@ -6344,7 +6344,7 @@ if _gw_key:
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
     # must too - otherwise the UI shows no usable agent and every chat
     # falls back to local Ollama. Container-side base URL.
-    llm["model"] = "openai/t1-orchestrator"
+    llm["model"] = "openai/l1-orchestrator"
     llm["base_url"] = "http://host.docker.internal:20128/v1"
     llm["api_key"] = _gw_key
     _default_reasoning = True
@@ -6355,7 +6355,7 @@ if _gw_key:
     _default_window = None
     try:
         with open(os.environ.get("AUTOOS_IDE_MODELS") or "", "r", encoding="utf-8") as _imf:
-            _default_window = next(m for m in json.load(_imf)["models"] if m["id"] == "t1-orchestrator")
+            _default_window = next(m for m in json.load(_imf)["models"] if m["id"] == "l1-orchestrator")
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         pass
 elif openrouter_key:

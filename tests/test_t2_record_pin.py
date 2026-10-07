@@ -160,7 +160,7 @@ class PlanAndRecordTests(unittest.TestCase):
     def args(self, **overrides):
         ns = argparse.Namespace(
             tier=2, card=None, allow_training=False, client="opencode",
-            joinable=False, max_depth=None, clean=False, model="omniroute/t2-worker",
+            joinable=False, max_depth=None, clean=False, model="omniroute/l2-worker",
             free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=True,
             auto=True, lean=False, title=None, dry_run=True, task="do it",
             no_defer=False, read_only=False)
@@ -170,12 +170,12 @@ class PlanAndRecordTests(unittest.TestCase):
 
     def cfg(self):
         return {"providers": {"omniroute": {"models": {
-            "t2-worker": {}, "t2-other": {}}}},
-                "agents": {"t2-worker": {"model": "omniroute/t2-worker"},
+            "l2-worker": {}, "t2-other": {}}}},
+                "agents": {"l2-worker": {"model": "omniroute/l2-worker"},
                            "t2-other": {"model": "omniroute/t2-other"}}}
 
     def route(self, **overrides):
-        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/t2-worker",
+        route = {"tier": 2, "combo": "l2-worker", "model": "omniroute/l2-worker",
                  "reason": "stub", "privacy": "public", "review": False,
                  "resolver": False, "read_only": False, "effort": None}
         route.update(overrides)
@@ -208,9 +208,9 @@ class PlanAndRecordTests(unittest.TestCase):
 
     def test_the_plan_names_the_asked_model_and_the_launch_model(self):
         plan = self.build()
-        self.assertEqual(plan["requested_model"], "omniroute/t2-worker")
-        self.assertEqual(plan["launched_model"], "omniroute/t2-worker")
-        self.assertEqual(plan["model"], "omniroute/t2-worker")
+        self.assertEqual(plan["requested_model"], "omniroute/l2-worker")
+        self.assertEqual(plan["launched_model"], "omniroute/l2-worker")
+        self.assertEqual(plan["model"], "omniroute/l2-worker")
         self.assertEqual(plan["model_source"], "pinned")
 
     def test_an_unpinned_plan_asked_for_nothing(self):
@@ -231,7 +231,7 @@ class PlanAndRecordTests(unittest.TestCase):
             "run_id": "20261002-045253-recpin-abcdef", "client": "opencode",
             "model": MIMO, "model_source": "pinned",
             "requested_model": MIMO, "launched_model": MIMO,
-            "route": {"combo": "t2-worker"}, "depth": (1, 3),
+            "route": {"combo": "l2-worker"}, "depth": (1, 3),
             "cwd": os.getcwd(), "sandbox": None, "env": {}})
         self.assertEqual(rec["requested_model"], MIMO)
         self.assertEqual(rec["launched_model"], MIMO)
@@ -246,12 +246,12 @@ class PlanAndRecordTests(unittest.TestCase):
         rec = self.record({
             "run_id": "20261002-045253-recpin-abcdef", "client": "opencode",
             "model": "omniroute/t2-other", "model_source": "pinned",
-            "requested_model": "omniroute/t2-worker",
+            "requested_model": "omniroute/l2-worker",
             "launched_model": "omniroute/t2-other",
             "route": {"combo": "t2-other"}, "depth": (1, 3),
             "cwd": os.getcwd(), "sandbox": None, "env": {}})
         self.assertIn("model_mismatch", rec["reason"])
-        self.assertIn("requested=omniroute/t2-worker", rec["reason"])
+        self.assertIn("requested=omniroute/l2-worker", rec["reason"])
 
     # --- item 2c: a plan that would launch a different model is refused ------
 
@@ -264,7 +264,7 @@ class PlanAndRecordTests(unittest.TestCase):
                                  dry_run=False)
         self.assertEqual(rc, 2, text)
         self.assertIn("model_mismatch", text)
-        self.assertIn("requested=omniroute/t2-worker", text)
+        self.assertIn("requested=omniroute/l2-worker", text)
         self.assertIn("launched=omniroute/t2-other", text)
 
     def test_a_dry_run_announces_the_mismatch_without_failing(self):
@@ -282,17 +282,17 @@ class PlanAndRecordTests(unittest.TestCase):
         # `#effort`, `omniroute/` and the -clean twin are one model, not a
         # mismatch: refusing those would break every clean and effort run.
         key = self.agent._model_pin_key
-        self.assertEqual(key("omniroute/t2-worker"), key("t2-worker"))
-        self.assertEqual(key("omniroute/t2-worker-clean"), key("t2-worker"))
-        self.assertEqual(key("omniroute/t2-worker#high"), key("t2-worker"))
-        self.assertNotEqual(key("t2-worker"), key("t2-other"))
+        self.assertEqual(key("omniroute/l2-worker"), key("l2-worker"))
+        self.assertEqual(key("omniroute/l2-worker-clean"), key("l2-worker"))
+        self.assertEqual(key("omniroute/l2-worker#high"), key("l2-worker"))
+        self.assertNotEqual(key("l2-worker"), key("t2-other"))
 
     def test_a_client_that_picks_its_own_model_is_not_a_mismatch(self):
-        plan = {"requested_model": "omniroute/t2-worker",
+        plan = {"requested_model": "omniroute/l2-worker",
                 "launched_model": self.agent.PLAN_MODEL_UNNAMED}
         self.assertIsNone(self.agent.model_mismatch_refusal(plan))
         self.assertIsNone(self.agent.model_mismatch_refusal(
-            {"requested_model": "", "launched_model": "omniroute/t2-worker"}))
+            {"requested_model": "", "launched_model": "omniroute/l2-worker"}))
 
 
 class PinQualifyTests(unittest.TestCase):
@@ -449,12 +449,12 @@ class ReviewTierWriteTests(unittest.TestCase):
 
     def cfg(self):
         return {"providers": {"omniroute": {"models": {
-            n: {} for n in ("t2-worker", "t3-driver", "t3-review")}}},
+            n: {} for n in ("l2-worker", "l3-driver", "t3-review")}}},
             # The budget gate prices a tier run through resolve_model, which
             # reads the tier agent's declared model — so the stub config has to
             # declare one (the same model the route stub below launches).
-            "agents": {a: {"model": "omniroute/t3-driver"}
-                       for a in ("t1-orchestrator", "t2-worker", "t3-reviewer")}}
+            "agents": {a: {"model": "omniroute/l3-driver"}
+                       for a in ("l1-orchestrator", "l2-worker", "t3-reviewer")}}
 
     def dispatch(self, **overrides):
         args = self.args(**overrides)
@@ -467,8 +467,8 @@ class ReviewTierWriteTests(unittest.TestCase):
                                               "test: T2-RECORD-PIN tier 3"}):
                 with mock.patch.object(self.agent, "resolve_route",
                                        lambda *a, **k: {
-                                           "tier": 3, "combo": "t3-driver",
-                                           "model": "omniroute/t3-driver",
+                                           "tier": 3, "combo": "l3-driver",
+                                           "model": "omniroute/l3-driver",
                                            "reason": "stub", "privacy": "public",
                                            "review": bool(
                                                (card or {}).get("role")
@@ -662,7 +662,7 @@ class D284NormalisedSpellingTests(unittest.TestCase):
     ALLOWED_IDS = ("vertex/gemini-3.8-flash", "vertex-gemini-3.8-flash",
                    "google/gemini-3.8-flash", "gemini-3.8-flash-high",
                    "openrouter/anthropic/claude-opus-4-6",
-                   "omniroute/t2-worker-clean", None, "")
+                   "omniroute/l2-worker-clean", None, "")
 
     def test_the_helper_accepts_every_normalisable_lifted_variant(self):
         agent = load_agent()
@@ -820,12 +820,12 @@ class D284PostPlanTests(unittest.TestCase):
 
     def cfg(self):
         return {"providers": {"omniroute": {"models": {
-            "t2-worker": {}, "t2-other": {}}}},
-                "agents": {"t2-worker": {"model": "omniroute/t2-worker"},
+            "l2-worker": {}, "t2-other": {}}}},
+                "agents": {"l2-worker": {"model": "omniroute/l2-worker"},
                            "t2-other": {"model": "omniroute/t2-other"}}}
 
     def route(self, **overrides):
-        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/t2-worker",
+        route = {"tier": 2, "combo": "l2-worker", "model": "omniroute/l2-worker",
                  "reason": "stub", "privacy": "public", "review": False,
                  "resolver": True, "read_only": False, "effort": None}
         route.update(overrides)

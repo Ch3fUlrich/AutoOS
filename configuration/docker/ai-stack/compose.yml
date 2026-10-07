@@ -209,7 +209,7 @@ services:
       - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/openhands.env
     environment:
       SANDBOX_USER_ID: ${AUTOOS_UID:-1000}
-      LLM_MODEL: openai/t1-orchestrator
+      LLM_MODEL: openai/l1-orchestrator
       LLM_BASE_URL: http://omniroute:20128/v1
       LOG_ALL_EVENTS: "true"
       # Every conversation's sandbox sees the code tree at the same path.

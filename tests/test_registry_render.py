@@ -188,38 +188,38 @@ class RenderMatchesTodayTests(unittest.TestCase):
         rendered = registry.render_omniroute(real_registry())
         combos_by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertNotIn("opencode-zen/deepseek-v4.1-flash",
-                         combos_by_name["t2-worker-clean"]["models"])
+                         combos_by_name["l2-worker-clean"]["models"])
         # FREEWIRE 2026-09-30: allow-groq-gpt-oss re-opened this leg on a
         # single-tool-call probe, so it IS served now (deny-groq used to gate it).
         self.assertIn("groq/openai/gpt-oss-120b",
-                      combos_by_name["t2-worker"]["models"])
+                      combos_by_name["l2-worker"]["models"])
         # the OpenRouter BYOK gpt-oss-120b leg is gated (measured 401,
         # credits exhausted 2026-09-27), so it does not reach the combo.
         self.assertNotIn("openrouter/openai/gpt-oss-120b",
-                         combos_by_name["t2-worker"]["models"])
+                         combos_by_name["l2-worker"]["models"])
         # FREEWIRE 2026-09-30: the DSMAX provider-level gate moved to the route
         # level (providers.openrouter.available is now true for its ':free'
         # ids); the paid openrouter deepseek leg stays route-gated.
         self.assertNotIn("openrouter/deepseek/deepseek-v4.1-flash",
-                         combos_by_name["t2-worker"]["models"])
+                         combos_by_name["l2-worker"]["models"])
         # CIGREEN: expectation moved by ba73f1cf (TASK2 re-added the gemini
         # head) + 20c4a816 (provider re-open): gemini/gemini-3.8-flash is a
-        # live servable head of t2-worker again, so the combo correctly
+        # live servable head of l2-worker again, so the combo correctly
         # contains it - the FREEWIRE-era removal is superseded (D-255 allows
         # 3.8 Flash).
         self.assertIn("gemini/gemini-3.8-flash",
-                      combos_by_name["t2-worker"]["models"])
+                      combos_by_name["l2-worker"]["models"])
 
     def test_paid_and_auto_routes_have_no_combo(self):
-        # t2-worker-paid/t3-driver-paid (LiteLLM-only) and
+        # l2-worker-paid/l3-driver-paid (LiteLLM-only) and
         # auto/auto-smart/auto-cheap (OmniRoute's dynamic strategy) carry
         # legs: [] in the registry and have no combos.json counterpart.
-        # MUSEAPI 2026-09-27 moved t1-orchestrator-paid out of that set: it
+        # MUSEAPI 2026-09-27 moved l1-orchestrator-paid out of that set: it
         # declares a servable leg now, so it renders a combo - test_the_legless
         # _route_renders_no_combo below pins the rule that made it an exception.
         rendered = registry.render_omniroute(real_registry())
         names = {c["name"] for c in rendered["combos"]}
-        for absent in ("t2-worker-paid", "t3-driver-paid",
+        for absent in ("l2-worker-paid", "l3-driver-paid",
                       "auto", "auto/smart", "auto/cheap"):
             self.assertNotIn(absent, names)
 
@@ -227,9 +227,9 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # The rule, kept general: a route with legs: [] is deliberately
         # LiteLLM-only and never becomes a combo, however it is spelled.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
+        reg["routes"]["l1-orchestrator-paid"]["legs"] = []
         names = {c["name"] for c in registry.render_omniroute(reg)["combos"]}
-        self.assertNotIn("t1-orchestrator-paid", names)
+        self.assertNotIn("l1-orchestrator-paid", names)
 
 
 class GatewayRefTests(unittest.TestCase):
@@ -269,7 +269,7 @@ class GatewayRefTests(unittest.TestCase):
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("ovh/Qwen3.8-27B",
-                      by_name["t3-driver"]["models"])
+                      by_name["l3-driver"]["models"])
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         # Providers without a model_prefix keep their registry spelling in
@@ -279,12 +279,12 @@ class GatewayRefTests(unittest.TestCase):
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("mistral/mistral-code-latest",
-                      by_name["t3-driver"]["models"])
+                      by_name["l3-driver"]["models"])
         # FREEWIRE 2026-09-30: the gemini head was removed; groq (no prefix)
         # keeps its registry spelling in the render.
-        self.assertIn("groq/qwen/qwen3.8-27b", by_name["t2-worker"]["models"])
+        self.assertIn("groq/qwen/qwen3.8-27b", by_name["l2-worker"]["models"])
         self.assertIn("deepseek/deepseek-flash",
-                      by_name["t2-worker-clean"]["models"])
+                      by_name["l2-worker-clean"]["models"])
 
     def test_registry_legs_keep_their_own_spelling(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY deleted the
@@ -292,7 +292,7 @@ class GatewayRefTests(unittest.TestCase):
         # same rule on a surviving multi-segment leg: the registry spelling is
         # kept verbatim and resolve_leg still splits at the first '/'.
         self.assertIn("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-                      real_registry()["routes"]["t2-worker"]["legs"])
+                      real_registry()["routes"]["l2-worker"]["legs"])
         # resolve_leg still splits the registry spelling at the first '/'.
         self.assertEqual(
             registry.resolve_leg("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
@@ -344,14 +344,14 @@ class ChangedLegFailsCheckTests(unittest.TestCase):
 
     def test_changed_leg_exits_one_and_names_the_combo(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver-clean"]["legs"][0] = "ghost-provider/ghost-model"
+        reg["routes"]["l3-driver-clean"]["legs"][0] = "ghost-provider/ghost-model"
         path = write_registry(reg)
         try:
             proc = run_cli("render", "omniroute", "--registry", path, "--check")
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("combos.t3-driver-clean", proc.stdout)
+        self.assertIn("combos.l3-driver-clean", proc.stdout)
 
     def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
         proc = run_cli("render", "omniroute", "--check")
@@ -400,15 +400,15 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
     def test_every_registry_managed_tier_is_rendered(self):
         # The managed set is derived from the registry, not a hand-kept pair:
         # every route that declares legs and keeps at least one LiteLLM-servable
-        # leg after gateway_legs()/GATEWAY_ONLY gets a block. t1-orchestrator
+        # leg after gateway_legs()/GATEWAY_ONLY gets a block. l1-orchestrator
         # used to be hand-kept, then fail-closed 2026-09-27 (Zen client-bound,
-        # OpenRouter off) and lost its block; t4-rag and t2-worker-clean never
+        # OpenRouter off) and lost its block; t4-rag and l2-worker-clean never
         # had markers.
         reg = real_registry()
         rendered = registry.render_litellm_blocks(reg, real_litellm_config())
         sync = registry._load_sync_router_tiers()
         self.assertEqual(set(rendered), set(sync.managed_tiers(reg)))
-        for managed in ("t2-worker", "t2-worker-clean", "t4-rag"):
+        for managed in ("l2-worker", "l2-worker-clean", "t4-rag"):
             self.assertIn(managed, rendered)
 
     def test_a_route_with_no_litellm_servable_leg_gets_no_block(self):
@@ -417,45 +417,45 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # no block either) and the samba one-leg routes (provider
         # available:false) render no block at all - the same shape
         # render_omniroute() gives an all-dead route, not an empty model list.
-        # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
-        # servable leg. t3-driver-free-only left this set when FREEAI gave it
+        # l1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
+        # servable leg. l3-driver-free-only left this set when FREEAI gave it
         # a servable free_ai/qwen7b leg.
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, rendered)
 
     def test_a_legless_hand_group_is_never_rendered(self):
-        # t2-worker-paid/t3-driver-paid declare no legs; they are hand-curated
+        # l2-worker-paid/l3-driver-paid declare no legs; they are hand-curated
         # fallback chains and must stay outside the AUTOOS-MANAGED markers.
-        # (t1-orchestrator-paid was one of them until MUSEAPI 2026-09-27 gave
+        # (l1-orchestrator-paid was one of them until MUSEAPI 2026-09-27 gave
         # it a leg - see test_the_legged_paid_route_is_rendered.)
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        for paid in ("t2-worker-paid", "t3-driver-paid"):
+        for paid in ("l2-worker-paid", "l3-driver-paid"):
             self.assertNotIn(paid, rendered)
 
     def test_the_legged_paid_route_is_rendered(self):
-        # MUSEAPI 2026-09-27: t1-orchestrator-paid's LiteLLM group used to 404
+        # MUSEAPI 2026-09-27: l1-orchestrator-paid's LiteLLM group used to 404
         # (no model_name anywhere in config.yaml, no legs in the registry).
         # With meta_api/muse-spark-1.3-contributor as its leg the registry owns
         # the block, so the render must produce it...
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
-        block = rendered["t1-orchestrator-paid"]
+        block = rendered["l1-orchestrator-paid"]
         self.assertIn("model: openai/muse-spark-1.3-contributor", block)
         self.assertIn("api_base: https://api.meta.ai/v1", block)
         self.assertIn("api_key: os.environ/META_API_KEY", block)
-        self.assertIn("  # AUTOOS-MANAGED-START t1-orchestrator-paid\n", block)
-        self.assertIn("  # AUTOOS-MANAGED-END t1-orchestrator-paid", block)
+        self.assertIn("  # AUTOOS-MANAGED-START l1-orchestrator-paid\n", block)
+        self.assertIn("  # AUTOOS-MANAGED-END l1-orchestrator-paid", block)
 
         # ...and the rule behind the old test survives: strip the legs and the
         # block is gone again, marker and all.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
-        self.assertNotIn("t1-orchestrator-paid",
+        reg["routes"]["l1-orchestrator-paid"]["legs"] = []
+        self.assertNotIn("l1-orchestrator-paid",
                          registry.render_litellm_blocks(reg, real_litellm_config()))
 
     def test_gateway_only_leg_is_dropped_not_silently_kept_or_missing(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY deleted exactly the
-        # antigravity fixture leg from t2-worker). The drop-behavior is now
+        # antigravity fixture leg from l2-worker). The drop-behavior is now
         # pinned with a synthetic gateway-only leg: cc sits in
         # tools/sync-router-tiers.py GATEWAY_ONLY, so with its provider
         # re-opened the leg IS served by the gateway combo yet still dropped
@@ -464,16 +464,16 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         reg = copy.deepcopy(real_registry())
         reg["providers"]["cc"]["available"] = True
         leg = "cc/claude-opus-4-6"
-        reg["routes"]["t2-worker"]["legs"] = (
-            reg["routes"]["t2-worker"]["legs"] + [leg])
-        legs = reg["routes"]["t2-worker"]["legs"]
+        reg["routes"]["l2-worker"]["legs"] = (
+            reg["routes"]["l2-worker"]["legs"] + [leg])
+        legs = reg["routes"]["l2-worker"]["legs"]
         self.assertIn(leg, legs)
         rendered = registry.render_litellm_blocks(reg, real_litellm_config())
-        self.assertNotIn("claude-opus-4-6", rendered["t2-worker"])
+        self.assertNotIn("claude-opus-4-6", rendered["l2-worker"])
         combos = {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
-        self.assertIn(leg, combos["t2-worker"]["models"])
+        self.assertIn(leg, combos["l2-worker"]["models"])
         self.assertIn("ovhcloud/Qwen3.8-27B",
-                      rendered["t2-worker"])
+                      rendered["l2-worker"])
 
 
 class StaleLitellmBlockIsDriftTests(unittest.TestCase):
@@ -524,14 +524,14 @@ class ChangedLegFailsLitellmCheckTests(unittest.TestCase):
 
     def test_changed_leg_exits_one_and_names_the_tier(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver"]["legs"][0] = "ghost-provider/ghost-model"
+        reg["routes"]["l3-driver"]["legs"][0] = "ghost-provider/ghost-model"
         path = write_registry(reg)
         try:
             proc = run_cli("render", "litellm", "--registry", path, "--check")
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("differs: t3-driver", proc.stdout)
+        self.assertIn("differs: l3-driver", proc.stdout)
 
     def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
         proc = run_cli("render", "litellm", "--check")
@@ -648,14 +648,14 @@ class ChangedFieldFailsIdeCheckTests(unittest.TestCase):
 
     def test_changed_context_exits_one_and_names_the_model(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context"] = 1
+        reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context"] = 1
         path = write_registry(reg)
         try:
             proc = run_cli("render", "ide", "--registry", path, "--check")
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("models.t3-driver", proc.stdout)
+        self.assertIn("models.l3-driver", proc.stdout)
 
     def test_reordered_registry_render_still_matches_by_content(self):
         # routes is a dict, so registry key order never drives render_ide()'s
@@ -690,14 +690,14 @@ class MissingRouteFailsIdeRenderTests(unittest.TestCase):
 
     def test_a_route_missing_from_the_registry_raises_and_names_it(self):
         reg = copy.deepcopy(real_registry())
-        del reg["routes"]["t3-driver"]
+        del reg["routes"]["l3-driver"]
         with self.assertRaises(ValueError) as ctx:
             registry.render_ide(reg)
-        self.assertIn("t3-driver", str(ctx.exception))
+        self.assertIn("l3-driver", str(ctx.exception))
 
     def test_an_unexpected_extra_route_raises_and_names_it(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["brand-new-route"] = copy.deepcopy(reg["routes"]["t3-driver"])
+        reg["routes"]["brand-new-route"] = copy.deepcopy(reg["routes"]["l3-driver"])
         reg["routes"]["brand-new-route"]["id"] = "brand-new-route"
         with self.assertRaises(ValueError) as ctx:
             registry.render_ide(reg)
@@ -712,69 +712,69 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
     def test_effort_ladder_derived_from_head_leg(self):
         reg = copy.deepcopy(real_registry())
         # Pick a route whose first leg's model actually carries an effort_ladder
-        # (t2-orchestrator heads antigravity/claude-sonnet-5-5-medium since the
-        # operator's CLAUDE55 order; t2-worker was the fixture until GLM55
+        # (l2-orchestrator heads antigravity/claude-sonnet-5-5-medium since the
+        # operator's CLAUDE55 order; l2-worker was the fixture until GLM55
         # 2026-10-05 put oc/glm-5.3-flash - no ladder - at its head;
-        # t1-orchestrator was the example before that until it fail-closed
+        # l1-orchestrator was the example before that until it fail-closed
         # 2026-09-27 and left the ide render).
-        route = reg["routes"]["t2-orchestrator"]
+        route = reg["routes"]["l2-orchestrator"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         model_entry = reg["models"][mid]
         self.assertIn("effort_ladder", model_entry)
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"],
+        self.assertEqual(by_id["l2-orchestrator"]["effort_ladder"],
                          [e for e in model_entry["effort_ladder"] if e != "none"])
 
     def test_none_is_dropped_from_effort_ladder(self):
         reg = copy.deepcopy(real_registry())
-        # GLM55 2026-10-05: the fixture moved from t2-worker - its head legs
+        # GLM55 2026-10-05: the fixture moved from l2-worker - its head legs
         # changed twice (oc/glm-5.3-flash then the gate) and the render derives
-        # the ladder from the first SERVABLE leg. t2-worker-clean's ovh head is
+        # the ladder from the first SERVABLE leg. l2-worker-clean's ovh head is
         # stable and carries a ladder.
-        route = reg["routes"]["t2-worker-clean"]
+        route = reg["routes"]["l2-worker-clean"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         reg["models"][mid]["effort_ladder"] = ["none", "low", "medium", "high"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["t2-worker-clean"]["effort_ladder"], ["low", "medium", "high"])
+        self.assertEqual(by_id["l2-worker-clean"]["effort_ladder"], ["low", "medium", "high"])
 
     def test_no_effort_ladder_when_model_has_no_ladder(self):
         reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["t3-driver-clean"]
+        route = reg["routes"]["l3-driver-clean"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         # Ensure the model has no effort_ladder
         reg["models"][mid].pop("effort_ladder", None)
-        # t2-orchestrator still has a ladder via the first leg's model
-        # (t2-worker was the control until GLM55 2026-10-05 put
-        # oc/glm-5.3-flash - no ladder - at its head; t1-orchestrator was the
+        # l2-orchestrator still has a ladder via the first leg's model
+        # (l2-worker was the control until GLM55 2026-10-05 put
+        # oc/glm-5.3-flash - no ladder - at its head; l1-orchestrator was the
         # control before that until it fail-closed 2026-09-27).
-        t2_route = reg["routes"]["t2-orchestrator"]
+        t2_route = reg["routes"]["l2-orchestrator"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertNotIn("effort_ladder", by_id["t3-driver-clean"])
-        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"], expected)
+        self.assertNotIn("effort_ladder", by_id["l3-driver-clean"])
+        self.assertEqual(by_id["l2-orchestrator"]["effort_ladder"], expected)
 
     def test_no_effort_ladder_when_route_has_no_legs(self):
         # The rule is about a route that declares no legs at all, so it is
         # tested against a synthesized one - MUSEAPI 2026-09-27 gave the real
-        # t1-orchestrator-paid a leg, and t2-worker-paid/t3-driver-paid would
+        # l1-orchestrator-paid a leg, and l2-worker-paid/l3-driver-paid would
         # drift out of the fixture the moment anyone legs them too.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t1-orchestrator-paid"]["legs"] = []
-        # t2-orchestrator has legs whose first model carries a ladder (the
-        # t2-worker control moved with GLM55 2026-10-05, see above).
-        t2_route = reg["routes"]["t2-orchestrator"]
+        reg["routes"]["l1-orchestrator-paid"]["legs"] = []
+        # l2-orchestrator has legs whose first model carries a ladder (the
+        # l2-worker control moved with GLM55 2026-10-05, see above).
+        t2_route = reg["routes"]["l2-orchestrator"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertNotIn("effort_ladder", by_id["t1-orchestrator-paid"])
-        self.assertEqual(by_id["t2-orchestrator"]["effort_ladder"], expected)
+        self.assertNotIn("effort_ladder", by_id["l1-orchestrator-paid"])
+        self.assertEqual(by_id["l2-orchestrator"]["effort_ladder"], expected)
 
     def test_the_contributor_ladder_reaches_every_surface_that_carries_one(self):
         # MUSEAPI step 3: the effort aliases for the contributor writer are the
@@ -782,18 +782,18 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # effort_ladder and, from it, opencode.jsonc's per-effort `variants`
         # (the #minimal/#low/#medium/#high/#xhigh pickers).
         # FREEKEYS-2 (D-141) moved the free band ahead of the contributor leg,
-        # so t1-orchestrator's SERVED head is gemini and its picker follows that
+        # so l1-orchestrator's SERVED head is gemini and its picker follows that
         # head (finding 8) - the contributor ladder is pinned on the routes the
         # contributor actually heads.
         ladder = real_registry()["models"]["muse-spark-1.3-contributor"]["effort_ladder"]
         self.assertEqual(ladder, ["minimal", "low", "medium", "high", "xhigh"])
         by_id = {m["id"]: m for m in real_ide_models()["models"]}
-        for route_id in ("t1-orchestrator-paid", "spark-1.3-contributor"):
+        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
             self.assertEqual(by_id[route_id]["effort_ladder"], ladder, route_id)
 
         oc = json.loads(_strip_jsonc((ROOT / "opencode.jsonc").read_text(encoding="utf-8")))
         seen = set()
-        for route_id in ("t1-orchestrator-paid", "spark-1.3-contributor"):
+        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
             for provider in by_id[route_id]["surfaces"]:
                 models = oc["providers"][provider]["models"]
                 variants = [v["id"] for v in models[route_id].get("variants", [])]
@@ -896,14 +896,14 @@ class ChangedFieldFailsOpenhandsCheckTests(unittest.TestCase):
 
     def test_changed_tokens_exits_one_and_names_the_tier(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["openhands_profile"]["max_input_tokens"] = 1
+        reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["openhands_profile"]["max_input_tokens"] = 1
         path = write_registry(reg)
         try:
             proc = run_cli("render", "openhands", "--registry", path, "--check")
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("tiers.omniroute-t3-driver", proc.stdout)
+        self.assertIn("tiers.omniroute-l3-driver", proc.stdout)
 
     def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
         proc = run_cli("render", "openhands", "--check")
@@ -924,10 +924,10 @@ class MissingTierFailsOpenhandsRenderTests(unittest.TestCase):
 
     def test_a_profile_missing_from_the_registry_raises_and_names_it(self):
         reg = copy.deepcopy(real_registry())
-        del reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["openhands_profile"]
+        del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["openhands_profile"]
         with self.assertRaises(ValueError) as ctx:
             registry.render_openhands(reg)
-        self.assertIn("omniroute-t3-driver", str(ctx.exception))
+        self.assertIn("omniroute-l3-driver", str(ctx.exception))
 
     def test_an_unexpected_extra_profile_raises_and_names_it(self):
         reg = copy.deepcopy(real_registry())
@@ -980,12 +980,12 @@ class SyncOpenhandsProfilesSourcesFromRegistryTests(unittest.TestCase):
                 cwd=str(ROOT), capture_output=True, text=True, timeout=30, env=env,
             )
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-            # t1-orchestrator was the canary until it fail-closed 2026-09-27
-            # (omitted: Zen client-bound, OpenRouter off); t2-worker is the
+            # l1-orchestrator was the canary until it fail-closed 2026-09-27
+            # (omitted: Zen client-bound, OpenRouter off); l2-worker is the
             # servable equivalent.
-            written = Path(d) / "profiles" / "omniroute-t2-worker.json"
+            written = Path(d) / "profiles" / "omniroute-l2-worker.json"
             self.assertTrue(written.exists())
-            self.assertEqual(json.loads(written.read_text())["model"], "openai/t2-worker")
+            self.assertEqual(json.loads(written.read_text())["model"], "openai/l2-worker")
 
 
 class ModelsDocRenderMatchesTodayTests(unittest.TestCase):
@@ -1026,21 +1026,21 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
 
     def test_context_column_prefers_context_declared(self):
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"] = "999k"
+        reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"] = "999k"
         rendered = registry.render_models_doc(reg)
-        self.assertIn("999k", row_for(rendered, "t3-driver"))
+        self.assertIn("999k", row_for(rendered, "l3-driver"))
 
     def test_context_column_falls_back_to_the_surfaces_numeric_context(self):
         reg = copy.deepcopy(real_registry())
-        del reg["routes"]["t3-driver"]["surfaces"]["omniroute"]["context_declared"]
+        del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"]
         rendered = registry.render_models_doc(reg)
         # FREEKEYS-2c: the numeric fallback is clamped like every other context
         # cell (clamp_route_context narrows a numeric surface context too), and
-        # t3-driver's servable legs now head with the free band, whose smallest
+        # l3-driver's servable legs now head with the free band, whose smallest
         # advertised window is the scaleway/nebius 128k. The surface promise of
         # 131,072 no longer survives the clamp; the comma-spelled number is the
         # fallback's signature - "128k" is the label form the deleted cell had.
-        self.assertIn("128,000", row_for(rendered, "t3-driver"))
+        self.assertIn("128,000", row_for(rendered, "l3-driver"))
 
     def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
         reg = copy.deepcopy(real_registry())
@@ -1061,14 +1061,14 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # naive str.index() finds only the FIRST occurrence for both. Search
         # forward from the previous match instead, so a repeated model
         # spelling is found at its own, later position rather than colliding
-        # on the first one. (No t3-driver leg repeats a spelling today - the
+        # on the first one. (No l3-driver leg repeats a spelling today - the
         # 16:4xZ revision removed its openrouter/qwen/qwen3.8-27b leg, so this
-        # currently asserts order only - but t2-worker still repeats
+        # currently asserts order only - but l2-worker still repeats
         # `gpt-oss-120b` across providers, so the forward search is the right
         # shape if a repeat is ever reintroduced here.)
         rendered = registry.render_models_doc(real_registry())
-        row = row_for(rendered, "t3-driver")
-        legs = real_registry()["routes"]["t3-driver"]["legs"]
+        row = row_for(rendered, "l3-driver")
+        legs = real_registry()["routes"]["l3-driver"]["legs"]
         positions = []
         cursor = 0
         for leg in legs:
@@ -1108,15 +1108,15 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # test_leg_flagged_unavailable_in_its_own_route_is_marked).
         reg = copy.deepcopy(real_registry())
         # CIGREEN: expectation moved by c4c3654b (TORDER-OR removed the paid
-        # openrouter legs from t2-orchestrator) + aced9915 (removed its
+        # openrouter legs from l2-orchestrator) + aced9915 (removed its
         # antigravity leg too): the route carried ovhcloud legs then. Moved
-        # again by the operator's CACHEORCH order (2026-10-05: t2-orchestrator
+        # again by the operator's CACHEORCH order (2026-10-05: l2-orchestrator
         # dropped its OVH legs - orchestrators serve long sessions and OVH does
-        # not cache), so the provider-wide flip uses t2-worker, which still
+        # not cache), so the provider-wide flip uses l2-worker, which still
         # reaches through ovhcloud.
         reg["providers"]["ovhcloud"]["available"] = False
         rendered = registry.render_models_doc(reg)
-        row = row_for(rendered, "t2-worker")
+        row = row_for(rendered, "l2-worker")
         self.assertIn("~~ovhcloud", row)
         self.assertIn("(unavailable)", row)
 
@@ -1292,9 +1292,9 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # block at all rather than raising: an absent group is a valid config
         # and the same shape render_omniroute() gives an all-dead route.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t2-worker"]["legs"] = ["groq/any-model"]
+        reg["routes"]["l2-worker"]["legs"] = ["groq/any-model"]
         rendered = registry.render_litellm_blocks(
-            reg, real_litellm_config(), tiers=("t2-worker",))
+            reg, real_litellm_config(), tiers=("l2-worker",))
         self.assertEqual(rendered, {})
 
     def test_an_explicit_tier_absent_from_the_registry_still_raises(self):
@@ -1308,7 +1308,7 @@ class GatewayLegsFilterTests(unittest.TestCase):
     def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        # DSBACK 2026-09-28: t2-worker-clean serves deepseek FIRST again —
+        # DSBACK 2026-09-28: l2-worker-clean serves deepseek FIRST again —
         # providers.deepseek is back on after the operator top-up. The openrouter
         # leg stays out (provider off, DSMAX) and the zen leg stays out (its own
         # route gate). MISTRALFIX 2026-09-28 took the route's fourth leg,
@@ -1319,13 +1319,13 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # L1-CLEAN 2026-10-01 supersedes the DSBACK single-leg shape: the trial
         # credits lead and the native DeepSeek leg is the last paid fallback.
         self.assertEqual(
-            combos["t2-worker-clean"]["models"],
+            combos["l2-worker-clean"]["models"],
             ["ovh/gpt-oss-120b", "ovh/Qwen3.8-27B", "vertex/gemini-3.8-flash",
              "deepseek/deepseek-flash"])
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes.
-        # t1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
-        # servable leg. t3-driver-free-only is NOT gone: FREEAI gave it a
+        # l1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
+        # servable leg. l3-driver-free-only is NOT gone: FREEAI gave it a
         # servable leg.
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, combos)
@@ -1336,43 +1336,43 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # sambanova/openrouter gpt-oss-120b legs are unavailable and dropped;
         # the ovhcloud credit-tier leg (added 2026-09-30,
         # L1-backlog/ws-ovh-20260930) is available and kept.
-        self.assertNotIn("sambanova/gpt-oss-120b", rendered["t2-worker"])
+        self.assertNotIn("sambanova/gpt-oss-120b", rendered["l2-worker"])
         # FREEWIRE 2026-09-30: allow-groq-gpt-oss re-opened this leg on a
         # single-tool-call probe, so the render now mirrors it.
-        self.assertIn("groq/openai/gpt-oss-120b", rendered["t2-worker"])
-        self.assertIn("ovhcloud/gpt-oss-120b", rendered["t2-worker"])
-        self.assertNotIn("model: openai/deepseek-v4-flash", rendered["t2-worker"])
+        self.assertIn("groq/openai/gpt-oss-120b", rendered["l2-worker"])
+        self.assertIn("ovhcloud/gpt-oss-120b", rendered["l2-worker"])
+        self.assertNotIn("model: openai/deepseek-v4-flash", rendered["l2-worker"])
         # the client-bound opencode-zen leg (litellm transport openai/…) is
         # dropped, and so is the openrouter leg of the same model (DSMAX moved
         # to the route level in FREEWIRE 2026-09-30). The deepseek DIRECT leg is
         # back in since DSBACK 2026-09-28 topped the balance up — pinned here as
         # present, so a future flip that drops it again names it.
-        self.assertIn("model: deepseek/deepseek-flash", rendered["t2-worker"])
-        self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["t2-worker"])
-        self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["t2-worker"])
+        self.assertIn("model: deepseek/deepseek-flash", rendered["l2-worker"])
+        self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["l2-worker"])
+        self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["l2-worker"])
         # CIGREEN: expectation moved by 018438ed (TASK1 re-added the gemini
         # head) + ba73f1cf (TASK2) + 20c4a816 (TASK3 re-opened google_ai_studio
         # available:true): the render correctly mirrors the live head. Gated
         # legs are still dropped - every assertNotIn above still holds.
-        self.assertIn("gemini-3.8-flash", rendered["t2-worker"])
-        # t3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
+        self.assertIn("gemini-3.8-flash", rendered["l2-worker"])
+        # l3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
         # client-bound. FREEWIRE re-opened the groq qwen3.8-27b and openrouter
         # ':free' qwen3.8-27b legs, so the lowercase spelling is now present.
-        self.assertIn("qwen3.8-27b", rendered["t3-driver"])
-        self.assertNotIn("MiniMax-M3", rendered["t3-driver"])
-        self.assertIn("mistral-code-latest", rendered["t3-driver"])
+        self.assertIn("qwen3.8-27b", rendered["l3-driver"])
+        self.assertNotIn("MiniMax-M3", rendered["l3-driver"])
+        self.assertIn("mistral-code-latest", rendered["l3-driver"])
         # ovhcloud credit-tier legs (added 2026-09-30) are available;
         # groq's lowercase qwen3.8-27b is denied and dropped, and the
         # OVH model ID is mixed-case (Qwen3.8-27B) so the assertNotIn
         # above still passes.
-        self.assertIn("ovhcloud/gpt-oss-120b", rendered["t3-driver"])
-        self.assertIn("ovhcloud/Qwen3.8-27B", rendered["t3-driver"])
+        self.assertIn("ovhcloud/gpt-oss-120b", rendered["l3-driver"])
+        self.assertIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
         # L1-CLEAN (2026-10-01): the -clean twins no longer carry a gated leg
         # (their trial-first legs are all servable), so the stale OVH coder leg
-        # kept in t2-worker's legs and marked unavailable_legs is the example.
-        row = row_for(registry.render_models_doc(real_registry()), "t2-worker")
+        # kept in l2-worker's legs and marked unavailable_legs is the example.
+        row = row_for(registry.render_models_doc(real_registry()), "l2-worker")
         self.assertIn(
             "~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable)", row)
 
@@ -1401,14 +1401,14 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
 
     def test_ide_drops_a_route_that_declares_legs_but_serves_none(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
-        # t1-orchestrator-free-only is NOT dropped: T1FREE gave it a gemini
+        # l1-orchestrator-free-only is NOT dropped: T1FREE gave it a gemini
         # servable leg.
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertNotIn(gone, ids)
 
     def test_ide_keeps_a_deliberately_legless_route(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
-        for kept in ("t1-orchestrator-paid", "t2-worker-paid", "t3-driver-paid",
+        for kept in ("l1-orchestrator-paid", "l2-worker-paid", "l3-driver-paid",
                      "auto", "auto/smart", "auto/cheap"):
             self.assertIn(kept, ids)
 
@@ -1424,14 +1424,14 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         # the dropped set, so the real registry alone proves nothing here.
         # Synthesize the dead route instead of commenting the assertion out.
         reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["t1-orchestrator"]
+        route = reg["routes"]["l1-orchestrator"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
             route["unavailable_legs"][leg] = {"available": False}
         self.assertEqual(registry.gateway_legs(route, reg), [])
         ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
-        self.assertNotIn("omniroute-t1-orchestrator", ids)
-        self.assertNotIn("litellm-t1-orchestrator", ids)
+        self.assertNotIn("omniroute-l1-orchestrator", ids)
+        self.assertNotIn("litellm-l1-orchestrator", ids)
         # every other openhands declaration is untouched by the gate
         self.assertEqual(len(ids), len(registry.render_openhands(real_registry())["tiers"]) - 2)
 
@@ -1439,37 +1439,37 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         # The rule reaches a route that DECLARED legs and cannot serve them -
         # never one that declares none at all.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["t1-orchestrator"]["legs"] = []
+        reg["routes"]["l1-orchestrator"]["legs"] = []
         ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
-        self.assertIn("omniroute-t1-orchestrator", ids)
-        self.assertIn("litellm-t1-orchestrator", ids)
+        self.assertIn("omniroute-l1-orchestrator", ids)
+        self.assertIn("litellm-l1-orchestrator", ids)
 
     def test_openhands_tier_returns_when_its_leg_becomes_servable(self):
         # FREEKEYS-2c (D-141) put a servable free band (scaleway/nebius) ahead of
         # free_ai in this route, so gating one leg no longer empties it: gate
         # EVERY leg and its declaration goes; lift the gate and it comes back.
         gated = copy.deepcopy(real_registry())
-        route = gated["routes"]["t3-driver-free-only"]
+        route = gated["routes"]["l3-driver-free-only"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
             route["unavailable_legs"][leg] = {"available": False}
         self.assertEqual(registry.gateway_legs(route, gated), [])
         gone = {t["id"] for t in registry.render_openhands(gated)["tiers"]}
-        self.assertNotIn("omniroute-t3-driver-free-only", gone)
-        self.assertNotIn("litellm-t3-driver-free-only", gone)
+        self.assertNotIn("omniroute-l3-driver-free-only", gone)
+        self.assertNotIn("litellm-l3-driver-free-only", gone)
 
         served = copy.deepcopy(gated)
-        for leg in list(served["routes"]["t3-driver-free-only"]["legs"]):
-            served["routes"]["t3-driver-free-only"]["unavailable_legs"].pop(leg, None)
+        for leg in list(served["routes"]["l3-driver-free-only"]["legs"]):
+            served["routes"]["l3-driver-free-only"]["unavailable_legs"].pop(leg, None)
         ids = {t["id"] for t in registry.render_openhands(served)["tiers"]}
-        self.assertIn("omniroute-t3-driver-free-only", ids)
-        self.assertIn("litellm-t3-driver-free-only", ids)
+        self.assertIn("omniroute-l3-driver-free-only", ids)
+        self.assertIn("litellm-l3-driver-free-only", ids)
 
     def test_models_doc_is_not_filtered(self):
         # Out of scope by OR1d's own decision: models-doc still shows every
         # route, gated legs struck through, for the human reader.
         doc = registry.render_models_doc(real_registry())
-        for kept in ("t1-orchestrator-free-only", "t3-driver-free-only",
+        for kept in ("l1-orchestrator-free-only", "l3-driver-free-only",
                      "samba/gpt-oss-120b", "samba/MiniMax-M3"):
             self.assertIn("| `%s`" % kept, doc)
 
@@ -1487,7 +1487,7 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
     def with_untils(self):
         reg = copy.deepcopy(real_registry())
         reg["providers"]["cxa"]["unavailable_until"] = "2026-10-01T09:05:00Z"
-        reg["routes"]["t2-worker-clean"]["unavailable_legs"][
+        reg["routes"]["l2-worker-clean"]["unavailable_legs"][
             "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = (
                 "2026-10-01T09:05:00Z")
         # One leg with an until but no available:false at all.
@@ -1648,19 +1648,19 @@ class OmittedRoutesListTests(unittest.TestCase):
 
 class FreeAiRenderTests(unittest.TestCase):
     """BRIEF FREEAI (2026-09-27): adding free_ai/qwen7b to the two zero-spend
-    routes makes t3-driver-free-only servable again - it leaves combos.json's
+    routes makes l3-driver-free-only servable again - it leaves combos.json's
     `omitted` list, gains an OmniRoute combo, a LiteLLM block, an IDE model and
     both OpenHands tiers - and free_ai never enters a -clean declaration."""
 
     def test_t3_driver_free_only_leaves_omitted_and_gains_a_combo(self):
         rendered = registry.render_omniroute(real_registry())
-        self.assertNotIn("t3-driver-free-only", rendered["omitted"])
+        self.assertNotIn("l3-driver-free-only", rendered["omitted"])
         combos = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("t3-driver-free-only", combos)
+        self.assertIn("l3-driver-free-only", combos)
         # CIGREEN (ba73f1cf TORDER TASK2): the trial-free-credits-paid band
         # leads and the self-hosted free_ai rides mid-list under its
         # omniroute_id spelling (D: model_prefix free-ai).
-        models = combos["t3-driver-free-only"]["models"]
+        models = combos["l3-driver-free-only"]["models"]
         # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
         # trial-free-credits-paid order - gemini trial head, free band, the
         # self-hosted free_ai mid-list, scaleway grants trail it, deepseek
@@ -1691,9 +1691,9 @@ class FreeAiRenderTests(unittest.TestCase):
         # future reorder that buries it mid-list fails loudly here.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        self.assertEqual(combos["t2-worker-free-only"]["models"][-1],
+        self.assertEqual(combos["l2-worker-free-only"]["models"][-1],
                          "free-ai/qwen7b")
-        self.assertEqual(combos["t3-driver-free-only"]["models"][-1],
+        self.assertEqual(combos["l3-driver-free-only"]["models"][-1],
                          "free-ai/qwen7b")
 
     def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
@@ -1703,7 +1703,7 @@ class FreeAiRenderTests(unittest.TestCase):
         # spelling (model_prefix free-ai) and deepseek closes the combo.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        models = combos["t2-worker"]["models"]
+        models = combos["l2-worker"]["models"]
         self.assertEqual(models[-1], "deepseek/deepseek-flash")
         self.assertIn("free-ai/qwen7b", models)
         self.assertLess(models.index("free-ai/qwen7b"), len(models) - 1)
@@ -1722,7 +1722,7 @@ class FreeAiRenderTests(unittest.TestCase):
     def test_litellm_blocks_carry_free_ai_on_both_free_only_routes(self):
         rendered = registry.render_litellm_blocks(
             real_registry(), real_litellm_config())
-        for route_id in ("t2-worker-free-only", "t3-driver-free-only"):
+        for route_id in ("l2-worker-free-only", "l3-driver-free-only"):
             self.assertIn("model: openai/qwen7b", rendered[route_id], route_id)
             self.assertIn("api_base: https://api.free.ai/v1",
                           rendered[route_id], route_id)
@@ -1731,13 +1731,13 @@ class FreeAiRenderTests(unittest.TestCase):
 
     def test_ide_lists_t3_driver_free_only_again(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
-        self.assertIn("t3-driver-free-only", ids)
+        self.assertIn("l3-driver-free-only", ids)
 
     def test_openhands_lists_both_t3_driver_free_only_tiers_again(self):
         ids = {t["id"] for t in
                registry.render_openhands(real_registry())["tiers"]}
-        self.assertIn("omniroute-t3-driver-free-only", ids)
-        self.assertIn("litellm-t3-driver-free-only", ids)
+        self.assertIn("omniroute-l3-driver-free-only", ids)
+        self.assertIn("litellm-l3-driver-free-only", ids)
 
     def test_combos_file_matches_the_render(self):
         rendered = registry.render_omniroute(real_registry())
@@ -1872,7 +1872,7 @@ class RouteContextCapTests(unittest.TestCase):
         # unprobed placeholders, never the clamp input - see
         # route_context_cap). The 1048576 pin fails loudly if the band moves.
         reg = real_registry()
-        for route_id in ("t1-orchestrator", "t1-orchestrator-free-only"):
+        for route_id in ("l1-orchestrator", "l1-orchestrator-free-only"):
             route = reg["routes"][route_id]
             cap = registry.route_context_cap(route, reg)
             self.assertEqual(cap, 1048576, route_id)
@@ -1906,7 +1906,7 @@ class RouteContextCapTests(unittest.TestCase):
         # survives the clamp). Pins the rule: the docs cell is the declared
         # window clamped to the servable legs, not the raw declaration.
         reg = real_registry()
-        route = reg["routes"]["t1-orchestrator"]
+        route = reg["routes"]["l1-orchestrator"]
         promise = registry._route_context_promise(route, reg)
         self.assertEqual(
             promise,
@@ -1929,12 +1929,12 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # that shares the same gemini-3.8-flash model row (ladder low/medium/high,
         # no xhigh).
         reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["t1-orchestrator"]
+        route = reg["routes"]["l1-orchestrator"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
             if leg != "vertex/gemini-3.8-flash":
                 route["unavailable_legs"][leg] = {"available": False}
-        reg["routes"]["t1-orchestrator"]["legs"] = ["vertex/gemini-3.8-flash"]
+        reg["routes"]["l1-orchestrator"]["legs"] = ["vertex/gemini-3.8-flash"]
         return reg
 
     def _ide_entry(self, reg, route_id):
@@ -1947,8 +1947,8 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # context (IDE_GATEWAYS puts omniroute first) clamped to the servable
         # legs, never above any leg's window.
         reg = real_registry()
-        entry = self._ide_entry(reg, "t1-orchestrator")
-        route = reg["routes"]["t1-orchestrator"]
+        entry = self._ide_entry(reg, "l1-orchestrator")
+        route = reg["routes"]["l1-orchestrator"]
         self.assertEqual(
             entry["context"],
             registry.clamp_route_context(
@@ -1956,16 +1956,16 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertEqual(entry["context"], 1000000)
 
     def test_effort_ladder_comes_from_the_first_servable_leg(self):
-        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
+        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "l1-orchestrator")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_an_effort_default_the_served_head_rejects_is_dropped(self):
-        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "t1-orchestrator")
+        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "l1-orchestrator")
         self.assertNotIn("reasoning_effort", entry)
 
     def _t1_headed_by_contributor(self):
         reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["t1-orchestrator"]
+        route = reg["routes"]["l1-orchestrator"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
             if leg != "meta_api/muse-spark-1.3-contributor":
@@ -1977,7 +1977,7 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # tops out at "high" - so the positive branch needs a registry whose
         # served head DOES carry the surface default: gate the band and
         # meta_api/muse-spark-1.3-contributor answers with its "xhigh".
-        entry = self._ide_entry(self._t1_headed_by_contributor(), "t1-orchestrator")
+        entry = self._ide_entry(self._t1_headed_by_contributor(), "l1-orchestrator")
         self.assertEqual(entry.get("reasoning_effort"), "xhigh")
         self.assertIn("xhigh", entry["effort_ladder"])
 
@@ -1986,7 +1986,7 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # first: ladder low/medium/high, no xhigh). render_ide()'s served-head
         # rule drops a surface default the head rejects instead of forwarding
         # it, so the picker is not offered a level the answering leg refuses.
-        entry = self._ide_entry(real_registry(), "t1-orchestrator")
+        entry = self._ide_entry(real_registry(), "l1-orchestrator")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
         self.assertNotIn("reasoning_effort", entry)
 
@@ -1998,7 +1998,7 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         reg = real_registry()
         tiers = {t["id"]: t for t in
                  registry.render_openhands(reg)["tiers"]}
-        for tier_id in ("omniroute-t1-orchestrator", "litellm-t1-orchestrator"):
+        for tier_id in ("omniroute-l1-orchestrator", "litellm-l1-orchestrator"):
             gw, route_id = tier_id.split("-", 1)
             route = reg["routes"][route_id]
             profile = route["surfaces"][gw]["openhands_profile"]
@@ -2069,14 +2069,14 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
     def test_a_declared_auth_combo_leg_is_dropped_and_named(self):
         # F2: combos_refs' `no_key` clause had no test - deleting it survived.
         with tempfile.TemporaryDirectory() as tmp:
-            path = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+            path = self._combos(tmp, [{"name": "l1-orchestrator", "models": [
                 "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
             refs = self.sync.combos_refs(path, registry=self.reg)
-            self.assertEqual(refs["t1-orchestrator"], ["ovhcloud/gpt-oss-120b"])
-            self.assertEqual(self.sync.SKIPPED_BY_TIER["t1-orchestrator"],
+            self.assertEqual(refs["l1-orchestrator"], ["ovhcloud/gpt-oss-120b"])
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["l1-orchestrator"],
                              ["vertex/gemini-3.8-flash"])
-            block = self.sync.render_block("t1-orchestrator",
-                                           refs["t1-orchestrator"])
+            block = self.sync.render_block("l1-orchestrator",
+                                           refs["l1-orchestrator"])
             self.assertIn("# litellm-skip: vertex/gemini-3.8-flash",
                           "\n".join(block), block)
 
@@ -2085,20 +2085,20 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
         # assigned per tier, never cleared - a second call in one process left
         # the first call's skips sitting there for render_block() to pick up.
         with tempfile.TemporaryDirectory() as tmp:
-            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+            path = self._combos(tmp, [{"name": "l2-worker", "models": [
                 "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
             self.sync.combos_refs(path, registry=self.reg)
-            second = self._combos(tmp, [{"name": "t1-orchestrator", "models": [
+            second = self._combos(tmp, [{"name": "l1-orchestrator", "models": [
                 "ovhcloud/gpt-oss-120b"]}])
             combos = self.sync.combos_refs(second, registry=self.reg)
-            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t1-orchestrator"})
+            self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"l1-orchestrator"})
             block = "\n".join(self.sync.render_block(
-                "t2-worker", combos.get("t2-worker", [])))
+                "l2-worker", combos.get("l2-worker", [])))
             self.assertNotIn("litellm-skip", block)
 
     def test_the_registry_call_clears_a_prior_combos_call(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = self._combos(tmp, [{"name": "t2-worker", "models": [
+            path = self._combos(tmp, [{"name": "l2-worker", "models": [
                 "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
             self.sync.combos_refs(path, registry=self.reg)
             self.sync.registry_refs(str(REGISTRY_PATH), tiers=("t4-rag",))

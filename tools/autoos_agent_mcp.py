@@ -1428,7 +1428,7 @@ def serve() -> None:
 
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
         ctx: 128k|1m, privacy: public|sensitive, spend: free-ok|credit}; omitted fields
-        take their defaults, an empty card is t2-worker. Or pass tier 1-3 instead of a card.
+        take their defaults, an empty card is l2-worker. Or pass tier 1-3 instead of a card.
         isolate: private git clone on its own branch, forked from `cwd`'s repo and
         HEAD. It is FORCED for every spawned tier (2 and 3) and for a role that
         wears a leaf (`leaf: true` in catalog/agent-harness.json — role=review or

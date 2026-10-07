@@ -175,7 +175,7 @@ def render(lane, repo_config_path):
     provider = m.get("provider") or "omniroute"
     mid = m["modelID"]
     # Lane c (2026-10-05): the client limit follows the lane's model, not a
-    # hardcoded 128k - a 1M leg (gemini, the t1/t2-orchestrator combos) that
+    # hardcoded 128k - a 1M leg (gemini, the t1/l2-orchestrator combos) that
     # renders as 131072 is the "wrongly defined token size" failure: the
     # session compacts long before its model's real window. A lane may pin
     # model.limit {"context","output"} explicitly (the watcher's set_lane_model

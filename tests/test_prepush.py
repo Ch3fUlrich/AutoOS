@@ -1131,7 +1131,7 @@ class MappingTests(unittest.TestCase):
         self.assertTrue(plan["terms"], "the registry mapped to no bash filter terms")
 
     def test_a_route_or_combo_file_maps_the_same_way(self):
-        for path in ("configuration/omniroute/profiles/t1-orchestrator.json",
+        for path in ("configuration/omniroute/profiles/l1-orchestrator.json",
                      "tools/sync-router-tiers.py",
                      "catalog/router-combo.json"):
             plan = self.plan_for([path])

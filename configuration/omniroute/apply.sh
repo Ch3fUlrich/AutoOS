@@ -1067,7 +1067,7 @@ for m in d.get("data", []):
 fi
 if [[ -z "$live_ids" ]]; then
     echo "  ! could not read /v1/models (check the omniroute client key in api-keys.yml)"
-    echo "    combos will be created without catalog validation - verify with: omniroute simulate --combo t1-orchestrator"
+    echo "    combos will be created without catalog validation - verify with: omniroute simulate --combo l1-orchestrator"
 fi
 
 echo "Resilience:"

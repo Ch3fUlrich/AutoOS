@@ -13,20 +13,20 @@ For every omniroute combo, asserts:
       DeepSeek last: a combo containing deepseek/deepseek-flash must end with it.
       OpenRouter: every servable openrouter leg MUST end in ":free"; every
       declared paid openrouter/* leg that survives in routes.*.legs MUST be
-      gated in routes.<id>.unavailable_legs (t1-orchestrator-clean is the
+      gated in routes.<id>.unavailable_legs (l1-orchestrator-clean is the
       documented declared+gated exception so it stays omitted, not legless).
   (c) every leg resolves via resolve_leg; live-catalog existence is reported
       per leg when a key is available (gateway reachable) but warns-only:
       apply.ps1/apply.sh skip unknown models with a warning (exit 0), so the
       gate must not fail-closed on dead legs (huggingface/antigravity NOT_FOUND)
       or TASK8 apply -DryRun exit 0 would break. Unresolvable legs fail.
-  (d) t1 routes (t1-orchestrator, -free-only, -paid, -clean) render 1M and
+  (d) t1 routes (l1-orchestrator, -free-only, -paid, -clean) render 1M and
       every t1 leg window >= T1_MIN_WINDOW (600000, operator update 3);
-      t2/t3 (t2-worker, -free-only, t3-driver, -free-only) render the 128k
+      t2/t3 (l2-worker, -free-only, l3-driver, -free-only) render the 128k
       clamp (lowest implementer window, do not raise) with sub-1M legs allowed.
   (e) two distinct servable providers per agentic combo, except the named
       SINGLE_PROVIDER_EXEMPTIONS below (same style as
-      tests/test_registry.py CLEAN_ROUTE_EXEMPTIONS): t1-orchestrator-free-only
+      tests/test_registry.py CLEAN_ROUTE_EXEMPTIONS): l1-orchestrator-free-only
       is deliberately single-provider (L0 D-TORDER-2 ACCEPT) and passes only
       via that exemption + its registry constraint note; a future
       single-provider route without such a note still fails.
@@ -49,30 +49,30 @@ IDE_PATH = ROOT / "catalog" / "ide-models.json"
 
 # Operator update (3): t1 leg threshold, explicit constant.
 T1_MIN_WINDOW = 600000
-T1_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
-             "t1-orchestrator-paid", "t1-orchestrator-clean")
-T2T3_ROUTES = ("t2-worker", "t2-worker-free-only",
-               "t3-driver", "t3-driver-free-only")
-AGENTIC_ROUTES = ("t1-orchestrator", "t1-orchestrator-free-only",
-                  "t2-worker", "t2-worker-free-only",
-                  "t3-driver", "t3-driver-free-only")
+T1_ROUTES = ("l1-orchestrator", "l1-orchestrator-free-only",
+             "l1-orchestrator-paid", "l1-orchestrator-clean")
+T2T3_ROUTES = ("l2-worker", "l2-worker-free-only",
+               "l3-driver", "l3-driver-free-only")
+AGENTIC_ROUTES = ("l1-orchestrator", "l1-orchestrator-free-only",
+                  "l2-worker", "l2-worker-free-only",
+                  "l3-driver", "l3-driver-free-only")
 
 # The one documented, deliberate single-provider exception (L0 D-TORDER-2
 # ACCEPT 2026-10-01, same style as CLEAN_ROUTE_EXEMPTIONS): no verified
 # genuinely-free live 1M tool-calling second provider exists, so
-# t1-orchestrator-free-only stays single-provider on gemini only and
-# t1-orchestrator carries the real load on vertex credits. Passes only via
-# this entry PLUS its routes.t1-orchestrator-free-only.$comment constraint
+# l1-orchestrator-free-only stays single-provider on gemini only and
+# l1-orchestrator carries the real load on vertex credits. Passes only via
+# this entry PLUS its routes.l1-orchestrator-free-only.$comment constraint
 # note (deliberately single-provider, free-ai premium_requires_purchase,
 # openrouter :free <=262k, huggingface unusable, vertex credits); a future
 # single-provider route without such a note still fails rule (e).
 SINGLE_PROVIDER_EXEMPTIONS = {
-    "t1-orchestrator-free-only": (
+    "l1-orchestrator-free-only": (
         "L0 D-TORDER-2 ACCEPT: deliberately single-provider "
         "(gemini/gemini-3.8-flash only); no verified genuinely-free live 1M "
         "tool-calling second provider (free-ai premium_requires_purchase; "
         "openrouter :free <=262k sub-1M; huggingface unusable); real load on "
-        "t1-orchestrator vertex credits."
+        "l1-orchestrator vertex credits."
     ),
 }
 

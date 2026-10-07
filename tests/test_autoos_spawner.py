@@ -248,35 +248,35 @@ class RoutingTableTests(unittest.TestCase):
 
     def test_empty_card_is_t2_worker(self):
         combo, reason = routing.select_combo({})
-        self.assertEqual(combo, "t2-worker")
+        self.assertEqual(combo, "l2-worker")
         self.assertTrue(reason)
 
     def test_public_1m_routes_to_t1_orchestrator(self):
-        # T1FREE 2026-09-27: t1-orchestrator now carries a free gemini/gemini-3.8-flash
+        # T1FREE 2026-09-27: l1-orchestrator now carries a free gemini/gemini-3.8-flash
         # fallback leg, so ctx=1m public cards route there again.
         for card in ({"ctx": "1m", "role": "orchestrate"},
                      {"ctx": "1m", "complexity": "hard"},
                      {"ctx": "1m", "role": "review", "spend": "credit"}):
             combo, reason = routing.select_combo(card)
-            self.assertEqual(combo, "t1-orchestrator")
+            self.assertEqual(combo, "l1-orchestrator")
             self.assertEqual(reason, "public-1m")
 
     def test_public_implement_standard_free_is_t2_worker(self):
-        self.assertEqual(self.pick(role="implement", complexity="standard", spend="free-ok"), "t2-worker")
+        self.assertEqual(self.pick(role="implement", complexity="standard", spend="free-ok"), "l2-worker")
 
     def test_public_review_free_is_t3_driver(self):
-        self.assertEqual(self.pick(role="review"), "t3-driver")
+        self.assertEqual(self.pick(role="review"), "l3-driver")
 
     def test_public_trivial_free_is_t3_driver(self):
-        self.assertEqual(self.pick(complexity="trivial"), "t3-driver")
+        self.assertEqual(self.pick(complexity="trivial"), "l3-driver")
 
     def test_public_implement_credit_is_t2_worker(self):
-        # The -credit chains were dropped 2026-09-23 (ADR 0006): t2-worker
+        # The -credit chains were dropped 2026-09-23 (ADR 0006): l2-worker
         # already overflows to its paid legs, so credit picks the same combo.
-        self.assertEqual(self.pick(spend="credit"), "t2-worker")
+        self.assertEqual(self.pick(spend="credit"), "l2-worker")
 
     def test_public_review_credit_is_t3_driver(self):
-        self.assertEqual(self.pick(role="review", spend="credit"), "t3-driver")
+        self.assertEqual(self.pick(role="review", spend="credit"), "l3-driver")
 
     def test_every_combo_exists_and_none_is_retired(self):
         retired = {"tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag",
@@ -297,22 +297,22 @@ class RoutingTableTests(unittest.TestCase):
                 self.assertIn(combo, routing.ALL_COMBOS, (values, allow))
 
     def test_sensitive_implement_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive"), "t2-worker-clean")
+        self.assertEqual(self.pick(privacy="sensitive"), "l2-worker-clean")
 
     def test_sensitive_hard_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="credit"), "t2-worker-clean")
+        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="credit"), "l2-worker-clean")
 
     def test_sensitive_review_is_t3_driver_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", role="review"), "t3-driver-clean")
+        self.assertEqual(self.pick(privacy="sensitive", role="review"), "l3-driver-clean")
 
     def test_sensitive_trivial_is_t3_driver_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="trivial"), "t3-driver-clean")
+        self.assertEqual(self.pick(privacy="sensitive", complexity="trivial"), "l3-driver-clean")
 
     def test_sensitive_1m_has_no_route_and_says_what_to_do(self):
         with self.assertRaises(routing.NoRoute) as ctx:
             routing.select_combo({"privacy": "sensitive", "ctx": "1m"})
         msg = str(ctx.exception)
-        self.assertIn("t2-worker-clean", msg)
+        self.assertIn("l2-worker-clean", msg)
         self.assertIn("128k", msg)
         self.assertNotIn("--allow-training", msg)
 
@@ -322,7 +322,7 @@ class RoutingBoundaryTests(unittest.TestCase):
 
     def test_unknown_field_is_rejected(self):
         with self.assertRaises(routing.CardError) as ctx:
-            routing.select_combo({"model": "t1-orchestrator"})
+            routing.select_combo({"model": "l1-orchestrator"})
         self.assertIn("model", str(ctx.exception))
 
     def test_unknown_value_is_rejected(self):
@@ -350,18 +350,18 @@ class RoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
 
     def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
-        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again (ctx=128k +
+        # T1FREE 2026-09-27: l1-orchestrator serves public-strong again (ctx=128k +
         # orchestrate/hard) through its gemini fallback leg.
-        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "t1-orchestrator")
+        self.assertEqual(routing.select_combo({"role": "orchestrate"})[0], "l1-orchestrator")
         self.assertEqual(routing.select_combo({"role": "orchestrate"})[1], "public-strong")
 
     def test_hard_review_is_t1_orchestrator_not_t3_driver(self):
         # orchestrate/hard wins over review/trivial: a hard review needs the strong model.
-        # T1FREE 2026-09-27: t1-orchestrator serves public-strong again.
-        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "t1-orchestrator")
+        # T1FREE 2026-09-27: l1-orchestrator serves public-strong again.
+        self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "l1-orchestrator")
 
     def test_sensitive_orchestrate_128k_is_t2_worker_clean(self):
-        self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "t2-worker-clean")
+        self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "l2-worker-clean")
 
     def test_allow_training_no_longer_opens_sensitive_1m(self):
         # Compatibility flag, inert since DSMAX 2026-09-27: there is no
@@ -370,7 +370,7 @@ class RoutingBoundaryTests(unittest.TestCase):
             routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
 
     def test_allow_training_changes_nothing_else(self):
-        self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "t2-worker-clean")
+        self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "l2-worker-clean")
 
     def test_parse_card_reads_key_value_pairs(self):
         self.assertEqual(routing.parse_card("role=review, privacy=sensitive"),
@@ -437,12 +437,12 @@ class ClientCommandTests(unittest.TestCase):
     def test_qwen_goes_through_omniroute_run_with_the_card_combo(self):
         r = plan_of("--client", "qwen", "--card", "role=review", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("would run: omniroute run qwen --model t3-driver --api-key-env AUTOOS_OMNIROUTE_KEY -- ", r.stdout)
+        self.assertIn("would run: omniroute run qwen --model l3-driver --api-key-env AUTOOS_OMNIROUTE_KEY -- ", r.stdout)
         self.assertIn("--approval-mode plan", r.stdout)
 
     def test_gemini_goes_through_omniroute_run(self):
         r = plan_of("--client", "gemini", "t")
-        self.assertIn("omniroute run gemini --model t2-worker ", r.stdout)
+        self.assertIn("omniroute run gemini --model l2-worker ", r.stdout)
         self.assertIn("--approval-mode auto_edit -p t", r.stdout)
 
     def test_gemini_trusts_the_spawn_cwd_for_this_session_only(self):
@@ -454,7 +454,7 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_codex_runs_exec_through_omniroute(self):
         r = plan_of("--client", "codex", "t")
-        self.assertIn("omniroute run codex --model t2-worker --api-key-env AUTOOS_OMNIROUTE_KEY --",
+        self.assertIn("omniroute run codex --model l2-worker --api-key-env AUTOOS_OMNIROUTE_KEY --",
                       r.stdout)
         self.assertIn("exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
 
@@ -600,11 +600,11 @@ class ClientCommandTests(unittest.TestCase):
 
     def test_opencode_card_maps_combo_to_its_tier_agent(self):
         r = plan_of("--card", "role=review,privacy=sensitive", "t")
-        self.assertIn("--agent t3-reviewer --model omniroute/t3-driver-clean ", r.stdout)
+        self.assertIn("--agent t3-reviewer --model omniroute/l3-driver-clean ", r.stdout)
 
     def test_the_route_is_printed_with_reason_and_version(self):
         r = plan_of("--card", "role=review", "t")
-        self.assertIn("route: t3-driver reason=", r.stdout)
+        self.assertIn("route: l3-driver reason=", r.stdout)
         self.assertIn("routing=" + routing.ROUTING_VERSION, r.stdout)
 
     def test_sensitive_1m_fails_closed_with_next_steps(self):
@@ -760,7 +760,7 @@ class ClientCapabilityTests(unittest.TestCase):
 
 
 class ReviewFindingTests(unittest.TestCase):
-    """Cross-family review (t1-orchestrator, 2026-09-24) findings, pinned."""
+    """Cross-family review (l1-orchestrator, 2026-09-24) findings, pinned."""
 
     def test_joinable_keeps_an_explicit_model(self):
         r = plan_of("--client", "claude", "--joinable", "--title", "d1",
@@ -768,8 +768,8 @@ class ReviewFindingTests(unittest.TestCase):
         self.assertIn("--model opus", r.stdout)
 
     def test_gateway_client_model_override_wins_over_the_card(self):
-        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/t2-worker", "t")
-        self.assertIn("omniroute run qwen --model t2-worker ", r.stdout)
+        r = plan_of("--client", "qwen", "--card", "complexity=trivial", "--model", "omniroute/l2-worker", "t")
+        self.assertIn("omniroute run qwen --model l2-worker ", r.stdout)
 
     def test_mcp_max_depth_as_a_string_is_coerced_not_a_crash(self):
         argv, _ = mcp_server.build_argv({"task": "t", "max_depth": "2"})
@@ -1069,7 +1069,7 @@ class McpToolTests(unittest.TestCase):
     def test_spawn_returns_a_run_id_at_once_and_routes_through_select_combo(self):
         out = mcp_server.spawn({"task": "t", "card": {"role": "review"}, "cwd": str(ROOT)})
         self.assertNotIn("error", out)
-        self.assertEqual(out["route"]["combo"], "t3-driver")
+        self.assertEqual(out["route"]["combo"], "l3-driver")
         self.assertEqual(out["route"]["routing_version"], routing.ROUTING_VERSION)
         st = self.wait_done(out["id"])
         self.assertEqual(st["state"], "completed")
@@ -2093,7 +2093,7 @@ class McpStdioTests(unittest.TestCase):
                                      "respond", "route", "list_agents", "context", "heartbeat",
                                      "ps", "oc_status", "oc_start", "oc_restart"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
-            self.assertEqual(spawned["route"]["combo"], "t3-driver")
+            self.assertEqual(spawned["route"]["combo"], "l3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
             self.assertTrue(os.path.isdir(run_dir))
             for _ in range(100):  # let the detached dry run finish before tmp goes away
@@ -2169,17 +2169,17 @@ class TrackEntryClientTests(unittest.TestCase):
     """A run on an own-account client (qoder, agy, claude) never touches the
     gateway route its plan names, so it is no observation of that route:
     no track record and hence no re-probe proposal (measured 2026-09-26:
-    agy/qoder NO-OPs were recorded as t2-worker failures)."""
+    agy/qoder NO-OPs were recorded as l2-worker failures)."""
 
     def setUp(self):
         self.cli = load_agent()
 
     def plan(self, client):
-        return {"client": client, "route": {"combo": "t2-worker", "card": None}}
+        return {"client": client, "route": {"combo": "l2-worker", "card": None}}
 
     def test_a_gateway_client_run_is_recorded(self):
         self.assertEqual(self.cli.track_entry(self.plan("opencode"), 0, 1.0)["route"],
-                         "t2-worker")
+                         "l2-worker")
 
     def test_an_own_account_client_run_is_not_recorded(self):
         for client in ("qoder", "agy", "claude"):
@@ -2394,7 +2394,7 @@ class ProbeProposalTests(unittest.TestCase):
 
 
 class NoOpGuardTests(unittest.TestCase):
-    """Measured 2026-09-25: two t2-worker workers reported "all fixed" with
+    """Measured 2026-09-25: two l2-worker workers reported "all fixed" with
     placeholder commit hashes and changed nothing. An isolated run whose job
     is to implement must leave commits or changes, or it failed."""
 
@@ -2522,7 +2522,7 @@ class NoOpGuardTests(unittest.TestCase):
 
     def test_a_read_only_write_is_recorded_as_a_capability_failure(self):
         cli = self.cli
-        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+        plan = {"route": {"combo": "l2-worker", "class": "cheap", "review": False},
                 "client": "opencode", "free": False}
         with tempfile.TemporaryDirectory() as tmp:
             tracked = cli.track_entry(plan, cli.EXIT_READ_ONLY_WRITE, 1.0)
@@ -2544,7 +2544,7 @@ class NoOpGuardTests(unittest.TestCase):
         # rc 10 must reach the track record like rc 5 does: a record autoos_track
         # rejects is dropped silently (REVFIX).
         cli = self.cli
-        plan = {"route": {"combo": "t2-worker", "class": "cheap", "review": False},
+        plan = {"route": {"combo": "l2-worker", "class": "cheap", "review": False},
                 "client": "opencode", "free": False}
         with tempfile.TemporaryDirectory() as tmp:
             tracked = cli.track_entry(plan, cli.EXIT_INCOMPLETE, 1.0)
@@ -2806,7 +2806,7 @@ class ReportFenceAndProseTests(unittest.TestCase):
     # work/L1-routing/R5ARATE.out: the client wrapped its whole closing message
     # in one fence, and the spawner's summary follows it.
     WRAPPED_REPORT = "\n".join((
-        "route: t2-worker reason=public-default routing=1",
+        "route: l2-worker reason=public-default routing=1",
         "sandbox: /tmp/sb (branch agent/x)",
         "```",
         "REPORT R5ARATE (RESTART R5a, S2)",
@@ -2826,7 +2826,7 @@ class ReportFenceAndProseTests(unittest.TestCase):
         "grep -n 'REPORT' tools/autoos-agent.py",
         "EOF",
         "2774: a finished worker prints a heading",
-        "> t2-worker · cheaperinference/kimi-k3",
+        "> l2-worker · cheaperinference/kimi-k3",
         "REPORT:",
         "- sha: 2e985967",
         "- tests: 26/26",
@@ -2838,7 +2838,7 @@ class ReportFenceAndProseTests(unittest.TestCase):
         " ```",
         " quoted tool output from two turns ago",
         " ```",
-        "> t2-worker · deepseek-v4.1-flash",
+        "> l2-worker · deepseek-v4.1-flash",
         "REPORT",
         "",
         "- sha: 2661544",
@@ -3220,8 +3220,8 @@ class SessionTagTests(unittest.TestCase):
         return ns
 
     def _cfg(self, providers):
-        providers.setdefault("omniroute", {"models": {"t2-worker": {}}})
-        return {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+        providers.setdefault("omniroute", {"models": {"l2-worker": {}}})
+        return {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
                 "providers": providers}
 
     def _overlay(self, plan):
@@ -3261,7 +3261,7 @@ class SessionTagTests(unittest.TestCase):
 
     def test_a_non_omniroute_model_gets_no_header(self):
         cfg = self._cfg({"other": {"models": {"m": {}}}})
-        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        cfg["agents"]["l2-worker"]["model"] = "other/m"
         plan = self.cli.build_plan(self._args(title="T"), cfg)
         self.assertNotIn("providers", self._overlay(plan))
 
@@ -3546,8 +3546,8 @@ class WorkerGatewayOverlayTests(unittest.TestCase):
             isolate=False, auto=True, joinable=False, model=None,
             clean=False, allow_training=False, max_depth=None, lean=False,
             title="T")
-        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
         plan = self.cli.build_plan(args, cfg)
         prov = self._env_overlay(self._stamped(plan))["providers"]["omniroute"]
         self.assertEqual(prov["settings"]["baseURL"], "http://omniroute:20128/v1")
@@ -4104,7 +4104,7 @@ class RawTailClassificationTests(unittest.TestCase):
 
     def _run_verdict(self, exit_obj):
         fake_plan = {
-            "agent": "t2-worker", "client": "qoder",
+            "agent": "l2-worker", "client": "qoder",
             "model": "qwen/qwen3.8-flash",
             # CLAUDEBUDGET-h: the argv a real qoder launch carries (build_command
             # always names a model), because the last-mile gate now prices the plan
@@ -4270,7 +4270,7 @@ class CardV2Tests(unittest.TestCase):
             "privacy": "sensitive", "mode": "quality-first",
             "deferrable": True, "deadline": "2026-09-26T06:00Z",
             "paths": ["tools/a.py", "tests/b.py"],
-            "override": {"route": "t1-orchestrator", "effort": "high"},
+            "override": {"route": "l1-orchestrator", "effort": "high"},
         })
         self.assertEqual(out["kind"], "debug")
         self.assertEqual(out["risk"], "high")
@@ -4280,7 +4280,7 @@ class CardV2Tests(unittest.TestCase):
         self.assertIs(out["deferrable"], True)
         self.assertEqual(out["deadline"], "2026-09-26T06:00Z")
         self.assertEqual(out["paths"], ["tools/a.py", "tests/b.py"])
-        self.assertEqual(out["override"], {"route": "t1-orchestrator", "effort": "high"})
+        self.assertEqual(out["override"], {"route": "l1-orchestrator", "effort": "high"})
         self.assertEqual(out["version"], "2")
 
     def test_a_v2_card_does_not_alias_the_default_containers(self):
@@ -4337,23 +4337,23 @@ class CardV2Tests(unittest.TestCase):
 
     def test_parse_card_keeps_the_dotted_override_keys(self):
         self.assertEqual(
-            routing.parse_card("override.route=t1-orchestrator,override.effort=high"),
-            {"override.route": "t1-orchestrator", "override.effort": "high"})
+            routing.parse_card("override.route=l1-orchestrator,override.effort=high"),
+            {"override.route": "l1-orchestrator", "override.effort": "high"})
 
     def test_parse_card_keeps_the_pipe_delimited_paths(self):
         self.assertEqual(routing.parse_card("paths=a/b|c/d"), {"paths": "a/b|c/d"})
 
     def test_key_value_paths_and_override_become_typed(self):
-        out = self.norm(routing.parse_card("paths=a/b|c,override.route=t1-orchestrator"))
+        out = self.norm(routing.parse_card("paths=a/b|c,override.route=l1-orchestrator"))
         self.assertEqual(out["paths"], ["a/b", "c"])
-        self.assertEqual(out["override"], {"route": "t1-orchestrator"})
+        self.assertEqual(out["override"], {"route": "l1-orchestrator"})
 
     def test_json_and_key_value_forms_normalize_the_same(self):
         json_out = self.norm(routing.parse_card(
             '{"kind": "debug", "risk": "high", "paths": ["a/b", "c/d"], '
-            '"override": {"route": "t1-orchestrator"}}'))
+            '"override": {"route": "l1-orchestrator"}}'))
         kv_out = self.norm(routing.parse_card(
-            "kind=debug,risk=high,paths=a/b|c/d,override.route=t1-orchestrator"))
+            "kind=debug,risk=high,paths=a/b|c/d,override.route=l1-orchestrator"))
         self.assertEqual(json_out, kv_out)
 
     def test_unknown_v2_field_is_an_error(self):
@@ -4381,7 +4381,7 @@ class CardV2Tests(unittest.TestCase):
                      {"complexity": "hard", "spec": "exact"},
                      {"ctx": "1m", "mode": "quality-first"},
                      {"spend": "credit", "paths": ["a"]},
-                     {"role": "implement", "override.route": "t1-orchestrator"}):
+                     {"role": "implement", "override.route": "l1-orchestrator"}):
             with self.assertRaises(routing.CardError) as ctx:
                 self.norm(card)
             self.assertIn("mixes v1 and v2 fields", str(ctx.exception))
@@ -4486,11 +4486,11 @@ class CardV2Tests(unittest.TestCase):
 
     def test_select_combo_v1_results_are_unchanged(self):
         cases = [
-            ({}, ("t2-worker", "public-default")),
-            ({"role": "review"}, ("t3-driver", "public-light")),
-            ({"privacy": "sensitive"}, ("t2-worker-clean", "sensitive")),
-            ({"complexity": "hard"}, ("t1-orchestrator", "public-strong")),
-            ({"ctx": "1m", "role": "orchestrate"}, ("t1-orchestrator", "public-1m")),
+            ({}, ("l2-worker", "public-default")),
+            ({"role": "review"}, ("l3-driver", "public-light")),
+            ({"privacy": "sensitive"}, ("l2-worker-clean", "sensitive")),
+            ({"complexity": "hard"}, ("l1-orchestrator", "public-strong")),
+            ({"ctx": "1m", "role": "orchestrate"}, ("l1-orchestrator", "public-1m")),
         ]
         for card, expected in cases:
             self.assertEqual(routing.select_combo(card), expected, card)
@@ -4704,7 +4704,7 @@ class RouteCliTests(unittest.TestCase):
         # Build a minimal fake plan so cmd_run does not need the real
         # route-resolution machinery.
         fake_plan = {
-            "agent": "t2-worker",
+            "agent": "l2-worker",
             "client": "qoder",
             "model": "qwen/qwen3.8-flash",
             # CLAUDEBUDGET-h: a real qoder argv names its model (see the fixture in
@@ -4818,7 +4818,7 @@ class RunCardV2Tests(unittest.TestCase):
         with mock.patch.object(self.agent, "route_plan_for", boom):
             rc, out, err = self.run_cmd_run(card="role=review")
         self.assertEqual(rc, 0, err)
-        self.assertIn("route: t3-driver reason=public-light", out)
+        self.assertIn("route: l3-driver reason=public-light", out)
 
     def test_empty_card_never_calls_the_resolver(self):
         def boom(*a, **k):
@@ -4826,7 +4826,7 @@ class RunCardV2Tests(unittest.TestCase):
         with mock.patch.object(self.agent, "route_plan_for", boom):
             rc, out, err = self.run_cmd_run(card="")
         self.assertEqual(rc, 0, err)
-        self.assertIn("route: t2-worker reason=public-default", out)
+        self.assertIn("route: l2-worker reason=public-default", out)
 
     # --- tier comes from the route id's own t<1-3>- prefix, else tier 2 ----
 
@@ -4836,9 +4836,9 @@ class RunCardV2Tests(unittest.TestCase):
         self.assertEqual(self.agent._tier_for_route("deepseek-v4.1-flash"), 2)
 
     def test_a_recognised_prefix_picks_its_own_tier(self):
-        self.assertEqual(self.agent._tier_for_route("t1-orchestrator-free-only"), 1)
-        self.assertEqual(self.agent._tier_for_route("t2-worker-clean"), 2)
-        self.assertEqual(self.agent._tier_for_route("t3-driver-clean"), 3)
+        self.assertEqual(self.agent._tier_for_route("l1-orchestrator-free-only"), 1)
+        self.assertEqual(self.agent._tier_for_route("l2-worker-clean"), 2)
+        self.assertEqual(self.agent._tier_for_route("l3-driver-clean"), 3)
 
     # --- input_required / deferred / --no-defer -----------------------------
 
@@ -4883,17 +4883,17 @@ class RunCardV2Tests(unittest.TestCase):
     # --- the track entry records the resolver's own bucket ------------------
 
     def test_track_entry_uses_the_plans_bucket_not_unknown(self):
-        plan = {"client": "opencode", "route": {"combo": "t2-worker", "card": {}, "bucket": "S2"}}
+        plan = {"client": "opencode", "route": {"combo": "l2-worker", "card": {}, "bucket": "S2"}}
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "S2")
 
     def test_track_entry_without_a_bucket_still_falls_back_to_unknown(self):
-        plan = {"client": "opencode", "route": {"combo": "t2-worker", "card": {}}}
+        plan = {"client": "opencode", "route": {"combo": "l2-worker", "card": {}}}
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["bucket"], "unknown")
 
     # --- review-runv2-a4b: the class is the route's own, not its t1/t2/t3 prefix
 
     def test_track_entry_uses_the_routes_class_over_the_tier_prefix(self):
-        plan = {"client": "opencode", "route": {"combo": "t1-orchestrator-free-only",
+        plan = {"client": "opencode", "route": {"combo": "l1-orchestrator-free-only",
                                                 "class": "free", "card": {}}}
         self.assertEqual(self.agent.track_entry(plan, 0, 1.0)["class"], "free")
 
@@ -4928,7 +4928,7 @@ class RunCardV2Tests(unittest.TestCase):
 class ModelOverridePrivacyTests(unittest.TestCase):
     """PRIV3 (review-priv, qoder 2026-09-26): an explicit --model replaced a
     sensitive card's -clean combo with no privacy re-check, so
-    `--card privacy=sensitive --model omniroute/t3-driver` ran private work on
+    `--card privacy=sensitive --model omniroute/l3-driver` ran private work on
     the mistral-code free pool. Every leg the gateway serves for the chosen
     combo must be private-safe (tools/registry.py private_safe)."""
 
@@ -4953,28 +4953,28 @@ class ModelOverridePrivacyTests(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_sensitive_card_with_a_free_pool_model_is_refused(self):
-        rc, out, err = self.run_cmd(model="omniroute/t3-driver")
+        rc, out, err = self.run_cmd(model="omniroute/l3-driver")
         self.assertEqual(rc, 2, out + err)
         self.assertIn("privacy", err)
 
     def test_sensitive_card_with_a_clean_model_runs(self):
-        rc, out, err = self.run_cmd(model="omniroute/t2-worker-clean")
+        rc, out, err = self.run_cmd(model="omniroute/l2-worker-clean")
         self.assertEqual(rc, 0, err)
 
     def test_clean_tier_maps_a_free_pool_model_to_its_clean_twin(self):
         # --tier --clean already resolves an override to its -clean twin
         # (resolve_model), so the PRIV3 check sees a private-safe combo.
-        rc, out, err = self.run_cmd(card=None, tier=2, clean=True, model="omniroute/t3-driver")
+        rc, out, err = self.run_cmd(card=None, tier=2, clean=True, model="omniroute/l3-driver")
         self.assertEqual(rc, 0, err)
-        self.assertIn("route: t3-driver-clean", out)
+        self.assertIn("route: l3-driver-clean", out)
 
     def test_v2_sensitive_card_with_a_free_pool_model_is_refused(self):
-        plan = {"route": "t3-driver-clean", "state": "ready", "reason": "stub",
+        plan = {"route": "l3-driver-clean", "state": "ready", "reason": "stub",
                 "bucket": "S1", "defer_until": None}
         with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: plan), \
                 mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}):
             rc, out, err = self.run_cmd(card="kind=review,paths=tools/registry.py,privacy=sensitive",
-                                        model="omniroute/t3-driver")
+                                        model="omniroute/l3-driver")
         self.assertEqual(rc, 2, out + err)
         self.assertIn("privacy", err)
 
@@ -4985,7 +4985,7 @@ class ModelOverridePrivacyTests(unittest.TestCase):
         for card in ("privacy=sensitive", "kind=review,paths=tools/registry.py,privacy=sensitive"):
             with mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}), \
                     mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: {
-                        "route": "t3-driver-clean", "state": "ready", "reason": "stub",
+                        "route": "l3-driver-clean", "state": "ready", "reason": "stub",
                         "bucket": "S1", "defer_until": None}):
                 rc, out, err = self.run_cmd(card=card, free=True)
             self.assertEqual(rc, 2, card + out + err)
@@ -4993,14 +4993,14 @@ class ModelOverridePrivacyTests(unittest.TestCase):
             self.assertNotIn("muse-spark", out)
 
     def test_public_card_with_any_model_is_not_checked(self):
-        rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/t3-driver")
+        rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/l3-driver")
         self.assertEqual(rc, 0, err)
 
     def test_allow_training_no_longer_opens_the_sensitive_1m_route(self):
         # Compatibility flag, inert since DSMAX 2026-09-27: the card fails
         # closed before the explicit --model is even considered.
         rc, out, err = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=True,
-                                    model="omniroute/t2-worker-clean")
+                                    model="omniroute/l2-worker-clean")
         self.assertEqual(rc, 2, out + err)
         self.assertIn("128k", err)
 
@@ -5687,9 +5687,9 @@ class IsolateContainmentTests(unittest.TestCase):
                 clean=False, allow_training=False, max_depth=None, lean=False,
                 read_only=read_only,
                 title=None, dry_run=False, no_defer=False)
-            cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-                   "providers": {"omniroute": {"models": {"t2-worker": {},
-                                                          "t3-driver": {}}}}}
+            cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+                   "providers": {"omniroute": {"models": {"l2-worker": {},
+                                                          "l3-driver": {}}}}}
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
@@ -6018,8 +6018,8 @@ class IsolateContainmentTests(unittest.TestCase):
         # prompt would silently drop it.
         agent = self.agent
         state = self.make_state()
-        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
         for name, c in clients.CLIENTS.items():
             if not c.headless:
                 continue
@@ -6059,7 +6059,7 @@ class IsolateContainmentTests(unittest.TestCase):
 
     def test_track_entry_maps_exit_7_to_containment(self):
         plan = {"client": "opencode", "free": False,
-                "route": {"combo": "t2-worker", "card": {}}}
+                "route": {"combo": "l2-worker", "card": {}}}
         entry = self.agent.track_entry(plan, 7, 1.0)
         self.assertEqual(entry["failure_class"], "containment")
         self.assertEqual(entry["gate"], "fail")
@@ -6423,8 +6423,8 @@ class IsolateContainmentTests(unittest.TestCase):
                 isolate=True, auto=True, joinable=True, model=None,
                 clean=False, allow_training=False, max_depth=None, lean=False,
                 title=None, dry_run=False, no_defer=False)
-            cfg = {"agents": {"t2-worker": {"model": "claude/t2-worker"}},
-                   "providers": {"claude": {"models": {"t2-worker": {}}}}}
+            cfg = {"agents": {"l2-worker": {"model": "claude/l2-worker"}},
+                   "providers": {"claude": {"models": {"l2-worker": {}}}}}
             env = dict(os.environ)
             env["PATH"] = stubdir + os.pathsep + env.get("PATH", "")
             env["AUTOOS_STATE_DIR"] = statedir
@@ -7337,7 +7337,7 @@ class ClientModeHelpTests(unittest.TestCase):
             model=None, clean=False, allow_training=False, max_depth=None, lean=False,
             title=None, dry_run=False, no_defer=False)
         cfg = {"agents": {a: {"model": "qoder/x"} for a in
-                          ("t1-orchestrator", "t2-worker", "t3-reviewer")},
+                          ("l1-orchestrator", "l2-worker", "t3-reviewer")},
                "providers": {"qoder": {"models": {"x": {}}}}}
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
@@ -7474,7 +7474,7 @@ class FreeConcurrencyCapTests(unittest.TestCase):
             auto=True, joinable=False, model=None, clean=False, allow_training=False,
             max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
         cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
-               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+               "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
         with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
@@ -7511,7 +7511,7 @@ class FreeConcurrencyCapTests(unittest.TestCase):
             auto=True, joinable=False, model=None, clean=False, allow_training=False,
             max_depth=None, lean=False, title=None, dry_run=True, no_defer=False)
         cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
-               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+               "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
                                           "AUTOOS_STATE_DIR": self.tmp}, clear=True):
             with mock.patch.object(agent, "wait_for_free_slot",
@@ -7646,7 +7646,7 @@ class FreeConcurrencyCapTests(unittest.TestCase):
             auto=True, joinable=False, model=None, clean=False, allow_training=False,
             max_depth=None, lean=False, title=None, dry_run=False, no_defer=False)
         cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
-               "agents": {"t2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
+               "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
         with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
@@ -7763,7 +7763,7 @@ class _WorkerRecordBase(unittest.TestCase):
         os.makedirs(self.workers, mode=0o700, exist_ok=True)
         rec = {"id": wid, "pid": os.getpid(), "pid_start": self.agent._proc_starttime(os.getpid()),
                "started": self.agent.utc_now_iso(), "session_tag": "lane-a", "client": "opencode",
-               "model": "m", "route": "t2-worker", "title": "", "cwd": "/x", "sandbox": "",
+               "model": "m", "route": "l2-worker", "title": "", "cwd": "/x", "sandbox": "",
                "task_head": "do a thing", "depth": 1}
         rec.update(over)
         path = os.path.join(self.workers, wid + ".json")
@@ -7781,9 +7781,9 @@ class WorkerRecordTests(_WorkerRecordBase):
         self.assertEqual(os.stat(self.workers).st_mode & 0o777, 0o700)
 
     def test_a_dry_run_writes_no_record(self):
-        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+        plan = {"agent": "l2-worker", "client": "opencode", "model": "m",
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
-                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
                 "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
@@ -7867,9 +7867,9 @@ class WorkerRecordTests(_WorkerRecordBase):
         self.assertEqual([r["id"] for r in rows], ["w1"])
 
     def test_cmd_run_records_during_the_run_and_ended_with_rc_after(self):
-        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+        plan = {"agent": "l2-worker", "client": "opencode", "model": "m",
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
-                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
                 "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
@@ -7899,7 +7899,7 @@ class WorkerRecordTests(_WorkerRecordBase):
                 rc = self.agent.cmd_run(ns, {})
         self.assertEqual(rc, 4)
         self.assertEqual(seen["rec"]["client"], "opencode")
-        self.assertEqual(seen["rec"]["route"], "t2-worker")
+        self.assertEqual(seen["rec"]["route"], "l2-worker")
         self.assertEqual(seen["rec"]["task_head"], "do it")
         with io.open(os.path.join(self.workers, seen["rec"]["id"] + ".json"), encoding="utf-8") as fh:
             after = json.load(fh)
@@ -7910,9 +7910,9 @@ class WorkerRecordTests(_WorkerRecordBase):
     def test_a_failed_end_record_keeps_the_client_rc(self):
         # L1-routing review note (1): the finally-block record write must never
         # replace the client's rc (disk full, permissions).
-        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+        plan = {"agent": "l2-worker", "client": "opencode", "model": "m",
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
-                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
                 "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
@@ -7941,9 +7941,9 @@ class WorkerRecordTests(_WorkerRecordBase):
     def test_a_record_start_failure_still_runs_the_client(self):
         # V4 ps final review: workers_dir()/_worker_record_start() run before
         # run_client; an OSError there must not stop the client from launching.
-        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+        plan = {"agent": "l2-worker", "client": "opencode", "model": "m",
                 "cmd": [sys.executable, "-c", "pass"], "env": {},
-                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2},
                 "run_id": "20260928-092516-test-run-abc123",
                 "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
@@ -8799,7 +8799,7 @@ class ProviderResetStateTests(unittest.TestCase):
 
 class GatewayCooldownStopTests(unittest.TestCase):
     """R6STOP (2026-09-28): the OmniRoute gateway's per-credential cooldown --
-    the stop a t2-worker run actually gets when google_ai_studio's free tier is
+    the stop a l2-worker run actually gets when google_ai_studio's free tier is
     spent -- was invisible to the REVROUTE recorder, measured in
     work/L1-routing/R6RES.out section 2:
 
@@ -8822,7 +8822,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
     """
 
     NOW = datetime.datetime(2026, 9, 28, 12, 0, 0, tzinfo=datetime.timezone.utc)
-    # Verbatim from the call log R6RES section 1 quotes (t2-worker-free-only,
+    # Verbatim from the call log R6RES section 1 quotes (l2-worker-free-only,
     # 12 rows, 0 tokens), with the seconds R6RES section 2 tested against.
     GEMINI_COOLDOWN = ("Error: [429] All credentials for model gemini-3.8-flash "
                        "are cooling down (reset after 37s)")
@@ -8832,12 +8832,12 @@ class GatewayCooldownStopTests(unittest.TestCase):
                     "exceeded for metric: generate_content_free_tier_requests, "
                     "limit: 20, model: gemini-3.8-flash "
                     "Please retry in 59.250991496s.")
-    # FREEWIRE 2026-09-30: the gemini head left t2-worker (and providers.
-    # google_ai_studio is now unavailable), so the t2-worker attribution tests
-    # below name a model t2-worker still serves from exactly ONE provider -
+    # FREEWIRE 2026-09-30: the gemini head left l2-worker (and providers.
+    # google_ai_studio is now unavailable), so the l2-worker attribution tests
+    # below name a model l2-worker still serves from exactly ONE provider -
     # free-ai's qwen7b grant (SCWREMOVAL 2026-10-06 removed the scaleway
-    # provider and its t2-worker leg; free_ai/qwen7b is the surviving leg
-    # exactly one t2-worker/-free-only leg serves).
+    # provider and its l2-worker leg; free_ai/qwen7b is the surviving leg
+    # exactly one l2-worker/-free-only leg serves).
     SCW_COOLDOWN = ("Error: [429] All credentials for model "
                     "qwen7b are cooling down "
                     "(reset after 37s)")
@@ -8928,11 +8928,11 @@ class GatewayCooldownStopTests(unittest.TestCase):
             "zen")
 
     def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
-        # FREEWIRE 2026-09-30: the model t2-worker names from one provider is now
+        # FREEWIRE 2026-09-30: the model l2-worker names from one provider is now
         # free-ai's qwen7b grant (the gemini head was removed). The
-        # measured wrong answer was antigravity (the next live leg of t2-worker).
+        # measured wrong answer was antigravity (the next live leg of l2-worker).
         recorded = self.agent.record_reset_stop(
-            self.SCW_COOLDOWN, "t2-worker", self.registry,
+            self.SCW_COOLDOWN, "l2-worker", self.registry,
             now=self.NOW, path=self.state_path)
         self.assertEqual(recorded, ("free_ai", "2026-09-28T12:00:37Z"))
         self.assertEqual(list(self.state()["providers"]), ["free_ai"],
@@ -8943,7 +8943,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_t2_worker_free_only_model_named_cooldown_benches_its_provider(self):
         self.assertEqual(
-            self.agent.record_reset_stop(self.SCW_RETRY, "t2-worker-free-only",
+            self.agent.record_reset_stop(self.SCW_RETRY, "l2-worker-free-only",
                                          self.registry, now=self.NOW,
                                          path=self.state_path),
             ("free_ai", "2026-09-28T12:00:59Z"))
@@ -8951,7 +8951,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
-        # the trial-first clean routes): t2-worker-clean HAS a gemini leg now,
+        # the trial-first clean routes): l2-worker-clean HAS a gemini leg now,
         # vertex/gemini-3.8-flash serves gemini-3.8-flash alone, and naming it
         # correctly benches vertex_ai. The intent stands -- naming a model the
         # route does not serve falls back to the first live leg, as an unnamed
@@ -8960,7 +8960,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # from it rather than pinned to one provider's name (DSBACK 2026-09-28
         # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
         # it to the ovhcloud head leg).
-        legs = self.registry["routes"]["t2-worker-clean"]["legs"]
+        legs = self.registry["routes"]["l2-worker-clean"]["legs"]
         named = self.agent.stop_provider_id(
             "Error: [429] All credentials for model gemini-3.7-flash-high are "
             "cooling down (reset after 37s)", self.registry, legs)
@@ -8977,7 +8977,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # than the retry the client will do itself.
         self.assertIsNone(self.agent.record_reset_stop(
             "Error: [429] All credentials for model gemini-3.8-flash are "
-            "cooling down", "t2-worker", self.registry,
+            "cooling down", "l2-worker", self.registry,
             now=self.NOW, path=self.state_path))
         self.assertFalse(os.path.exists(self.state_path))
 
@@ -9019,14 +9019,14 @@ class GatewayCooldownStopTests(unittest.TestCase):
                               want, line)
 
     def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
-        # CIGREEN: expectation moved by 7e329c7e (OVH legs added to t2-worker):
-        # the real t2-worker route serves gpt-oss-120b from ovhcloud AND
+        # CIGREEN: expectation moved by 7e329c7e (OVH legs added to l2-worker):
+        # the real l2-worker route serves gpt-oss-120b from ovhcloud AND
         # cerebras AND SambaNova now (the groq leg spells it openai/gpt-oss-120b,
         # a different token). The verdict holds -- the stop line names the
         # model, not the provider, so NOBODY may be benched on a three-way
         # guess (and picking one silently starves it) -- only the pinned name
         # list grows by one.
-        pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "t2-worker")
+        pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "l2-worker")
         self.assertIsNone(pid)
         # The names are the registry's own provider ids — the spelling every
         # other read of this registry keys on, so a message is never the only
@@ -9038,7 +9038,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
         with contextlib.redirect_stdout(io.StringIO()):
             recorded = self.agent.record_reset_stop(
-                self.GPT_OSS_COOLDOWN, "t2-worker", self.registry,
+                self.GPT_OSS_COOLDOWN, "l2-worker", self.registry,
                 now=self.NOW, path=self.state_path)
         self.assertIsNone(recorded)
         self.assertFalse(os.path.exists(self.state_path),
@@ -9046,23 +9046,23 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_model_one_provider_serves_still_benches_that_provider(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the antigravity
-        # leg): gemini-3.7-flash-high is served by NO t2-worker leg now, so
+        # leg): gemini-3.7-flash-high is served by NO l2-worker leg now, so
         # naming it falls back to the first live leg instead of benching
         # antigravity. The intent stands -- the ambiguity rule must not swallow
         # a clean single-served stop -- pinned here on free-ai's qwen7b
-        # grant, which exactly one t2-worker leg serves.
+        # grant, which exactly one l2-worker leg serves.
         pid, printed = self.stop(
             "Error: [429] All credentials for model "
             "qwen7b are "
-            "cooling down (reset after 37s)", "t2-worker")
+            "cooling down (reset after 37s)", "l2-worker")
         self.assertEqual(pid, "free_ai", printed)
         self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
         # this file in and skips the leg. FREEWIRE 2026-09-30: the recorded line
-        # names free-ai's qwen7b leg (the gemini head left t2-worker).
-        self.agent.record_reset_stop(self.SCW_COOLDOWN, "t2-worker",
+        # names free-ai's qwen7b leg (the gemini head left l2-worker).
+        self.agent.record_reset_stop(self.SCW_COOLDOWN, "l2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
@@ -9141,7 +9141,7 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
         review = {"state": "resolved",
                   "reviewer": {"client": "opencode", "model": "opencode/deepseek-v4.1-flash"}}
         model, combo, note = self.agent.reviewer_run_override(
-            review, client, self.real_cfg(), 3, "omniroute/t3-driver", None, False)
+            review, client, self.real_cfg(), 3, "omniroute/l3-driver", None, False)
         self.assertEqual(model, "opencode/deepseek-v4.1-flash")
         self.assertIsNone(combo, "no gateway combo to rename: the route stands")
         self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
@@ -10348,7 +10348,7 @@ class EffortRungPlumbingTests(unittest.TestCase):
 
     def test_a_model_without_the_rung_declared_gets_no_invented_variant(self):
         # CIGREEN: expectation moved by 266e16da (render follows the head leg's
-        # ladder, tools/registry.py:1603): t3-driver's head is now
+        # ladder, tools/registry.py:1603): l3-driver's head is now
         # gemini-3.8-flash with a [low, medium, high] ladder, so the render
         # declares those variants and #high is correctly appended. The intent
         # stands -- a rung the config declares no variant for is dropped, never
@@ -10384,7 +10384,7 @@ class EffortRungPlumbingTests(unittest.TestCase):
         plan = self.agent.build_plan(ns, self.cfg)
         cmd = plan["cmd"]
         model = cmd[cmd.index("--model") + 1]
-        self.assertEqual(model, "omniroute/t3-driver")
+        self.assertEqual(model, "omniroute/l3-driver")
         self.assertNotIn("#", model)
 
     def test_a_gateway_client_takes_the_bare_combo(self):
@@ -11100,7 +11100,7 @@ class LeafSpawnGateOverlayTests(unittest.TestCase):
                          [("subagent", "*", "deny"), ("task", "*", "deny")])
 
     def test_a_spawning_tier_denies_all_then_allows_its_one_child(self):
-        for tier, child in ((1, "t2-worker"), (2, "t3-reviewer")):
+        for tier, child in ((1, "l2-worker"), (2, "t3-reviewer")):
             rules = self.rules(tier)
             for gate in ("subagent", "task"):
                 own = [r for r in rules if r[0] == gate]
@@ -11161,9 +11161,9 @@ class CanonicalRunIdTests(unittest.TestCase):
         return ns
 
     def _cfg(self, providers=None):
-        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
                "providers": providers or {}}
-        cfg["providers"].setdefault("omniroute", {"models": {"t2-worker": {}}})
+        cfg["providers"].setdefault("omniroute", {"models": {"l2-worker": {}}})
         return cfg
 
     def _overlay(self, plan):
@@ -11321,7 +11321,7 @@ class CanonicalRunIdTests(unittest.TestCase):
 
     def test_a_model_off_the_gateway_gets_neither_header(self):
         cfg = self._cfg({"other": {"models": {"m": {}}}})
-        cfg["agents"]["t2-worker"]["model"] = "other/m"
+        cfg["agents"]["l2-worker"]["model"] = "other/m"
         plan = self.cli.build_plan(self._args(title="T"), cfg)
         self.assertNotIn("providers", self._overlay(plan))
 
@@ -11475,16 +11475,16 @@ class RunIdRecordTests(_WorkerRecordBase):
 
     def _plan(self, **over):
         run_id = "20260928-092516-fix-the-router-abc123"
-        plan = {"agent": "t2-worker", "client": "opencode", "model": "m",
+        plan = {"agent": "l2-worker", "client": "opencode", "model": "m",
                 # what build_plan actually hands the child (autoos-agent.py
                 # build_plan: env["AUTOOS_AGENT_RUN_ID"] = run_id)
                 "cmd": [sys.executable, "-c", "pass"],
                 "env": {"AUTOOS_AGENT_DEPTH": "1", "AUTOOS_AGENT_MAX_DEPTH": "3",
                         "AUTOOS_AGENT_RUN_ID": run_id},
                 "run_id": run_id,
-                "route": {"combo": "t2-worker", "reason": "card", "privacy": "public",
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
                           "review": False, "tier": 2,
-                          "route_plan": {"route": "t2-worker", "class": "paid",
+                          "route_plan": {"route": "l2-worker", "class": "paid",
                                          "leg": "p/m", "effort": "low", "p": 0.8,
                                          "expected_cost": 0.1, "bucket": "S2",
                                          "skipped_legs": [],
@@ -11614,7 +11614,7 @@ class RunIdRecordTests(_WorkerRecordBase):
     def test_the_route_plan_is_persisted_and_redacted_like_the_rest(self):
         _rc, rec, _env = self._cmd_run(self._plan())
         plan = rec["route_plan"]
-        self.assertEqual(plan["route"], "t2-worker")
+        self.assertEqual(plan["route"], "l2-worker")
         self.assertEqual(plan["bucket"], "S2")
         self.assertEqual(plan["skipped_legs"], [])
         self.assertNotIn("sk-ant", json.dumps(plan))
@@ -13349,7 +13349,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
     # --- item 2: the tier agent model is consulted before any client default ---
 
     def claude_tier_cfg(self):
-        """opencode.jsonc whose t2-worker agent answers on an all-Claude route.
+        """opencode.jsonc whose l2-worker agent answers on an all-Claude route.
 
         TEST-LOCAL declaration (the shipped opencode.jsonc no longer declares
         opus-4-6): mirrors the neighbouring `_cfg` fixtures that declare models
@@ -13357,7 +13357,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
         """
         import copy
         cfg = copy.deepcopy(self.real_cfg)
-        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        cfg["agents"]["l2-worker"]["model"] = "omniroute/opus-4-6"
         cfg.setdefault("providers", {}).setdefault(
             "omniroute", {}).setdefault("models", {})["opus-4-6"] = {}
         return cfg
@@ -13370,7 +13370,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
         import copy
         cli = self.cli()
         cfg = copy.deepcopy(self.real_cfg)
-        cfg["agents"]["t2-worker"]["model"] = "omniroute/opus-4-6"
+        cfg["agents"]["l2-worker"]["model"] = "omniroute/opus-4-6"
         registry = self.shipped(opencode={"default_model": "deepseek-v4.1-flash"})
         with self.assertRaisesRegex(ValueError, "omniroute/opus-4-6"):
             cli.effective_spawn_model(
@@ -13396,7 +13396,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
         model, source = cli.effective_spawn_model(
             "opencode", registry=registry, cfg=self.claude_tier_cfg(), tier=2)
         self.assertEqual(model, "omniroute/opus-4-6")
-        self.assertIn("t2-worker", source)
+        self.assertIn("l2-worker", source)
         refusal, note = cli.claude_spawn_refusal("opencode", {}, registry,
                                                  cfg=self.claude_tier_cfg(), tier=2)
         self.assertIsNotNone(refusal, note)
@@ -13475,7 +13475,7 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
         dict(client="opencode", card="role=implement,complexity=hard"),
         dict(client="opencode", free=True),
         dict(client="opencode", free=True, tier=2),
-        dict(client="opencode", model="omniroute/t1-orchestrator", tier=2),
+        dict(client="opencode", model="omniroute/l1-orchestrator", tier=2),
         dict(client="qwen", tier=1),
         dict(client="qwen", card="role=implement"),
         dict(client="qoder", tier=2),
@@ -13665,9 +13665,9 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # `_resolve_route_v2` replaces the card's combo with the resolver's route;
         # the early gate reads the client default and never sees it. This is the
         # final plan that route produces.
-        plan = {"client": "opencode", "agent": "t2-worker",
+        plan = {"client": "opencode", "agent": "l2-worker",
                 "model": "omniroute/claude-route",
-                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "l2-worker",
                         "--model", "omniroute/claude-route", "--title", "t", "x"],
                 "route": {"combo": "claude-route", "resolver": True}, "env": {}}
         refusal, note = self.last_mile(self.args(), plan)
@@ -13809,9 +13809,9 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # the bare combo. One normaliser decides they are one value -- with two
         # spellings an already-priced route reads as a caller's unknown model.
         args = self.args(tier=2, card=None)
-        plan = {"client": "opencode", "agent": "t2-worker",
+        plan = {"client": "opencode", "agent": "l2-worker",
                 "model": "omniroute/r-cheap#high",
-                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "l2-worker",
                         "--model", "omniroute/r-cheap#high", "--title", "t", "x"],
                 "route": {"combo": "r-cheap"}, "env": {}}
         pairs = self.agent.plan_launch_models(plan, args, self.cfg(), self.registry)
@@ -13841,8 +13841,8 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # Finding 5: `plan_launch_models` swallowed the router's ValueError and
         # priced the argv strictly, so a card the router refuses left as a
         # `claude_budget:` refusal — wrong door, next steps hidden.
-        plan = {"client": "opencode", "agent": "t2-worker",
-                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+        plan = {"client": "opencode", "agent": "l2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "l2-worker",
                         "--model", "omniroute/r-cheap", "--title", "t", "x"],
                 "route": {"combo": "r-cheap"}, "env": {}}
         args = self.args(card="role=bogus")
@@ -13857,8 +13857,8 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # the router's own ValueError is cmd_run's business (its CLI words are
         # asserted by test_the_cli_still_prints_the_router_words_for_a_bad_card).
         cli = self.agent
-        plan = {"client": "opencode", "agent": "t2-worker",
-                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+        plan = {"client": "opencode", "agent": "l2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "l2-worker",
                         "--model", "omniroute/r-cheap", "--title", "t", "x"],
                 "route": {"combo": "r-cheap"}, "env": {}}
         refusal, note = cli.claude_plan_refusal(self.args(card="role=bogus"), plan,
@@ -13891,13 +13891,13 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
         # child's OPENCODE_CONFIG_CONTENT (build_plan), where it OVERRIDES the jsonc
         # and the argv for opencode. A model named there is a model the process
         # receives, and a `--model` scan never saw it.
-        plan = {"client": "opencode", "agent": "t2-worker",
-                "cmd": ["opencode", "run", "--standalone", "--agent", "t2-worker",
+        plan = {"client": "opencode", "agent": "l2-worker",
+                "cmd": ["opencode", "run", "--standalone", "--agent", "l2-worker",
                         "--model", "omniroute/r-cheap", "--title", "t", "x"],
                 "route": {"combo": "r-cheap"},
                 "env": {"OPENCODE_CONFIG_CONTENT": json.dumps(
                     {"model": "omniroute/claude-route",
-                     "agents": {"t2-worker": {"model": "omniroute/claude-route"}}})}}
+                     "agents": {"l2-worker": {"model": "omniroute/claude-route"}}})}}
         refusal, note = self.last_mile(self.args(), plan)
         self.assertIsNotNone(refusal, note)
         self.assertIn("claude-route", refusal)
@@ -14211,7 +14211,7 @@ class CreditGuardWiringTests(unittest.TestCase):
                 track_record, client_state, client="opencode", env=None,
                 overlay_missing_at=None, credit_guards=None):
             seen.append(credit_guards)
-            return {"route": "t2-worker", "state": "ready", "reason": "stub",
+            return {"route": "l2-worker", "state": "ready", "reason": "stub",
                     "bucket": "S1", "defer_until": None, "explain": [],
                     "effort": None, "review": None}
 
@@ -14244,11 +14244,11 @@ class CreditGuardWiringTests(unittest.TestCase):
             client="opencode", tier=None, card="kind=implement,complexity=trivial",
             task="do the thing", free=False, free_model=self.agent.DEFAULT_FREE_MODEL,
             model=None, clean=False, allow_training=False, lean=False, no_defer=True)
-        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-               "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
         plan = self.agent._resolve_route_v2(args, {"kind": "implement"}, cfg, None)
         self.assertEqual(seen, [marker], plan)
-        self.assertEqual(plan["combo"], "t2-worker")
+        self.assertEqual(plan["combo"], "l2-worker")
 
     def test_the_mcp_route_tool_passes_the_guards_into_the_plan(self):
         marker = {"morph": {"state": "refuse"}}
@@ -14256,7 +14256,7 @@ class CreditGuardWiringTests(unittest.TestCase):
         # fresh instance load_agent() returns, so the spy goes on that one.
         seen = self._spy_sites(marker, target=mcp_server.agent)
         result = mcp_server.route_plan({"kind": "implement", "paths": ["tools"]})
-        self.assertEqual(result["route"], "t2-worker", result)
+        self.assertEqual(result["route"], "l2-worker", result)
         self.assertEqual(seen, [marker])
 
 
@@ -14819,8 +14819,8 @@ class WorkerShellPinTests(unittest.TestCase):
         return ns
 
     def _cfg(self):
-        return {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
-                "providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        return {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+                "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
 
     @unittest.skipIf(os.name == "nt", "a POSIX shell pin")
     def test_the_rendered_opencode_config_sets_its_shell(self):
@@ -15066,7 +15066,7 @@ class ResolvedWriterTests(unittest.TestCase):
     def test_a_gateway_run_resolves_provider_model_and_family(self):
         agent = self.agent
         plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
-                "model": "omniroute/t2-worker", "client": "opencode"}
+                "model": "omniroute/l2-worker", "client": "opencode"}
         registry = {"models": {"mimo-7": {"family": "mimo"}}}
         with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
              mock.patch.object(agent, "_call_log_rows",
@@ -15084,7 +15084,7 @@ class ResolvedWriterTests(unittest.TestCase):
     def test_a_gateway_failure_is_written_as_unresolved(self):
         agent = self.agent
         plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
-                "model": "omniroute/t2-worker", "client": "opencode"}
+                "model": "omniroute/l2-worker", "client": "opencode"}
         with mock.patch.object(agent, "manage_key", lambda env=None: None):
             writer = agent.resolved_writer(plan, True, registry={"models": {}})
         self.assertEqual(set(writer.values()), {agent.WRITER_UNRESOLVED})
@@ -15339,7 +15339,7 @@ class FamilyFenceUnreadableWriterTests(unittest.TestCase):
     nothing, and the review went on UNFENCED with a warning beside it. Measured live
     on a dry run of `--review-of 20260929-063303-familyfence-3-fix-round-3a237a` (a
     Qwen writer, whose record sat in the spawning checkout's store) from a checkout
-    that did not hold it: it planned `t3-driver`, qwen legs and all, and printed
+    that did not hold it: it planned `l3-driver`, qwen legs and all, and printed
     `review without a known writer family - cross-family not enforced`."""
 
     def setUp(self):
@@ -15911,7 +15911,7 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
         passing assertion about a list this process built for itself.
 
         CIGREEN: expectation moved by 7eff6020 (FREEWIRE wired nemotron legs
-        into t3-driver/t2-worker): fencing nvidia now trips the documented
+        into l3-driver/l2-worker): fencing nvidia now trips the documented
         fail-closed _fence_check_route refusal (any leg in the fence fences the
         combo), because the review card's combo carries an nvidia leg. The
         intent stands -- the fence reaches the CLI argv -- pinned here by
@@ -15953,7 +15953,7 @@ class FamilyFenceRecordTests(unittest.TestCase):
         # chance", and p_success ignores it (spec 5.7). rc 12 is the same story with
         # a different cause — and a record the validator rejects would be dropped.
         cli = self.agent
-        plan = {"route": {"combo": "t3-driver", "class": "cheap", "review": True},
+        plan = {"route": {"combo": "l3-driver", "class": "cheap", "review": True},
                 "client": "opencode", "free": False}
         tracked = cli.track_entry(plan, cli.EXIT_NO_OTHER_FAMILY, 1.0)
         self.assertIsNotNone(tracked)
@@ -16133,7 +16133,7 @@ class WriterProvenanceTests(unittest.TestCase):
     def test_a_gateway_run_is_proven_by_the_gateway(self):
         agent = self.agent
         plan = {"session_tag": "lane-x", "run_id": self.RUN_ID,
-                "model": "omniroute/t2-worker", "client": "opencode"}
+                "model": "omniroute/l2-worker", "client": "opencode"}
         with mock.patch.object(agent, "manage_key", lambda env=None: "k"), \
              mock.patch.object(agent, "_call_log_rows",
                                lambda *a, **k: [{"sessionTag": "lane-x/" + self.RUN_ID,
@@ -16466,7 +16466,7 @@ Options:
 
 class NativeComboTests(unittest.TestCase):
     """FAMILYFENCE-3 N4: an own-account run answers with the client's OWN model,
-    never a gateway combo. Before this its route was recorded as `t1-orchestrator`
+    never a gateway combo. Before this its route was recorded as `l1-orchestrator`
     — a combo OmniRoute does not even serve it through — so `ps`, the worker
     record and the run log all named a route the run never ran. The route a native
     run records is now `native:<client>`; a gateway run keeps its real combo."""
@@ -16480,7 +16480,7 @@ class NativeComboTests(unittest.TestCase):
         out = self._route_line("--client", "qoder", "--tier", "1", "--model",
                                "Efficient", "t")
         self.assertIn("route: native:qoder", out)
-        self.assertNotIn("t1-orchestrator", out)
+        self.assertNotIn("l1-orchestrator", out)
 
     def test_a_claude_run_records_its_own_account_route(self):
         out = self._route_line("--client", "claude", "--tier", "1", "t")
@@ -16503,8 +16503,8 @@ class NativeComboTests(unittest.TestCase):
                                   max_depth=None, dry_run=True, no_defer=False,
                                   not_family=None, review_of=None,
                                   no_fallthrough=False, run_id=None)
-        cfg = {"agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator"}},
-               "providers": {"omniroute": {"models": {"t1-orchestrator": {}}}}}
+        cfg = {"agents": {"l1-orchestrator": {"model": "omniroute/l1-orchestrator"}},
+               "providers": {"omniroute": {"models": {"l1-orchestrator": {}}}}}
         with mock.patch.object(agent, "gateway_up", lambda: True):
             plan = agent.build_plan(args, cfg)
         self.assertEqual(plan["route"]["combo"], "native:qoder")
@@ -16521,7 +16521,7 @@ class FreeOnlyComboTests(unittest.TestCase):
     """T0-PAID-2a1: a --free run pins the keyless opencode model, so its combo
     is only ever a label — but it must be an honest one. select_combo knows
     nothing of free (it stays pure: the MCP `route` tool takes only a card),
-    so a free run was labelled `t1-orchestrator`, a combo with a paid tail it
+    so a free run was labelled `l1-orchestrator`, a combo with a paid tail it
     never resolves. A free run is now labelled with the matching *-free-only
     twin when one exists."""
 
@@ -16534,28 +16534,28 @@ class FreeOnlyComboTests(unittest.TestCase):
         out = self._route_line("--free", "--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertIn("route: t1-orchestrator-free-only", out)
-        self.assertNotIn("route: t1-orchestrator ", out)
+        self.assertIn("route: l1-orchestrator-free-only", out)
+        self.assertNotIn("route: l1-orchestrator ", out)
 
     def test_a_free_default_card_is_labelled_t2_worker_free_only(self):
         out = self._route_line("--free", "--card",
                                "complexity=standard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertIn("route: t2-worker-free-only", out)
-        self.assertNotIn("route: t2-worker ", out)
+        self.assertIn("route: l2-worker-free-only", out)
+        self.assertNotIn("route: l2-worker ", out)
 
     def test_a_free_light_card_is_labelled_t3_driver_free_only(self):
         out = self._route_line("--free", "--card",
                                "complexity=trivial,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertIn("route: t3-driver-free-only", out)
-        self.assertNotIn("route: t3-driver ", out)
+        self.assertIn("route: l3-driver-free-only", out)
+        self.assertNotIn("route: l3-driver ", out)
 
     def test_a_paid_strong_card_keeps_its_paid_combo(self):
         out = self._route_line("--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertRegex(out, r"route: t1-orchestrator reason=")
+        self.assertRegex(out, r"route: l1-orchestrator reason=")
         self.assertNotIn("free-only", out)
 
     def test_the_build_plan_route_combo_is_the_free_only_one_too(self):
@@ -16575,11 +16575,11 @@ class FreeOnlyComboTests(unittest.TestCase):
                                   max_depth=None, dry_run=True, no_defer=False,
                                   not_family=None, review_of=None,
                                   no_fallthrough=False, run_id=None)
-        cfg = {"agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator"}},
-               "providers": {"omniroute": {"models": {"t1-orchestrator": {}}}}}
+        cfg = {"agents": {"l1-orchestrator": {"model": "omniroute/l1-orchestrator"}},
+               "providers": {"omniroute": {"models": {"l1-orchestrator": {}}}}}
         with mock.patch.object(agent, "gateway_up", lambda: True):
             plan = agent.build_plan(args, cfg)
-        self.assertEqual(plan["route"]["combo"], "t1-orchestrator-free-only")
+        self.assertEqual(plan["route"]["combo"], "l1-orchestrator-free-only")
         self.assertTrue(plan["free"])
         self.assertIn(agent.DEFAULT_FREE_MODEL, " ".join(plan["cmd"]))
 
@@ -16587,7 +16587,7 @@ class FreeOnlyComboTests(unittest.TestCase):
         # T0-PAID-3 P2: the expectation is derived, not hand-written. Every
         # combo in combos.json with a paid leg AND a "<name>-free-only" twin
         # must map to the twin; a combo with a paid leg but no twin
-        # (t2-orchestrator, t1-orchestrator-paid, *-clean) keeps its paid
+        # (l2-orchestrator, l1-orchestrator-paid, *-clean) keeps its paid
         # label on a free run -- there is no twin to name.
         agent = load_agent()
         with (ROOT / "configuration" / "omniroute" / "combos.json").open(
@@ -16626,12 +16626,12 @@ class FreeOnlyComboTests(unittest.TestCase):
                     kept.append(name)
         self.assertEqual(
             set(mapped),
-            {"t1-orchestrator", "t2-worker", "t3-driver"},
+            {"l1-orchestrator", "l2-worker", "l3-driver"},
             "a paid combo grew a free-only twin (or lost one)")
-        for name in ("t2-orchestrator", "t1-orchestrator-paid"):
+        for name in ("l2-orchestrator", "l1-orchestrator-paid"):
             self.assertIn(name, kept, name)
-        self.assertEqual(agent.free_only_combo("t2-worker-clean"),
-                         "t2-worker-clean")
+        self.assertEqual(agent.free_only_combo("l2-worker-clean"),
+                         "l2-worker-clean")
         self.assertEqual(agent.free_only_combo("t4-rag"), "t4-rag")
         self.assertIsNone(agent.free_only_combo(None))
 
@@ -18755,7 +18755,7 @@ class WinshimClientResolutionTests(unittest.TestCase):
         agent.LEGACY_OVERLAY_PATH = os.path.join(tmp, "legacy-measured.json")
         agent.TRACK_RECORD = os.path.join(tmp, "track-record.jsonl")
         fake_plan = {
-            "agent": "t2-worker", "client": "qoder",
+            "agent": "l2-worker", "client": "qoder",
             "model": "qwen/qwen3.8-flash",
             "cmd": ["qodercli", "-p", "--permission-mode", "dont_ask",
                     "--model", "qwen/qwen3.8-flash", "do the thing"], "env": {},
@@ -19524,7 +19524,7 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
         ns = argparse.Namespace(
             tier=2, card=None, allow_training=False, client="opencode",
             joinable=False, max_depth=None, clean=False,
-            model="omniroute/t2-worker",
+            model="omniroute/l2-worker",
             free=False, free_model=self.cli.DEFAULT_FREE_MODEL, isolate=True,
             auto=True, lean=False, title=None, dry_run=True, task="do it",
             no_defer=False, read_only=False)
@@ -19533,14 +19533,14 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
         return ns
 
     def _cfg(self):
-        return {"providers": {"omniroute": {"models": {"t2-worker": {}}}}}
+        return {"providers": {"omniroute": {"models": {"l2-worker": {}}}}}
 
     def test_non_autoos_sandbox_leaves_the_autoos_tree(self):
         from unittest import mock as _mock
         root = self._repo("Server")
         home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, home, True)
-        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/x",
+        route = {"tier": 2, "combo": "l2-worker", "model": "omniroute/x",
                  "reason": "stub", "privacy": "public", "review": False,
                  "resolver": False, "read_only": False, "effort": None}
         with _mock.patch.object(self.cli, "resolve_route",
@@ -19561,7 +19561,7 @@ class T2IsolateSecretsS4SandboxRootTests(unittest.TestCase):
 
     def test_autoos_cards_stay_in_logs_sandboxes(self):
         from unittest import mock as _mock
-        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/x",
+        route = {"tier": 2, "combo": "l2-worker", "model": "omniroute/x",
                  "reason": "stub", "privacy": "public", "review": False,
                  "resolver": False, "read_only": False, "effort": None}
         with _mock.patch.object(self.cli, "resolve_route",
@@ -20165,7 +20165,7 @@ class HandEntryPricingTests(unittest.TestCase):
     def test_a_managed_region_entry_is_not_read_as_a_hand_entry(self):
         # Its modelID is the route id itself, so the passthrough shape is absent
         # and the route half of the gate keeps answering for it.
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/t2-worker",
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/l2-worker",
                                                    SHIPPED_REGISTRY, self.cfg), "")
 
     def test_an_unknown_hand_id_is_still_refused(self):
@@ -20234,6 +20234,82 @@ class HandEntryPricingTests(unittest.TestCase):
         r = run_agent("run", "--model", "omniroute/vertex-3.6-flash",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+
+class DirectSeatHandEntriesTests(unittest.TestCase):
+    """DIRECTSEAT (operator 2026-10-06): opencode can pick exactly ONE model on a
+    seat or provider, with no combo and no fall-through, for the four doors the
+    operator named - agy Gemini 3.8 Flash, agy Claude Sonnet 5.5, native DeepSeek
+    Flash and Meta Muse Spark. Each is an opencode.jsonc hand entry (the
+    vertex-3.8-flash precedent), so the budget gate prices it through its modelID
+    leg: the registry must carry a row for what answers, and the entry's limits
+    must be that row's, not a guess. The agy gateway spells the effort INTO the
+    id (`agy/gemini-3.8-flash-high`, measured live 2026-10-06; there is no bare
+    `agy/gemini-3.8-flash`), so the ids below are the served ones. The Meta key is
+    not registered yet: the entry is declared now and answers once it is."""
+
+    # entry name -> (gateway modelID, registry leg, spends Claude)
+    ENTRIES = {
+        "agy-gemini-3.8-flash": (
+            "agy/gemini-3.8-flash-high", "antigravity/gemini-3.8-flash-high", False),
+        "agy-claude-sonnet-5-5-high": (
+            "agy/claude-sonnet-5-5-high", "antigravity/claude-sonnet-5-5-high", True),
+        "deepseek-direct-flash": (
+            "deepseek/deepseek-flash", "deepseek/deepseek-flash", False),
+        "meta-direct-muse-spark-1.3-contributor": (
+            "meta-api/muse-spark-1.3-contributor", "meta_api/muse-spark-1.3-contributor",
+            False),
+    }
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        self.models = self.cfg["providers"]["omniroute"]["models"]
+
+    def test_each_entry_passes_its_served_gateway_id_through(self):
+        for name, (model_id, _leg, _claude) in self.ENTRIES.items():
+            self.assertIn(name, self.models, name)
+            self.assertEqual(self.models[name]["modelID"], model_id, name)
+
+    def test_each_entry_is_a_hand_entry_not_a_route(self):
+        # A hand entry's modelID is a provider/model leg; a managed-region entry's
+        # modelID is the route id itself. Only the first shape is priced by leg.
+        for name in self.ENTRIES:
+            self.assertTrue(self.agent.hand_entry_model_id("omniroute/" + name, self.cfg),
+                            name)
+            self.assertNotIn(name, SHIPPED_REGISTRY["routes"], name)
+
+    def test_each_entry_resolves_to_its_registry_leg(self):
+        for name, (_id, leg, _claude) in self.ENTRIES.items():
+            self.assertEqual(
+                self.agent.hand_entry_leg("omniroute/" + name, SHIPPED_REGISTRY, self.cfg),
+                leg, name)
+
+    def test_each_entry_is_priced_and_only_the_sonnet_one_is_claude(self):
+        for name, (_id, _leg, claude) in self.ENTRIES.items():
+            got = self.agent.spawn_spends_claude(
+                "opencode", "omniroute/" + name, SHIPPED_REGISTRY, "--model", self.cfg)
+            self.assertIs(got, claude, name)
+
+    def test_the_gemini_entry_passes_the_d255_allow_list(self):
+        self.assertEqual(
+            self.agent.gemini_spawn_refusal("omniroute/agy-gemini-3.8-flash", None,
+                                            SHIPPED_REGISTRY, self.cfg), "")
+
+    def test_limits_are_the_registry_rows_own_numbers(self):
+        for name, (_id, leg, _claude) in self.ENTRIES.items():
+            _provider, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
+            row = SHIPPED_REGISTRY["models"][model_id]
+            limit = self.models[name]["limit"]
+            self.assertEqual(limit["context"], row["context_advertised"], name)
+            self.assertEqual(limit["output"], row["output_max"], name)
+
+    def test_the_two_new_agy_rows_carry_family_and_effort(self):
+        rows = SHIPPED_REGISTRY["models"]
+        self.assertEqual(rows["claude-sonnet-5-5-high"]["family"], "anthropic")
+        self.assertEqual(rows["claude-sonnet-5-5-high"]["effort_ladder"], ["high"])
+        self.assertEqual(rows["gemini-3.8-flash-high"]["family"], "google")
+        self.assertEqual(rows["gemini-3.8-flash-high"]["effort_ladder"], ["high"])
 
 
 class VertexFlashRegistryRowsTests(unittest.TestCase):
@@ -20394,12 +20470,12 @@ class GeminiAllowListTests(unittest.TestCase):
                                       "ovh-direct-gpt-oss-120b"), "")
 
     def test_an_explicit_combo_with_some_off_list_legs_is_allowed(self):
-        # RWP2 S1 regression: `--model omniroute/t2-worker` is the same route a
-        # card reaches. t2-worker's registry data still carries one off-list
+        # RWP2 S1 regression: `--model omniroute/l2-worker` is the same route a
+        # card reaches. l2-worker's registry data still carries one off-list
         # fall-through leg (deepinfra/google/gemini-3.1-flash-lite) that only
         # answers when the legs ahead of it are down; refusing an explicit name
         # over it benched every qwen/gemini spawn that overrides the card.
-        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker"), "")
+        self.assertEqual(self.refusal("omniroute/l2-worker", "l2-worker"), "")
 
     def test_a_combo_whose_every_leg_is_off_list_is_refused(self):
         # The partial case is a leg that rarely answers; this is a route that can
@@ -20424,7 +20500,7 @@ class GeminiAllowListTests(unittest.TestCase):
         # The same route reached through a card: one fall-through leg that only
         # answers when the legs ahead of it are down must not bench every tier-2
         # spawn, so the router's pick is refused only when NO leg is on the list.
-        self.assertEqual(self.refusal("omniroute/t2-worker", "t2-worker",
+        self.assertEqual(self.refusal("omniroute/l2-worker", "l2-worker",
                                       explicit=False), "")
 
     def test_run_named_pro_hand_entry_is_refused_at_the_door(self):
@@ -20434,7 +20510,7 @@ class GeminiAllowListTests(unittest.TestCase):
             free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=True,
             auto=True, lean=False, title=None, dry_run=True, task="x", no_defer=False)
         cfg = {"providers": {"omniroute": {"models": {
-            "t2-worker": {"modelID": "t2-worker"},
+            "l2-worker": {"modelID": "l2-worker"},
             "vertex-2.5": {"modelID": "vertex/gemini-2.5-flash"}}}}}
         with mock.patch.object(self.agent, "resolve_route_unchecked",
                                lambda *a, **k: {"tier": 2, "model": "omniroute/vertex-2.5",

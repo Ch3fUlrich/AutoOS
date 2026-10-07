@@ -126,10 +126,10 @@ class RepoTests(unittest.TestCase):
         # the narrowest advertised window among its SERVED legs.
         # CIGREEN: expectation moved by 018438ed (TORDER TASK1, t1 band 1M-only:
         # every sub-1M leg moved out of t1 into t2/t3, so on this branch every
-        # served leg of t1-orchestrator and t1-orchestrator-free-only is a 1M
+        # served leg of l1-orchestrator and l1-orchestrator-free-only is a 1M
         # leg and the honest promise is back to 1000000).
-        clamp = {"t1-orchestrator": 1000000, "t1-orchestrator-free-only": 1000000,
-                 "t1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
+        clamp = {"l1-orchestrator": 1000000, "l1-orchestrator-free-only": 1000000,
+                 "l1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
         seen = set()
         for m in doc["models"]:
@@ -146,7 +146,7 @@ class CheckTests(SandboxCase):
 
     def test_check_reports_drift_with_a_diff_and_writes_nothing(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["context"] = 262144
+        model(doc, "l2-worker")["context"] = 262144
         self.box.save_catalog(doc)
         before = self.box.snapshot()
         result = self.box.run("--check")
@@ -158,7 +158,7 @@ class CheckTests(SandboxCase):
 
     def test_a_display_name_change_is_drift_in_opencode(self):
         doc = self.box.catalog()
-        model(doc, "t3-driver")["name"] = "t3 renamed"
+        model(doc, "l3-driver")["name"] = "t3 renamed"
         self.box.save_catalog(doc)
         result = self.box.run("--check")
         self.assertEqual(result.returncode, 1)
@@ -169,10 +169,10 @@ class WriteTests(SandboxCase):
     def drift(self):
         # deepseek-v4.1-flash was the drift model until it fail-closed
         # (deepseek 402, 2026-09-27T16:4xZ) and left ide-models.json;
-        # t2-worker-clean is the servable equivalent with a ladder.
+        # l2-worker-clean is the servable equivalent with a ladder.
         doc = self.box.catalog()
-        model(doc, "t2-worker-clean")["output"] = 40000
-        model(doc, "t3-driver")["context"] = 65536
+        model(doc, "l2-worker-clean")["output"] = 40000
+        model(doc, "l3-driver")["context"] = 65536
         self.box.save_catalog(doc)
 
     def test_write_fixes_every_surface_and_a_rerun_is_byte_identical(self):
@@ -187,18 +187,18 @@ class WriteTests(SandboxCase):
         self.assertEqual(self.box.run("--check").returncode, 0)
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
-        t1 = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
+        t1 = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
         # CIGREEN: expectation moved by e1da4f7a (L1-CLEAN D2 render moved the
         # -clean twins from deepseek's 1M window to the 128k trial-first head;
         # 35148c5c made ovh the head) - the drift here only changes output.
         self.assertEqual(t1["limit"], {"context": 128000, "output": 40000})
-        self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
+        self.assertEqual(oc["providers"]["litellm"]["models"]["l3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
         self.assertEqual(by_id["omniroute-t2-worker-clean"]["max_output_tokens"], 40000)
         self.assertEqual(by_id["litellm-t3-driver"]["max_input_tokens"], 65536)
         toml = self.box.text("openhands_toml")
-        section = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
+        section = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
         self.assertIn("max_input_tokens = 65536", section)
 
     def test_everything_outside_the_managed_regions_is_untouched(self):
@@ -275,8 +275,8 @@ class WriteTests(SandboxCase):
         # CIGREEN: expectation moved by 35148c5c (trial-first clean routes head
         # ovh gpt-oss-120b, ladder low/medium/high) + e1da4f7a (the render
         # follows the served head): the -clean twins now carry low/medium/high,
-        # and t1-orchestrator-free-only's served head is the gemini free leg
-        # (ladder low/medium/high), so it carries variants too; t3-driver's
+        # and l1-orchestrator-free-only's served head is the gemini free leg
+        # (ladder low/medium/high), so it carries variants too; l3-driver's
         # served head likewise carries low/medium/high now.
         # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
         # ladder is low/medium/high) and stays the low/medium/high case.
@@ -287,24 +287,24 @@ class WriteTests(SandboxCase):
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         self.assertEqual(
             [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["t1-orchestrator-free-only"]["variants"]],
+             oc["providers"]["omniroute"]["models"]["l1-orchestrator-free-only"]["variants"]],
             ["low", "medium", "high"])
-        clean = oc["providers"]["omniroute"]["models"]["t2-worker-clean"]
+        clean = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
         self.assertEqual([v["id"] for v in clean["variants"]],
                          ["low", "medium", "high"])
         for v in clean["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         self.assertEqual(
             [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["t3-driver-clean"]["variants"]],
+             oc["providers"]["omniroute"]["models"]["l3-driver-clean"]["variants"]],
             ["low", "medium", "high"])
-        # GLM55 2026-10-05 (operator): t3-driver heads on oc/glm-5.3-flash,
+        # GLM55 2026-10-05 (operator): l3-driver heads on oc/glm-5.3-flash,
         # whose model row carries no effort ladder - the variants block drops
-        # (the render's rule), and t2-worker moves with it.
+        # (the render's rule), and l2-worker moves with it.
         self.assertNotIn("variants",
-                         oc["providers"]["omniroute"]["models"]["t3-driver"])
+                         oc["providers"]["omniroute"]["models"]["l3-driver"])
         self.assertNotIn("variants",
-                         oc["providers"]["omniroute"]["models"]["t2-worker"])
+                         oc["providers"]["omniroute"]["models"]["l2-worker"])
 
 
 class CommaDisciplineTests(SandboxCase):
@@ -327,7 +327,7 @@ class CommaDisciplineTests(SandboxCase):
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
         models = oc["providers"]["litellm"]["models"]
         self.assertIn("my-own", models)
-        self.assertIn("t2-worker", models)
+        self.assertIn("l2-worker", models)
         self.assertEqual(self.box.run("--check").returncode, 0)
 
     def test_a_hand_entry_after_the_region_gets_a_comma_before_it(self):
@@ -385,21 +385,21 @@ class UnusableInputTests(SandboxCase):
 
     def test_a_catalog_model_without_a_context(self):
         doc = self.box.catalog()
-        del model(doc, "t2-worker")["context"]
+        del model(doc, "l2-worker")["context"]
         self.box.save_catalog(doc)
-        self.assert_refused("t2-worker", "context")
+        self.assert_refused("l2-worker", "context")
 
     def test_an_unknown_surface(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["surfaces"]["omniroute"].append("vscode")
+        model(doc, "l2-worker")["surfaces"]["omniroute"].append("vscode")
         self.box.save_catalog(doc)
         self.assert_refused("vscode")
 
     def test_a_duplicate_id(self):
         doc = self.box.catalog()
-        doc["models"].append(dict(model(doc, "t2-worker")))
+        doc["models"].append(dict(model(doc, "l2-worker")))
         self.box.save_catalog(doc)
-        self.assert_refused("t2-worker")
+        self.assert_refused("l2-worker")
 
     def test_a_tier_profile_for_a_model_the_catalog_does_not_offer_there(self):
         spec = json.loads(self.box.text("tier_profiles"))
@@ -416,31 +416,31 @@ class UnusableInputTests(SandboxCase):
 
     def test_non_list_effort_ladder_is_refused(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["effort_ladder"] = "low"
+        model(doc, "l2-worker")["effort_ladder"] = "low"
         self.box.save_catalog(doc)
         self.assert_refused("effort_ladder")
 
     def test_non_string_in_effort_ladder_list_is_refused(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["effort_ladder"] = ["low", 42, "high"]
+        model(doc, "l2-worker")["effort_ladder"] = ["low", 42, "high"]
         self.box.save_catalog(doc)
         self.assert_refused("effort_ladder")
 
     def test_empty_effort_ladder_list_is_refused(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["effort_ladder"] = []
+        model(doc, "l2-worker")["effort_ladder"] = []
         self.box.save_catalog(doc)
         self.assert_refused("effort_ladder", "empty")
 
     def test_none_in_effort_ladder_is_refused(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["effort_ladder"] = ["none", "low", "medium"]
+        model(doc, "l2-worker")["effort_ladder"] = ["none", "low", "medium"]
         self.box.save_catalog(doc)
         self.assert_refused("effort_ladder", "none")
 
     def test_duplicate_rungs_in_effort_ladder_is_refused(self):
         doc = self.box.catalog()
-        model(doc, "t2-worker")["effort_ladder"] = ["low", "medium", "low"]
+        model(doc, "l2-worker")["effort_ladder"] = ["low", "medium", "low"]
         self.box.save_catalog(doc)
         self.assert_refused("effort_ladder", "duplicate")
 
@@ -469,13 +469,13 @@ class TomlUnknownModelTests(SandboxCase):
 
     def test_write_leaves_that_table_untouched_and_syncs_the_rest(self):
         doc = self.box.catalog()
-        model(doc, "t3-driver")["context"] = 65536
+        model(doc, "l3-driver")["context"] = 65536
         self.box.save_catalog(doc)
         result = self.box.run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         toml = self.box.text("openhands_toml")
         self.assertEqual(toml.split("[llm.mine]", 1)[1].split("\n[", 1)[0], self.mine)
-        t3 = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
+        t3 = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
         self.assertIn("max_input_tokens = 65536", t3)
 
 
@@ -540,7 +540,7 @@ class RegistrySourcedTests(unittest.TestCase):
 
     def test_a_registry_context_change_is_drift_in_opencode(self):
         doc = self.box.registry()
-        route_surface(doc, "t3-driver")["context"] = 65536
+        route_surface(doc, "l3-driver")["context"] = 65536
         self.box.save_registry(doc)
         result = self.box.run("--check")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
@@ -549,27 +549,27 @@ class RegistrySourcedTests(unittest.TestCase):
 
     def test_write_fixes_every_surface_from_the_registry(self):
         doc = self.box.registry()
-        # t3-driver lists both gateways - render_ide() takes context/output
+        # l3-driver lists both gateways - render_ide() takes context/output
         # from omniroute (IDE_GATEWAYS priority), one shared value for both.
-        route_surface(doc, "t3-driver", "omniroute")["context"] = 65536
-        # t3-driver-paid is litellm-only, so this is the value render_ide() uses.
-        route_surface(doc, "t3-driver-paid", "litellm")["output"] = 40000
+        route_surface(doc, "l3-driver", "omniroute")["context"] = 65536
+        # l3-driver-paid is litellm-only, so this is the value render_ide() uses.
+        route_surface(doc, "l3-driver-paid", "litellm")["output"] = 40000
         self.box.save_registry(doc)
 
         result = self.box.run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
-        self.assertEqual(oc["providers"]["omniroute"]["models"]["t3-driver"]["limit"]["context"], 65536)
-        self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver"]["limit"]["context"], 65536)
-        self.assertEqual(oc["providers"]["litellm"]["models"]["t3-driver-paid"]["limit"]["output"], 40000)
+        self.assertEqual(oc["providers"]["omniroute"]["models"]["l3-driver"]["limit"]["context"], 65536)
+        self.assertEqual(oc["providers"]["litellm"]["models"]["l3-driver"]["limit"]["context"], 65536)
+        self.assertEqual(oc["providers"]["litellm"]["models"]["l3-driver-paid"]["limit"]["output"], 40000)
 
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
         self.assertEqual(by_id["omniroute-t3-driver"]["max_input_tokens"], 65536)
 
         toml = self.box.text("openhands_toml")
-        section = toml.split("[llm.t3-driver]", 1)[1].split("\n[", 1)[0]
+        section = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
         self.assertIn("max_input_tokens = 65536", section)
 
         second = self.box.run()
@@ -583,23 +583,23 @@ class RegistrySourcedTests(unittest.TestCase):
         catalog_copy = self.box.dir / "ide-models-explicit.json"
         shutil.copyfile(SOURCES["catalog"], catalog_copy)
         cat_doc = json.loads(catalog_copy.read_text(encoding="utf-8"))
-        model(cat_doc, "t3-driver")["context"] = 77777
+        model(cat_doc, "l3-driver")["context"] = 77777
         catalog_copy.write_text(json.dumps(cat_doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
         result = self.box.run("--catalog", str(catalog_copy))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
-        self.assertEqual(oc["providers"]["omniroute"]["models"]["t3-driver"]["limit"]["context"], 77777)
+        self.assertEqual(oc["providers"]["omniroute"]["models"]["l3-driver"]["limit"]["context"], 77777)
 
     def test_unresolvable_head_leg_raises_error(self):
         # A6a review: a route whose first leg resolve_leg rejects raises
         # ValueError (load_from_registry wraps it as ConfigError).
         doc = self.box.registry()
-        doc["routes"]["t2-worker"]["legs"][0] = "nonesuch/bogus"
+        doc["routes"]["l2-worker"]["legs"][0] = "nonesuch/bogus"
         self.box.save_registry(doc)
         result = self.box.run()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("t2-worker", result.stderr)
+        self.assertIn("l2-worker", result.stderr)
 
     def test_non_string_rung_in_registry_effort_ladder_raises_error(self):
         # A6a review: a non-string rung in the head model's effort_ladder

@@ -178,8 +178,9 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
   turn and may train. (why: a scoping grep printed full api-keys.yml lines with values; source: L1-routing SECRET-HANDLING 2026-09-29)
 - R-orch-28: Lanes commit early and often, and a respawn into a possibly-live worktree stands the old session down explicitly first — never assume a cut session died. Reviewers/briefs stay
   idempotent and read-only so cuts waste nothing. (why: every restart cuts in-flight calls; duplicate writers collided in one worktree twice; source: L1-backlog waves 6h/6i, 2026-09-30)
-- R-orch-29: L2 agents brief and pin 1M combos only (t1-orchestrator band, every
-  leg >=600k); 128k t2/t3 combos are L3 leaves. (why: under-windowed orchestrators drop context; source: operator 2026-10-07)
+- R-orch-29: L2 agents brief and pin 1M combos only (l1-orchestrator band);
+  128k t2/t3 combos are L3 leaves. Tier windows live in combo-create Skill,
+  not here. (why: under-windowed orchestrators drop context; source: operator 2026-10-07)
 - R-orch-30: Fan out at most 10 seats, default 3-5 judged on task complexity;
   prefer fewer; vary model families and prompt angles per seat so findings
   diverge. (why: identical seats duplicate findings and cost; source: operator 2026-10-07)

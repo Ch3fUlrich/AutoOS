@@ -4813,11 +4813,11 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
         $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
         $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-t3-driver.json') -Raw | ConvertFrom-Json
-        Assert-Equal $t1.model 'openai/t1-orchestrator'
+        Assert-Equal $t1.model 'openai/l1-orchestrator'
         Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $t1.api_key 'test-omni-key'
         Assert-Equal $t1.reasoning_effort 'high'
-        Assert-Equal $t3.model 'openai/t3-driver'
+        Assert-Equal $t3.model 'openai/l3-driver'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
         Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-t2-worker-clean.json')) 'clean twin missing'
@@ -4982,9 +4982,9 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     $tool = Join-Path $Root 'tools\autoos-agent.py'
     $out = & $py.Source $tool run --tier 2 --dry-run t 2>&1 | Out-String
     Assert-Equal $LASTEXITCODE 0 "dry run failed: $out"
-    Assert-True ($out -match '--standalone --agent t2-worker --model omniroute/t2-worker ') 't2-worker not paired with its model'
+    Assert-True ($out -match '--standalone --agent l2-worker --model omniroute/l2-worker ') 'l2-worker not paired with its model'
     $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String
-    Assert-True ($out -match '--model omniroute/t3-driver-clean ') 'clean twin not chosen'
+    Assert-True ($out -match '--model omniroute/l3-driver-clean ') 'clean twin not chosen'
     $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
     try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }
     finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
@@ -5501,7 +5501,7 @@ Test-Case "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)" {
 
 Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
     # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
-    # default LLM must mirror the opencode t1 setup (openai/t1-orchestrator via the
+    # default LLM must mirror the opencode t1 setup (openai/l1-orchestrator via the
     # container-side gateway) instead of falling back to local Ollama.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -5516,7 +5516,7 @@ Test-Case 'the embedded OpenHands setup script defaults to the gateway with a ke
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $settings.agent_settings.llm.model 'openai/t1-orchestrator'
+        Assert-Equal $settings.agent_settings.llm.model 'openai/l1-orchestrator'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $settings.agent_settings.llm.api_key 'test-gw-key'
         Assert-Equal $settings.agent_settings.llm.reasoning_effort 'high'
@@ -5575,10 +5575,10 @@ Test-Case 'opencode user config carries global gateway providers without secrets
     # Tier ids, names and windows come from catalog/ide-models.json at run
     # time (Get-AutoOSIdeModel), never as literals in the writer.
     Assert-True ($body -match "Get-AutoOSIdeModel\b.*-Surface 'opencode'") 'writer does not read catalog/ide-models.json'
-    Assert-True ($body -notmatch "'t3-driver-clean'") 'writer carries a literal tier list again'
+    Assert-True ($body -notmatch "'l3-driver-clean'") 'writer carries a literal tier list again'
     $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
     $ids = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties['omniroute'] -and @($_.surfaces.omniroute) -contains 'opencode' } | ForEach-Object { $_.id })
-    foreach ($t in @('t1-orchestrator', 't3-driver-clean', 'auto/smart')) {
+    foreach ($t in @('l1-orchestrator', 'l3-driver-clean', 'auto/smart')) {
         Assert-Contains $ids $t
     }
     Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
@@ -7222,7 +7222,7 @@ Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again wh
         $noKeys = Join-Path $scratch 'no-keys.yml'
         $null = New-Item -ItemType Directory -Path $stub, $qdir -Force
         $seed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}}}'
-        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"t2-worker"}}'
+        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"l2-worker"}}'
         [IO.File]::WriteAllText($qcfg, $seed)
         [IO.File]::WriteAllText((Join-Path $stub 'qwen-settings.json'), $routed)
         if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
@@ -7861,11 +7861,11 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         }
         # PROVFIX3 finding 1 re-pins the window: a route promises what its
         # smallest SERVED leg takes. FREEKEYS-2/2c (D-141) put the free band
-        # (scaleway/nebius, 128k advertised) ahead of gemini in t1-orchestrator,
+        # (scaleway/nebius, 128k advertised) ahead of gemini in l1-orchestrator,
         # so 128,000 is the honest promise now. Finding 8 still holds and now
         # bites for real: the head is gemini, whose ladder tops out at "high",
         # so the surface default "xhigh" is DROPPED, never forwarded.
-        $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 't1-orchestrator' })
+        $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 'l1-orchestrator' })
         Assert-Equal $t1.Count 1
         Assert-Equal $t1[0].max_tokens 128000
         Assert-Equal ($null -eq $t1[0].PSObject.Properties['reasoning_effort']) $true 'xhigh must be dropped for gemini, not forwarded'
@@ -7874,7 +7874,7 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
         Assert-Equal ($off -join ',') '' "bypass tools off: $($off -join ',')"
         Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
-        Assert-Equal $bypass.default_model.model 't1-orchestrator'
+        Assert-Equal $bypass.default_model.model 'l1-orchestrator'
         Assert-Equal $s.agent.tool_permissions.default 'allow'
         Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
         Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
@@ -8452,19 +8452,19 @@ Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"t3-driver-paid"}}}' |
+        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"l3-driver-paid"}}}' |
             Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
         Set-AutoOSZedProxy
         $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s.agent.default_model.model 't1-orchestrator'
+        Assert-Equal $s.agent.default_model.model 'l1-orchestrator'
         # A default already on omniroute must survive untouched.
-        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"t2-worker"}}}' |
+        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"l2-worker"}}}' |
             Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
         Set-AutoOSZedProxy
         $s2 = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
         Assert-Equal $s2.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s2.agent.default_model.model 't2-worker'
+        Assert-Equal $s2.agent.default_model.model 'l2-worker'
     } finally { $env:APPDATA = $realAppData }
 }
 
@@ -8472,7 +8472,7 @@ Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $oc = $stripped | ConvertFrom-Json
-    Assert-Equal $oc.model 'omniroute/t1-orchestrator'
+    Assert-Equal $oc.model 'omniroute/l1-orchestrator'
     Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
     # The model list is the managed block rendered from catalog/ide-models.json,
     # so the expectation is derived from that file: which tiers opencode may see
@@ -8515,16 +8515,16 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
     $stripped = $raw -replace '(?m)^\s*//.*$', ''
     $agents = ($stripped | ConvertFrom-Json).agents
-    Assert-True ($null -ne $agents.'t1-orchestrator') 't1-orchestrator agent missing'
-    Assert-True ($null -ne $agents.'t2-worker') 't2-worker agent missing'
+    Assert-True ($null -ne $agents.'l1-orchestrator') 'l1-orchestrator agent missing'
+    Assert-True ($null -ne $agents.'l2-worker') 'l2-worker agent missing'
     Assert-True ($null -ne $agents.'t3-reviewer') 't3-reviewer agent missing'
-    # t1 may launch t2-worker and nothing else (deny-all first, narrow
+    # t1 may launch l2-worker and nothing else (deny-all first, narrow
     # allow last — last matching rule wins).
-    $t1 = @($agents.'t1-orchestrator'.permissions)
+    $t1 = @($agents.'l1-orchestrator'.permissions)
     Assert-Equal $t1[0].action 'subagent'; Assert-Equal $t1[0].resource '*'; Assert-Equal $t1[0].effect 'deny'
-    Assert-Equal $t1[-1].resource 't2-worker'; Assert-Equal $t1[-1].effect 'allow'
+    Assert-Equal $t1[-1].resource 'l2-worker'; Assert-Equal $t1[-1].effect 'allow'
     # t2 may launch t3-reviewer and nothing else.
-    $t2 = @($agents.'t2-worker'.permissions)
+    $t2 = @($agents.'l2-worker'.permissions)
     Assert-Equal $t2[0].effect 'deny'
     Assert-Equal $t2[-1].resource 't3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
     # t3 is a leaf: subagent deny-all, no allow rule. It reads and runs
@@ -8545,8 +8545,8 @@ Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing'
     Assert-Equal $t3[6].action 'glob'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
     # The spawn gate is asserted for t1/t2 as well, in both spellings.
     foreach ($spec in @(
-        @{rules = $t1; child = 't2-worker';   name = 't1-orchestrator'},
-        @{rules = $t2; child = 't3-reviewer'; name = 't2-worker'})) {
+        @{rules = $t1; child = 'l2-worker';   name = 'l1-orchestrator'},
+        @{rules = $t2; child = 't3-reviewer'; name = 'l2-worker'})) {
         foreach ($gate in 'subagent', 'task') {
             $own = @(@($spec.rules) | Where-Object { $_.action -eq $gate })
             Assert-True ($own.Count -eq 2) "$($spec.name): $gate gate incomplete"
@@ -8697,13 +8697,13 @@ Test-Case 'subagent depth config' {
 
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
-    # t1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
+    # l1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
     # is omitted — a route with no servable leg — so apply prunes it and the
     # profile would point at a 404. The next assertion pins it staying gone.
-    foreach ($section in @('[llm]', '[llm.t1-orchestrator]', '[llm.t2-worker]', '[llm.t3-driver]', '[llm.t2-worker-clean]', '[llm.t3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.l2-worker-clean]', '[llm.l3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
-    Assert-True ($toml -notmatch '\[llm\.t1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'
+    Assert-True ($toml -notmatch '\[llm\.l1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'
     Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
     Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
     Assert-True ($toml -match 'api_key = ""') 'api_key not left empty'
@@ -8972,7 +8972,7 @@ Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers 
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'catalog')
         $catPath = Join-Path $fakeRoot 'catalog\ide-models.json'
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $fakeRoot
-        $cases = @('', '{ "models": [ ', '{"models": [{"id": "t1-orchestrator"}]}', '{"other": 1}')
+        $cases = @('', '{ "models": [ ', '{"models": [{"id": "l1-orchestrator"}]}', '{"other": 1}')
         for ($i = 0; $i -lt $cases.Count; $i++) {
             Remove-Item -LiteralPath $catPath -Force -ErrorAction SilentlyContinue
             if ($cases[$i]) { [IO.File]::WriteAllText($catPath, $cases[$i]) }
@@ -9838,21 +9838,21 @@ print('%s|%s|%s' % (
     }
     $contexts = @{
         # TORDER 2026-10-01 (D-TORDER-1b, CTXFIX, MAINPIN): t1 1M-only (>=600k,
-        # all 1048576, renders 1M); gemini 1M (live 1048576); opus/t2-orchestrator
+        # all 1048576, renders 1M); gemini 1M (live 1048576); opus/l2-orchestrator
         # 1M (antigravity opus 1048576, CTXFIX); t2/t3-clean 1M (deepseek 1M,
         # CTXFIX); t2/t3 full + free-only 128k clamp (sub-1M allowed, do not raise).
-        't1-orchestrator' = '1M'
-        't1-orchestrator-free-only' = '1M'
-        't1-orchestrator-paid' = '1M'
+        'l1-orchestrator' = '1M'
+        'l1-orchestrator-free-only' = '1M'
+        'l1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
-        't2-worker' = '128k'
-        't2-worker-clean' = '128k'; 't2-worker-free-only' = '128k'; 't2-orchestrator' = '1M'; 't3-driver' = '128k'; 't3-driver-clean' = '128k'; 't3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        'l2-worker' = '128k'
+        'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
         # L1-CLEAN wave 2026-10-05: the -clean routes carry the 128k credit band
         # legs (registry surfaces declare 128000), so they clamp to 128k.
-        # 2026-10-05 operator: t2-orchestrator is 1M again (agy claude head).
+        # 2026-10-05 operator: l2-orchestrator is 1M again (agy claude head).
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
-        't4-researcher' = '128k'
+        'l2-researcher' = '128k'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
         'opus-5-5' = '1M'
@@ -9875,7 +9875,7 @@ print('%s|%s|%s' % (
         Assert-Equal $c.context $contexts[$c.name]
     }
     # Every route the render fails closed is named in "omitted" and is never a
-    # combo (t1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
+    # combo (l1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
     # left that set on DSBACK 2026-09-28 when the operator top-up made
     # providers.deepseek available again, and whatever flips next —
     # derived, so there is no per-route list to keep current here).
@@ -9890,8 +9890,8 @@ print('%s|%s|%s' % (
     # *-clean = paid legs only: no free pool may train on private prompts.
     # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
     # free tier, mistral-code + qwen free pools. -contributor (trains by
-    # contract) is banned in t2-worker-clean/t3-driver-clean
-    # (t1-orchestrator-clean is omitted, see above). Direct-key legs
+    # contract) is banned in l2-worker-clean/l3-driver-clean
+    # (l1-orchestrator-clean is omitted, see above). Direct-key legs
     # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
     # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
     # metered credit-tier provider (providers.ovhcloud tier credit), not a
@@ -10099,7 +10099,7 @@ Test-Case 'apply prune: deletes only the retired combos the store holds, never a
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('tier2', 't2-worker', 'my-own-combo')
+        Set-AutoOSPruneList $d @('tier2', 'l2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
@@ -10118,7 +10118,7 @@ Test-Case 'apply prune: --dry-run names the retired combo and deletes nothing' {
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('tier2', 't2-worker', 'my-own-combo')
+        Set-AutoOSPruneList $d @('tier2', 'l2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
@@ -10137,7 +10137,7 @@ Test-Case 'apply prune: a second run finds no retired or omitted combos and dele
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        Set-AutoOSPruneList $d @('t2-worker', 'my-own-combo')
+        Set-AutoOSPruneList $d @('l2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') ''
@@ -10151,24 +10151,24 @@ Test-Case 'apply prune: a second run finds no retired or omitted combos and dele
 # OR1g: "omitted" lists only the ORPHANED routes (declared legs, none servable).
 # A live combo with such an id is a managed orphan apply prunes; a deliberately
 # legless route (*-paid, auto*) is never in that list, so a live "auto" or
-# "t2-worker-paid" is never touched or even named.
+# "l2-worker-paid" is never touched or even named.
 Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one' {
     $d = New-AutoOSPruneSandbox
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
         # PROVFIX3 verify: the example id follows the registry — T1FREE/MUSEAPI
-        # re-serviced t1-orchestrator-free-only, and DSBACK 2026-09-28 re-serviced
+        # re-serviced l1-orchestrator-free-only, and DSBACK 2026-09-28 re-serviced
         # deepseek-v4.1-flash (the operator top-up made providers.deepseek
-        # available again), so the orphan on show today is t1-orchestrator-clean.
+        # available again), so the orphan on show today is l1-orchestrator-clean.
         # Same rule, real id.
-        Set-AutoOSPruneList $d @('t1-orchestrator-clean', 't2-worker', 'my-own-combo')
+        Set-AutoOSPruneList $d @('l1-orchestrator-clean', 'l2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
-        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete t1-orchestrator-clean --yes'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete l1-orchestrator-clean --yes'
         Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
-        Assert-True ($out -like '*  - t1-orchestrator-clean: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -like '*  - l1-orchestrator-clean: omitted, deleted*') "no omitted-deletion line in: $out"
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
@@ -10176,22 +10176,22 @@ Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, nev
     }
 }
 
-Test-Case 'apply prune: --dry-run names the omitted combo and never names a live "auto" or "t2-worker-paid"' {
+Test-Case 'apply prune: --dry-run names the omitted combo and never names a live "auto" or "l2-worker-paid"' {
     $d = New-AutoOSPruneSandbox
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
         # DSBACK 2026-09-28: deepseek-v4.1-flash is a live combo again, so the
-        # orphan on show is t1-orchestrator-clean (see the case above).
-        Set-AutoOSPruneList $d @('t1-orchestrator-clean', 'auto', 't2-worker-paid', 'my-own-combo')
+        # orphan on show is l1-orchestrator-clean (see the case above).
+        Set-AutoOSPruneList $d @('l1-orchestrator-clean', 'auto', 'l2-worker-paid', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
-        Assert-True ($out -like '*  - t1-orchestrator-clean: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -like '*  - l1-orchestrator-clean: omitted, would delete*') "no omitted would-delete line in: $out"
         Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
         Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
-        Assert-True ($out -notlike '*- t2-worker-paid:*') 'a live "t2-worker-paid" combo was named'
+        Assert-True ($out -notlike '*- l2-worker-paid:*') 'a live "l2-worker-paid" combo was named'
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
     } finally {
         Stop-AutoOSTestHttpServer $srv
@@ -10224,7 +10224,7 @@ Test-Case 'apply registers meta_api from the shared meta key and stays idempoten
     $srv = $null
     try {
         [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
-        Set-AutoOSPruneList $d @('t2-worker')
+        Set-AutoOSPruneList $d @('l2-worker')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
         Assert-True ($out -like '*  - meta-api : would register (key from meta)*') "plan: $out"
         Assert-True ($out -notlike '*meta-api : no key in api-keys.yml*') 'read a meta_api key instead'
@@ -10252,7 +10252,7 @@ Test-Case 'apply registers meta_api from the shared meta key and stays idempoten
 }
 
 # L0 2026-09-27T19:07:39Z, free-ai/qwen7b on a fresh machine: the leg appeared
-# in t3-driver-free-only only on the SECOND apply run, because the first read
+# in l3-driver-free-only only on the SECOND apply run, because the first read
 # /v1/models before the gateway had enumerated the connection it had just added
 # and dropped the ref as "catalog does not know". The order that fixes it is
 # register -> refresh (omniroute models <provider>) -> read -> combos.
@@ -10295,13 +10295,13 @@ Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and w
         # list: FREEKEYS-2 put scaleway's and nebius' free grants in front of
         # free-ai's stopgap, so the old single-leg expectation pinned one tier's
         # pre-FREEKEYS legs. Fails if ANY leg goes missing, not only if free-ai does.
-        $want = @($doc.combos | Where-Object { $_.name -eq 't3-driver-free-only' })[0]
-        $expect = 'combo create t3-driver-free-only --strategy {0} --models {1}' -f `
+        $want = @($doc.combos | Where-Object { $_.name -eq 'l3-driver-free-only' })[0]
+        $expect = 'combo create l3-driver-free-only --strategy {0} --models {1}' -f `
             $want.strategy, ($want.models -join ',')
         Assert-Equal (@($calls | Where-Object { $_ -eq $expect }).Count) 1 `
             "first-run combos: $($calls -join ' | ')"
         Assert-Equal (@($calls | Where-Object {
-            $_ -like 'combo create t3-driver-free-only *' -and
+            $_ -like 'combo create l3-driver-free-only *' -and
             $_ -like '*--models *free-ai/qwen7b*' }).Count) 1 `
             "the new leg in the first combo write: $($calls -join ' | ')"
         $enumAt = -1; $comboAt = -1
