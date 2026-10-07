@@ -3,7 +3,7 @@
   "models": [
     {
       "id": "t1-orchestrator",
-      "name": "t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
+      "name": "L1 · t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -26,7 +26,7 @@
     },
     {
       "id": "t1-orchestrator-paid",
-      "name": "t1 orchestrator-1M — meta_api paid",
+      "name": "L1 · t1 orchestrator-1M — meta_api paid",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -49,7 +49,7 @@
     },
     {
       "id": "t1-orchestrator-free-only",
-      "name": "t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
+      "name": "L1 · t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
       "context": 1000000,
       "output": 32768,
       "effort_ladder": [
@@ -72,7 +72,7 @@
     },
     {
       "id": "t2-worker",
-      "name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+      "name": "L2 · t2 smart-reasoning-128k — ≤128k ctx (free-first)",
       "context": 128000,
       "output": 32768,
       "surfaces": {
@@ -90,7 +90,7 @@
     },
     {
       "id": "t2-worker-clean",
-      "name": "t2 smart-reasoning-128k — no training (sensitive data)",
+      "name": "L2 · t2 smart-reasoning-128k — no training (sensitive data)",
       "context": 128000,
       "output": 32768,
       "effort_ladder": [
@@ -108,7 +108,7 @@
     },
     {
       "id": "t2-worker-paid",
-      "name": "t2 smart-reasoning-128k — paid legs (escalation)",
+      "name": "L2 · t2 smart-reasoning-128k — paid legs (escalation)",
       "context": 131072,
       "output": 32768,
       "surfaces": {
@@ -120,7 +120,7 @@
     },
     {
       "id": "t2-worker-free-only",
-      "name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+      "name": "L2 · t2 smart-reasoning-128k — zero spend (free legs only)",
       "context": 131072,
       "output": 32768,
       "surfaces": {
@@ -138,7 +138,7 @@
     },
     {
       "id": "t2-orchestrator",
-      "name": "t2 orchestrator-1M — small-scope orchestration",
+      "name": "L2 · t2 orchestrator-1M — small-scope orchestration",
       "context": 1048576,
       "output": 32768,
       "effort_ladder": [
@@ -154,7 +154,7 @@
     },
     {
       "id": "t3-driver",
-      "name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+      "name": "L3 · t3 cheap-driver-128k — ≤128k ctx (cheapest)",
       "context": 128000,
       "output": 16384,
       "surfaces": {
@@ -172,7 +172,7 @@
     },
     {
       "id": "t3-driver-clean",
-      "name": "t3 cheap-driver-128k — no training (sensitive data)",
+      "name": "L3 · t3 cheap-driver-128k — no training (sensitive data)",
       "context": 128000,
       "output": 16384,
       "effort_ladder": [
@@ -190,7 +190,7 @@
     },
     {
       "id": "t3-driver-paid",
-      "name": "t3 cheap-driver-128k — paid legs (escalation)",
+      "name": "L3 · t3 cheap-driver-128k — paid legs (escalation)",
       "context": 131072,
       "output": 16384,
       "surfaces": {
@@ -202,7 +202,7 @@
     },
     {
       "id": "t3-driver-free-only",
-      "name": "t3 cheap-driver-128k — zero spend (free legs only)",
+      "name": "L3 · t3 cheap-driver-128k — zero spend (free legs only)",
       "context": 131072,
       "output": 16384,
       "surfaces": {
@@ -256,7 +256,7 @@
     },
     {
       "id": "t4-rag",
-      "name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+      "name": "L2 · t4-rag cohere RAG — 128k ctx (trial keys)",
       "context": 131072,
       "output": 16384,
       "surfaces": {
@@ -273,7 +273,7 @@
     },
     {
       "id": "t4-researcher",
-      "name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+      "name": "L2 · t4 researcher-128k (read-only, free legs, wide-context head)",
       "context": 131072,
       "output": 8192,
       "surfaces": {

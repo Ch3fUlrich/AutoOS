@@ -434,6 +434,24 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "gemini-3.8-flash-high": {
+      "$comment": "DIRECTSEAT 2026-10-06 (operator): the single-model opencode entry agy-gemini-3.8-flash (opencode.jsonc hand entry, no combo). The agy door spells the effort into the id and serves low/medium/high/tiered (live /v1/models 2026-10-06: agy/gemini-3.8-flash-high context_length 1000000, tool_calling true; there is no bare agy/gemini-3.8-flash). The door reports no output cap, so output_max is the native gemini-3.8-flash row's 65536. Only the high spelling is declared; add -medium/-low rows when a lane needs them. $0 marginal (antigravity seat). tool_calls stays unproven here.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-3.8-flash-high",
+      "output_max": 65536,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "gemini-3.1-pro-preview": {
       "$comment": "T1-CREDIT-FIX-10 M4 (D-253, operator 2026-10-01): Vertex AI leg of Gemini 3.1 Pro Preview (providers.vertex_ai, gateway connection 'vertex'). Model-level price stays 0 so unbilled legs bill $0; the billed leg price lives in provider_prices.vertex_ai at list $2.00 in / $12.00 out per 1M tokens (https://cloud.google.com/vertex-ai/generative-ai/pricing, accessed 2026-10-01). Window/ladder fields mirror the gemini-3.8-flash sibling row -- unmeasured for this id, re-measure before a leg depends on them. tool_calls unproven (never probed).",
       "context_advertised": 1048576,
@@ -1779,6 +1797,24 @@
       ],
       "family": "anthropic",
       "id": "claude-sonnet-5-5-medium",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "claude-sonnet-5-5-high": {
+      "$comment": "DIRECTSEAT 2026-10-06 (operator): the single-model opencode entry agy-claude-sonnet-5-5-high (opencode.jsonc hand entry, no combo). Live gateway agy/claude-sonnet-5-5-high measured 2026-10-06: context_length 1000000, max_output_tokens 128000, capabilities tool_calling true. Stored as the sibling -medium row stores it: 1M renders 1048576 and output stays the conservative 32768 (the live 128000 is not what a worker is budgeted at). $0 marginal (antigravity seat-metered) but family anthropic, so the Claude budget gate prices it as Claude. tool_calls stays unproven until a seat quotes one through this registry.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-sonnet-5-5-high",
       "output_max": 32768,
       "price_in": 0.0,
       "price_out": 0.0,
@@ -4259,7 +4295,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
+          "display_name": "L1 · t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
           "effort_default": "xhigh",
           "openhands_profile": {
             "gateway": "litellm",
@@ -4278,7 +4314,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
+          "display_name": "L1 · t1 orchestrator-1M -- gemini free -> vertex credit -> meta_api/deepseek paid",
           "effort_default": "xhigh",
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -4305,7 +4341,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M — paid legs only (contributor: trains)",
+          "display_name": "L1 · t1 orchestrator-1M — paid legs only (contributor: trains)",
           "openhands_profile": {
             "max_input_tokens": 1000000,
             "max_output_tokens": 32768,
@@ -4338,7 +4374,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
+          "display_name": "L1 · t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 1000000,
@@ -4356,7 +4392,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
+          "display_name": "L1 · t1 orchestrator-1M -- zero spend (gemini + free_ai 1M free legs only)",
           "openhands_profile": {
             "max_input_tokens": 1000000,
             "max_output_tokens": 32768,
@@ -4388,7 +4424,7 @@
             "zed"
           ],
           "context": 1000000,
-          "display_name": "t1 orchestrator-1M — meta_api paid",
+          "display_name": "L1 · t1 orchestrator-1M — meta_api paid",
           "output": 32768
         },
         "omniroute": {
@@ -4398,7 +4434,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "t1 orchestrator-1M — meta_api paid",
+          "display_name": "L1 · t1 orchestrator-1M — meta_api paid",
           "output": 32768
         }
       }
@@ -4421,7 +4457,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "t2 orchestrator-1M — small-scope orchestration",
+          "display_name": "L2 · t2 orchestrator-1M — small-scope orchestration",
           "openhands_profile": {
             "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
@@ -4472,7 +4508,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "display_name": "L2 · t2 smart-reasoning-128k — ≤128k ctx (free-first)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4490,7 +4526,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t2 smart-reasoning-128k — ≤128k ctx (free-first)",
+          "display_name": "L2 · t2 smart-reasoning-128k — ≤128k ctx (free-first)",
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 32768,
@@ -4554,7 +4590,7 @@
           ],
           "context": 128000,
           "context_declared": "128k",
-          "display_name": "t2 smart-reasoning-128k — no training (sensitive data)",
+          "display_name": "L2 · t2 smart-reasoning-128k — no training (sensitive data)",
           "openhands_profile": {
             "max_input_tokens": 128000,
             "max_output_tokens": 32768,
@@ -4598,7 +4634,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "display_name": "L2 · t2 smart-reasoning-128k — zero spend (free legs only)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4616,7 +4652,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t2 smart-reasoning-128k — zero spend (free legs only)",
+          "display_name": "L2 · t2 smart-reasoning-128k — zero spend (free legs only)",
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 32768,
@@ -4649,7 +4685,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "t2 smart-reasoning-128k — paid legs (escalation)",
+          "display_name": "L2 · t2 smart-reasoning-128k — paid legs (escalation)",
           "output": 32768
         }
       }
@@ -4696,7 +4732,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "display_name": "L3 · t3 cheap-driver-128k — ≤128k ctx (cheapest)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4714,7 +4750,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t3 cheap-driver-128k — ≤128k ctx (cheapest)",
+          "display_name": "L3 · t3 cheap-driver-128k — ≤128k ctx (cheapest)",
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 16384,
@@ -4774,7 +4810,7 @@
           ],
           "context": 128000,
           "context_declared": "128k",
-          "display_name": "t3 cheap-driver-128k — no training (sensitive data)",
+          "display_name": "L3 · t3 cheap-driver-128k — no training (sensitive data)",
           "openhands_profile": {
             "max_input_tokens": 128000,
             "max_output_tokens": 16384,
@@ -4817,7 +4853,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "display_name": "L3 · t3 cheap-driver-128k — zero spend (free legs only)",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4835,7 +4871,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t3 cheap-driver-128k — zero spend (free legs only)",
+          "display_name": "L3 · t3 cheap-driver-128k — zero spend (free legs only)",
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 16384,
@@ -4868,7 +4904,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "t3 cheap-driver-128k — paid legs (escalation)",
+          "display_name": "L3 · t3 cheap-driver-128k — paid legs (escalation)",
           "output": 16384
         }
       }
@@ -4888,7 +4924,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+          "display_name": "L2 · t4-rag cohere RAG — 128k ctx (trial keys)",
           "output": 16384
         },
         "omniroute": {
@@ -4899,7 +4935,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t4-rag cohere RAG — 128k ctx (trial keys)",
+          "display_name": "L2 · t4-rag cohere RAG — 128k ctx (trial keys)",
           "openhands_profile": {
             "max_input_tokens": 131072,
             "max_output_tokens": 16384,
@@ -4948,7 +4984,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "display_name": "L2 · t4 researcher-128k (read-only, free legs, wide-context head)",
           "output": 8192
         },
         "omniroute": {
@@ -4958,7 +4994,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t4 researcher-128k (read-only, free legs, wide-context head)",
+          "display_name": "L2 · t4 researcher-128k (read-only, free legs, wide-context head)",
           "output": 8192
         }
       },
