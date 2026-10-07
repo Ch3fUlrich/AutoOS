@@ -342,7 +342,8 @@ DEFAULT_FREE_MODEL = "opencode/muse-spark-1.3-contributor-free"
 TAIL_LIMIT = 64 * 1024
 # Track record class per route family (spec §5.6). Provisional until the
 # registry supplies route.class: t1 frontier, t2 cheap, t3 free.
-TRACK_CLASS = {"t1": "frontier", "t2": "cheap", "t3": "free"}
+TRACK_CLASS = {"t1": "frontier", "t2": "cheap", "t3": "free",
+               "l1": "frontier", "l2": "cheap", "l3": "free"}
 TRACK_RECORD = os.path.join(ROOT, "logs", "routing", "track-record.jsonl")
 # operator request 2026-09-26: propose a tool-calling re-probe whenever a real
 # run's gate contradicts the recorded status of its route's legs.

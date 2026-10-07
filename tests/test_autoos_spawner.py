@@ -16513,7 +16513,7 @@ class NativeComboTests(unittest.TestCase):
 
     def test_a_gateway_run_keeps_its_real_combo(self):
         out = self._route_line("--client", "opencode", "--card", "role=implement", "t")
-        self.assertIn("route: t", out)
+        self.assertIn("route: l2-worker", out)
         self.assertNotIn("native:opencode", out)
 
 
