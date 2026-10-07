@@ -525,7 +525,7 @@
       "tool_calls": "unproven"
     },
     "gemini-3.8-flash": {
-      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded).",
+      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded). GEMINI-MIN-TOKENS 2026-10-06 (operator task 10): every Gemini call needs max_tokens >= ~600 - the reasoning burn comes off the completion budget first, so a smaller cap truncates before any content (measured on review seats).",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -4158,33 +4158,6 @@
           "context_declared": "256k",
           "display_name": "North-Mini-Code via OpenRouter :free",
           "output": 64000
-        }
-      }
-    },
-    "or-qwen3.8-27b-free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 5842 ms): pinned single-provider free combo for openrouter/qwen/qwen3.8-27b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only. ORQWEN-DEAD 2026-10-06: OpenRouter withdrew the :free slug (live 404 'unavailable for free, use paid qwen/qwen3.8-27b'; gateway pre-dispatch skips the leg). Leg retained declared + gated (unavailable_legs) so the route lands in omitted (not legless) and apply prunes the live stale combo; nothing routable. Paid slug not adopted (openrouter NO-credits rule).",
-      "class": "free",
-      "id": "or-qwen3.8-27b-free",
-      "legs": [
-        "openrouter/qwen/qwen3.8-27b:free"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 262144,
-          "context_declared": "256k",
-          "display_name": "Qwen3.8-27B via OpenRouter :free",
-          "output": 235929
-        }
-      },
-      "unavailable_legs": {
-        "openrouter/qwen/qwen3.8-27b:free": {
-          "$comment": "ORQWEN-DEAD 2026-10-06: vendor withdrew the :free slug (live 404); gated so the route renders omitted and apply prunes it.",
-          "available": false
         }
       }
     },

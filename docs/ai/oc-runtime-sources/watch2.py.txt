@@ -10,7 +10,7 @@ Every 30 s:
     note into the lane inbox, restart (a rotation kills the process group, so never while a spawned run runs).
 Never kills by name; only recorded pids / units. Never prints secrets. Cost backstop is the central Google gate (block $10).
 """
-import glob, json, os, signal, subprocess, sys, time
+import glob, json, os, re, signal, subprocess, sys, time
 
 HOME = os.path.expanduser("~")
 REPO = HOME + "/code/AutoOS"
@@ -23,7 +23,8 @@ OUTBOX = CLONE + "/.oc-pilot/outbox"
 ROLE = os.environ.get("ROLE_TEXT", "Read your inbox, then do the next concrete step of your current lane.")
 BLOCK = os.environ.get("BLOCK_GATE") == "1"
 RUN_STOP = 850_000
-ROTATE_MSGS = int(os.environ.get("ROTATE_MSGS", "45"))   # ~60k per-turn input (D-614)
+ROTATE_MSGS = int(os.environ.get("ROTATE_MSGS", "45"))   # message-count backstop (D-614)
+ROTATE_INPUT = int(os.environ.get("ROTATE_INPUT", "30000"))  # lane c/task 3: rotate on real per-turn input (input + cache reads) above this
 NUDGE_AFTER, RESTART_EVERY = 240, 600
 NUDGE_EVERY = int(os.environ.get("NUDGE_EVERY", "600"))   # D-614: L0 1200 s, L1 600 s
 L1_OUTBOX = os.environ.get("L1_OUTBOX", "")             # set for the L0: nudge only when the L1 wrote something new
@@ -324,14 +325,19 @@ def refresh_heartbeat(st, alive, outcome, n_asst, newest, recs):
 
 
 def session_view(st):
-    """(alive, outcome, assistant_count, newest_assistant_ts)"""
+    """(alive, outcome, assistant_count, newest_assistant_ts, turn_input)
+
+    turn_input is the newest assistant turn's REAL context (input tokens plus
+    cache reads - what the model actually saw); None when unknown. The lane-c
+    rotation uses it ("rotation by real per-turn input, target <= 30k") instead
+    of counting messages only."""
     try:
         s1, p1 = h._request(st["port"], "GET", "/api/session/%s" % st["session_id"], password=PW)
     except Exception:
-        return False, None, 0, 0.0
+        return False, None, 0, 0.0, None
     d1 = h._data(p1) if s1 == 200 else None
     if not isinstance(d1, dict):
-        return False, None, 0, 0.0
+        return False, None, 0, 0.0, None
     s2, p2 = h._request(st["port"], "GET", "/api/session/%s/message?order=desc&limit=200" % st["session_id"], password=PW)
     items = h._data(p2) if s2 == 200 else []
     items = items.get("items") if isinstance(items, dict) else items
@@ -342,13 +348,48 @@ def session_view(st):
             if c.get("type") == "tool" and (c.get("state") or {}).get("status") == "running":
                 last["stuck_s"] = max(last["stuck_s"], time.time() - (c.get("time") or {}).get("created", time.time() * 1000) / 1000.0)
     newest = max([(m.get("time") or {}).get("created", 0) / 1000.0 for m in asst] or [0.0])
-    return True, d1.get("outcome"), len(asst), newest
+    turn_input = None
+    for m in reversed(asst):
+        tk = (m.get("data") or m).get("tokens") or {}
+        if isinstance(tk, dict) and (tk.get("input") or tk.get("cache", {}).get("read")):
+            c = tk.get("cache") or {}
+            turn_input = (tk.get("input") or 0) + (c.get("read") or 0)
+            break
+    return True, d1.get("outcome"), len(asst), newest, turn_input
+
+
+def check_proxy():
+    """2026-10-06 incident: both throttle proxies died silently mid-day and every
+    lane start burned rc=5 canaries on ConnectionRefused until they were noticed.
+    The watcher owns the lane, so it also babysits the proxy: when the proxy port
+    refuses, restart its unit (max once per 5 minutes)."""
+    url = os.environ.get("SESSION_GATEWAY_URL") or ""
+    m = re.search(r":(\d+)", url)
+    if not m:
+        return
+    port = int(m.group(1))
+    import socket as _s
+    s = _s.socket()
+    s.settimeout(2.0)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return
+    except OSError:
+        s.close()
+    if time.time() - last.get("proxy_restart", 0.0) < 300:
+        return
+    last["proxy_restart"] = time.time()
+    subprocess.run(["systemctl", "--user", "restart", "oc-throttle-%s" % ("l0" if LANE == "oc-l0" else "l1")],
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+    log("proxy port %d refused: restarted the throttle unit" % port)
 
 
 def main():
     log("watcher up for %s" % LANE)
     while True:
         try:
+            check_proxy()
             st = read_state()
             now = time.time()
             if not st:
@@ -375,8 +416,9 @@ def main():
             if gate_fallback(st, [r for r in worker_records() if not r.get("ended")], gate if lane_is_google() else gate_verdict()):
                 time.sleep(30)
                 continue
-            alive, outcome, n_asst, newest = session_view(st)
+            alive, outcome, n_asst, newest, turn_input = session_view(st)
             dead = (not alive) or outcome in ("failed", "interrupted") or last.get("stuck_s", 0) > STUCK_TOOL_S
+            refresh_heartbeat(st, alive, outcome, n_asst, newest, recs)
             if STATUS_FILE:
                 try:
                     state_word = "dead" if dead else ("silent" if newest and now - newest > 600 else "live")
@@ -386,7 +428,15 @@ def main():
                     pass
             if dead:
                 last["dead_since"] = last["dead_since"] or now
-                if now - last["dead_since"] > 120 and now - last["restart"] > RESTART_EVERY:
+                # task 1 (2026-10-06): a restart must never kill spawned
+                # writer/seat runs. Defer while any run holds its scope; force
+                # only after 15 min of continuous deadness so a wedged lane
+                # with a stale run record still recovers.
+                if recs and now - last["dead_since"] < 900:
+                    pass
+                elif now - last["dead_since"] > 120 and now - last["restart"] > RESTART_EVERY:
+                    if recs:
+                        log("dead but forcing restart: %d run record(s) active for 15+ min" % len(recs))
                     log("dead (alive=%s outcome=%s stuck_tool_s=%d): restarting" % (alive, outcome, last.get("stuck_s", 0)))
                     last["restart"] = now
                     stop_server(st)
@@ -404,8 +454,14 @@ def main():
                                body={"text": "Continue. You went idle. " + ROLE + " Do not end your turn until you have spawned a "
                                      "step, finished a step, or written a status envelope (kind=status, state=blocked with the reason)."})
                     log("nudged idle session (%d s without an assistant message)" % (now - newest))
-                if n_asst > ROTATE_MSGS and not recs and now - last["rotate"] > 900:
-                    log("rotate: %d assistant messages" % n_asst)
+                # lane c/task 3 (2026-10-06): rotate on REAL per-turn input
+                # (input + cache reads, target <= 30k), not message counts;
+                # the message count stays as the backstop. Never while a
+                # spawned run holds the process group (D-614).
+                over_input = turn_input is not None and turn_input > ROTATE_INPUT
+                if (n_asst > ROTATE_MSGS or over_input) and not recs and now - last["rotate"] > 900:
+                    log("rotate: %d assistant messages, per-turn input %s (target <= %d)"
+                        % (n_asst, turn_input, ROTATE_INPUT))
                     last["rotate"] = now
                     stop_server(st)
                     progress_note()

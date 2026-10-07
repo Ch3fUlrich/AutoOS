@@ -89,8 +89,12 @@ def tearDownModule():
 
 MIMO = "opencode/mimo-v2.6-flash-free"
 NEMOTRON = "opencode/nemotron-3-ultra-free"
-BARE_OR = "or-qwen3.8-27b-free"
-QUALIFIED_OR = "omniroute/or-qwen3.8-27b-free"
+# ORQWEN404 2026-10-06: the old fixture (or-qwen3.8-27b-free) is retired - the
+# openrouter :free slug measured 404 upstream and its hand entry left
+# opencode.jsonc. The mechanism under test (a bare pin qualifies with the one
+# provider that declares it) is pinned against a LIVE declared hand entry.
+BARE_OR = "ovh-direct-qwen3.8-27b"
+QUALIFIED_OR = "omniroute/ovh-direct-qwen3.8-27b"
 
 
 class ModelPinHonouredTests(unittest.TestCase):
@@ -361,7 +365,7 @@ class PinQualifyTests(unittest.TestCase):
 
     def test_a_free_prefixed_pin_declared_in_opencode_jsonc_is_allowed(self):
         # A --free pin with '/' that is declared in opencode.jsonc (e.g.
-        # omniroute/or-qwen3.8-27b-free) should be allowed even if not in
+        # omniroute/ovh-direct-qwen3.8-27b) should be allowed even if not in
         # the registry's free_client_models (which only has opencode's zen models).
         r = plan_of("--client", "opencode", "--free", "--model",
                     QUALIFIED_OR, "t")

@@ -2087,9 +2087,11 @@ class McpStdioTests(unittest.TestCase):
                 proc.stdout.close()
             self.assertEqual(replies[1]["result"]["serverInfo"]["name"], "autoos-agent")
             names = {t["name"] for t in replies[2]["result"]["tools"]}
+            # c2 2026-10-06: the lane lifecycle tools (oc_status/oc_start/
+            # oc_restart) join the set.
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
                                      "respond", "route", "list_agents", "context", "heartbeat",
-                                     "ps"})
+                                     "ps", "oc_status", "oc_start", "oc_restart"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "t3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -8833,13 +8835,15 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # FREEWIRE 2026-09-30: the gemini head left t2-worker (and providers.
     # google_ai_studio is now unavailable), so the t2-worker attribution tests
     # below name a model t2-worker still serves from exactly ONE provider -
-    # scaleway's mistral-small grant.
+    # free-ai's qwen7b grant (SCWREMOVAL 2026-10-06 removed the scaleway
+    # provider and its t2-worker leg; free_ai/qwen7b is the surviving leg
+    # exactly one t2-worker/-free-only leg serves).
     SCW_COOLDOWN = ("Error: [429] All credentials for model "
-                    "mistral-small-3.2-24b-instruct-2506 are cooling down "
+                    "qwen7b are cooling down "
                     "(reset after 37s)")
     SCW_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
                  "exceeded for metric: generate_content_free_tier_requests, "
-                 "limit: 20, model: mistral-small-3.2-24b-instruct-2506 "
+                 "limit: 20, model: qwen7b "
                  "Please retry in 59.250991496s.")
 
     def setUp(self):
@@ -8925,13 +8929,13 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
         # FREEWIRE 2026-09-30: the model t2-worker names from one provider is now
-        # scaleway's mistral-small grant (the gemini head was removed). The
+        # free-ai's qwen7b grant (the gemini head was removed). The
         # measured wrong answer was antigravity (the next live leg of t2-worker).
         recorded = self.agent.record_reset_stop(
             self.SCW_COOLDOWN, "t2-worker", self.registry,
             now=self.NOW, path=self.state_path)
-        self.assertEqual(recorded, ("scaleway", "2026-09-28T12:00:37Z"))
-        self.assertEqual(list(self.state()["providers"]), ["scaleway"],
+        self.assertEqual(recorded, ("free_ai", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["free_ai"],
                          "the cooldown benches the provider that served the model "
                          "the line names, and nobody else")
         self.assertNotIn("antigravity", self.state()["providers"])
@@ -8942,8 +8946,8 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.agent.record_reset_stop(self.SCW_RETRY, "t2-worker-free-only",
                                          self.registry, now=self.NOW,
                                          path=self.state_path),
-            ("scaleway", "2026-09-28T12:00:59Z"))
-        self.assertEqual(list(self.state()["providers"]), ["scaleway"])
+            ("free_ai", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["free_ai"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
@@ -9045,26 +9049,26 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # leg): gemini-3.7-flash-high is served by NO t2-worker leg now, so
         # naming it falls back to the first live leg instead of benching
         # antigravity. The intent stands -- the ambiguity rule must not swallow
-        # a clean single-served stop -- pinned here on scaleway's mistral-small
+        # a clean single-served stop -- pinned here on free-ai's qwen7b
         # grant, which exactly one t2-worker leg serves.
         pid, printed = self.stop(
             "Error: [429] All credentials for model "
-            "mistral-small-3.2-24b-instruct-2506 are "
+            "qwen7b are "
             "cooling down (reset after 37s)", "t2-worker")
-        self.assertEqual(pid, "scaleway", printed)
+        self.assertEqual(pid, "free_ai", printed)
         self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
         # this file in and skips the leg. FREEWIRE 2026-09-30: the recorded line
-        # names scaleway's mistral-small leg (the gemini head left t2-worker).
+        # names free-ai's qwen7b leg (the gemini head left t2-worker).
         self.agent.record_reset_stop(self.SCW_COOLDOWN, "t2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=1))
-        cooled = merged["providers"]["scaleway"]
+        cooled = merged["providers"]["free_ai"]
         self.assertIs(cooled["available"], False)
         self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
         self.assertTrue(self.agent.unavailable_now(cooled,
@@ -9073,7 +9077,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=60))
         self.assertFalse(
-            self.agent.unavailable_now(expired["providers"]["scaleway"],
+            self.agent.unavailable_now(expired["providers"]["free_ai"],
                                        self.NOW + datetime.timedelta(seconds=60)),
             "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
 
