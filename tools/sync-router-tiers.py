@@ -10,8 +10,8 @@ explicit override onto combos.json's own shape (spec 3.2's two-phase rule:
 no old catalog is deleted before every consumer has moved off it).
 configuration/litellm/config.yaml is the manual fallback and carries a static
 copy of those legs -- a copy that drifts the moment someone re-curates a
-route (that already happened once: t2-worker led with a 2-RPM Mistral leg
-while OmniRoute led with Gemini, and t3-driver listed model ids OmniRoute no
+route (that already happened once: l2-worker led with a 2-RPM Mistral leg
+while OmniRoute led with Gemini, and l3-driver listed model ids OmniRoute no
 longer had).
 
 This tool removes the drift by regenerating ONLY the block between the two
@@ -22,8 +22,8 @@ markers in config.yaml:
     # AUTOOS-MANAGED-END <tier>
 
 Everything outside the markers -- the header prose, the true hand groups
-(t2-worker-paid, t3-driver-paid; both inert while DeepSeek is off, and
-t1-orchestrator-paid is NOT one of them since MUSEAPI 2026-09-27 gave it a
+(l2-worker-paid, l3-driver-paid; both inert while DeepSeek is off, and
+l1-orchestrator-paid is NOT one of them since MUSEAPI 2026-09-27 gave it a
 meta_api leg, so it is managed like the tiers), router_settings,
 litellm_settings, every comment and the exact whitespace between them -- is
 left byte-for-byte untouched. Inside a managed block the legs are
@@ -345,8 +345,8 @@ def managed_tiers(registry):
     route whose every leg is unavailable, policy-denied, client-bound or
     gateway-only gets no block at all - an absent group is a valid config,
     exactly like render_omniroute()'s all-dead route, and never an empty
-    model list. This replaced the old hand-kept SYNCED_TIERS = ("t2-worker",
-    "t3-driver") pair, which needed editing the moment a route was
+    model list. This replaced the old hand-kept SYNCED_TIERS = ("l2-worker",
+    "l3-driver") pair, which needed editing the moment a route was
     re-curated and silently missed every other servable route."""
     routes = registry.get("routes") if isinstance(registry, dict) else None
     routes = routes if isinstance(routes, dict) else {}

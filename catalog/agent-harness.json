@@ -136,7 +136,7 @@
       },
       "openhands": {
         "profile": "orchestrator",
-        "llm_profile_ref": "omniroute-t1-orchestrator"
+        "llm_profile_ref": "omniroute-l1-orchestrator"
       },
       "mcp": [
         "serena",
@@ -157,7 +157,7 @@
       },
       "openhands": {
         "profile": "suborchestrator",
-        "llm_profile_ref": "omniroute-t1-orchestrator"
+        "llm_profile_ref": "omniroute-l1-orchestrator"
       },
       "mcp": [
         "serena",
@@ -178,7 +178,7 @@
       },
       "openhands": {
         "profile": "implementer",
-        "llm_profile_ref": "omniroute-t1-orchestrator"
+        "llm_profile_ref": "omniroute-l1-orchestrator"
       },
       "mcp": [
         "serena",

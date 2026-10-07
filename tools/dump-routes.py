@@ -15,7 +15,7 @@ def tier_of(leg):
     return pid, mid, t, p.get('trains_on_prompts'), m.get('trains_on_prompts')
 
 
-for rid in ('t2-worker', 't3-driver', 't2-worker-free-only', 't3-driver-free-only'):
+for rid in ('l2-worker', 'l3-driver', 'l2-worker-free-only', 'l3-driver-free-only'):
     r = d['routes'][rid]
     print('==', rid, '==')
     print('  surfaces:', json.dumps(r.get('surfaces'))[:300])

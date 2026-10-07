@@ -1,8 +1,8 @@
 """FLEET-AGENTS: foreign-repo sandboxes get the AutoOS agent definitions via the config overlay.
 
 A spawned opencode for a repo outside the AutoOS checkout dies with
-``Error: Agent not found: "t2-worker"`` because the agent definitions
-(t1-orchestrator, t2-worker, t3-reviewer, t4-researcher) exist only in the
+``Error: Agent not found: "l2-worker"`` because the agent definitions
+(l1-orchestrator, l2-worker, t3-reviewer, l2-researcher) exist only in the
 AutoOS checkout's opencode.jsonc top-level "agents" block, which a foreign
 clone does not have.  The fix injects those definitions into the
 OPENCODE_CONFIG_CONTENT overlay for foreign repos, while leaving an
@@ -89,7 +89,7 @@ class FleetSandboxAgentsTests(unittest.TestCase):
     def _args(self, **overrides):
         ns = argparse.Namespace(
             tier=2, card=None, allow_training=False, client="opencode",
-            joinable=False, max_depth=None, clean=False, model="omniroute/t2-worker",
+            joinable=False, max_depth=None, clean=False, model="omniroute/l2-worker",
             free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=True,
             auto=True, lean=False, title=None, dry_run=True, task="do it",
             no_defer=False, read_only=False)
@@ -103,7 +103,7 @@ class FleetSandboxAgentsTests(unittest.TestCase):
                           "env": ["AUTOOS_OMNIROUTE_KEY"],
                           "package": "@opencode/ai/providers/openai-compatible",
                           "settings": {"baseURL": "http://127.0.0.1:20128/v1"},
-                          "models": {"t2-worker": {}, "t3-driver": {}}},
+                          "models": {"l2-worker": {}, "l3-driver": {}}},
             "litellm": {"name": "AutoOS LiteLLM",
                         "env": ["AUTOOS_LITELLM_KEY"],
                         "settings": {"baseURL": "http://127.0.0.1:4000/v1"},
@@ -113,18 +113,18 @@ class FleetSandboxAgentsTests(unittest.TestCase):
                     {"action": "shell", "resource": "git push *", "effect": "deny"}],
                 "mcp": {"serena": {"command": ["serena"]}},
                 "experimental": {"subagent_depth": 2},
-                "model": "omniroute/t1-orchestrator",
-                "agents": {"t1-orchestrator": {"model": "omniroute/t1-orchestrator",
+                "model": "omniroute/l1-orchestrator",
+                "agents": {"l1-orchestrator": {"model": "omniroute/l1-orchestrator",
                                                "description": "orchestrator"},
-                           "t2-worker": {"model": "omniroute/t2-worker",
+                           "l2-worker": {"model": "omniroute/l2-worker",
                                          "description": "worker"},
-                           "t3-reviewer": {"model": "omniroute/t3-driver",
+                           "t3-reviewer": {"model": "omniroute/l3-driver",
                                            "description": "reviewer"},
-                           "t4-researcher": {"model": "omniroute/t4-researcher",
+                           "l2-researcher": {"model": "omniroute/l2-researcher",
                                              "description": "researcher"}}}
 
     def _route(self, **overrides):
-        route = {"tier": 2, "combo": "t2-worker", "model": "omniroute/t2-worker",
+        route = {"tier": 2, "combo": "l2-worker", "model": "omniroute/l2-worker",
                  "reason": "stub", "privacy": "public", "review": False,
                  "resolver": False, "read_only": False, "effort": None}
         route.update(overrides)
@@ -143,21 +143,21 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         raw = plan["env"].get("OPENCODE_CONFIG_CONTENT", "{}")
         return json.loads(raw)
 
-    # --- (1) keyed foreign-repo plan for the t2-worker route -----------------
+    # --- (1) keyed foreign-repo plan for the l2-worker route -----------------
 
     def test_keyed_foreign_repo_plan_has_t2_worker_agent(self):
         plan = self._build()
         overlay = self._overlay(plan)
         self.assertIn("agents", overlay)
-        self.assertIn("t2-worker", overlay["agents"])
-        self.assertIn("model", overlay["agents"]["t2-worker"])
+        self.assertIn("l2-worker", overlay["agents"])
+        self.assertIn("model", overlay["agents"]["l2-worker"])
 
     # --- (2) same for the review route -> agents.t3-reviewer -----------------
 
     def test_keyed_foreign_repo_review_plan_has_t3_reviewer_agent(self):
         plan = self._build(route=self._route(tier=3, review=True,
-                                             model="omniroute/t3-driver",
-                                             combo="t3-driver"))
+                                             model="omniroute/l3-driver",
+                                             combo="l3-driver"))
         overlay = self._overlay(plan)
         self.assertIn("agents", overlay)
         self.assertIn("t3-reviewer", overlay["agents"])
@@ -251,23 +251,23 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         # Check that agents block exists
         self.assertIn("agents", overlay)
         
-        # Check that t2-worker agent exists
-        self.assertIn("t2-worker", overlay["agents"])
+        # Check that l2-worker agent exists
+        self.assertIn("l2-worker", overlay["agents"])
         
         # Check that the free model is set (from --free)
-        self.assertEqual(overlay["agents"]["t2-worker"]["model"], free_model)
+        self.assertEqual(overlay["agents"]["l2-worker"]["model"], free_model)
         
         # Check that other keys from the root definition are preserved
         # These should come from the root definition in _cfg() method
-        self.assertIn("description", overlay["agents"]["t2-worker"])
-        self.assertEqual(overlay["agents"]["t2-worker"]["description"], "worker")
+        self.assertIn("description", overlay["agents"]["l2-worker"])
+        self.assertEqual(overlay["agents"]["l2-worker"]["description"], "worker")
 
     # --- FLEET-AGENTS-2: providers + permission fence ------------------------
 
     def test_foreign_keyed_plan_has_root_providers(self):
         overlay = self._overlay(self._build())
         omni = overlay["providers"]["omniroute"]
-        self.assertIn("t2-worker", omni["models"])
+        self.assertIn("l2-worker", omni["models"])
         self.assertEqual(omni["env"], ["AUTOOS_OMNIROUTE_KEY"])
         self.assertEqual(omni["package"],
                          "@opencode/ai/providers/openai-compatible")
@@ -277,8 +277,8 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         overlay = self._overlay(self._build())
         omni = overlay["providers"]["omniroute"]
         self.assertTrue(omni.get("headers"), "per-run session headers lost")
-        self.assertIn("t2-worker", omni["models"])
-        self.assertIn("t3-driver", omni["models"])
+        self.assertIn("l2-worker", omni["models"])
+        self.assertIn("l3-driver", omni["models"])
         self.assertEqual(omni["settings"]["baseURL"],
                          "http://127.0.0.1:20128/v1")
 
@@ -320,7 +320,7 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         omni = json.loads(env["OPENCODE_CONFIG_CONTENT"])["providers"]["omniroute"]
         self.assertEqual(omni["settings"]["baseURL"],
                          "http://gw.example.invalid:1/v1")
-        self.assertIn("t2-worker", omni["models"])
+        self.assertIn("l2-worker", omni["models"])
         self.assertEqual(omni["env"], ["AUTOOS_OMNIROUTE_KEY"])
         self.assertTrue(omni.get("headers"))
 
@@ -349,7 +349,7 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         from a workers record as read_run_record_session_tag would read it.
         """
         plan = self._build(route=self._route(tier=3, review=True, read_only=True,
-                                             combo="t3-driver",
+                                             combo="l3-driver",
                                              model="omniroute/ovh-direct-gpt-oss-120b"))
         overlay = self._overlay(plan)
         headers = overlay["providers"]["omniroute"]["headers"]
@@ -441,11 +441,11 @@ class RootAgentsBlockTests(unittest.TestCase):
         cls.agent = load_agent()
 
     def test_returns_only_agents(self):
-        cfg = {"agents": {"t2-worker": {"model": "omniroute/t2-worker"}},
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
                "providers": {"omniroute": {"env": ["SECRET"]}},
-               "model": "omniroute/t1-orchestrator"}
+               "model": "omniroute/l1-orchestrator"}
         block = self.agent.root_agents_block(cfg)
-        self.assertIn("t2-worker", block)
+        self.assertIn("l2-worker", block)
         self.assertNotIn("providers", block)
         self.assertNotIn("model", block)
 

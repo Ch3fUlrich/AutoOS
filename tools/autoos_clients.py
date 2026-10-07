@@ -81,7 +81,11 @@ CLIENTS = {c.name: c for c in (
 # would be the home for this, but the clients schema (catalog/ai-registry
 # .schema.json $defs.client, additionalProperties false) has no such slot; a
 # constant is the brief's documented fallback rather than widening the schema.
-AGY_DEFAULT_MODEL = "claude-opus-4-6-thinking"
+# CLAUDE55 2026-10-05 (operator): the 4-6 generation is retired upstream - the
+# agy CLI's own model list (measured 2026-10-05) carries only the 5-5
+# generation - so the default moves to claude-opus-5-5-medium (the balanced
+# rung of the replacement model).
+AGY_DEFAULT_MODEL = "claude-opus-5-5-medium"
 
 # Qoder's free model on the operator's account (qodercli --list-models: Efficient,
 # Qwen3.8-Max, Qwen3.8-Flash; Max needs credit). Measured 2026-09-27: writes a file

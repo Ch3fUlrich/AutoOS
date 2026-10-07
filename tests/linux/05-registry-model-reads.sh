@@ -172,7 +172,7 @@ print(llm["model"], llm["base_url"], llm["api_key"], llm["reasoning_effort"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:20128/v1 test-gw-key high"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-gw-key high"
 fi
 
 if it "setup_openhands_config writes gateway tier profiles with a key, none without"; then
@@ -194,7 +194,7 @@ print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/t3-driver none False omniroute-t1-orchestrator True"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/l3-driver none False omniroute-t1-orchestrator True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
@@ -224,7 +224,7 @@ print(t1["model"], t1["base_url"], t1["api_key"], lp["active"],
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/t1-orchestrator http://host.docker.internal:4000/v1 test-lit-key litellm-t1-orchestrator False"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:4000/v1 test-lit-key litellm-t1-orchestrator False"
 fi
 
 if it "tier profiles come from the spec, installer and tool agree"; then

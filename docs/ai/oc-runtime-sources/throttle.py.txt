@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Throttling reverse proxy for ONE OpenCode orchestrator session (host-local, coding.vm; routing D-615).
+OpenCode sessions drive themselves, so the only external way to space an orchestrator's model turns is to delay its requests.
+Usage: throttle.py PORT MIN_INTERVAL_S [CLONE_FOR_RUN_ACTIVE [RUN_INTERVAL_S]]
+  * POST /v1/chat/completions (and /v1/responses): at least MIN_INTERVAL_S since the previous one (RUN_INTERVAL_S while a spawned run of CLONE is active).
+  * every other path passes through untouched. No secrets are read or logged; the Authorization header is forwarded as is.
+Upstream: http://127.0.0.1:20128 (the local gateway)."""
+import glob, http.client, json, os, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(sys.argv[1]); MIN_S = float(sys.argv[2])
+CLONE = sys.argv[3] if len(sys.argv) > 3 else ""
+RUN_S = float(sys.argv[4]) if len(sys.argv) > 4 else MIN_S
+UP_HOST, UP_PORT = "127.0.0.1", 20128
+LOCK = threading.Lock(); LAST = [0.0]
+HOP = {"connection", "keep-alive", "transfer-encoding", "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade", "host", "content-length"}
+
+
+def run_active():
+    if not CLONE:
+        return False
+    for f in glob.glob(CLONE + "/logs/workers/*.json"):
+        try:
+            r = json.load(open(f))
+            if r.get("ended") or not r.get("pid"):
+                continue
+            st = open("/proc/%d/stat" % int(r["pid"])).read().rsplit(")", 1)[1].split()[0]
+            if st != "Z":
+                return True
+        except (OSError, ValueError, IndexError):
+            continue
+    return False
+
+
+class H(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"      # body ends at connection close: no chunk re-framing needed
+
+    def log_message(self, *a):
+        pass
+
+    def _go(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else None
+        if self.command == "POST" and ("/chat/completions" in self.path or "/responses" in self.path):
+            with LOCK:
+                gap = RUN_S if run_active() else MIN_S
+                wait = LAST[0] + gap - time.time()
+                if wait > 0:
+                    time.sleep(wait)
+                LAST[0] = time.time()
+        hdr = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
+        c = http.client.HTTPConnection(UP_HOST, UP_PORT, timeout=600)
+        try:
+            c.request(self.command, self.path, body=body, headers=hdr)
+            r = c.getresponse()
+            self.send_response(r.status)
+            for k, v in r.getheaders():
+                if k.lower() not in HOP:
+                    self.send_header(k, v)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            while True:
+                chunk = r.read1(4096)
+                if not chunk:
+                    break
+                self.wfile.write(chunk); self.wfile.flush()
+        except (OSError, http.client.HTTPException):
+            try:
+                self.send_error(502, "upstream error")
+            except OSError:
+                pass
+        finally:
+            c.close()
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = do_HEAD = _go
+
+
+if __name__ == "__main__":
+    ThreadingHTTPServer(("127.0.0.1", PORT), H).serve_forever()

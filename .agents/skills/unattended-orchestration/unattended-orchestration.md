@@ -4,8 +4,8 @@ How to run long-horizon agent work cost-efficiently through OmniRoute,
 and how orchestration hands off without losing the goal.
 
 Status: living doc. Proven 2026-09-20: all 6 combos live-probed `ack`
-(`t1-orchestrator`→openrouter spark-contributor, `t1-orchestrator-clean`→openrouter spark,
-`t2-worker`→gpt-oss-120b, `t3-driver`→mistral-code-latest). Gateway :20128.
+(`l1-orchestrator`→openrouter spark-contributor, `l1-orchestrator-clean`→openrouter spark,
+`l2-worker`→gpt-oss-120b, `l3-driver`→mistral-code-latest). Gateway :20128.
 
 ## Tier enforcement (mandatory depth, runtime-checked)
 
@@ -15,11 +15,11 @@ prompt convention — the `subagent` permission action (V2 docs:
 `agents` + `permissions` guides) denies everything first, then allows
 exactly one child per level:
 
-- `t1-orchestrator` (`mode: all`, model `omniroute/t1-orchestrator`): deny
-  `subagent *`, allow `subagent t2-worker`.
-- `t2-worker` (`mode: subagent`, model `omniroute/t2-worker`): deny
+- `l1-orchestrator` (`mode: all`, model `omniroute/l1-orchestrator`): deny
+  `subagent *`, allow `subagent l2-worker`.
+- `l2-worker` (`mode: subagent`, model `omniroute/l2-worker`): deny
   `subagent *`, allow `subagent t3-reviewer`.
-- `t3-reviewer` (`mode: subagent`, model `omniroute/t3-driver`): deny
+- `t3-reviewer` (`mode: subagent`, model `omniroute/l3-driver`): deny
   `subagent *` (no allow rule — leaf).
 
 Effect: a t2 that tries to spawn another t2 (or a t3 that
@@ -30,7 +30,7 @@ measured live against opencode 2.0.16 (2026-09-24):
 
 1. **Depth is `experimental.subagent_depth`.** A top-level
    `subagent_depth` is dropped as an "unsupported legacy setting" and the
-   depth defaults to 1 - t2-worker then answers "Subagent depth limit reached
+   depth defaults to 1 - l2-worker then answers "Subagent depth limit reached
    (1)". Both suites gate the key.
 2. **The reviewer is fenced by `shell` rules and MCP denies**, not by
    `edit`/`write` alone. v2 calls the shell action `shell` (a `bash` rule
@@ -42,11 +42,11 @@ measured live against opencode 2.0.16 (2026-09-24):
    no commit, push, checkout, reset, env dumps) as a `shell` deny.
 3. **Children keep their model; the entry agent does not.** A subagent
    spawned through the subagent tool runs on its own agent's model, so depth
-   and model stay paired: t1-orchestrator on `omniroute/t1-orchestrator`,
-   t2-worker on `omniroute/t2-worker`, t3-reviewer on `omniroute/t3-driver`.
+   and model stay paired: l1-orchestrator on `omniroute/l1-orchestrator`,
+   l2-worker on `omniroute/l2-worker`, t3-reviewer on `omniroute/l3-driver`.
    Ask for a `-clean` twin when the task is sensitive (same depth, no-training
-   legs). But `opencode run --agent t2-worker` runs on the top-level default
-   (`omniroute/t1-orchestrator`) unless `--model` is passed too - use
+   legs). But `opencode run --agent l2-worker` runs on the top-level default
+   (`omniroute/l1-orchestrator`) unless `--model` is passed too - use
    `tools/autoos-agent.py` (below), which always pairs them.
 4. **The subagent tool accepts a `model` override**, so a model can still
    pick another model at spawn time; the agent prompt, not the runtime,
@@ -60,14 +60,14 @@ measured live against opencode 2.0.16 (2026-09-24):
 
 ```bash
 python3 tools/autoos-agent.py list                            # tiers, card fields, client matrix, depth
-python3 tools/autoos-agent.py run --isolate "Add a test for X"   # empty card -> t2-worker
+python3 tools/autoos-agent.py run --isolate "Add a test for X"   # empty card -> l2-worker
 python3 tools/autoos-agent.py run --card role=review --isolate --lean "Review lib/linux/ui.sh"
-python3 tools/autoos-agent.py run --card privacy=sensitive --isolate "..."   # -> t2-worker-clean
+python3 tools/autoos-agent.py run --card privacy=sensitive --isolate "..."   # -> l2-worker-clean
 python3 tools/autoos-agent.py run --client qwen --card complexity=trivial --isolate "..."
 python3 tools/autoos-agent.py run --client claude --joinable --isolate --title d1 "..."
 python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"   # tier by hand
 python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."      # -clean twin
-python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/t2-orchestrator "..."
+python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/l2-orchestrator "..."
 python3 tools/autoos-agent.py run --tier 1 --free "..."       # no key, no gateway, no spend
 python3 tools/autoos-agent.py run --card role=review --isolate --dry-run "..."   # print the plan only
 python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
@@ -128,19 +128,19 @@ spend), then a preference by role and complexity.
 
 | privacy | ctx | role / complexity | spend | combo |
 |---|---|---|---|---|
-| public | 1m | any | any | `t1-orchestrator` |
-| public | 128k | orchestrate, or hard | any | `t1-orchestrator` |
-| public | 128k | implement / standard | any | `t2-worker` |
-| public | 128k | review, or trivial | any | `t3-driver` |
-| sensitive | 128k | review, or trivial | any | `t3-driver-clean` |
-| sensitive | 128k | anything else | any | `t2-worker-clean` |
+| public | 1m | any | any | `l1-orchestrator` |
+| public | 128k | orchestrate, or hard | any | `l1-orchestrator` |
+| public | 128k | implement / standard | any | `l2-worker` |
+| public | 128k | review, or trivial | any | `l3-driver` |
+| sensitive | 128k | review, or trivial | any | `l3-driver-clean` |
+| sensitive | 128k | anything else | any | `l2-worker-clean` |
 | sensitive | 1m | any | any | refused - split to 128k, or `--allow-training` (logged) |
 
 `spend=credit` is still accepted but has no combo of its own: the `-credit`
-chains were dropped on 2026-09-23 and `t2-worker` / `t3-driver` already
+chains were dropped on 2026-09-23 and `l2-worker` / `l3-driver` already
 overflow to their paid legs (ADR 0006).
 
-The combo's tier picks the opencode agent (`t3-driver-clean` runs `t3-reviewer`).
+The combo's tier picks the opencode agent (`l3-driver-clean` runs `t3-reviewer`).
 
 ### Clients
 
@@ -267,11 +267,11 @@ complexity per R-coord-03. The tier rows below are the structural contract only.
 | Tier | Role | Context |
 |---|---|---|
 | `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, xhigh effort (`#high`) |
-| `t1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only |
+| `l1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only |
 | `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k |
-| `t2-worker-clean` | same, paid legs only (sensitive data) | ≤128k |
+| `l2-worker-clean` | same, paid legs only (sensitive data) | ≤128k |
 | `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k |
-| `t3-driver-clean` | same, paid legs only (sensitive data) | ≤128k |
+| `l3-driver-clean` | same, paid legs only (sensitive data) | ≤128k |
 
 Rule: anything under 1M context belongs in t2/t3, never t1
 (`opencode.jsonc` limits enforce this: 1M vs 128k). Small-context models
@@ -365,7 +365,7 @@ Unattended orchestration spans **two runtimes**, not one:
 
 ## Cost discipline
 
-- Default model is `omniroute/t1-orchestrator` (free legs first, paid overflow
+- Default model is `omniroute/l1-orchestrator` (free legs first, paid overflow
   only from sanctioned providers). Paid Zen legs 402 without balance —
   the chain hops, by design.
 - `auto/*` combos are the zero-setup bootstrap; strict `t*-*`
@@ -382,8 +382,8 @@ owning t2, one live `ack` probe per touched tier.
 - **Disjoint file sets**: t1 assigns non-overlapping tracks so parallel
   workers never merge-conflict.
 - **Parallel dual-lens reviews**: one cheap-codegen leg
-  (`t3-driver`/`t3-driver-clean`, mistral/qwen) + one smart leg
-  (`t2-worker`/`t2-worker-clean`, gpt-oss/deepseek). Reconciled by the owning
+  (`l3-driver`/`l3-driver-clean`, mistral/qwen) + one smart leg
+  (`l2-worker`/`l2-worker-clean`, gpt-oss/deepseek). Reconciled by the owning
   t2; t1 never sees two conflicting reviews directly.
 - **Ack-probe budget**: reasoning models (spark) need ≥2048 output
   tokens or they return empty — a budget fault, not a routing fault.

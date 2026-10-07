@@ -46,8 +46,8 @@ MINIMAL_REGISTRY = {
         "antigravity": {"omniroute_id": "antigravity"},
     },
     "routes": {
-        "t2-worker": {"legs": ["groq/openai/gpt-oss-120b", "antigravity/gemini-3.7-flash-high"]},
-        "t3-driver": {"legs": ["opencode-zen/deepseek-v4.1-flash", "cc/opus-4-6"]},
+        "l2-worker": {"legs": ["groq/openai/gpt-oss-120b", "antigravity/gemini-3.7-flash-high"]},
+        "l3-driver": {"legs": ["opencode-zen/deepseek-v4.1-flash", "cc/opus-4-6"]},
     },
 }
 
@@ -139,13 +139,13 @@ class RegistryRefsTests(unittest.TestCase):
     def test_drops_gateway_only_legs_and_keeps_order(self):
         sync = _load_module()
         refs = sync.registry_refs(self.registry_path)
-        self.assertEqual(refs["t2-worker"], ["groq/openai/gpt-oss-120b"])
-        self.assertEqual(refs["t3-driver"], ["opencode-zen/deepseek-v4.1-flash"])
+        self.assertEqual(refs["l2-worker"], ["groq/openai/gpt-oss-120b"])
+        self.assertEqual(refs["l3-driver"], ["opencode-zen/deepseek-v4.1-flash"])
 
     def test_missing_route_raises_config_error(self):
         sync = _load_module()
         with self.assertRaises(sync.ConfigError):
-            sync.registry_refs(self.registry_path, tiers=("t2-worker", "no-such-tier"))
+            sync.registry_refs(self.registry_path, tiers=("l2-worker", "no-such-tier"))
 
 
 class ManagedTierSelectionTests(unittest.TestCase):
@@ -176,45 +176,45 @@ class ManagedTierSelectionTests(unittest.TestCase):
 
     def test_default_covers_a_servable_route_outside_the_old_synced_pair(self):
         self._write_registry({
-            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
-            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "l2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "l3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
             "t4-rag": {"legs": ["groq/command-a-03-2025"]},
         })
         sync = _load_module()
         self.assertEqual(set(sync.registry_refs(self.registry_path)),
-                         {"t2-worker", "t3-driver", "t4-rag"})
+                         {"l2-worker", "l3-driver", "t4-rag"})
 
     def test_a_legless_route_gets_no_managed_entry(self):
         self._write_registry({
-            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
-            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
-            "t2-worker-paid": {"legs": []},
+            "l2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "l3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "l2-worker-paid": {"legs": []},
         })
         sync = _load_module()
         self.assertEqual(set(sync.registry_refs(self.registry_path)),
-                         {"t2-worker", "t3-driver"})
+                         {"l2-worker", "l3-driver"})
 
     def test_a_gateway_only_route_gets_no_managed_entry(self):
         self._write_registry({
-            "t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
-            "t3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
+            "l2-worker": {"legs": ["groq/openai/gpt-oss-120b"]},
+            "l3-driver": {"legs": ["groq/qwen/qwen3.8-27b"]},
             "opus-4-6": {"legs": ["cc/claude-opus-4-6",
                                   "antigravity/claude-opus-4-6-thinking"]},
         })
         sync = _load_module()
         self.assertEqual(set(sync.registry_refs(self.registry_path)),
-                         {"t2-worker", "t3-driver"})
+                         {"l2-worker", "l3-driver"})
 
     def test_combos_override_defaults_to_every_servable_combo(self):
         combos_path = self.dir / "combos.json"
         combos_path.write_text(json.dumps({"combos": [
-            {"name": "t2-worker", "models": ["groq/openai/gpt-oss-120b"]},
-            {"name": "t3-driver", "models": []},
+            {"name": "l2-worker", "models": ["groq/openai/gpt-oss-120b"]},
+            {"name": "l3-driver", "models": []},
             {"name": "opus-4-6", "models": ["antigravity/claude-opus-4-6-thinking"]},
         ]}), encoding="utf-8")
         sync = _load_module()
         refs = sync.combos_refs(combos_path)
-        self.assertEqual(set(refs), {"t2-worker"})
+        self.assertEqual(set(refs), {"l2-worker"})
 
     def test_combos_override_renders_a_gateway_namespace_by_its_provider(self):
         """FREEKEYS-2e: combos.json holds `gateway_ref()`'s OUTPUT - `scw/*` is
@@ -229,17 +229,17 @@ class ManagedTierSelectionTests(unittest.TestCase):
         }, "routes": {}}
         combos_path = self.dir / "combos.json"
         combos_path.write_text(json.dumps({"combos": [{
-            "name": "t3-driver-free-only",
+            "name": "l3-driver-free-only",
             "models": ["scw/mistral-small-3.2-24b-instruct-2506",
                        "free-ai/qwen7b",
                        "agy/gemini-3.7-flash-medium"]}]}), encoding="utf-8")
         sync = _load_module()
         refs = sync.combos_refs(combos_path, registry=registry)
-        self.assertEqual(refs["t3-driver-free-only"],
+        self.assertEqual(refs["l3-driver-free-only"],
                          ["scaleway/mistral-small-3.2-24b-instruct-2506",
                           "free-ai/qwen7b"])
         # Without a registry there is nothing to translate by - refs as read.
-        self.assertEqual(sync.combos_refs(combos_path)["t3-driver-free-only"],
+        self.assertEqual(sync.combos_refs(combos_path)["l3-driver-free-only"],
                          ["scw/mistral-small-3.2-24b-instruct-2506",
                           "free-ai/qwen7b"])
 
@@ -292,13 +292,13 @@ class CliDefaultsToRegistryTests(unittest.TestCase):
         box = RegistrySandbox()
         try:
             doc = box.registry()
-            doc["routes"]["t3-driver"]["legs"] = list(doc["routes"]["t3-driver"]["legs"])
-            doc["routes"]["t3-driver"]["legs"].insert(0, "mistral/mistral-small-latest")
+            doc["routes"]["l3-driver"]["legs"] = list(doc["routes"]["l3-driver"]["legs"])
+            doc["routes"]["l3-driver"]["legs"].insert(0, "mistral/mistral-small-latest")
             box.save_registry(doc)
             result = box.run("--check", "--quiet")
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("DRIFT", result.stderr)
-            self.assertIn("t3-driver", result.stderr)
+            self.assertIn("l3-driver", result.stderr)
         finally:
             box.close()
 
@@ -337,17 +337,17 @@ class StaleManagedBlockTests(unittest.TestCase):
         self.registry_path.write_text(json.dumps({
             "providers": {"groq": {"omniroute_id": "groq",
                                    "litellm_env": "GROQ_API_KEY"}},
-            "routes": {"t2-worker": {"legs": ["groq/openai/gpt-oss-120b"]}},
+            "routes": {"l2-worker": {"legs": ["groq/openai/gpt-oss-120b"]}},
         }), encoding="utf-8")
         self.config_path = self.dir / "config.yaml"
         self.config_path.write_text(
             "model_list:\n"
-            "  # AUTOOS-MANAGED-START t2-worker\n"
-            "  - model_name: t2-worker\n"
+            "  # AUTOOS-MANAGED-START l2-worker\n"
+            "  - model_name: l2-worker\n"
             "    litellm_params:\n"
             "      model: groq/openai/gpt-oss-120b\n"
             "      api_key: os.environ/GROQ_API_KEY\n"
-            "  # AUTOOS-MANAGED-END t2-worker\n"
+            "  # AUTOOS-MANAGED-END l2-worker\n"
             "\n" + self.STALE,
             encoding="utf-8")
 
@@ -371,7 +371,7 @@ class StaleManagedBlockTests(unittest.TestCase):
         text = self.config_path.read_text(encoding="utf-8")
         self.assertNotIn("AUTOOS-MANAGED-START dead-tier", text)
         self.assertNotIn("model_name: dead-tier", text)
-        self.assertIn("AUTOOS-MANAGED-START t2-worker", text)
+        self.assertIn("AUTOOS-MANAGED-START l2-worker", text)
         # The pruned file is clean on the next check: prune is idempotent.
         self.assertEqual(self._run("--check", "--quiet").returncode, 0)
 
@@ -392,11 +392,11 @@ class GatewayLegsNoPathGrowthTests(unittest.TestCase):
             # Start from a clean slate: the first call is the one allowed to
             # add tools/, any later call must not add another copy.
             sys.path[:] = [p for p in sys.path if p != tools_dir]
-            route = MINIMAL_REGISTRY["routes"]["t2-worker"]
+            route = MINIMAL_REGISTRY["routes"]["l2-worker"]
             sync._gateway_legs(route, MINIMAL_REGISTRY)
             after_first = sys.path.count(tools_dir)
             sync._gateway_legs(route, MINIMAL_REGISTRY)
-            sync._gateway_legs(MINIMAL_REGISTRY["routes"]["t3-driver"], MINIMAL_REGISTRY)
+            sync._gateway_legs(MINIMAL_REGISTRY["routes"]["l3-driver"], MINIMAL_REGISTRY)
             after_many = sys.path.count(tools_dir)
         finally:
             sys.path[:] = before

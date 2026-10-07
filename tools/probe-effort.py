@@ -39,7 +39,7 @@ reasoning_tokens to stdout, with a total at the end.
 Usage:
     python3 tools/probe-effort.py --dry-run
     python3 tools/probe-effort.py --leg antigravity/claude-opus-4-6-thinking
-    python3 tools/probe-effort.py --route t2-worker
+    python3 tools/probe-effort.py --route l2-worker
     python3 tools/probe-effort.py --registry catalog/ai-registry.json \\
         --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 

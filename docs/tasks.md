@@ -3,7 +3,7 @@
 One row per track. t1 adds the row at spawn, updates Status at
 reconcile. DONE-criteria must be checkable (`ack` probe, suite counts,
 `git grep` proof). Logs linked under `logs/`. Ids renamed 2026-09-23
-(`tier1/2/3`→`t1-orchestrator/t2-worker/t3-driver`); history rows below keep
+(`tier1/2/3`→`l1-orchestrator/l2-worker/l3-driver`); history rows below keep
 their contemporary names.
 
 | Task | Owner | Started | DONE-criteria | Status |

@@ -21,7 +21,16 @@ repo-file shape):
     for the lane's "mcp" list (default ["autoos-agent"]); an enabled name
     missing from the repo file is a config error.
   * "plugins": the configured plugin DIRECTORIES (key omitted when empty).
-  * "permission": bash/edit/read plus autoos-agent_* allowed.
+  * "permission": bash/edit/read plus autoos-agent_* allowed; an optional
+    lane "external_directory" list of path globs is rendered as allow entries
+    (lane c 2026-10-05: the outside-folder access moves from a hand-edited
+    host overlay into the lane config).
+  * "compaction" / "tool_output": lane c (2026-10-05) pins prune-on
+    compaction with a small verbatim tail and an orchestrator-sized
+    tool-output clamp - opencode's defaults (prune off, 2000 lines / 50 KB
+    per tool result) are how an orchestrator's per-turn input grew to 794k
+    tokens. An optional lane model.limit {"context","output"} overrides the
+    128k default so a 1M leg renders its real window.
   * NO "server" block: hostname and port go on the `opencode serve`
     command line (tools/oc_l1_serve.py), not in the rendered file.
 """
@@ -32,6 +41,25 @@ import re
 from pathlib import Path
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
+REGISTRY_RELPATH = Path("catalog") / "ai-registry.json"
+_registry_cache = None
+
+
+def _registry_models():
+    """catalog/ai-registry.json's models table (cached), or {} when the
+    catalog is unavailable - the renderer must never hard-fail on it."""
+    global _registry_cache
+    if _registry_cache is None:
+        try:
+            path = Path(__file__).resolve().parent.parent / REGISTRY_RELPATH
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            _registry_cache = doc.get("models") or {}
+        except (OSError, ValueError):
+            _registry_cache = {}
+    return _registry_cache
+
+
+ENV_URL = "AUTOOS_OMNIROUTE_URL"
 ENV_KEY = "AUTOOS_OMNIROUTE_KEY"
 RENDERED_FILENAME = "opencode.json"
 PROVIDER_NPM = "@ai-sdk/openai-compatible"
@@ -39,6 +67,15 @@ PROVIDER_NAME = "workstation gateway"
 MODEL_LIMIT = {"context": 131072, "output": 16000}
 PERMISSIONS = {"bash": "allow", "edit": "allow", "read": "allow",
                "autoos-agent_*": "allow"}
+# Lane c (render keys, 2026-10-05): opencode prunes old tool outputs ONLY on
+# opt-in (compaction.prune default false) and truncates tool output at 2000
+# lines / 51200 bytes by default - the defaults are how an orchestrator
+# session's per-turn input grew to 794k tokens (measured 2026-10-05). The
+# lane render pins the tight shape instead: prune on, a small verbatim tail,
+# and an orchestrator-sized tool-output clamp (the full text still lands in
+# opencode's truncation directory; only the model-visible preview shrinks).
+COMPACTION = {"auto": True, "prune": True, "tail_turns": 4}
+TOOL_OUTPUT = {"max_lines": 400, "max_bytes": 16384}
 
 
 class LaneError(Exception):
@@ -137,17 +174,55 @@ def render(lane, repo_config_path):
     m = lane["model"]
     provider = m.get("provider") or "omniroute"
     mid = m["modelID"]
+    # Lane c (2026-10-05): the client limit follows the lane's model, not a
+    # hardcoded 128k - a 1M leg (gemini, the t1/l2-orchestrator combos) that
+    # renders as 131072 is the "wrongly defined token size" failure: the
+    # session compacts long before its model's real window. A lane may pin
+    # model.limit {"context","output"} explicitly (the watcher's set_lane_model
+    # does this when it swaps gemini <-> deepseek); the default stays the safe
+    # 128k the 128k fallback legs need.
+    def _registry_window(model_id):
+        """The model's real advertised window from catalog/ai-registry.json,
+        or None when the row is missing (fail-open to the caller's pin)."""
+        row = _registry_models().get(model_id.rsplit("/", 1)[-1]) or {}
+        v = row.get("context_advertised")
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+    def _limit(raw, model_id):
+        """muse-spark seat 2026-10-06, finding 4: a pinned limit is rendered
+        straight into the client config - validate its shape here (positive
+        int context/output) instead of passing any dict through."""
+        if not isinstance(raw, dict):
+            window = _registry_window(model_id)
+            return {"context": window, "output": MODEL_LIMIT["output"]} if window else dict(MODEL_LIMIT)
+        ctx, out = raw.get("context"), raw.get("output")
+        if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+            window = _registry_window(model_id)
+            ctx = window or MODEL_LIMIT["context"]
+        if isinstance(out, bool) or not isinstance(out, int) or out <= 0:
+            out = MODEL_LIMIT["output"]
+        return {"context": ctx, "output": out}
+
+    limit = _limit(m.get("limit"), mid)
     models = {
         mid: {
             "name": _display_name(mid, m.get("key")),
-            "limit": dict(MODEL_LIMIT),
+            "limit": dict(limit),
         }
     }
     if m.get("fallback_modelID"):
         fid = m["fallback_modelID"]
+        # muse-spark seat 2026-10-06, finding 3: the fallback leg must NOT
+        # inherit the primary's limit - a 1M primary would render a 128k
+        # fallback as 1M and the client would overshoot it mid-conversation.
+        # OPERATOR 2026-10-06: the fallback limit comes from the REGISTRY's
+        # own model row (deepseek-flash advertises 1048576 - "there should
+        # not be a 128k deepseek fallback"); a pinned fallback_limit wins,
+        # and only a model with no registry row falls to the 128k default.
+        flimit = _limit(m.get("fallback_limit"), fid) if m.get("fallback_limit") else _limit(None, fid)
         models[fid] = {
             "name": _display_name(fid, m.get("fallback_key")),
-            "limit": dict(MODEL_LIMIT),
+            "limit": flimit,
         }
 
     cfg = {
@@ -169,7 +244,17 @@ def render(lane, repo_config_path):
         "instructions": list(lane["instructions"]),
         "mcp": mcp_out,
         "permission": dict(PERMISSIONS),
+        "compaction": dict(COMPACTION),
+        "tool_output": dict(TOOL_OUTPUT),
     }
+    ext = lane.get("external_directory")
+    if ext:
+        if (not isinstance(ext, list) or not all(isinstance(p, str) and p for p in ext)):
+            raise LaneError(
+                "lane '%s': 'external_directory' must be a list of non-empty path strings"
+                % lane["name"]
+            )
+        cfg["permission"]["external_directory"] = {p: "allow" for p in ext}
     if lane["plugins"]:
         cfg["plugins"] = list(lane["plugins"])
 

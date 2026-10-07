@@ -37,7 +37,7 @@ tools/probe-effort.py in tools/probe_common.py.
 Usage:
     python3 tools/probe-recall.py --dry-run
     python3 tools/probe-recall.py --leg groq/qwen-3.8-27b --trials 3
-    python3 tools/probe-recall.py --route t2-worker
+    python3 tools/probe-recall.py --route l2-worker
     python3 tools/probe-recall.py --sizes 32000,128000
     python3 tools/probe-recall.py --registry catalog/ai-registry.json \\
         --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py

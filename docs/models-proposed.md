@@ -1,6 +1,14 @@
 # Combos evaluation (for the operator — keep / drop / merge)
 
-## 2026-09-30 refresh — status at a glance
+## 2026-10-07 refresh — status at a glance
+
+Re-rendered §A from today's `configuration/omniroute/combos.json` (24 curated
+combos) and `catalog/ai-registry.json` route classes. Sections marked
+2026-09-30 below are the original evaluation record — leg lists there are
+superseded by §A and the generated table in `docs/models.md`; history kept for
+provenance, not as setup. OS-32 approval for gateway applies stands.
+
+## 2026-09-30 refresh — status at a glance (historical)
 
 Re-read against `configuration/omniroute/combos.json` (15 curated combos,
 T2FREE → DSBACK → MISTRALFIX → CTXAUDIT → CTXFIX → FREEKEYS-2c lineage) and
@@ -42,12 +50,12 @@ unauthenticated, so the live list is unverified here — finish with
 `omniroute combos list` authenticated, or `python tools/audit-router.py`
 (live), which reports repo-missing and live-extra combos).
 
-## Roles, plainly
+## Roles, plainly (layer aliases L1/L2/L3 since 2026-10-07; leg details: generated table in `docs/models.md`)
 
-- **smart-reasoning (`t2-worker`)**: the adaptive tier — free pools first,
+- **smart-reasoning (`l2-worker`, L2)**: the adaptive tier — free pools first,
   paid overflow after. Cost/quality decide membership, not context size.
-- **paid-only smart (`t2-worker-clean`) / paid-only driver
-  (`t3-driver-clean`)**: same roles minus every free/training leg. For
+- **paid-only smart (`l2-worker-clean`) / paid-only driver
+  (`l3-driver-clean`)**: same roles minus every free/training leg. For
   sensitive data (no prompt training), not for saving money.
 - **credit burn, driver tier** (retired `t3-driver-credit`): chains whose
   ONLY job was spending stored cerebras/sambanova/partner balances.
@@ -69,12 +77,11 @@ breaker + cooldowns ARE the automatic move-dead-providers-last mechanism —
 quota_exhausted never retries, repeated failures cool down. No manual
 reordering, no separate credit combos needed.
 
-## `t3-driver` heads the free band now.
+## `l3-driver` heads the free band now (2026-09-30 note, legs since changed — see §A).
 
-`t3-driver` (2026-09-30 refresh) LEADS with the free band (`scw/` +
-`nebius/`); `mistral/mistral-code-latest` is the first paid leg, then
-`deepseek/deepseek-flash` and the `meta-api` escalation. `t3-driver-free-only`
-(scw + nebius + free-ai) is the strict free answer.
+`l3-driver` (2026-09-30 refresh) LED with the free band; `mistral/mistral-code-latest` is the first paid leg, then
+`deepseek/deepseek-flash` and the `meta-api` escalation. `l3-driver-free-only`
+(free band only) is the strict free answer.
 
 ## Fleet model pins (live 2026-09-30 — what the orchestrators and leaves run)
 
@@ -139,26 +146,133 @@ boot, curated combos to work.
 
 | Combo | Legs, exact refs in priority order | Role | Recommendation |
 |---|---|---|---|
-| `t1-orchestrator` | `gemini/gemini-3.8-flash` → `scw/qwen3-235b-a22b-instruct-2507` → `nebius/zai-org/GLM-5.3-Flash` → `scw/mistral-small-3.2-24b-instruct-2506` → `meta-api/muse-spark-1.3-contributor` | orchestrator, 1M | **keep** (free band heads; muse-spark paid escalation last) |
-| `spark-1.3-contributor` | `meta-api/muse-spark-1.3-contributor` | pinned single-model route | **keep** (Meta Model API contributor leg; trains on prompts — never in a `-clean` route) |
-| `t1-orchestrator-clean` | — (dropped) | — | **dropped 2026-09-30** (contributor-only/paid; in `combos.json` `"omitted"`) |
-| `t1-orchestrator-free-only` | `gemini/gemini-3.8-flash` → `scw/qwen3-235b-a22b-instruct-2507` → `nebius/zai-org/GLM-5.3-Flash` → `scw/mistral-small-3.2-24b-instruct-2506` | zero spend, 1M | **keep** |
-| `t1-orchestrator-paid` | `meta-api/muse-spark-1.3-contributor` | paid-only 1M | **keep** (now curated here too; was LiteLLM-only) |
-| `t2-worker` | `gemini/gemini-3.8-flash` → `agy/gemini-3.7-flash-high` → `scw/qwen3-235b-a22b-instruct-2507` → `scw/mistral-small-3.2-24b-instruct-2506` → `nebius/zai-org/GLM-5.2` → `deepseek/deepseek-flash` → `meta-api/muse-spark-1.3-contributor` → `free-ai/qwen7b` | smart-reasoning, 128k | **keep** (free band rebuilt; `free-ai/qwen7b` tail) |
-| `t2-worker-clean` | `deepseek/deepseek-flash` | paid-only smart, 128k | **keep** (`mistral-small-latest` out — 0 rpm; `mistral-code-latest` barred — trains on prompts) |
-| `t2-worker-free-only` | `gemini/gemini-3.8-flash` → `agy/gemini-3.7-flash-medium` → `scw/qwen3-235b-a22b-instruct-2507` → `scw/mistral-small-3.2-24b-instruct-2506` → `nebius/zai-org/GLM-5.2` → `free-ai/qwen7b` | zero spend, 128k | **keep** |
-| `t2-orchestrator` | `agy/claude-opus-4-6-thinking` | small-scope orchestration, 1M | **keep** (context re-audited to 1M) |
-| `t3-driver` | `scw/mistral-small-3.2-24b-instruct-2506` → `nebius/zai-org/GLM-5.2` → `scw/qwen3-235b-a22b-instruct-2507` → `mistral/mistral-code-latest` → `deepseek/deepseek-flash` → `meta-api/muse-spark-1.3-contributor` | cheap driver, 128k | **keep** (free band heads; `mistral-code-latest` first paid leg) |
-| `t3-driver-clean` | `deepseek/deepseek-flash` | paid-only driver, 128k | **keep** |
-| `t3-driver-free-only` | `scw/mistral-small-3.2-24b-instruct-2506` → `nebius/zai-org/GLM-5.3-Flash` → `scw/qwen3-235b-a22b-instruct-2507` → `free-ai/qwen7b` | zero spend, 128k | **keep** |
-| `t4-rag` | `cohere/command-a-03-2025` → `cohere/command-r-plus-08-2024` | RAG grounded QA (trial keys) | **keep** (only non-reasoning route) |
-| `gemini-3.8-flash` | `gemini/gemini-3.8-flash` | pinned, 1M | **keep** |
-| `deepseek-v4.1-flash` | `deepseek/deepseek-v4-flash` | pinned, 1M | **keep** (leg fixed 2026-09-30 from `deepseek/deepseek-flash`) |
-| `opus-4-6` | `agy/claude-opus-4-6-thinking` | pinned frontier reasoning, 1M | **keep** |
+| `deepseek-v4.1-flash` | `deepseek/deepseek-flash` | cheap, 1M | **keep** (rendered from registry deepseek-v4.1-flash) |
+| `gemini-3.8-flash` | `gemini/gemini-3.8-flash` → `vertex/gemini-3.8-flash` | cheap, 1M | **keep** (rendered from registry gemini-3.8-flash) |
+| `groq-qwen3.8-27b` | `groq/qwen/qwen3.8-27b` | free, 128k | **keep** (rendered from registry groq-qwen3.8-27b) |
+| `l1-orchestrator` | `gemini/gemini-3.8-flash` → `agy/claude-sonnet-5-5-medium` → `free-ai/google/gemini-3.8-flash` → `vertex/gemini-3.8-flash` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 1M | **keep** (rendered from registry l1-orchestrator) |
+| `l1-orchestrator-free-only` | `gemini/gemini-3.8-flash` | free, 1M | **keep** (rendered from registry l1-orchestrator-free-only) |
+| `l1-orchestrator-paid` | `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 1M | **keep** (rendered from registry l1-orchestrator-paid) |
+| `l2-orchestrator` | `agy/claude-sonnet-5-5-medium` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | frontier, 1M | **keep** (rendered from registry l2-orchestrator) |
+| `l2-researcher` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l2-researcher) |
+| `l2-worker` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker) |
+| `l2-worker-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker-clean) |
+| `l2-worker-free-only` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l2-worker-free-only) |
+| `l3-driver` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `mistral/mistral-code-latest` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver) |
+| `l3-driver-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver-clean) |
+| `l3-driver-free-only` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `openrouter/poolside/laguna-s-2.1:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l3-driver-free-only) |
+| `opus-5-5` | `agy/claude-opus-5-5-medium` | frontier, 1M | **keep** (rendered from registry opus-5-5) |
+| `or-laguna-s-2.1-free` | `openrouter/poolside/laguna-s-2.1:free` | free, 256k | **keep** (rendered from registry or-laguna-s-2.1-free) |
+| `or-nemotron-3-super-free` | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | free, 256k | **keep** (rendered from registry or-nemotron-3-super-free) |
+| `or-north-mini-code-free` | `openrouter/cohere/north-mini-code:free` | free, 256k | **keep** (rendered from registry or-north-mini-code-free) |
+| `ovh-gpt-oss-120b` | `ovh/gpt-oss-120b` | credit, 128k | **keep** (rendered from registry ovh-gpt-oss-120b) |
+| `ovh-qwen3-coder-30b` | `ovh/Qwen3-Coder-30B-A3B-Instruct` | credit, 128k | **keep** (rendered from registry ovh-qwen3-coder-30b) |
+| `ovh-qwen3.8-27b` | `ovh/Qwen3.8-27B` | credit, 128k | **keep** (rendered from registry ovh-qwen3.8-27b) |
+| `spark-1.3-contributor` | `meta-api/muse-spark-1.3-contributor` | cheap, 1M | **keep** (rendered from registry spark-1.3-contributor) |
+| `t4-rag` | `cohere/command-a-03-2025` → `cohere/command-r-plus-08-2024` | cheap, 128k | **keep** (rendered from registry t4-rag) |
+| `vertex-gemini-3.8-flash` | `vertex/gemini-3.8-flash` | credit, 1M | **keep** (rendered from registry vertex-gemini-3.8-flash) |
 
-`combos.json` `"omitted"` today: `cheaperinference/glm-5.2`,
-`cheaperinference/kimi-k3`, `samba/MiniMax-M3`, `samba/gpt-oss-120b`,
-`t1-orchestrator-clean`.
+Live `combos.json` `"omitted"` today: `cheaperinference/glm-5.2`,
+`cheaperinference/kimi-k3`, `hf-glm-5.2`, `hf-qwen3.8-27b`,
+`l1-orchestrator-clean`, `samba/MiniMax-M3`, `samba/gpt-oss-120b`.
+Retired ids (pruned from the live store by `apply`): `tier1`, `tier1-clean`,
+`tier2`, `tier2-clean`, `tier3`, `tier3-clean`, `rag`, `tier1-paid`,
+`tier2-paid`, `tier3-paid`, `tier2-credit`, `tier3-credit`, `opus-4-6`,
+`or-qwen3.8-27b-free` (ORQWEN-DEAD 2026-10-06), plus the `t*` ids retired
+by the LAYERS 2026-10-07 rename (`t1-orchestrator`, `t1-orchestrator-clean`,
+`t1-orchestrator-free-only`, `t1-orchestrator-paid`, `t2-orchestrator`,
+`t2-worker`, `t2-worker-clean`, `t2-worker-free-only`, `t2-worker-paid`,
+`t3-driver`, `t3-driver-clean`, `t3-driver-free-only`, `t3-driver-paid`,
+`t4-researcher`).
+
+## G. Provider x model x combo matrix (generated 2026-10-07)
+
+Regenerated from `catalog/ai-registry.json` + `configuration/omniroute/combos.json`;
+re-run `gen-prov-table.py` (operator scratch) to refresh. Qwen-CLI check
+(operator task): the qwen CLI needs no dedicated combo - it takes `--model`
+(`omniroute run --model <combo> qwen ...`, proven QWEN-OK on or-nemotron;
+groq legs 413 on large contexts, so point qwen at 128k+ combos).
+
+
+Order rationale (applies to every banded combo): trial → free →
+credits → paid, deepseek LAST, no free leg after a paid leg. Position
+numbers are 1-based indices into the committed `models` array: low =
+tried first. Singles (`ovh-*`, `groq-qwen3.8-27b`, `gemini-3.8-flash`,
+`vertex-gemini-3.8-flash`, `deepseek-v4.1-flash`, `spark-1.3-contributor`)
+are single-leg by design. `omitted` routes render no combo.
+
+| `SambaNova` | — | tier free, available False | none | no legs reference it |
+| `agentrouter` | — | tier free, available False | none | no legs reference it |
+| `agnes` | — | tier free, available False | none | no legs reference it |
+| `ai_horde` | — | tier free, available False | none | no legs reference it |
+| `ainative` | `llama-4-maverick` | free | l2-researcher (#1); l2-worker (#1); l2-worker-free-only (#1); l3-driver (#1); l3-driver-free-only (#1) |  |
+| `aion_labs` | — | tier free, available False | none | no legs reference it |
+| `antigravity` | `claude-opus-5-5-medium` | free | opus-5-5 (#1) |  |
+| `antigravity` | `claude-sonnet-5-5-medium` | free | l1-orchestrator (#2); l2-orchestrator (#1) |  |
+| `api_airforce` | — | tier free, available False | none | no legs reference it |
+| `arcee` | — | tier free, available False | none | no legs reference it |
+| `bazaarlink` | — | tier free, available True | none | no legs reference it |
+| `bluesminds` | — | tier free, available False | none | no legs reference it |
+| `cc` | — | tier subscription, available False | none | no legs reference it |
+| `cerebras` | `gpt-oss-120b` | free | — | provider gated |
+| `cerebras` | `qwen-3.8-27b` | free | — | provider gated |
+| `cheapinference` | — | tier paid, available False | none | no legs reference it |
+| `cloudflare_workers_ai` | — | tier free, available None | none | no legs reference it |
+| `cohere` | `command-a-03-2025` | free | t4-rag (#1) |  |
+| `cohere` | `command-r-plus-08-2024` | free | t4-rag (#2) |  |
+| `cohere` | `north-mini-code:free` | free | — | not wired into any band (see route $comments) |
+| `cxa` | — | tier subscription, available False | none | no legs reference it |
+| `deepinfra` | `google/gemini-3.1-flash-lite` | credit | — | not wired into any band (see route $comments) |
+| `deepinfra` | `google/gemini-3.5-flash` | credit | — | not wired into any band (see route $comments) |
+| `deepinfra` | `google/gemini-3.7-flash` | credit | — | not wired into any band (see route $comments) |
+| `deepseek` | `deepseek-flash` | paid $3e-07 | deepseek-v4.1-flash (#1); l1-orchestrator (#6); l1-orchestrator-paid (#2); l2-orchestrator (#3); l2-worker (#14); l2-worker-clean (#4); l3-driver (#15); l3-driver-clean (#4) |  |
+| `deepseek` | `deepseek-v4-flash-0731free:free` | paid | — | not wired into any band (see route $comments) |
+| `deepseek` | `deepseek-v4.1-flash` | paid $3e-07 | — | not wired into any band (see route $comments) |
+| `devin` | — | tier subscription, available None | none | no legs reference it |
+| `felo` | — | tier free, available False | none | no legs reference it |
+| `free_ai` | `google/gemini-3.8-flash` | free | l1-orchestrator (#3) |  |
+| `free_ai` | `qwen7b` | free | l2-researcher (#3); l2-worker (#9); l2-worker-free-only (#9); l3-driver (#9); l3-driver-free-only (#9) |  |
+| `freeaiapikey` | — | tier credit, available True | none | no legs reference it |
+| `g4f` | — | tier free, available False | none | no legs reference it |
+| `google_ai_studio` | — | tier free, available True | none | no legs reference it |
+| `groq` | `openai/gpt-oss-120b` | free | l2-worker (#7); l2-worker-free-only (#7); l3-driver (#7); l3-driver-free-only (#8) |  |
+| `groq` | `openai/gpt-oss-20b` | free | l2-worker (#5); l2-worker-free-only (#5); l3-driver (#5); l3-driver-free-only (#6) |  |
+| `groq` | `qwen/qwen3.8-27b` | free | groq-qwen3.8-27b (#1); l2-worker (#3); l2-worker-free-only (#3); l3-driver (#3); l3-driver-free-only (#3) |  |
+| `hugging_face` | — | tier free, available False | none | no legs reference it |
+| `kilo_gateway` | — | tier free, available False | none | no legs reference it |
+| `llm7` | — | tier free, available False | none | no legs reference it |
+| `meta` | `muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
+| `meta_api` | `muse-spark-1.3-contributor` | paid $1e-07 | l1-orchestrator (#5); l1-orchestrator-paid (#1); l2-worker (#13); l3-driver (#14); spark-1.3-contributor (#1) |  |
+| `mistral` | `mistral-code-latest` | paid | l3-driver (#13) |  |
+| `morph` | `morph-dsv4flash` | credit | — | not wired into any band (see route $comments) |
+| `morph` | `morph-glm52-744b` | credit | — | not wired into any band (see route $comments) |
+| `navyai` | — | tier free, available False | none | no legs reference it |
+| `nebius` | — | tier free, available False | none | no legs reference it |
+| `novita_ai` | — | tier free, available False | none | no legs reference it |
+| `nscale` | — | tier free, available False | none | no legs reference it |
+| `omniroute` | — | tier paid, available None | none | no legs reference it |
+| `opencode_gateway` | `glm-5.3-flash` | free | — | not wired into any band (see route $comments) |
+| `openrouter` | `cohere/north-mini-code:free` | free | l2-worker (#6); l2-worker-free-only (#6); l3-driver (#6); l3-driver-free-only (#7); or-north-mini-code-free (#1) |  |
+| `openrouter` | `meta/muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
+| `openrouter` | `nvidia/nemotron-3-super-120b-a12b:free` | free | l2-worker (#4); l2-worker-free-only (#4); l3-driver (#4); l3-driver-free-only (#4); or-nemotron-3-super-free (#1) |  |
+| `openrouter` | `poolside/laguna-s-2.1:free` | free | l2-worker (#8); l2-worker-free-only (#8); l3-driver (#8); l3-driver-free-only (#5); or-laguna-s-2.1-free (#1) |  |
+| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | ovh-qwen3-coder-30b (#1) |  |
+| `ovhcloud` | `Qwen3.8-27B` | credit $4.7e-07 | l2-worker (#11); l2-worker-clean (#2); l3-driver (#11); l3-driver-clean (#2); ovh-qwen3.8-27b (#1) |  |
+| `ovhcloud` | `gpt-oss-120b` | credit | l2-worker (#10); l2-worker-clean (#1); l3-driver (#10); l3-driver-clean (#1); ovh-gpt-oss-120b (#1) |  |
+| `pollinations` | — | tier free, available False | none | no legs reference it |
+| `qoder_ai` | — | tier free, available False | none | no legs reference it |
+| `requesty` | — | tier free, available False | none | no legs reference it |
+| `routeway` | — | tier free, available False | none | no legs reference it |
+| `samba` | `MiniMax-M3` | paid | — | provider gated |
+| `samba` | `gpt-oss-120b` | paid | — | provider gated |
+| `scaleway` | — | tier free, available False | none | no legs reference it |
+| `sealion` | — | tier free, available False | none | no legs reference it |
+| `siliconflow` | — | tier free, available False | none | no legs reference it |
+| `together_ai` | — | tier credit, available False | none | no legs reference it |
+| `uncloseai` | — | tier free, available False | none | no legs reference it |
+| `vertex_ai` | — | tier credit, available None | none | no legs reference it |
+| `z_ai` | — | tier free, available False | none | no legs reference it |
+| `zcode` | — | tier free, available False | none | no legs reference it |
+| `zen` | — | tier free, available None | none | no legs reference it |
 
 ## B. Gateway-only combos (referenced, NOT curated)
 
@@ -181,16 +295,20 @@ never any other store combo — and both suites assert the exact combo name
 list plus a retired-ids regression test (read from that array), so a
 resurrection fails CI before it reaches any gateway.
 
-## C. LiteLLM groups (refreshed 2026-09-30)
+## C. LiteLLM groups (refreshed 2026-10-07 from `configuration/litellm/config.yaml`)
 
-Present in `configuration/litellm/config.yaml` AND `opencode.jsonc`
-`providers.litellm.models`. `t2-worker-paid`/`t3-driver-paid` have no
-gateway combo (hand-curated fallback chains, deliberately outside
-`combos.json`); `t1-orchestrator-paid` is registry-driven since MUSEAPI and
-also exists as a curated combo (§A). The `-free-only` groups are
-hand-curated mirrors of the gateway combos of the same name (minus legs
-LiteLLM cannot address — see the free-only mirror test in
-`tests/run-tests.sh`):
+Managed blocks mirror the registry tiers (served today): `t1-orchestrator`,
+`t1-orchestrator-free-only`, `t1-orchestrator-paid`, `t2-orchestrator`,
+`t2-worker`, `t2-worker-clean`, `t2-worker-free-only`, `t2-worker-paid`,
+`t3-driver`, `t3-driver-clean`, `t3-driver-free-only`, `t3-driver-paid`,
+`t4-rag`, `t4-researcher`, `spark-1.3-contributor`, `deepseek-v4.1-flash`,
+`gemini-3.8-flash`, `groq-qwen3.8-27b`, `or-laguna-s-2.1-free`,
+`or-nemotron-3-super-free`, `or-north-mini-code-free`, `ovh-gpt-oss-120b`,
+`ovh-qwen3-coder-30b`, `ovh-qwen3.8-27b`. `t2-worker-paid`/`t3-driver-paid`
+have no gateway combo (hand-curated `deepseek/deepseek-flash` only). The
+`-free-only` groups mirror the gateway combos of the same name minus legs
+LiteLLM cannot address. The 2026-09-30 group table below is superseded
+(scw/nebius legs removed since).
 
 | Group | Legs / role | Recommendation |
 |---|---|---|
@@ -200,7 +318,7 @@ LiteLLM cannot address — see the free-only mirror test in
 | `t2-worker-free-only` | gemini → scw qwen → scw mistral → nebius GLM-5.2 → free-ai qwen7b (agy dropped: no LiteLLM transport) | **keep** |
 | `t3-driver-free-only` | scw mistral → nebius GLM-5.3 → scw qwen → free-ai qwen7b | **keep** |
 
-## D. Free-model bench (measured 2026-09-23, OpenRouter `:free` catalog)
+## D. Free-model bench (measured 2026-09-23, OpenRouter `:free` catalog — historical snapshot; current state: nemotron/laguna-s-2.1/north-mini serve live, qwen3.8-27b:free withdrawn 2026-10-06)
 
 21 free models right now. None are proven in an agentic loop — capability
 needs a leg-probe (one real task per candidate), not catalog reading. Precise
@@ -230,14 +348,14 @@ gateway. Verified live this session:
 | CLI | Points at gateway? | How | Reaches |
 |---|---|---|---|
 | opencode CLI/TUI | yes (repo `opencode.jsonc`) | native | all combos + `#effort` variants |
-| Qwen Code CLI | yes (`t2-worker` entry + `.env` key, headless ack proven) | `setup-qwen --model t2-worker` | all combos by switching `--model` |
+| Qwen Code CLI | yes (`t2-worker` entry + `.env` key, headless ack proven) | `omniroute run --model t2-worker qwen "..."` (positional prompt; zero-write, nothing installed) | all combos by switching `--model` |
 | Claude Code | yes (`ANTHROPIC_BASE_URL/AUTH_TOKEN` merged live) | `Set-AutoOSClaudeGateway` / `route_claude_to_gateway` | all combos |
 | Antigravity CLI | **no** (upstream `none`/`mitm`: cannot point at OmniRoute) | — | n/a (its models arrive via the `antigravity` gateway connection instead) |
 | Qoder CLI | n/a (needs binary on PATH + PAT; gateway `qoder` entry is dashboard-only) | `qodercli` component + dashboard | pending |
 | Devin CLI | n/a (binary installed 3000.11.3; `devin auth login` + dashboard connection pending) | catalog component | pending |
 | Gemini CLI | not installed (redundant: agy supersedes it, AI Studio key covers API legs) | `omniroute run gemini` if ever wanted | — |
 
-## E. Proposed free-provider additions (researched + probed 2026-09-23/24)
+## E. Proposed free-provider additions (researched + probed 2026-09-23/24 — historical snapshot; connection/probe notes kept for provenance, current routing state lives in `catalog/ai-registry.json`)
 
 Correction 2026-09-24: the local `agy models` list shows Gemini 3.8-flash,
 but the **gateway** `antigravity` connection exposes ONLY 3.7/3.1/GPT-OSS
@@ -365,7 +483,7 @@ Standalone `qwen` CLI returns 401 (connects to Alibaba Cloud, not the gateway).
 | OpenCode Free | `opencode` (noauth pool) | Refs incl `oc/gemini-3.8-flash`, `oc/glm-5.3`, `oc/deepseek-v4-flash-free` | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
 | Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 
-## F. FREEKEYS-2: free/credit provider onboarding (2026-09-30)
+## F. FREEKEYS-2: free/credit provider onboarding (2026-09-30 — historical snapshot; vertex/ovh/ainative since onboarded with registry rows, scaleway/nebius removed)
 
 Program set (operator, 2026-09-29; full probe plan in the routing repo,
 `PROBE-PLAN.md`). Recon, names-only: live `api-keys.yml` entries exist for

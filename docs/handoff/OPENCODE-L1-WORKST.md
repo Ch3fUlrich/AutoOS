@@ -99,3 +99,9 @@ Read this card first. Do exactly what it says. If a step is unclear, stop and as
 - Gate `STALE`, `PRICE-GAP` or above $12: stop launching. Tell the L1 in one line.
 - A run costs more than planned: kill it by title. Tell the L1 in one line.
 - Anything about keys, the gateway restart or a reboot that you are not sure about: stop and ask the operator.
+
+## Changes of 2026-10-05 for the workstation
+
+- Gate values are per host in `daily-gate.conf` (D-613: workstation warn 9 / block 11, central 12 / 14); read the status line, never hard-code numbers.
+- OVH models only for L3 work (writers, seats, research): 2 OVH writers at most, 850k input per run (the watcher stops a run above it).
+- The central OpenCode sessions (L0 router, AutoOS L1) do not write code (edit denied outside `.oc-pilot/`), talk to the gateway through throttling proxies, and are watched by user services; the workstation joins as the L3 writer/seat host and later as an L1/L2 host after the fleet-bus relay (port 47100, tailnet only) exists. Details and exact restart commands: `docs/handoff/OPENCODE-L1-AUTOOS.md` section 0, sources in `docs/ai/oc-runtime-sources/`.

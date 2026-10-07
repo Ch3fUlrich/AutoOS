@@ -28,7 +28,7 @@ fi
 if it "openhands wires the LLM through OmniRoute in start-stack"; then
     ok=1
     for f in configuration/start-stack.ps1 configuration/start-stack.sh; do
-        grep -q 'LLM_MODEL=openai/t1-orchestrator' "$f" || { ok=0; echo "missing model in $f" >&2; }
+        grep -q 'LLM_MODEL=openai/l1-orchestrator' "$f" || { ok=0; echo "missing model in $f" >&2; }
         grep -q 'LLM_BASE_URL' "$f" || ok=0
         grep -q 'docker.openhands.dev/openhands/openhands:latest' "$f" || ok=0
         grep -q '3000:3000' "$f" || ok=0
@@ -41,11 +41,11 @@ if it "the OpenHands template carries the LiteLLM provider prefix"; then    # Ev
     bad="$(grep -nE '^[[:space:]]*model[[:space:]]*=' configuration/openhands/config.toml |
         grep -v 'openai/' || true)"
     ok=1
-    grep -q 'model = "openai/t1-orchestrator"' configuration/openhands/config.toml || ok=0
-    grep -q 'model = "openai/t3-driver"' configuration/openhands/config.toml || ok=0
-    # PROVFIX3 finding 6: t1-orchestrator-clean must NOT come back — the combo is
+    grep -q 'model = "openai/l1-orchestrator"' configuration/openhands/config.toml || ok=0
+    grep -q 'model = "openai/l3-driver"' configuration/openhands/config.toml || ok=0
+    # PROVFIX3 finding 6: l1-orchestrator-clean must NOT come back — the combo is
     # omitted (DSMAX 2026-09-27) and apply.sh prunes it, so the profile 404s.
-    if grep -q 'openai/t1-orchestrator-clean' configuration/openhands/config.toml; then ok=0; fi
+    if grep -q 'openai/l1-orchestrator-clean' configuration/openhands/config.toml; then ok=0; fi
     if [[ -n "$bad" ]]; then fail "model lines without the openai/ prefix: $bad"
     elif (( ok )); then pass
     else fail "template is missing the expected tier models"; fi
@@ -2240,15 +2240,15 @@ def want(gateway):
     return out
 got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
 bad = [g for g in got_models if got_models[g] != want(g)]
-t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "t1-orchestrator"]
+t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "l1-orchestrator"]
 # PROVFIX3 finding 1 still binds: the promise may only be as big as the smallest servable leg window (tools/registry.py clamp_route_context idea, as in the test_sync_ide_models wide-tier clamp).
 sys.path.insert(0, "tools")
 import registry as _shardb_reg
 _shardb_doc = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
-_shardb_route = _shardb_doc["routes"]["t1-orchestrator"]
+_shardb_route = _shardb_doc["routes"]["l1-orchestrator"]
 _shardb_serv = _shardb_reg.gateway_legs(_shardb_route, _shardb_doc)
 _shardb_caps = [c for c in (_shardb_reg.leg_advertised_context(leg, _shardb_doc) for leg in _shardb_serv) if c is not None]
-_shardb_cat = [m["context"] for m in cat if m["id"] == "t1-orchestrator"]
+_shardb_cat = [m["context"] for m in cat if m["id"] == "l1-orchestrator"]
 _shardb_min = min(_shardb_caps) if _shardb_caps else None
 _shardb_ok = (not bad and len(t1) == 1 and len(_shardb_cat) == 1 and len(_shardb_serv) > 0 and _shardb_min is not None and t1 == _shardb_cat and _shardb_cat[0] <= _shardb_min)
 models = "catalog-ok" if _shardb_ok else "MISMATCH:%s t1=%s cat=%s minleg=%s" % (",".join(bad), t1, _shardb_cat, _shardb_min)
@@ -2283,7 +2283,7 @@ PY
     assert_eq "$line1" \
         "mine|http://127.0.0.1:20128/v1|catalog-ok|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
     assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=t1-orchestrator|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
+        "bypass=bypass|off=|provider=autoos-omniroute|model=l1-orchestrator|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
     assert_eq "leaks=$leaks" "leaks=0"
     # Two runs share second-precision backup names: same second -> 1 file,
     # straddling a boundary -> 2. Either proves backup-before-edit; an exact
@@ -2349,7 +2349,7 @@ groups = set(re.findall(r"(?m)^\s*-\s*model_name:\s*(\S+)\s*$", text))
 # escalation chains. An independent second opinion on
 # tools/sync-router-tiers.py --check, with no hand-kept name list to go stale
 # when a provider flips (lesson PROVPIN 2026-09-27: spark-1.3-contributor and
-# t1-orchestrator-paid became servable through meta_api and rendered new blocks).
+# l1-orchestrator-paid became servable through meta_api and rendered new blocks).
 reg = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
 need = set(registry.render_litellm_blocks(reg, text))
 need |= {rid for rid, route in reg["routes"].items()
@@ -2409,7 +2409,10 @@ combos = {c["name"]: c["models"]
 # name. Same independence rule as known_drops: pinned here, not read from
 # catalog/ai-registry.json, or the file that writes the ref and the file that
 # checks the mirror would agree by construction.
-namespace = {"scw": "scaleway"}
+# GLM55 2026-10-05 (operator): combos render the opencode_gateway legs under
+# the gateway's canonical `oc/*` prefix (providers.opencode_gateway
+# model_prefix), while LiteLLM addresses the provider by name.
+namespace = {"scw": "scaleway", "oc": "opencode_gateway"}
 transport = {"opencode-zen": "openai", "cheaperinference": "openai",
              "free-ai": "openai"}
 def litellm_model(ref):
@@ -2455,7 +2458,7 @@ PY
 fi
 
 # The list is what the registry renders today: spark-1.3-contributor and
-# t1-orchestrator-paid joined it with MUSEAPI (2026-09-27) and this Linux pin was
+# l1-orchestrator-paid joined it with MUSEAPI (2026-09-27) and this Linux pin was
 # left behind — the ids are registry output, verified by sync-ide-models --check.
 if it "opencode repo config pins omniroute with litellm fallback"; then
     report="$(python3 - <<'PY'
@@ -2503,14 +2506,14 @@ PY
     # The default model and the gateway URL are human-chosen client settings,
     # pinned on purpose; the model *list* above is derived, never pinned.
     assert_eq "$report" \
-        "omniroute/t1-orchestrator|http://127.0.0.1:20128/v1|models-agree|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
+        "omniroute/l1-orchestrator|http://127.0.0.1:20128/v1|models-agree|True|autoos-agent,context7,graphify,omnigraph,playwright,serena|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
 fi
 
 if it "openhands template has tiers and no secrets"; then
     ok=1
-    # t1-orchestrator-clean deliberately absent (PROVFIX3 finding 6 — its combo is
+    # l1-orchestrator-clean deliberately absent (PROVFIX3 finding 6 — its combo is
     # pruned, so the table would 404); the previous test asserts it stays gone.
-    for s in '\[llm\]' '\[llm.t1-orchestrator\]' '\[llm.t2-worker\]' '\[llm.t3-driver\]' '\[llm.t2-worker-clean\]' '\[llm.t3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    for s in '\[llm\]' '\[llm.l1-orchestrator\]' '\[llm.l2-worker\]' '\[llm.l3-driver\]' '\[llm.l2-worker-clean\]' '\[llm.l3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0

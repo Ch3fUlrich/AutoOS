@@ -115,7 +115,7 @@ for name, prov in (("omniroute", omni), ("litellm", lit)):
     key = (prov.get("options") or {}).get("apiKey", "")
     if not (key.startswith("{env:") and key.endswith("}")):
         problems.append(name + "-key-not-placeholder")
-for m in ("t1-orchestrator", "t1-orchestrator-free-only", "t2-worker", "t3-driver-clean", "auto/smart"):
+for m in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-worker", "l3-driver-clean", "auto/smart"):
     if m not in (omni.get("models") or {}):
         problems.append("missing:" + m)
 # The full surface comes from catalog/ide-models.json (rendered from the
@@ -127,7 +127,7 @@ surface = {m["id"] for m in want["models"]
 if surface != set((omni.get("models") or {}).keys()):
     problems.append("models:want=%s got=%s" % (",".join(sorted(surface)),
                                                ",".join(sorted((omni.get("models") or {}).keys()))))
-if "t2-worker" not in (lit.get("models") or {}):
+if "l2-worker" not in (lit.get("models") or {}):
     problems.append("missing:lit-t2-worker")
 if "deepseek" in p:
     problems.append("resurrected:deepseek")
@@ -374,7 +374,7 @@ fi
 if it "zed default_model converges litellm to omniroute (zed routing)"; then
     scratch="$(mktemp -d)"
     mkdir -p "$scratch/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"t3-driver-paid"}}}' >"$scratch/.config/zed/settings.json"
+    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"l3-driver-paid"}}}' >"$scratch/.config/zed/settings.json"
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
       AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
@@ -387,7 +387,7 @@ PY
     # A default already on omniroute must survive untouched.
     scratch2="$(mktemp -d)"
     mkdir -p "$scratch2/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"t2-worker"}}}' >"$scratch2/.config/zed/settings.json"
+    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"l2-worker"}}}' >"$scratch2/.config/zed/settings.json"
     ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0
       AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
     report2="$(python3 - "$scratch2/.config/zed/settings.json" <<'PY'
@@ -398,7 +398,7 @@ print("%s|%s" % (dm.get("provider"), dm.get("model")))
 PY
 )"
     rm -rf "$scratch" "$scratch2"
-    assert_eq "$report" "autoos-omniroute|t1-orchestrator"
-    assert_eq "$report2" "autoos-omniroute|t2-worker"
+    assert_eq "$report" "autoos-omniroute|l1-orchestrator"
+    assert_eq "$report2" "autoos-omniroute|l2-worker"
 fi
 

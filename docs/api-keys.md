@@ -383,8 +383,8 @@ back in.
   connection above.
 - **Qwen Code** — install `npm i -g @qwen-code/qwen-code` (done live
   2026-09-24: 0.24.4), backup `~/.qwen/settings.json` first, then
-  `omniroute setup-qwen --model t2-worker --yes --api-key
-  $env:OMNIROUTE_API_KEY`. Writes the `t2-worker (OmniRoute)` entry plus
+  `omniroute setup-qwen --model l2-worker --yes --api-key
+  $env:OMNIROUTE_API_KEY`. Writes the `l2-worker (OmniRoute)` entry plus
   `~/.qwen/.env` (`OMNIROUTE_API_KEY` only, existing provider credentials
   untouched). Combo ids work directly as `--model` values. No `qwen`
   binary on PATH is exactly the dashboard "found but not runnable" state.

@@ -26,7 +26,7 @@ Three subcommands:
        through a provider marked available: false (PRIV2, 2026-09-26: the
        OmniRoute gateway does not consult that registry-only flag, and
        combos.json/apply.sh still push the leg verbatim). CLEAN_ROUTE_
-       EXEMPTIONS names the one route (t1-orchestrator-clean) deliberately
+       EXEMPTIONS names the one route (l1-orchestrator-clean) deliberately
        exempted from this rule; `check`/`validate` still report it, as an
        info line, never silently;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
@@ -689,10 +689,10 @@ def private_safe(provider_id, model_id, registry) -> tuple:
 
 
 # The one documented, deliberate exception to rule 3 (PRIV2, 2026-09-26):
-# t1-orchestrator-clean's only leg is the OpenRouter contributor model, which
+# l1-orchestrator-clean's only leg is the OpenRouter contributor model, which
 # trains by contract (see the meta/muse-spark-1.3-contributor $comment in
 # catalog/ai-registry.json). combos.json's own $comment already recorded this
-# trade-off on 2026-09-21 ("t1-orchestrator-clean ... no longer means
+# trade-off on 2026-09-21 ("l1-orchestrator-clean ... no longer means
 # trains-nothing - it means paid-only"); tools/autoos-agent.py's spawner
 # requires an explicit --allow-training to route a sensitive card there
 # (tools/autoos_routing.py select_combo()). A route named here is never
@@ -701,10 +701,10 @@ def private_safe(provider_id, model_id, registry) -> tuple:
 # check_registry() problem. The resolver's own privacy filter
 # (tools/autoos_resolver.py filter_routes()) does NOT consult this table: it
 # calls private_safe() on every *available* serving leg of *every* route, and
-# t1-orchestrator-clean's only leg has no available leg at all, so a
+# l1-orchestrator-clean's only leg has no available leg at all, so a
 # privacy=sensitive card can never land there regardless.
 CLEAN_ROUTE_EXEMPTIONS = {
-    "t1-orchestrator-clean": (
+    "l1-orchestrator-clean": (
         "carries the OpenRouter contributor leg "
         "(openrouter/meta/muse-spark-1.3-contributor) deliberately, since the "
         "2026-09-21 contributor-only block made it paid-only rather than "
@@ -1177,6 +1177,20 @@ OMNIROUTE_RETIRED_IDS = [
     "rag",
     "tier1-paid", "tier2-paid", "tier3-paid",
     "tier2-credit", "tier3-credit",
+    # CLAUDE55 2026-10-05 (operator): the route was renamed opus-5-5 (the 4-6
+    # generation is retired upstream); the id retires so apply prunes the live
+    # store's orphaned combo instead of leaving it servable.
+    "opus-4-6",
+    # ORQWEN404 2026-10-06 (operator task 10): the openrouter qwen3.8-27b:free
+    # leg measured 404 upstream; its single-leg route is deleted and the id
+    # retires so apply prunes the live combo.
+    "or-qwen3.8-27b-free",
+    # LAYERS 2026-10-07 (operator): t*-ids renamed to l*-ids (descriptive
+    # layer names); the old ids retire so apply prunes the live store.
+    "t1-orchestrator", "t1-orchestrator-clean", "t1-orchestrator-free-only",
+    "t1-orchestrator-paid", "t2-orchestrator", "t2-worker", "t2-worker-clean",
+    "t2-worker-free-only", "t2-worker-paid", "t3-driver", "t3-driver-clean",
+    "t3-driver-free-only", "t3-driver-paid", "t4-researcher",
 ]
 
 
@@ -1186,7 +1200,7 @@ def render_omniroute(registry: dict) -> dict:
     no randomness - the same registry always renders the same dict.
 
     A route becomes a combo iff it has at least one servable leg. The
-    LiteLLM-only routes (t1-orchestrator-paid, t2-worker-paid, t3-driver-paid)
+    LiteLLM-only routes (l1-orchestrator-paid, l2-worker-paid, l3-driver-paid)
     and the dynamic `auto`/`auto/smart`/`auto/cheap` routes carry `legs: []`
     (the migration's ROUTE_COMMENT / AUTO_IDS convention) and have no
     combos.json counterpart at all - mapping doc section 4. They are served by
@@ -1381,7 +1395,7 @@ def render_litellm_blocks(registry: dict, config_text: str, tiers=None) -> dict:
     set is tools/sync-router-tiers.py's own managed_tiers(registry) - every
     route that declares `legs` and still has at least one LiteLLM-servable leg
     after GATEWAY_ONLY is dropped, in registry order. That replaces the old
-    hand-maintained SYNCED_TIERS pair (t2-worker/t3-driver), so a tier becomes
+    hand-maintained SYNCED_TIERS pair (l2-worker/l3-driver), so a tier becomes
     managed purely by existing in the registry. A tier whose final servable
     ref set is empty (all legs unavailable, policy-denied or client-bound, or
     all gateway-only) gets NO entry and NO block: an empty model list is not a
@@ -1555,15 +1569,15 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # task A4c's brief is "keep today's value via the render" for exactly this kind
 # of gap (as A4b did for the litellm rpm lines).
 IDE_MODEL_ORDER = (
-    "t1-orchestrator", "t1-orchestrator-clean", "t1-orchestrator-paid",
-    "t1-orchestrator-free-only",
-    "t2-worker", "t2-worker-clean", "t2-worker-paid", "t2-worker-free-only",
-    "t2-orchestrator",
-    "t3-driver", "t3-driver-clean", "t3-driver-paid", "t3-driver-free-only",
+    "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
+    "l1-orchestrator-free-only",
+    "l2-worker", "l2-worker-clean", "l2-worker-paid", "l2-worker-free-only",
+    "l2-orchestrator",
+    "l3-driver", "l3-driver-clean", "l3-driver-paid", "l3-driver-free-only",
     "spark-1.3-contributor",
-    "opus-4-6",
+    "opus-5-5",
     "t4-rag",
-    "t4-researcher",
+    "l2-researcher",
     "gemini-3.8-flash",
     "deepseek-v4.1-flash",
     # FREEWIRE 2026-09-30: pinned single-provider free combos for the
@@ -1571,7 +1585,9 @@ IDE_MODEL_ORDER = (
     # because render_ide() requires this constant to name every route id (a
     # route added without it raises rather than silently mis-ordering).
     "hf-glm-5.2", "hf-qwen3.8-27b",
-    "or-nemotron-3-super-free", "or-qwen3.8-27b-free",
+    "or-nemotron-3-super-free",
+    # ORQWEN404 2026-10-06: or-qwen3.8-27b-free left IDE_MODEL_ORDER with its
+    # route (openrouter qwen3.8-27b:free measured 404 upstream).
     "or-north-mini-code-free", "or-laguna-s-2.1-free",
     "groq-qwen3.8-27b",
     # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
@@ -1579,6 +1595,9 @@ IDE_MODEL_ORDER = (
     # route id (a route added without it raises rather than silently mis-ordering).
     "ovh-qwen3.8-27b", "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
     "vertex-gemini-3.8-flash",
+    # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
+    # within the $6 grant; legs gated until per-token prices land).
+    "faik-gpt-6-sol",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
     "auto/smart", "auto", "auto/cheap",
@@ -1772,6 +1791,21 @@ OPENHANDS_RETIRED_IDS = [
     "omniroute-tier3", "omniroute-tier3-clean", "omniroute-tier3-credit",
     "omniroute-rag",
     "litellm-tier1", "litellm-tier2", "litellm-tier3",
+    # LAYERS 2026-10-07 (operator): t*-ids renamed to l*-ids.
+    "omniroute-t1-orchestrator", "omniroute-t1-orchestrator-clean",
+    "omniroute-t1-orchestrator-free-only", "omniroute-t1-orchestrator-paid",
+    "omniroute-t2-orchestrator", "omniroute-t2-worker",
+    "omniroute-t2-worker-clean", "omniroute-t2-worker-free-only",
+    "omniroute-t2-worker-paid", "omniroute-t3-driver",
+    "omniroute-t3-driver-clean", "omniroute-t3-driver-free-only",
+    "omniroute-t3-driver-paid", "omniroute-t4-researcher",
+    "litellm-t1-orchestrator", "litellm-t1-orchestrator-free-only",
+    "litellm-t1-orchestrator-paid", "litellm-t2-orchestrator",
+    "litellm-t2-worker", "litellm-t2-worker-clean",
+    "litellm-t2-worker-free-only", "litellm-t2-worker-paid",
+    "litellm-t3-driver", "litellm-t3-driver-clean",
+    "litellm-t3-driver-free-only", "litellm-t3-driver-paid",
+    "litellm-t4-researcher",
 ]
 
 # The one standalone routes.<id>.surfaces.openhands.direct_profile tier
@@ -1793,28 +1827,28 @@ OPENHANDS_DIRECT_PROFILE_IDS = {
 # raises, naming every id at once, if a future openhands profile is added or
 # removed without updating this list - never a silent reorder or drop.
 OPENHANDS_TIER_ORDER = (
-    "omniroute-t1-orchestrator",
-    "omniroute-t2-worker",
-    "omniroute-t3-driver",
-    "omniroute-t2-orchestrator",
-    "omniroute-t2-worker-clean",
-    "omniroute-t3-driver-clean",
+    "omniroute-l1-orchestrator",
+    "omniroute-l2-worker",
+    "omniroute-l3-driver",
+    "omniroute-l2-orchestrator",
+    "omniroute-l2-worker-clean",
+    "omniroute-l3-driver-clean",
     "omniroute-t4-rag",
-    "omniroute-opus-4-6",
+    "omniroute-opus-5-5",
     "omniroute-gemini-3.8-flash",
-    "omniroute-t2-worker-free-only",
+    "omniroute-l2-worker-free-only",
     "omniroute-deepseek-v4.1-flash",
-    "omniroute-t3-driver-free-only",
-    "omniroute-t1-orchestrator-clean",
+    "omniroute-l3-driver-free-only",
+    "omniroute-l1-orchestrator-clean",
     "omniroute-spark-1.3-contributor",
     "openrouter-muse-spark-1.3-contributor",
-    "litellm-t1-orchestrator",
-    "litellm-t2-worker",
-    "litellm-t3-driver",
-    "litellm-t2-worker-free-only",
-    "litellm-t3-driver-free-only",
-    "litellm-t1-orchestrator-free-only",
-    "omniroute-t1-orchestrator-free-only",
+    "litellm-l1-orchestrator",
+    "litellm-l2-worker",
+    "litellm-l3-driver",
+    "litellm-l2-worker-free-only",
+    "litellm-l3-driver-free-only",
+    "litellm-l1-orchestrator-free-only",
+    "omniroute-l1-orchestrator-free-only",
     # NOTE (Q1, 2026-09-26 16:4xZ "Claude budget" revision): the 4 new pinned
     # single-leg credit routes (cheaperinference/kimi-k3, cheaperinference/
     # glm-5.2, samba/gpt-oss-120b, samba/MiniMax-M3) deliberately carry NO

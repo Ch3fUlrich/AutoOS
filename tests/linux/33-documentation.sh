@@ -32,7 +32,7 @@ fi
 if it "a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)"; then
     d="$(mktemp -d)"
     printf '{ "models": [ ' >"$d/truncated.json"
-    printf '{"models": [{"id": "t1-orchestrator"}]}' >"$d/no-fields.json"
+    printf '{"models": [{"id": "l1-orchestrator"}]}' >"$d/no-fields.json"
     ok=1
     for catfile in "$d/missing.json" "$d/truncated.json" "$d/no-fields.json"; do
         home="$d/home-$(basename "$catfile" .json)"
@@ -65,7 +65,7 @@ if it "a missing or malformed catalog/ide-models.json stops the IDE writers with
     llm="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); l=d.get("agent_settings", d).get("llm", {}); print(l.get("model"), l.get("max_input_tokens"))' "$home/.openhands/settings.json" 2>&1)"
     [[ "$out" == *"$d/truncated.json"* ]] || { ok=0; echo "openhands: path not named: $out" >&2; }
     [[ "$out" == *Traceback* ]] && { ok=0; echo "openhands: traceback: $out" >&2; }
-    [[ "$llm" == "openai/t1-orchestrator None" ]] || { ok=0; echo "openhands default: $llm" >&2; }
+    [[ "$llm" == "openai/l1-orchestrator None" ]] || { ok=0; echo "openhands default: $llm" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a broken model catalog is not reported cleanly"; fi
 fi
@@ -218,7 +218,7 @@ if it "apply sets the resilience deadline and the fast-skip breaker"; then
             || { ok=0; echo "$f does not use the 2-failure threshold" >&2; }
     done
     # A route that fails closed is named in combos.json's "omitted" and must
-    # never appear as a combo (t1-orchestrator-clean since DSMAX 2026-09-27).
+    # never appear as a combo (l1-orchestrator-clean since DSMAX 2026-09-27).
     # deepseek-v4.1-flash left that set on DSBACK 2026-09-28, when the operator
     # top-up made providers.deepseek available again. The set is read from the
     # rendered file, never re-pinned here (lesson PROVPIN).
@@ -315,7 +315,7 @@ for c in d["combos"]:
 by = {c["name"]: c["models"] for c in d["combos"]}
 omitted = set(d.get("omitted", []))
 # A route that declares legs but has none the gateway can serve fails closed:
-# never a combo, always named in "omitted" (t1-orchestrator-clean since DSMAX
+# never a combo, always named in "omitted" (l1-orchestrator-clean since DSMAX
 # 2026-09-27; deepseek-v4.1-flash left this set on DSBACK 2026-09-28 when the
 # operator top-up made providers.deepseek available again — and every future
 # flip — derived, so no per-route list to keep current).
@@ -324,8 +324,8 @@ for gone in expected_omitted:
         problems.append(gone + "-should-be-omitted")
     if gone not in omitted:
         problems.append(gone + "-not-in-omitted")
-# Every servable route is offered (t1-orchestrator and t1-orchestrator-free-only
-# since T1FREE, spark-1.3-contributor and t1-orchestrator-paid since MUSEAPI).
+# Every servable route is offered (l1-orchestrator and l1-orchestrator-free-only
+# since T1FREE, spark-1.3-contributor and l1-orchestrator-paid since MUSEAPI).
 for kept in expected_names:
     if kept not in by:
         problems.append(kept + "-should-be-in-combos")
@@ -571,7 +571,7 @@ if it "autoos-agent pairs each tier with its own model, standalone"; then
 import json, re, io, shlex, subprocess
 oc = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
 problems = []
-for tier, agent in ((1, "t1-orchestrator"), (2, "t2-worker"), (3, "t3-reviewer")):
+for tier, agent in ((1, "l1-orchestrator"), (2, "l2-worker"), (3, "t3-reviewer")):
     out = subprocess.run(["python3", "tools/autoos-agent.py", "run", "--tier", str(tier), "--dry-run", "t"],
                          capture_output=True, text=True).stdout
     want = "--standalone --agent %s --model %s " % (agent, shlex.quote(oc["agents"][agent]["model"]))
@@ -585,7 +585,7 @@ fi
 
 if it "autoos-agent: --clean picks the twin, undeclared models and --free --clean are refused"; then
     out="$(python3 tools/autoos-agent.py run --tier 3 --clean --dry-run t)"
-    assert_contains "$out" "--model omniroute/t3-driver-clean "
+    assert_contains "$out" "--model omniroute/l3-driver-clean "
     rc=0; python3 tools/autoos-agent.py run --tier 2 --model omniroute/not-a-combo --dry-run t >/dev/null 2>&1 || rc=$?
     assert_eq "$rc" "2"
     rc=0; python3 tools/autoos-agent.py run --tier 2 --free --clean --dry-run t >/dev/null 2>&1 || rc=$?
@@ -1079,7 +1079,7 @@ text = re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").
 a = json.loads(text)["agents"]
 def perms(n):
     return [(p["action"], p["resource"], p["effect"]) for p in a[n]["permissions"]]
-t1, t2, t3 = perms("t1-orchestrator"), perms("t2-worker"), perms("t3-reviewer")
+t1, t2, t3 = perms("l1-orchestrator"), perms("l2-worker"), perms("t3-reviewer")
 problems = []
 # KEYDENY3b: both spawn-gate spellings are fenced (v2's asserted `subagent`
 # action, the permission object's `task` key), each of them denying everything
@@ -1094,7 +1094,7 @@ def gate(rules, child):
         if child is not None and own[-1] != (child, "allow"):
             return False
     return True
-if not gate(t1, "t2-worker"):
+if not gate(t1, "l2-worker"):
     problems.append("t1")
 if not gate(t2, "t3-reviewer"):
     problems.append("t2")
@@ -1116,8 +1116,8 @@ PY
 fi
 
 # opencode v2 drops a top-level subagent_depth as an "unsupported legacy
-# setting" and defaults to 1, so t2-worker answered "Subagent depth limit reached
-# (1)" when t1-orchestrator had launched it (live, 2026-09-24).
+# setting" and defaults to 1, so l2-worker answered "Subagent depth limit reached
+# (1)" when l1-orchestrator had launched it (live, 2026-09-24).
 if it "subagent depth lives under experimental, where opencode v2 reads it"; then
     report="$(python3 - 2>&1 <<'PY'
 import json, re, io

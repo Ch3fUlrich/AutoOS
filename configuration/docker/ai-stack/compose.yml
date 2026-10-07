@@ -30,7 +30,10 @@ services:
     build:
       context: .
       dockerfile: omniroute.Dockerfile
-    image: autoos/omniroute:3.8.50-autoos2
+      # tools/apply-vertex-patch.py for the U2 build stage (omniroute.Dockerfile).
+      additional_contexts:
+        tools: ../../../tools
+    image: autoos/omniroute:3.8.50-autoos3
     container_name: autoos-omniroute
     restart: unless-stopped
     # The image's own user is node (1000); the host user's ids keep the
@@ -206,7 +209,7 @@ services:
       - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/openhands.env
     environment:
       SANDBOX_USER_ID: ${AUTOOS_UID:-1000}
-      LLM_MODEL: openai/t1-orchestrator
+      LLM_MODEL: openai/l1-orchestrator
       LLM_BASE_URL: http://omniroute:20128/v1
       LOG_ALL_EVENTS: "true"
       # Every conversation's sandbox sees the code tree at the same path.

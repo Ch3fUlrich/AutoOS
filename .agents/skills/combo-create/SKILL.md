@@ -10,17 +10,17 @@ reference it; they do not restate it.
 
 ## Rule (TORDER 2026-10-01, D-TORDER-1b)
 
-- **t1 band = >=600000, renders 1M.** `t1-orchestrator`, `t1-orchestrator-free-only`,
-  `t1-orchestrator-paid`, `t1-orchestrator-clean`: every leg window
+- **t1 band = >=600000, renders 1M.** `l1-orchestrator`, `l1-orchestrator-free-only`,
+  `l1-orchestrator-paid`, `l1-orchestrator-clean`: every leg window
   `>= 600000` (explicit constant `T1_MIN_WINDOW = 600000` in
   `tools/combo-contract.py`; rendered result is still 1M). Current 1M legs still
-  render 1M, so only the gate constant changed. t1-orchestrator band:
+  render 1M, so only the gate constant changed. l1-orchestrator band:
   `gemini/gemini-3.8-flash` (free head), `free_ai/google/gemini-3.8-flash`
   (second free 1M), `vertex/gemini-3.8-flash` (credit),
   `meta_api/muse-spark-1.3-contributor` (paid),
   `deepseek/deepseek-flash` (paid LAST). Free-only twin: L0 D-TORDER-2 ACCEPT —
   **deliberately single-provider** (`gemini` only; no verified genuinely-free
-  live 1M tool-calling second exists); real load on `t1-orchestrator` vertex
+  live 1M tool-calling second exists); real load on `l1-orchestrator` vertex
   credits. A single-provider tier is allowed ONLY as a documented,
   gate-exempted constraint (registry note + `SINGLE_PROVIDER_EXEMPTIONS` +
   test asserting the note). Verify each leg in live `/v1/models` before
@@ -46,12 +46,17 @@ reference it; they do not restate it.
   end `:free`. Every declared paid `openrouter/*` leg that survives MUST be
   gated in `routes.<id>.unavailable_legs`. `providers.openrouter.available`
   stays `True` (gating paid models, not provider, so `:free` still routes).
-  `t1-orchestrator-clean` keeps declared+gated paid leg so it stays `omitted`,
+  `l1-orchestrator-clean` keeps declared+gated paid leg so it stays `omitted`,
   not legless. Never set provider available:false (drops `:free` too).
 - **New credit singles (class credit).** `ovh-qwen3.8-27b`, `ovh-gpt-oss-120b`,
   `ovh-qwen3-coder-30b`, `vertex-gemini-3.8-flash`: single leg, strategy
   priority, `surfaces.omniroute` (clients `[opencode, zed]`, context/declared,
   display_name, output; no openhands_profile per groq/hf precedent).
+- **Every leg add/remove is reasoned and dated.** The reason lives in the
+  route/model `$comment` (e.g. ORQWEN-DEAD, SCWREMOVAL) AND in the
+  availability ledger (`python tools/probe-ledger.py record --leg P/M
+  --status served|failed|limited --reason TEXT`); `logs/routing/
+  availability.json` is the machine-readable mirror. No silent churn.
 
 ## Gate (fail-closed)
 

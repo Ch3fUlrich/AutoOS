@@ -38,7 +38,7 @@ and every new id target exists in `SKILL.md`.
 | `R-review-05` | `R-orch-13` | absorbed: pin review model |
 | `R-review-06` | `R-orch-04` | absorbed: copy inputs into clone |
 | `R-review-07` | `R-orch-13` | absorbed: demand files-read evidence |
-| `R-review-08` | `R-orch-13` | absorbed: never accept t3-driver review |
+| `R-review-08` | `R-orch-13` | absorbed: never accept l3-driver review |
 | `R-review-09` | `R-coord-02` | absorbed: consumer must accept config |
 | `R-review-10` | `R-orch-13` | absorbed: diff reused symbols |
 | `R-tests-01` | references/runner-setup.md: `-Validate` then `-DryRun` | runner-specific procedure |

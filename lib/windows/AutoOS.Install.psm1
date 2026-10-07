@@ -1164,7 +1164,7 @@ function Get-AutoOSIdeModel {
     }
     foreach ($m in $models) {
         # Indexer, not dot access: StrictMode throws on a gateway the model
-        # does not list (t1-orchestrator-clean has no litellm key).
+        # does not list (l1-orchestrator-clean has no litellm key).
         $members = $m.surfaces.PSObject.Properties[$Gateway]
         if ($null -ne $members -and @($members.Value) -contains $Surface) { $m }
     }
@@ -3215,7 +3215,7 @@ if _gw_key:
     # 3-level hierarchy routes through OmniRoute, so OpenHands' own default
     # must too - otherwise the UI shows no usable agent and every chat
     # falls back to local Ollama. Container-side base URL.
-    llm['model'] = 'openai/t1-orchestrator'
+    llm['model'] = 'openai/l1-orchestrator'
     llm['base_url'] = 'http://host.docker.internal:20128/v1'
     llm['api_key'] = _gw_key
     _default_reasoning = True
@@ -3226,7 +3226,7 @@ if _gw_key:
     _default_window = None
     try:
         with open(os.environ.get('AUTOOS_IDE_MODELS') or '', 'r', encoding='utf-8') as _imf:
-            _default_window = next(m for m in json.load(_imf)['models'] if m['id'] == 't1-orchestrator')
+            _default_window = next(m for m in json.load(_imf)['models'] if m['id'] == 'l1-orchestrator')
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         pass
 elif openrouter_key:
@@ -3804,7 +3804,7 @@ function Install-AutoOSOmniRouteRouting {
             if (Get-Command omniroute -ErrorAction SilentlyContinue) {
                 $qcfg = Join-Path $env:USERPROFILE '.qwen\settings.json'
                 if ($script:DryRun) {
-                    Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model t2-worker)" -Level muted
+                    Write-AutoOSLine "would route Qwen Code at OmniRoute in $qcfg (model l2-worker)" -Level muted
                 } else {
                     # The omniroute CLI edits the file itself, so the backup is taken first
                     # and kept only when the CLI changed something. An identical result
@@ -3817,7 +3817,7 @@ function Install-AutoOSOmniRouteRouting {
                         $qbefore = [IO.File]::ReadAllBytes($qcfg)
                         $qbak = Copy-AutoOSBackup -Path $qcfg
                     }
-                    & omniroute setup-qwen --model t2-worker --yes 2>&1 | Out-Null
+                    & omniroute setup-qwen --model l2-worker --yes 2>&1 | Out-Null
                     $qrc = $LASTEXITCODE
                     $qsame = $false
                     if ($null -ne $qbefore -and (Test-Path $qcfg)) {
@@ -3825,8 +3825,8 @@ function Install-AutoOSOmniRouteRouting {
                     }
                     if ($qsame -and $qbak) { Remove-Item $qbak -Force -ErrorAction SilentlyContinue }
                     if ($qrc -ne 0) { Write-AutoOSLine 'Qwen Code gateway routing failed - configure it by hand (docs/api-keys.md)' -Level warn }
-                    elseif ($qsame) { Write-AutoOSLine 'Qwen Code already routed at OmniRoute (model t2-worker) - skipped' -Level ok }
-                    else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model t2-worker)' -Level ok }
+                    elseif ($qsame) { Write-AutoOSLine 'Qwen Code already routed at OmniRoute (model l2-worker) - skipped' -Level ok }
+                    else { Write-AutoOSLine 'Qwen Code routed at OmniRoute (model l2-worker)' -Level ok }
                 }
             } else {
                 Write-AutoOSLine 'omniroute CLI not on PATH - cannot route Qwen Code' -Level warn
@@ -3953,7 +3953,7 @@ function Set-AutoOSZedProxy {
         tools = $bypassTools
         enable_all_context_servers = $true
         context_servers = [ordered]@{}
-        default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 't1-orchestrator' }
+        default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'l1-orchestrator' }
     }
     Add-Member -InputObject $settings.agent.profiles -NotePropertyName 'bypass' -NotePropertyValue $bypass -Force
     if ($null -eq $settings.agent.PSObject.Properties['tool_permissions']) {
@@ -3965,11 +3965,11 @@ function Set-AutoOSZedProxy {
     }
     # omniroute-first: the litellm proxy currently has zero healthy endpoints,
     # so a default pointing at autoos-litellm/* is broken. Converge it to
-    # {autoos-omniroute, t1-orchestrator}; never touch a default already on omniroute/*.
+    # {autoos-omniroute, l1-orchestrator}; never touch a default already on omniroute/*.
     if ($null -ne $settings.agent.PSObject.Properties['default_model'] -and
         $null -ne $settings.agent.default_model.PSObject.Properties['provider'] -and
         $settings.agent.default_model.provider -like 'autoos-litellm*') {
-        $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 't1-orchestrator' }
+        $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'l1-orchestrator' }
     }
     $omniEntry = [ordered]@{
         api_url = 'http://127.0.0.1:20128/v1'

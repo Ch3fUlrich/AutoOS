@@ -237,7 +237,7 @@ PY
             docker run -d --restart unless-stopped \
                 --memory "${AUTOOS_OPENHANDS_MEMORY:-2g}" \
                 -e SANDBOX_USER_ID="$(id -u)" \
-                -e LLM_MODEL=openai/t1-orchestrator \
+                -e LLM_MODEL=openai/l1-orchestrator \
                 -e LLM_API_KEY \
                 -e LLM_BASE_URL="http://host.docker.internal:20128/v1" \
                 -e LOG_ALL_EVENTS=true \

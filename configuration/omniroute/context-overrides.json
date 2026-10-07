@@ -26,7 +26,7 @@
     {
       "target": "meta-api/muse-spark-1.3-contributor",
       "context": 1048576,
-      "$comment": "Meta Model API contributor tier: 1,048,576 in (registry models.muse-spark-1.3-contributor). The spark-1.3-contributor / t1-orchestrator-paid routes declare 1M. Measured 2026-09-30: without this the gateway served 128k."
+      "$comment": "Meta Model API contributor tier: 1,048,576 in (registry models.muse-spark-1.3-contributor). The spark-1.3-contributor / l1-orchestrator-paid routes declare 1M. Measured 2026-09-30: without this the gateway served 128k."
     },
     {
       "target": "vertex/gemini-3.8-flash",

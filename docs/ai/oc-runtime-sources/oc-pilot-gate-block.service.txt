@@ -1,0 +1,5 @@
+[Unit]
+Description=Keep the OC-PILOT-only Google block gate file fresh
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/fleet/oc-pilot/write-block.py

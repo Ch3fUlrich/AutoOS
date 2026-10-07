@@ -36,7 +36,7 @@ NEBIUS_MODELS = (
     "zai-org/GLM-5.3-Flash",
 )
 # The full tiers the brief names alongside the free/trial/credit classes.
-NAMED_TIERS = ("t1-orchestrator", "t2-worker", "t3-driver")
+NAMED_TIERS = ("l1-orchestrator", "l2-worker", "l3-driver")
 NOW = datetime(2026, 10, 2, tzinfo=timezone.utc)
 
 
@@ -46,8 +46,8 @@ def load_registry():
 
 def free_tier_routes(reg):
     """The route set D-287 scopes: route class `free`, any `*-free-only`
-    route, plus the three named full tiers (t1-orchestrator, t2-worker,
-    t3-driver)."""
+    route, plus the three named full tiers (l1-orchestrator, l2-worker,
+    l3-driver)."""
     picked = {}
     for route_id, route in (reg.get("routes") or {}).items():
         if (isinstance(route, dict)

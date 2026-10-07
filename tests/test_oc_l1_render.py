@@ -38,8 +38,70 @@ class RenderShapeTest(unittest.TestCase):
 
     def test_top_level_keys_exact(self):
         cfg, _ = render(self.tmp)
-        self.assertEqual(set(cfg), {"$schema", "model", "provider", "instructions", "mcp", "permission", "plugins"})
+        self.assertEqual(set(cfg), {"$schema", "model", "provider", "instructions", "mcp", "permission", "plugins",
+                                    "compaction", "tool_output"})
         self.assertEqual(cfg["$schema"], "https://opencode.ai/config.json")
+
+    def test_compaction_prunes_with_a_small_tail(self):
+        # Lane c (2026-10-05): opencode's prune defaults to FALSE and the tool
+        # output default is 2000 lines / 50 KB - the defaults under which the
+        # L1 session's per-turn input grew to 794k tokens. The render pins the
+        # orchestrator shape.
+        cfg, _ = render(self.tmp)
+        self.assertEqual(cfg["compaction"], {"auto": True, "prune": True, "tail_turns": 4})
+        self.assertEqual(cfg["tool_output"], {"max_lines": 400, "max_bytes": 16384})
+
+    def test_model_limit_follows_the_lane_when_pinned(self):
+        # Lane c (2026-10-05): a 1M leg rendered at a hardcoded 131072 is the
+        # "wrongly defined token size" failure - the client compacts long
+        # before the model's real window. Without a pin the safe 128k default
+        # stands (the deepseek fallback catalog claims 128000).
+        cfg, _ = render(self.tmp)
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["placeholderprovider/PlaceholderModel"]["limit"],
+                         {"context": 131072, "output": 16000})
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "limit": {"context": 1048576, "output": 16000}})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["gemini/gemini-3.8-flash"]["limit"],
+                         {"context": 1048576, "output": 16000})
+
+    def test_fallback_limit_comes_from_the_registry_not_128k(self):
+        # OPERATOR 2026-10-06: "there should not be a 128k deepseek fallback" -
+        # the fallback leg's limit resolves from the registry model row
+        # (deepseek-flash advertises 1048576), not the 128k default; a pinned
+        # fallback_limit still wins.
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "limit": {"context": 1048576, "output": 16000},
+            "fallback_key": "ds", "fallback_modelID": "ds/deepseek-flash"})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["ds/deepseek-flash"]["limit"]["context"],
+                         1048576)
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "fallback_key": "ds", "fallback_modelID": "ds/deepseek-flash",
+            "fallback_limit": {"context": 262144, "output": 16000}})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["ds/deepseek-flash"]["limit"]["context"],
+                         262144)
+        # a model with no registry row falls to the safe default
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
+            "fallback_key": "x", "fallback_modelID": "nosuchprovider/NoRow"})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["nosuchprovider/NoRow"]["limit"],
+                         {"context": 131072, "output": 16000})
+
+    def test_external_directory_renders_when_pinned(self):
+        # Lane c (2026-10-05): the outside-folder allowlist moves from a
+        # hand-edited host overlay into the lane config.
+        cfg, _ = render(self.tmp, external_directory=["/home/s/code/AutoOS-worktrees/other/**"])
+        self.assertEqual(cfg["permission"]["external_directory"],
+                         {"/home/s/code/AutoOS-worktrees/other/**": "allow"})
+
+    def test_external_directory_rejects_non_strings(self):
+        lane = make_lane(self.tmp, external_directory=[1, 2])
+        cfg = write_cfg(self.tmp, lane)
+        rc, _, err = run_main(["render", "--name", "l1test", "--config", str(cfg)])
+        self.assertEqual(rc, 2)
+        self.assertIn("external_directory", err)
 
     def test_old_repo_file_keys_are_gone(self):
         cfg, _ = render(self.tmp)

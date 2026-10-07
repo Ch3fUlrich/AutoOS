@@ -6,7 +6,7 @@ beyond this file + the repo. Proof for claims lives in
 `docs/verification.md` (dated runs); routing truth lives in
 `docs/models.md` + `docs/models-proposed.md`.
 
-Your role: t1 orchestrator (`omniroute/t1-orchestrator#high`). Full protocol =
+Your role: t1 orchestrator (`omniroute/l1-orchestrator#high`). Full protocol =
 `.agents/skills/unattended-orchestration/unattended-orchestration.md`.
 Hard rules (AGENTS.md): never commit secrets/binaries; destructive actions
 are opt-in only; read-modify-write for PATH/profile/config; back up
@@ -16,15 +16,15 @@ no framework. Secrets live in git-ignored `configuration/api-keys.yml` +
 
 ## 1. What landed (see CHANGELOG.md for detail)
 
-- Tier ids renamed (`tier1/2/3`/`rag` → `t1-orchestrator`/`t2-worker`/
-  `t3-driver`/`t4-rag`); retired ids deleted from the live gateway store
+- Tier ids renamed (`tier1/2/3`/`rag` → `l1-orchestrator`/`l2-worker`/
+  `l3-driver`/`t4-rag`); retired ids deleted from the live gateway store
   (verified clean) with exact-list + retired-ids regression tests in both
   suites — a resurrection fails CI.
 - New combos (repo-side, need `apply` to go live): pinned `opus-4-6`
-  (agy thinking → cc opus, 200k) and `t2-orchestrator` (opus pair +
-  deepseek tail). `t1-orchestrator` stays spark-only by design.
-- Curated legs: `t2-worker` += `antigravity/gemini-3.7-flash-high`
-  (ack 3.6s); `t2-worker-free-only` keeps `-medium` (ack 1.6s).
+  (agy thinking → cc opus, 200k) and `l2-orchestrator` (opus pair +
+  deepseek tail). `l1-orchestrator` stays spark-only by design.
+- Curated legs: `l2-worker` += `antigravity/gemini-3.7-flash-high`
+  (ack 3.6s); `l2-worker-free-only` keeps `-medium` (ack 1.6s).
   No `antigravity/*3.8*` refs exist on the gateway — do not invent any.
 - Free-only LiteLLM groups (`t1/t2/t3-*-free-only`, no fallbacks) mirror
   combos minus gateway-only legs (`antigravity`, `cc`); new suite test pins
@@ -33,7 +33,7 @@ no framework. Secrets live in git-ignored `configuration/api-keys.yml` +
 - Live connections: `antigravity` + `claude` OAuth (account-named, active);
   `zai`, `zcode`, `opencode`, `devin` gateway connections registered
   (`devin`/`zcode`/`opencode` list no servable models — upstream limits).
-- CLIs wired: Qwen Code (npm 0.24.4, `t2-worker` entry, headless ack),
+- CLIs wired: Qwen Code (npm 0.24.4, `l2-worker` entry, headless ack),
   Claude Code Merchant (`ANTHROPIC_BASE_URL/AUTH_TOKEN` merged live),
   `qodercli` 1.1.62 (PATH + PAT automation committed), Devin CLI 3000.11.3
   (winget). agy 1.2.9 confirmed — no Gemini CLI needed.
@@ -75,7 +75,7 @@ suites on push.
 | 2 | Restart OmniRoute gateway | Process dates to 21.09 (predates qwen install, OAuth, PATH fix) — dashboard checks + new binaries only resolve after restart, then "⟳ Refresh detection" |
 | 3 | `devin auth login`, then dashboard `devin-cli` connection | `providers add devin-cli --oauth` answers Unknown (CLI OAuth allowlist holds 8) — dashboard only |
 | 4 | Dashboard `qoder` connection, then send `models qoder` output | No CLI OAuth flow exists for qoder |
-| 5 | `apply` to create `opus-4-6` + `t2-orchestrator` live (repo has them, store lacks them), then ack-probe each leg | `.\configuration\omniroute\apply.ps1 -Probe` |
+| 5 | `apply` to create `opus-4-6` + `l2-orchestrator` live (repo has them, store lacks them), then ack-probe each leg | `.\configuration\omniroute\apply.ps1 -Probe` |
 | 6 | Fund-or-drop Z.AI | Currently 429-insufficient-balance; history kept in `docs/models-proposed.md` §E |
 | 7 | Zed picker proof (16+ entries now) + OpenHands container proof | Manual UI checks, still unconfirmed |
 | 8 | `gh` PR stack (`gh auth status` — harness blocks `gh` for agents) | Still parked |
@@ -120,7 +120,7 @@ AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh
   spawning review subagents on it.
 - **opencode v2 reads `experimental.subagent_depth`, not a top-level one**
   (measured 2026-09-24): the top-level key is dropped as an "unsupported
-  legacy setting", the depth stays 1, and `t2-worker` answers "Subagent depth
+  legacy setting", the depth stays 1, and `l2-worker` answers "Subagent depth
   limit reached (1)". Fixed in `opencode.jsonc`; both suites gate the key.
 - **v2 names the shell permission action `shell`** — a `bash` rule matches
   nothing, so the reviewer's fence was inert (it could commit through the

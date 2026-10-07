@@ -26,7 +26,7 @@ A trial has two checks:
 Usage:
     python3 tools/probe-toolcalls.py --dry-run
     python3 tools/probe-toolcalls.py --leg deepseek/deepseek-flash --trials 5
-    python3 tools/probe-toolcalls.py --route t2-worker
+    python3 tools/probe-toolcalls.py --route l2-worker
     python3 tools/probe-toolcalls.py --registry catalog/ai-registry.json \\
         --gateway http://127.0.0.1:20128/v1/chat/completions   # overlay: tools/autoos_overlay.py
 

@@ -35,12 +35,12 @@ def _load_module():
 # route, never a combo).
 MINIMAL_REGISTRY = {
     "routes": {
-        "t3-driver": {
+        "l3-driver": {
             "strategy": "priority",
             "legs": ["groq/openai/gpt-oss-120b", "cerebras/qwen-3.8-27b"],
             "surfaces": {"omniroute": {"context_declared": "128k"}},
         },
-        "t3-driver-paid": {"strategy": "priority", "legs": [],
+        "l3-driver-paid": {"strategy": "priority", "legs": [],
                             "surfaces": {"litellm": {}}},
     }
 }
@@ -66,7 +66,7 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
         audit = _load_module()
         combos = audit.repo_combos(registry_path=self.registry_path)
         self.assertEqual(len(combos), 1)
-        self.assertEqual(combos[0]["name"], "t3-driver")
+        self.assertEqual(combos[0]["name"], "l3-driver")
         self.assertEqual(combos[0]["models"],
                           ["groq/openai/gpt-oss-120b", "cerebras/qwen-3.8-27b"])
 
@@ -74,7 +74,7 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
         audit = _load_module()
         combos = audit.repo_combos(registry_path=self.registry_path)
         names = [c["name"] for c in combos]
-        self.assertNotIn("t3-driver-paid", names)
+        self.assertNotIn("l3-driver-paid", names)
 
     def test_default_matches_the_real_repo_combos_json_semantically(self):
         # No path given at all: the tool's own default (catalog/ai-
