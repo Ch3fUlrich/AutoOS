@@ -692,6 +692,20 @@ class ProviderSpellingCostTests(UsageCliTests):
                                              provider=provider, registry=reg),
                              expected, provider)
 
+    def test_the_shipped_registry_carries_the_intro_window_that_is_in_force(self):
+        # The registry has no dated-price mechanism (schema `provider_prices`
+        # forbids an extra key), so the rate on file must be the one in force
+        # and the future list price travels in the prose: the published Vertex
+        # rate for gemini-3.8-flash is $0.75 in / $3.75 out per 1M through
+        # 2026-12-31 (50 % credits back), $1.50 / $7.50 from 2027-01-01. Filing
+        # the 2027 list price as current bills every grant row at double.
+        reg = usage.read_registry(ROOT / "catalog" / "ai-registry.json")
+        entry = reg["models"]["gemini-3.8-flash"]["provider_prices"]["vertex_ai"]
+        self.assertEqual((entry["price_in"], entry["price_out"]),
+                         (7.5e-07, 3.75e-06))
+        self.assertIn("2026-12-31", entry["price_source"])
+        self.assertIn("2027-01-01", entry["price_source"])
+
     def test_the_credit_guard_and_the_report_price_the_same_rows(self):
         # One ledger, one price: the figure that gates the leg and the figure
         # the report prints cannot disagree about a gateway-spelled provider.
