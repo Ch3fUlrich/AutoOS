@@ -49,9 +49,11 @@ reference it; they do not restate it.
   `l1-orchestrator-clean` keeps declared+gated paid leg so it stays `omitted`,
   not legless. Never set provider available:false (drops `:free` too).
 - **New credit singles (class credit).** `ovh-qwen3.8-27b`, `ovh-gpt-oss-120b`,
-  `ovh-qwen3-coder-30b`, `vertex-gemini-3.8-flash`: single leg, strategy
+  `vertex-gemini-3.8-flash`: single leg, strategy
   priority, `surfaces.omniroute` (clients `[opencode, zed]`, context/declared,
   display_name, output; no openhands_profile per groq/hf precedent).
+  (`ovh-qwen3-coder-30b` was the fourth until OVHCODER-DROP 2026-10-08 retired
+  it — OVH withdrew the model upstream, live 404.)
 - **Every leg add/remove is reasoned and dated.** The reason lives in the
   route/model `$comment` (e.g. ORQWEN-DEAD, SCWREMOVAL) AND in the
   availability ledger (`python tools/probe-ledger.py record --leg P/M

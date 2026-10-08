@@ -95,6 +95,11 @@
       "supports_effort": true
     }
   },
+  "host_admission": {
+    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape.",
+    "max_live_workers": 6,
+    "mem_available_floor_mb": 6144
+  },
   "models": {
     "MiniMax-M3": {
       "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
@@ -585,10 +590,10 @@
       "tool_calls": "proven",
       "provider_prices": {
         "vertex_ai": {
-          "price_in": 1.5e-06,
-          "price_out": 7.5e-06,
-          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (list price from 2027-01-01; intro $0.75/$3.75 through 2026-12-31 via 50% credits back)",
-          "price_as_of": "2026-10-01"
+          "price_in": 7.5e-07,
+          "price_out": 3.75e-06,
+          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (intro rate IN FORCE: $0.75 in / $3.75 out per 1M through 2026-12-31 via 50% credits back; list $1.50/$7.50 from 2027-01-01. provider_prices carries no dated price (schema allows none), so this row is the rate of the day - raise it to the list price when 2027-01-01 opens)",
+          "price_as_of": "2026-10-08"
         }
       },
       "prompt_cache_by_provider": {
@@ -5296,5 +5301,5 @@
       "$comment": " D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs). Layer twin of routes.l2-orchestrator for a privacy=sensitive card; it drops the bazaarlink free leg that route heads with."
     }
   },
-  "version": "2026-09-30"
+  "version": "2026-10-08"
 }

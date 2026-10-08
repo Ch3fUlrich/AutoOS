@@ -9,6 +9,7 @@ has no priced Flash model at all.
 
 Run with: python tests/test_run_budget_prices.py
 """
+import copy
 import json
 import sys
 import tempfile
@@ -25,9 +26,12 @@ PRICES_FILE = REPO_ROOT / "configuration" / "google-prices.json"
 REGISTRY_NONE = str(REPO_ROOT / "no-such-registry.json")
 
 
-def _row(model, provider, tin, tout, cache, ts="2026-10-03T10:00:00Z"):
-    return {"timestamp": ts, "model": model, "provider": provider,
-            "tokens": {"in": tin, "out": tout, "cacheRead": cache}}
+def _row(model, provider, tin, tout, cache, ts="2026-10-03T10:00:00Z", status=None):
+    row = {"timestamp": ts, "model": model, "provider": provider,
+           "tokens": {"in": tin, "out": tout, "cacheRead": cache}}
+    if status is not None:
+        row["status"] = status
+    return row
 
 
 def _provider_block(price_in, price_out, cache_read, unverified=True):
@@ -87,6 +91,97 @@ class TestVertexSpellingsPriced(unittest.TestCase):
             self.assertEqual(pr["price_out"], 3.75e-06, model)
             self.assertEqual(pr["price_cache_read"], 1.875e-07, model)
             self.assertTrue(pr["unverified"], model)
+
+
+class TestRegistryScopedProviderSpelling(unittest.TestCase):
+    """(a2) LANE-PRICE-GAP (2026-10-08): the registry half of `get_price` keyed
+    `models.<id>.provider_prices` by the spelling the row carried.
+
+    A call-log row names the provider `vertex` (the gateway connection id) or
+    `ovh` (the model prefix) while the price is filed under the registry id
+    (`vertex_ai`, `ovhcloud`). The scoped lookup therefore missed and the row
+    fell to the model-level row -- which for a two-price model id is the FREE
+    provider's 0, i.e. no price at all. The lookup now goes through the one
+    registry-derived normaliser tools/registry.py owns, the same one
+    `autoos_usage` prices with.
+
+    The gate's fallback policy is deliberately untouched: `configuration/
+    google-prices.json` still answers what the registry cannot state, in the
+    same order and with the same rates
+    (test_the_prices_file_fallback_is_unchanged).
+    """
+
+    REG = {
+        "providers": {
+            "vertex_ai": {"id": "vertex_ai", "omniroute_id": "vertex", "tier": "credit"},
+            "ovhcloud": {"id": "ovhcloud", "omniroute_id": "ovhcloud",
+                         "model_prefix": "ovh", "tier": "credit"},
+            "google_ai_studio": {"id": "google_ai_studio", "omniroute_id": "gemini",
+                                 "tier": "free"},
+        },
+        "models": {
+            "gemini-3.8-flash": {
+                "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
+                "price_cache_read": 0.0,
+                "provider_prices": {"vertex_ai": {
+                    "price_in": 1e-06, "price_out": 3e-06, "price_cache_read": 1e-07,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+            "gpt-oss-120b": {
+                "id": "gpt-oss-120b", "price_in": 0.0, "price_out": 0.0,
+                "price_cache_read": 0.0,
+                "provider_prices": {"ovhcloud": {
+                    "price_in": 2e-07, "price_out": 4e-07, "price_cache_read": 2e-08,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+        },
+    }
+
+    def _table(self):
+        return {"fallback": {}, "registry": copy.deepcopy(self.REG)}
+
+    def test_the_gateway_connection_id_finds_the_provider_key_price(self):
+        pr = rb.get_price("gemini-3.8-flash", "vertex", self._table())
+        self.assertEqual(pr["source"], "registry")
+        self.assertEqual((pr["price_in"], pr["price_out"], pr["price_cache_read"]),
+                         (1e-06, 3e-06, 1e-07))
+
+    def test_the_provider_key_spelling_costs_the_same_as_the_gateway_one(self):
+        for spelling in ("vertex", "vertex_ai", "VERTEX"):
+            pr = rb.get_price("gemini-3.8-flash", spelling, self._table())
+            self.assertEqual(pr["source"], "registry", spelling)
+            self.assertEqual(pr["price_in"], 1e-06, spelling)
+
+    def test_the_model_prefix_namespace_finds_its_provider_key_price(self):
+        pr = rb.get_price("gpt-oss-120b", "ovh", self._table())
+        self.assertEqual(pr["source"], "registry", pr)
+        self.assertEqual(pr["price_in"], 2e-07)
+
+    def test_an_unknown_provider_never_borrows_another_providers_price(self):
+        # The model-level row is the free leg's 0: an unresolvable provider reads
+        # as unpriced, not as vertex_ai's money.
+        pr = rb.get_price("gemini-3.8-flash", "ghost", self._table())
+        self.assertEqual(pr["source"], "unpriced", pr)
+        self.assertEqual(pr["price_in"], 0.0)
+
+    def test_a_row_billed_under_the_gateway_id_is_priced_end_to_end(self):
+        rows = [_row("gemini-3.8-flash", "vertex", 1_000_000, 100_000, 200_000)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        # 800_000 uncached * 1e-06 + 200_000 cached * 1e-07 + 100_000 out * 3e-06
+        # = 0.8 + 0.02 + 0.3 = 1.12
+        self.assertAlmostEqual(res["est_usd"], 1.12, places=6)
+        self.assertEqual(res["unpriced_models"], [])
+
+    def test_the_prices_file_fallback_is_unchanged(self):
+        # A registry row that cannot state a cache rate still loses to the
+        # prices file, in the same order as before: the gate's fallback policy
+        # is not this change's business.
+        table = {"fallback": {"models": {"gemini-3.8-flash": {"providers":
+                 _provider_block(0.75, 3.75, 0.1875)}}},
+                 "registry": copy.deepcopy(self.REG)}
+        del table["registry"]["models"]["gemini-3.8-flash"]["provider_prices"][
+            "vertex_ai"]["price_cache_read"]
+        pr = rb.get_price("gemini-3.8-flash", "vertex", table)
+        self.assertEqual(pr["source"], "google-prices.json", pr)
+        self.assertEqual(pr["price_in"], 7.5e-07)
 
 
 class TestHighestFlashRateWins(unittest.TestCase):
@@ -176,6 +271,96 @@ class TestUnpricedFlagSemantics(unittest.TestCase):
         res = rb.evaluate_day(rows, day_str="2026-10-03", prices=table)
         self.assertFalse(res["unpriced_default_used"])
         self.assertAlmostEqual(res["usd"], 0.75, places=6)
+
+
+class TestZeroTokenRowsAreFree(unittest.TestCase):
+    """(f) PRICE-GAP: a row that bills no tokens is not unpriced spend.
+
+    Measured 2026-10-08 (workstation): 11 failed calls — vertex/claude-sonnet-5
+    x5 (501), vertex/claude-opus-5 x5 (501), gemini/deep-research-max-preview-04-2026
+    x1 (402), all with 0 tokens — were counted as unpriced rows priced at the
+    Gemini Flash default, which is what raised the gate's PRICE-GAP flag.
+
+    The rule: a row whose (in + out) token counts are both 0 costs $0 and is
+    never registered in `unpriced` / `unpriced_default_used`, whatever its
+    status. A non-2xx row that *does* carry tokens keeps the default: the
+    provider may have billed partial work, and under-counting real tokens is
+    the worse failure (so a bare non-2xx status is deliberately not a free
+    pass). A 2xx row with tokens and no price keeps the default, unchanged.
+    """
+
+    def _table(self):
+        # One priced Flash model (so the default rate is non-zero) and no row
+        # for the Claude / deep-research models under test.
+        return _table({"vertex-flash-a": _provider_block(1.2, 3.0, 0.05)})
+
+    def test_failed_zero_token_unpriced_row_is_free_in_run(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 0, 0, 0, status=501)
+                for _ in range(5)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["calls"], 5)
+        self.assertEqual(res["est_usd"], 0.0)
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertEqual(res["verdict"], "ok")
+
+    def test_failed_zero_token_unpriced_row_is_free_in_day(self):
+        rows = ([_row("vertex/claude-opus-5", "vertex", 0, 0, 0, status=501)
+                 for _ in range(5)] +
+                [_row("gemini/deep-research-max-preview-04-2026", "gemini",
+                      0, 0, 0, status=402)])
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["usd"], 0.0)
+        self.assertEqual(res["by_provider"], {"vertex": 0.0, "gemini": 0.0})
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertEqual(res["verdict"], "ok")
+
+    def test_priced_zero_token_row_is_not_counted_as_unpriced(self):
+        # A successful call that reported no usage: still nothing to price.
+        rows = [_row("vertex-flash-a", "vertex", 0, 0, 0, status=200)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["est_usd"], 0.0)
+        self.assertFalse(res["unpriced_default_used"])
+
+    def test_ok_unpriced_row_with_tokens_still_uses_default(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 1_000_000, 0, 0, status=200)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-sonnet-5", "count": 1}])
+        self.assertAlmostEqual(res["est_usd"], 1.2, places=6)
+
+    def test_failed_row_with_tokens_keeps_the_default_conservatively(self):
+        # 4xx + tokens: a failed call is not proof that nothing was billed.
+        rows = [_row("vertex/claude-opus-5", "vertex", 1_000_000, 0, 0, status=429)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-opus-5", "count": 1}])
+        self.assertAlmostEqual(res["est_usd"], 1.2, places=6)
+
+    def test_row_with_garbage_tokens_is_not_read_as_zero(self):
+        # A non-numeric token field coerces to 0 but does not *prove* a free
+        # call: it stays counted as unpriced spend and lands in bad_rows.
+        rows = [_row("vertex/claude-opus-5", "vertex", "n/a", 0, 0, status=500)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["bad_rows"], 1)
+        self.assertTrue(res["unpriced_default_used"])
+
+    def test_missing_token_block_is_free(self):
+        rows = [{"timestamp": "2026-10-03T10:00:00Z", "model": "vertex/claude-opus-5",
+                 "provider": "vertex", "status": 501}]
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["usd"], 0.0)
+        self.assertFalse(res["unpriced_default_used"])
+
+    def test_mixed_day_counts_only_the_rows_that_billed(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 0, 0, 0, status=501)
+                for _ in range(11)]
+        rows.append(_row("vertex/claude-sonnet-5", "vertex", 100_000, 0, 0, status=200))
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-sonnet-5", "count": 1}])
+        self.assertAlmostEqual(res["usd"], 0.12, places=6)
+        self.assertTrue(res["unpriced_default_used"])
 
 
 class TestRealPriceFileConsistency(unittest.TestCase):
