@@ -20912,7 +20912,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(started, [])
         self.assertIn("100 MB", err)
 
-    def test_a_dry_run_is_admitted_however_full_the_host(self):
+    def test_a_dry_run_is_admitted_by_host_admission_unchanged(self):
         # Planning touches nothing, so a preview of a run the host could not take
         # still prints its plan: the operator sees the route, then queues it.
         self.live(9)
