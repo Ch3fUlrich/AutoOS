@@ -945,6 +945,11 @@ function orchestratorDenialReason(command, depth = 0) {
 //   (`rg --file/--ignore-file/-f/--path-separator`) is refused outright
 // - a flag that hands the read a program, a repository, a pager or a symlink
 //   walk is refused, inside a short bundle (`rg -uz`) as much as spelled out
+// - a flag that makes the read look at files it was never pointed at is refused
+//   the same way: rg discovers its own inputs, so the ignore rules are what keep
+//   a recursive search off this checkout's gitignored secrets (`rg --hidden KEY`
+//   printed ./.env), and git accepts an abbreviation of a long option, so
+//   `--outpu` is `--output` (round-5 findings 1 and 2)
 //
 // Anything else is denied, fail closed.
 // ---------------------------------------------------------------------------
@@ -966,9 +971,16 @@ const L2_LIST_TEXT = "git status|log|diff|show, ls, cat, rg, head, tail, wc, pwd
 //   Matched on the option NAME before any `=`, so `--no-pager` stays allowed.
 // - git per-verb switches in the rest: `--ext-diff` (and its short `-x`) runs
 //   the external diff driver, `--textconv` (`-a`) runs the textconv filter,
-//   `--no-index` compares two working-tree paths - arbitrary files.
+//   `--no-index` compares two working-tree paths - arbitrary files. Every long
+//   option on the git lists is refused under its ABBREVIATIONS too (`--ext-d`,
+//   `--textc`, `--outpu`), because git resolves them - a denied spelling is not
+//   a denied flag.
 // - rg: `--pre` / `--pre-glob` pipe every file through a program,
 //   `--hostname-bin` runs a binary, `--search-zip` / `-z` decompress with it.
+// - rg ignore-flag and glob-flag spellings (`--hidden` / `-.`, the `-u` cluster
+//   and `--unrestricted`, `--no-ignore*`, `-g` / `--glob` / `--iglob`): rg picks
+//   its own inputs, so these are how a read-only head reaches the gitignored
+//   secret files this checkout holds.
 // - /proc/self/*, /proc/<pid>/*, /proc/*/environ: the lane's own environment -
 //   server password, gateway keys - is readable there, so no read head may
 //   name one. `/proc/cpuinfo` and friends stay readable.
@@ -979,11 +991,30 @@ const L2_GIT_GLOBAL_DENY = new Set([
   "--namespace", "--super-prefix", "--paginate", "-p",
 ]);
 const L2_GIT_REST_DENY = new Set([
-  "--ext-diff", "--textconv", "--no-index", "-x", "-a",
+  // "--output" is refused by name above (it is a write, not a read knob); it is
+  // on this list too so the abbreviation rule below sees it - `git log --outp=f`
+  // is the same write under a shorter spelling.
+  "--output", "--ext-diff", "--textconv", "--no-index", "-x", "-a",
 ]);
 const L2_RG_DENY = new Set([
   "--pre", "--pre-glob", "--hostname-bin", "--search-zip", "-z", "--follow", "-L",
 ]);
+
+// Sonnet round-5 REJECT finding 1 (MED-HIGH): rg DISCOVERS the files it reads, so
+// the operand rules above never see them, and the ignore rules are the only thing
+// that kept a recursive search off the gitignored secrets sitting in the checkout.
+// `--hidden` / `-.` add the dot files, `-u` (`--unrestricted`, and its `-uu`,
+// `-uuu` clusters) drops the ignore files, `--no-ignore*` drops one class of them,
+// and a glob picks a named file in by hand. All of them printed ./.env.
+const L2_RG_IGNORE_DENY = new Set([
+  "--hidden", "-.", "--unrestricted", "-u", "--glob", "-g", "--iglob",
+]);
+// ripgrep's `--no-ignore` family takes a qualifier: --no-ignore-vcs, -parent,
+// -dot, -global, -files. Each one is the same read under a longer name.
+const L2_RG_IGNORE_DENY_PREFIXES = ["no-ignore"];
+const L2_RG_IGNORE_WHY = "makes a recursive search read files it never named - the " +
+  "gitignored secrets in this checkout (.env, *.key) are exactly the dot files and " +
+  "ignored files these flags switch on";
 const L2_PROC_RE = /(^|\/)proc\/(self|thread-self|[0-9]+|\*)\//;
 
 // Sonnet round-4 REJECT finding 3: a value-taking option is how a read command
@@ -1028,14 +1059,40 @@ function splitOptionDeny(deny) {
   return { long, short };
 }
 
-function l2OptionDenial(tokens, deny, label) {
+function l2OptionDenial(tokens, deny, label, opts) {
+  // A short flag hides inside a bundle (`rg -uz` is `rg -u -z`), so an exact
+  // token match on "-z" never saw it. Split the deny list by spelling and let
+  // the caller test a bundle character by character.
+  //
+  // opts.prefixes extend the deny list to every LONG name starting with one of
+  // them (ripgrep's `--no-ignore` family), and opts.abbreviate denies every long
+  // option that is itself an unambiguous-looking PREFIX of a denied name: git
+  // accepts `--outpu` for `--output`, `--ext-d` for `--ext-diff` and `--textc`
+  // for `--textconv`, so an exact-match table was a hole, not a rule (round-5
+  // finding 2). Three characters is the floor git itself needs to be picky, and
+  // it keeps a one- or two-letter prefix from swallowing unrelated options.
   const { long, short } = splitOptionDeny(deny);
-  const why = "hands the read-only command a program, a repository, a pager or a " +
-              "symlink walk to run";
+  const longNames = [...long];
+  const prefixes = (opts && opts.prefixes) || [];
+  const abbreviate = !!(opts && opts.abbreviate);
+  const why = (opts && opts.why) ||
+    "hands the read-only command a program, a repository, a pager or a symlink walk to run";
   for (const t of tokens) {
     if (t.startsWith("--")) {
-      if (long.has(t.slice(2).split("=")[0])) {
+      const name = t.slice(2).split("=")[0];
+      if (long.has(name)) {
         return `${label} ${t} ${why}`;
+      }
+      const prefixed = prefixes.find((p) => name.startsWith(p));
+      if (prefixed !== undefined) {
+        return `${label} ${t} (--${prefixed}* spelling) ${why}`;
+      }
+      if (abbreviate && name.length >= 3) {
+        const abbreviated = longNames.find((d) => d.startsWith(name));
+        if (abbreviated !== undefined) {
+          return `${label} ${t} is an abbreviation of the denied long option ` +
+                 `--${abbreviated}; git accepts it as one`;
+        }
       }
       continue;
     }
@@ -1375,7 +1432,7 @@ function l2ReadOnlyDenialReason(command) {
       // however read-only the verb looks: `-c` writes config the verb then
       // executes (core.fsmonitor, core.pager, credential.helper), `-C` and
       // friends choose another repository or git binary.
-      const globalReason = l2OptionDenial(g.opts, L2_GIT_GLOBAL_DENY, "git");
+      const globalReason = l2OptionDenial(g.opts, L2_GIT_GLOBAL_DENY, "git", { abbreviate: true });
       if (globalReason) return globalReason;
       if (g.sub === null || g.sub === undefined) {
         return "git without a subcommand may run any verb";
@@ -1386,7 +1443,7 @@ function l2ReadOnlyDenialReason(command) {
       // `git log --output=f` is a file write wearing a read-only verb.
       const out = g.rest.find((a) => a === "--output" || a.startsWith("--output="));
       if (out) return `git ${g.sub} ${out} writes a file; an L2 may not write anywhere`;
-      const restReason = l2OptionDenial(g.rest, L2_GIT_REST_DENY, `git ${g.sub}`);
+      const restReason = l2OptionDenial(g.rest, L2_GIT_REST_DENY, `git ${g.sub}`, { abbreviate: true });
       if (restReason) return restReason;
       // A pathspec is a path even when it wears a revision's spelling.
       const gOperand = l2OperandReason("git", g.rest);
@@ -1400,6 +1457,11 @@ function l2ReadOnlyDenialReason(command) {
     if (head === "rg") {
       const rgReason = l2OptionDenial(args, L2_RG_DENY, "rg");
       if (rgReason) return rgReason;
+      const ignoreReason = l2OptionDenial(args, L2_RG_IGNORE_DENY, "rg", {
+        prefixes: L2_RG_IGNORE_DENY_PREFIXES,
+        why: L2_RG_IGNORE_WHY,
+      });
+      if (ignoreReason) return ignoreReason;
     }
     const operandReason = l2OperandReason(head, args);
     if (operandReason) return operandReason;

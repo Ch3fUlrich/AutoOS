@@ -598,7 +598,10 @@ class TestL2ReadOnlyRole(unittest.TestCase):
             self._l2_denied(cmd, "rg")
 
     def test_rg_plain_search_kept(self):
-        for cmd in ("rg foo", "rg -i --hidden TODO ."):
+        # `--hidden` moved to the deny list (round-5 finding 1): it makes rg read
+        # the gitignored secrets in the repo. See
+        # test_r5_rg_flags_that_defeat_the_ignore_rules_denied.
+        for cmd in ("rg foo", "rg -i TODO .", "rg --ignore-case TODO ."):
             self._l2_allowed(cmd)
 
     def test_proc_per_process_reads_denied(self):
@@ -802,6 +805,59 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                     "exec ls", "command cat f", "nice ls", "timeout 5 ls", "time ls",
                     "nohup ls", "stdbuf -o0 cat f", "sudo", "timeout"):
             self._l2_denied(cmd, "wrapper")
+
+    # ------------------------------------------------------------------
+    # Sonnet round-5 REJECT (L2GATES-r4): two holes left in the L2 role.
+    #
+    # (1) MED-HIGH rg DISCOVERS the files it reads, so the operand rules never
+    #     see them, and the ignore rules are the only thing that kept a recursive
+    #     search off the gitignored secrets sitting in the checkout. Every flag
+    #     that defeats them printed ./.env: `rg --hidden KEY`, `rg -uu KEY`,
+    #     `rg -. KEY`, `rg --no-ignore --hidden KEY`. A glob picks the secret in
+    #     by hand, so `-g/--glob/--iglob` go too.
+    # (2) LOW      L2_GIT_REST_DENY was an exact-match table and git accepts an
+    #     unambiguous ABBREVIATION of a long option: `--outpu`, `--ext-d`,
+    #     `--textc` each walked past it into the very behaviour the table named.
+    # ------------------------------------------------------------------
+
+    def test_r5_rg_flags_that_defeat_the_ignore_rules_denied(self):
+        for cmd in ("rg --hidden KEY", "rg --hidden=true KEY", "rg -. KEY",
+                    "rg -u KEY", "rg -uu KEY", "rg -uuu KEY",
+                    "rg --unrestricted KEY", "rg --no-ignore KEY",
+                    "rg --no-ignore --hidden KEY", "rg --no-ignore-vcs KEY",
+                    "rg --no-ignore-dot KEY", "rg --no-ignore-parent --no-ignore KEY",
+                    "rg -iu KEY", "rg -i. KEY", "rg --hidden KEY .env",
+                    "rg -zu KEY", "rg --no-ignore-files KEY"):
+            self._l2_denied(cmd, "rg")
+
+    def test_r5_rg_glob_flags_denied(self):
+        for cmd in ("rg -g .env KEY", "rg --glob .env KEY", "rg --glob=!.env KEY",
+                    "rg -g=*.env KEY", "rg --iglob .env KEY", "rg --iglob=*.env KEY",
+                    "rg -iAg KEY", "rg foo -g '*.env'"):
+            self._l2_denied(cmd, "rg")
+
+    def test_r5_plain_rg_searches_kept(self):
+        for cmd in ("rg foo", "rg -n foo src", "rg --line-number foo",
+                    "rg --context 3 foo", "rg --count-matches foo",
+                    "rg --sort path foo", "rg -i foo ."):
+            self._l2_allowed(cmd)
+
+    def test_r5_git_abbreviated_denied_long_options_denied(self):
+        for cmd in ("git log --outp=/tmp/f", "git log --outp /tmp/f",
+                    "git log --outpu=/tmp/f", "git diff --ext-d",
+                    "git diff --ext-di", "git show --textc", "git show --textco",
+                    "git diff --no-i a b", "git diff --no-ind a b",
+                    "git --exec-p=/tmp/bins log", "git --git-di=/tmp/evil.git log",
+                    "git --work-tre=/etc status", "git --pag log",
+                    "git --confi=x status", "git --names status"):
+            self._l2_denied(cmd, "git")
+
+    def test_r5_git_read_only_long_options_kept(self):
+        for cmd in ("git diff --no-ext-diff HEAD", "git show --no-textconv HEAD",
+                    "git --no-pager log", "git log --oneline -5 --stat",
+                    "git diff --name-only", "git status --short --branch",
+                    "git log --no-color", "git show --format=%h"):
+            self._l2_allowed(cmd)
 
 
 if __name__ == "__main__":
