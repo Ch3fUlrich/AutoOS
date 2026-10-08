@@ -4089,6 +4089,40 @@ class DenyGemini31ProPreviewTests(unittest.TestCase):
 
 _MISSING = object()
 
+# AO-PROBE-D657 data (D-658, 2026-10-08): the registry model rows the probe's
+# legs resolved to through tools/registry.py's resolve_leg, at the verdict the
+# two gateways' `cache` cells add up to - "true" on either gateway wins over
+# "false" on either, anything else is "unknown". gemini-3.8-flash is the one
+# documented value: Google's implicit caching covers its vertex legs, and the
+# probe never had to measure what the vendor already states.
+_D657_BY_VALUE = {
+    "true": ("deepseek/deepseek-v4-flash-0731free:free",
+             "nvidia/nemotron-3-super-120b-a12b:free"),
+    "documented": ("gemini-3.8-flash",),
+    "false": ("cohere/north-mini-code:free",
+              "command-a-03-2025",
+              "command-r-plus-08-2024",
+              "mistral-code-latest",
+              "poolside/laguna-s-2.1:free"),
+    "unknown": ("Qwen3-Coder-30B-A3B-Instruct",
+                "Qwen3.8-27B",
+                "claude-sonnet-5",
+                "google/gemini-3.8-flash",
+                "gpt-oss-120b",
+                "llama-4-maverick",
+                "morph-dsv4flash",
+                "muse-spark-1.3-contributor-free",
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "qwen/qwen3.8-27b:free",
+                "qwen7b"),
+}
+PROMPT_CACHE_D657 = {model_id: value
+                     for value, ids in _D657_BY_VALUE.items()
+                     for model_id in ids}
+
+
 
 class PromptCacheFieldTests(unittest.TestCase):
     """AO-PROBE-D657 (D-657/D-658, 2026-10-08): ``models.<id>.prompt_cache`` is
@@ -4109,11 +4143,24 @@ class PromptCacheFieldTests(unittest.TestCase):
             reg["models"][self.MODEL_ID]["prompt_cache_source"] = source
         return [p for p in registry.check_registry(reg) if "prompt_cache" in p]
 
-    def test_the_committed_registry_records_no_cache_verdict_yet(self):
+    def test_the_committed_registry_carries_the_D657_probe_rows_and_nothing_else(self):
+        """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
+        leg resolved to, at the verdict its TSV cells add up to - no invented
+        row, no verdict for a leg the probe never answered."""
         reg = load_registry()
-        self.assertEqual([m for m, row in reg["models"].items()
-                          if "prompt_cache" in row], [])
+        rows = {model_id: model["prompt_cache"]
+                for model_id, model in reg["models"].items()
+                if "prompt_cache" in model}
+        self.assertEqual(rows, PROMPT_CACHE_D657)
         self.assertEqual(registry.check_registry(reg), [])
+
+    def test_every_set_verdict_names_where_it_came_from(self):
+        reg = load_registry()
+        for model_id, model in sorted(reg["models"].items()):
+            if "prompt_cache" not in model:
+                continue
+            self.assertIn("probe D-657 2026-10-08 central+workstation",
+                          model["prompt_cache_source"], model_id)
 
     def test_the_four_strings_validate(self):
         for value in ("true", "documented", "false", "unknown"):
