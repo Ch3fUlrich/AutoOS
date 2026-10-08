@@ -8832,19 +8832,18 @@ class GatewayCooldownStopTests(unittest.TestCase):
                     "exceeded for metric: generate_content_free_tier_requests, "
                     "limit: 20, model: gemini-3.8-flash "
                     "Please retry in 59.250991496s.")
-    # FREEWIRE 2026-09-30: the gemini head left l2-worker (and providers.
-    # google_ai_studio is now unavailable), so the l2-worker attribution tests
-    # below name a model l2-worker still serves from exactly ONE provider -
-    # free-ai's qwen7b grant (SCWREMOVAL 2026-10-06 removed the scaleway
-    # provider and its l2-worker leg; free_ai/qwen7b is the surviving leg
-    # exactly one l2-worker/-free-only leg serves).
-    SCW_COOLDOWN = ("Error: [429] All credentials for model "
-                    "qwen7b are cooling down "
-                    "(reset after 37s)")
-    SCW_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
-                 "exceeded for metric: generate_content_free_tier_requests, "
-                 "limit: 20, model: qwen7b "
-                 "Please retry in 59.250991496s.")
+    # D657-D2 (AO-DENYLEGS D2, 2026-10-08) re-cut l2-worker to the chain §2
+    # judges: bazaarlink's deepseek head, an openrouter leg, the vertex tail.
+    # free-ai's qwen7b grant left with it (no probe-d657 gateway acked it, so §8
+    # omits it until a re-probe), which made the SCW_* lines name a model the
+    # route no longer holds and bench the wrong provider. The line below names
+    # the model the D2 chain still serves from exactly ONE provider on
+    # l2-worker-free-only; the gemini line above names the vertex tail that
+    # l2-worker serves from one provider.
+    NEMOTRON_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
+                      "exceeded for metric: generate_content_free_tier_requests, "
+                      "limit: 20, model: nvidia/nemotron-3-super-120b-a12b:free "
+                      "Please retry in 59.250991496s.")
 
     def setUp(self):
         self.agent = load_agent()
@@ -8928,26 +8927,27 @@ class GatewayCooldownStopTests(unittest.TestCase):
             "zen")
 
     def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
-        # FREEWIRE 2026-09-30: the model l2-worker names from one provider is now
-        # free-ai's qwen7b grant (the gemini head was removed). The
-        # measured wrong answer was antigravity (the next live leg of l2-worker).
+        # D657-D2: the model l2-worker names from exactly one provider is the
+        # vertex tail (the chain's head is bazaarlink's deepseek, so a guess at
+        # the first live leg would bench the wrong provider). The measured wrong
+        # answer was antigravity (the next live leg of l2-worker).
         recorded = self.agent.record_reset_stop(
-            self.SCW_COOLDOWN, "l2-worker", self.registry,
+            self.GEMINI_COOLDOWN, "l2-worker", self.registry,
             now=self.NOW, path=self.state_path)
-        self.assertEqual(recorded, ("free_ai", "2026-09-28T12:00:37Z"))
-        self.assertEqual(list(self.state()["providers"]), ["free_ai"],
+        self.assertEqual(recorded, ("vertex_ai", "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), ["vertex_ai"],
                          "the cooldown benches the provider that served the model "
                          "the line names, and nobody else")
         self.assertNotIn("antigravity", self.state()["providers"])
-        self.assertNotIn("google_ai_studio", self.state()["providers"])
+        self.assertNotIn("bazaarlink", self.state()["providers"])
 
     def test_a_t2_worker_free_only_model_named_cooldown_benches_its_provider(self):
         self.assertEqual(
-            self.agent.record_reset_stop(self.SCW_RETRY, "l2-worker-free-only",
+            self.agent.record_reset_stop(self.NEMOTRON_RETRY, "l2-worker-free-only",
                                          self.registry, now=self.NOW,
                                          path=self.state_path),
-            ("free_ai", "2026-09-28T12:00:59Z"))
-        self.assertEqual(list(self.state()["providers"]), ["free_ai"])
+            ("openrouter", "2026-09-28T12:00:59Z"))
+        self.assertEqual(list(self.state()["providers"]), ["openrouter"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
@@ -8959,7 +8959,8 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # serves. The fallback leg is registry data, so the expectation is read
         # from it rather than pinned to one provider's name (DSBACK 2026-09-28
         # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
-        # it to the ovhcloud head leg).
+        # it to the ovhcloud head leg; D657-D2 leaves the clean chain a single
+        # vertex leg, so the head leg IS the answer and stays derived).
         legs = self.registry["routes"]["l2-worker-clean"]["legs"]
         named = self.agent.stop_provider_id(
             "Error: [429] All credentials for model gemini-3.7-flash-high are "
@@ -8967,7 +8968,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
         unnamed = self.agent.stop_provider_id(
             "Error: [429] All credentials are cooling down (reset after 37s)",
             self.registry, legs)
-        self.assertEqual(named, "ovhcloud")
+        self.assertEqual(named, registry_tool.resolve_leg(legs[0], self.registry)[0])
         self.assertEqual(named, unnamed,
                          "an unmatched model name must attribute exactly as an "
                          "unnamed stop does, to the route's first live leg")
@@ -8982,9 +8983,6 @@ class GatewayCooldownStopTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.state_path))
 
     # --- 4 (SPAWNFIX3 item 7): a model more than one provider serves ----------
-
-    GPT_OSS_COOLDOWN = ("Error: [429] All credentials for model gpt-oss-120b are "
-                        "cooling down (reset after 37s)")
 
     def stop(self, line, route):
         out = io.StringIO()
@@ -9019,26 +9017,25 @@ class GatewayCooldownStopTests(unittest.TestCase):
                               want, line)
 
     def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
-        # CIGREEN: expectation moved by 7e329c7e (OVH legs added to l2-worker):
-        # the real l2-worker route serves gpt-oss-120b from ovhcloud AND
-        # cerebras AND SambaNova now (the groq leg spells it openai/gpt-oss-120b,
-        # a different token). The verdict holds -- the stop line names the
-        # model, not the provider, so NOBODY may be benched on a three-way
-        # guess (and picking one silently starves it) -- only the pinned name
-        # list grows by one.
-        pid, printed = self.stop(self.GPT_OSS_COOLDOWN, "l2-worker")
+        # D657-D2: no judged chain route holds one model twice any more (§8 makes
+        # consecutive legs change provider), so the ambiguity lives where the
+        # registry still declares it — the `gemini-3.8-flash` route, which
+        # google_ai_studio AND vertex_ai both serve. The verdict holds: the stop
+        # line names the model, not the provider, so NOBODY may be benched on a
+        # two-way guess (and picking one silently starves it).
+        pid, printed = self.stop(self.GEMINI_COOLDOWN, "gemini-3.8-flash")
         self.assertIsNone(pid)
         # The names are the registry's own provider ids — the spelling every
         # other read of this registry keys on, so a message is never the only
         # place a made-up lowercase name appears.
         self.assertEqual(printed.strip(),
-                         "ambiguous stop: gpt-oss-120b served by ovhcloud, cerebras, "
-                         "SambaNova - not benched")
+                         "ambiguous stop: gemini-3.8-flash served by "
+                         "google_ai_studio, vertex_ai - not benched")
 
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
         with contextlib.redirect_stdout(io.StringIO()):
             recorded = self.agent.record_reset_stop(
-                self.GPT_OSS_COOLDOWN, "l2-worker", self.registry,
+                self.GEMINI_COOLDOWN, "gemini-3.8-flash", self.registry,
                 now=self.NOW, path=self.state_path)
         self.assertIsNone(recorded)
         self.assertFalse(os.path.exists(self.state_path),
@@ -9049,26 +9046,26 @@ class GatewayCooldownStopTests(unittest.TestCase):
         # leg): gemini-3.7-flash-high is served by NO l2-worker leg now, so
         # naming it falls back to the first live leg instead of benching
         # antigravity. The intent stands -- the ambiguity rule must not swallow
-        # a clean single-served stop -- pinned here on free-ai's qwen7b
-        # grant, which exactly one l2-worker leg serves.
+        # a clean single-served stop -- pinned here (D657-D2) on the openrouter
+        # nemotron leg, which exactly one l2-worker leg serves.
         pid, printed = self.stop(
             "Error: [429] All credentials for model "
-            "qwen7b are "
+            "nvidia/nemotron-3-super-120b-a12b:free are "
             "cooling down (reset after 37s)", "l2-worker")
-        self.assertEqual(pid, "free_ai", printed)
+        self.assertEqual(pid, "openrouter", printed)
         self.assertEqual(printed, "")
 
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
-        # this file in and skips the leg. FREEWIRE 2026-09-30: the recorded line
-        # names free-ai's qwen7b leg (the gemini head left l2-worker).
-        self.agent.record_reset_stop(self.SCW_COOLDOWN, "l2-worker",
+        # this file in and skips the leg. D657-D2: the recorded line names the
+        # vertex tail of l2-worker (the free-ai qwen7b grant is gated out).
+        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "l2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=1))
-        cooled = merged["providers"]["free_ai"]
+        cooled = merged["providers"]["vertex_ai"]
         self.assertIs(cooled["available"], False)
         self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
         self.assertTrue(self.agent.unavailable_now(cooled,
@@ -9077,7 +9074,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=60))
         self.assertFalse(
-            self.agent.unavailable_now(expired["providers"]["free_ai"],
+            self.agent.unavailable_now(expired["providers"]["vertex_ai"],
                                        self.NOW + datetime.timedelta(seconds=60)),
             "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
 
@@ -9272,10 +9269,12 @@ class ReviewStatusTests(unittest.TestCase):
     def test_more_than_three_seats_is_a_note_never_a_failure(self):
         # The operator's guidance is 2-3 seats; the gate enforces the floor of
         # two and prints a non-blocking note past three -- never a refusal.
+        # D657-D2: the meta seat here is the free Muse reviewer, not the paid
+        # contributor combo (`omniroute/spark-1.3-contributor` renders nothing).
         real = self.real_registry()
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
-            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "reviewer=opencode/muse-spark-1.3-contributor-free verdict=PASS\n"
             "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
@@ -9497,15 +9496,18 @@ class ReviewStatusTests(unittest.TestCase):
     # --- reality, not the fixture -----------------------------------------
 
     def test_the_real_registry_resolves_the_paid_reviewer_and_haiku(self):
+        # D657-D2: the paid seat is opencode-zen's deepseek grant. The paid Muse
+        # contributor left policy.reviewers with the route it named (§8 keeps the
+        # paid Meta leg out of everything a probe-d657 gateway never acked).
         real = self.real_registry()
         report = self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
-            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "reviewer=opencode/deepseek-v4.1-flash verdict=PASS\n"
             "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
             "reviewer=opencode/nemotron-3-ultra-free verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
-        self.assertEqual(report["cross_family"]["families"], ["meta", "nvidia"])
+        self.assertEqual(report["cross_family"]["families"], ["deepseek", "nvidia"])
         # Haiku is the fallback first pass: it counts as a cross-family reviewer
         # for a non-anthropic author, and the same anthropic family as Sonnet's
         # final check — which is why the two entries are different requirements.
@@ -9524,27 +9526,29 @@ class ReviewStatusTests(unittest.TestCase):
         # REVFIX S2 measured against the real catalog, not a fixture: the
         # operator's reviewer spelling resolves through the registry to the
         # family it declares, and the vendor's capitalization of that family is
-        # the same family.
+        # the same family. D657-D2 moved the gateway spelling off
+        # `omniroute/spark-1.3-contributor` (no combo renders, so nothing places
+        # it) onto `omniroute/l2-worker`, whose head leg is a zhipu grant.
         real = self.real_registry()
         self.assertEqual(self.agent.resolver.author_family(
-            "omniroute/spark-1.3-contributor", real)[0], "meta")
-        self.assertEqual(self.agent.resolver.author_family("Meta", real)[0], "meta")
+            "omniroute/l2-worker", real)[0], "zhipu")
+        self.assertEqual(self.agent.resolver.author_family("Zhipu", real)[0], "zhipu")
         report = self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=Meta "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=Meta "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=qwen3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
         self.assertTrue(report["ready"], report)
-        # The self-review that used to pass: Meta's own model, Meta's reviewer.
+        # The self-review that used to pass: Zhipu's own model, Zhipu's reviewer.
         self.assertFalse(self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=Meta "
-            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "AutoOS-Review: kind=cross-family author=Zhipu "
+            "reviewer=omniroute/l2-worker verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
         # An author the registry cannot place is not an independent review.
         self.assertFalse(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
-            "reviewer=omniroute/spark-1.3-contributor verdict=PASS\n"
+            "reviewer=omniroute/l2-worker verdict=PASS\n"
             "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
 
     def test_the_real_registry_resolves_the_free_zen_reviewers(self):
@@ -9589,15 +9593,18 @@ class ReviewStatusTests(unittest.TestCase):
                 family, why_not = self.agent.resolver.author_family(author, real)
                 self.assertEqual(family, "anthropic", why_not)
 
-    def test_an_orchestrator_author_reviewed_by_the_paid_muse_is_cross_family(self):
+    def test_an_orchestrator_author_reviewed_by_the_meta_reviewer_is_cross_family(self):
         # The point of the four ids above: a lane an Opus 5.5 session wrote is
         # reviewable by Muse without anyone editing the author field to a lie.
+        # D657-D2: the meta seat is the free Muse reviewer -- §8 keeps the paid
+        # contributor leg, which no probe-d657 gateway acked, out of the registry.
         real = self.real_registry()
         for author in self.ORCHESTRATOR_AUTHORS:
             with self.subTest(author=author):
                 report = self.agent.review_status(
                     ("AutoOS-Review: kind=cross-family author=%s "
-                     "reviewer=omniroute/spark-1.3-contributor verdict=ship\n" % author)
+                     "reviewer=opencode/muse-spark-1.3-contributor-free "
+                     "verdict=ship\n" % author)
                     + "AutoOS-Review: kind=cross-family author=%s "
                       "reviewer=gemini-3.8-flash verdict=ship\n" % author
                     + FINAL_LINE, real)
@@ -10266,22 +10273,29 @@ class EffortRungPlumbingTests(unittest.TestCase):
     variants generated into opencode.jsonc were dead weight.
 
     The one client-side mechanism that exists is opencode's model variant:
-    `--model omniroute/deepseek-v4.1-flash#high` selects the variant entry
-    whose `settings.reasoningEffort` the OpenAI-compatible protocol sends as
+    `--model omniroute/<combo>#<rung>` selects the variant entry whose
+    `settings.reasoningEffort` the OpenAI-compatible protocol sends as
     `reasoning_effort`. So `none` — and a non-reasoning leg's None — means NO
     `#variant` at all: the base model entry carries no reasoning settings
     (pinned in tests/test_sync_ide_models.py). An OmniRoute combo cannot carry
     a per-effort alias (pinned in tests/test_registry_render.py), so a gateway
     client takes the bare combo and the rung is not delivered there — said
     out loud rather than half-implemented.
+
+    D657-D2 (2026-10-08) moved the carrier: `deepseek-v4.1-flash` renders no combo
+    any more (no probe-d657 gateway acked `deepseek/deepseek-flash`), so it is no
+    longer declared in opencode.jsonc and `resolve_model` refuses it. The rungs
+    are read off the config instead of being hardcoded, so the carrier can move
+    again without the ladder going stale.
     """
 
-    RUNGS = ("low", "high", "max")
-    COMBO = "deepseek-v4.1-flash"
+    COMBO = "l3-review-codebase"
 
     def setUp(self):
         self.agent = load_agent()
         self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        self.RUNGS = tuple(v["id"] for v in
+                           self.variants_of("omniroute/" + self.COMBO).values())
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         self.agent.MEASURED_OVERLAY_PATH = os.path.join(tmp, "measured.json")
@@ -10329,7 +10343,9 @@ class EffortRungPlumbingTests(unittest.TestCase):
 
     # --- one test per rung -------------------------------------------------
 
-    def test_low_high_and_max_reach_deepseek_as_reasoning_effort(self):
+    def test_every_declared_rung_reaches_the_combo_as_reasoning_effort(self):
+        self.assertTrue(self.RUNGS,
+                        "precondition: %s declares an effort ladder" % self.COMBO)
         for rung in self.RUNGS:
             with self.subTest(rung=rung):
                 self.assertEqual(self.argv_model(rung),
@@ -10352,11 +10368,11 @@ class EffortRungPlumbingTests(unittest.TestCase):
 
     def test_the_rung_is_also_kept_on_the_record(self):
         # stamping the argv must not cost the track record its rung
-        route = self.plan_of_resolver("max")
-        self.assertEqual(route["effort"], "max")
+        route = self.plan_of_resolver(self.RUNGS[-1])
+        self.assertEqual(route["effort"], self.RUNGS[-1])
         self.assertEqual(self.agent.track_entry(
             {"client": "opencode", "route": route, "model": route["model"]}, 0, 1.0)["effort"],
-            "max")
+            self.RUNGS[-1])
 
     # --- never invent a rung the answering config cannot honour -------------
 
@@ -16639,11 +16655,19 @@ class FreeOnlyComboTests(unittest.TestCase):
                 if has_paid_leg(combo):
                     kept.append(name)
         self.assertEqual(
-            set(mapped),
-            {"l1-orchestrator", "l2-worker", "l3-driver"},
-            "a paid combo grew a free-only twin (or lost one)")
-        for name in ("l2-orchestrator", "l1-orchestrator-paid"):
-            self.assertIn(name, kept, name)
+            set(mapped), set(),
+            "D657-D2 (AO-DENYLEGS D2, 2026-10-08): §8 keeps every paid leg out of "
+            "the judged chains, so the scan above finds nothing to map -- a free "
+            "run never has to leave a chain to avoid paying")
+        # The "-free-only" twins stay (other code names them -- R-orch-11), and
+        # a free run still lands on one; what changed is that riding it no
+        # longer dodges a cost, it duplicates a chain that is already free.
+        for name in ("l1-orchestrator", "l2-worker", "l3-driver"):
+            self.assertIn(name + "-free-only", names, name)
+            self.assertEqual(agent.free_only_combo(name), name + "-free-only", name)
+        self.assertEqual(set(kept), set(),
+                         "a combo with a paid leg and no free-only twin: a free "
+                         "run would stay on it and pay")
         self.assertEqual(agent.free_only_combo("l2-worker-clean"),
                          "l2-worker-clean")
         self.assertEqual(agent.free_only_combo("t4-rag"), "t4-rag")
@@ -20546,6 +20570,16 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
     def setUp(self):
         self.agent = load_agent()
         self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        # D657-D2 (AO-DENYLEGS D2, 2026-10-08) gated every ovhcloud leg out of
+        # the judged chains: probe-d657 answers HTTP 404 for all of them, so §8
+        # omits the route until a re-probe and the rendered config no longer
+        # declares `ovh-gpt-oss-120b`. The door these tests pin is provider-level
+        # registry data (does a cited `trains_on_prompts: false` admit a sensitive
+        # card?), so the run needs *a* routable name for it: this adds back the
+        # one declaration the render dropped. It claims nothing about OVH serving
+        # today -- `tools/combo-contract.py --strict-d657` says that, and says no.
+        self.cfg["providers"]["omniroute"]["models"]["ovh-gpt-oss-120b"] = {
+            "modelID": "ovh-gpt-oss-120b"}
 
     def run_cmd(self, model):
         ns = argparse.Namespace(
