@@ -3935,7 +3935,14 @@ class CleanTierRouteTests(unittest.TestCase):
     risky to share (credentials and the like), nearly all projects are not
     privacy sensitive, so l2-orchestrator is no longer pinned to the trial
     legs and may carry the antigravity claude head (a privacy=sensitive CARD
-    is still filtered per-leg at routing time via private_safe)."""
+    is still filtered per-leg at routing time via private_safe).
+    D657-D2 (2026-10-08) supersedes both the trial-credit lead and the paid
+    deepseek tail: every OVH row 404s on both probe gateways (ack fail, so the
+    leg is omitted until a re-probe returns 200), the antigravity claude head
+    is 429 and agy is never a head, and spec SS8 bans a paid deepseek leg. What
+    survives both rules is the vertex credit, so a clean chain today is that one
+    leg - which is why the tail pin below asserts the *absence* of the banned
+    legs rather than a band the probes never confirmed."""
 
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
@@ -3956,36 +3963,51 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self._leg(leg)
 
-    def test_sensitive_routes_lead_with_the_trial_credits(self):
+    def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
+        # D657-D2: the two ovhcloud trial legs 401/404 out of every chain (probe
+        # ack fail on both gateways), so the vertex credit leads and closes. A
+        # clean route may never fall back onto a leg that trains on prompts.
         for rid in self.SENSITIVE:
-            if rid == "l2-orchestrator":
-                continue
-            self.assertEqual(self.reg["routes"][rid]["legs"][:3],
-                             list(self.TRIAL_LEGS), rid)
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
+            self.assertNotIn("ovhcloud/gpt-oss-120b", legs, rid)
+            self.assertNotIn("ovhcloud/Qwen3.8-27B", legs, rid)
 
-    def test_t2_orchestrator_is_1m_caching_with_the_claude_head(self):
+    def test_t2_orchestrator_is_1m_caching_with_the_free_head(self):
         # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
         # sessions, so only prompt-caching providers may serve them - the two
-        # OVH legs are gone (OVH does not cache; it is for implementation work
-        # only). CTX1M (same day): every serving leg advertises 1M, so the
-        # stale 128k declaration is raised to 1M. PRIVACY (same day): the
-        # sensitive-capable pin no longer applies to this route, so the
-        # antigravity claude sonnet 5-5 head is allowed (deepseek stays last).
+        # OVH legs are gone (OVH does not cache). CTX1M (same day): every
+        # serving leg advertises 1M, so the stale 128k declaration is raised.
+        # D657-D2 replaces the antigravity claude head (429 on both gateways,
+        # and agy is never a head per the D-657 rules) with the bazaarlink free
+        # leg, and drops the paid deepseek tail (spec SS8).
         legs = self.reg["routes"]["l2-orchestrator"]["legs"]
-        self.assertEqual(legs, ["antigravity/claude-sonnet-5-5-medium",
-                                "vertex/gemini-3.8-flash",
-                                "deepseek/deepseek-flash"])
+        self.assertEqual(legs, ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                "vertex/gemini-3.8-flash"])
         self.assertEqual(
             self.reg["routes"]["l2-orchestrator"]["surfaces"]["omniroute"]
             ["context_declared"], "1M")
-        self.assertEqual(legs[-1], "deepseek/deepseek-flash")
+        self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
 
-    def test_sensitive_routes_end_with_paid_deepseek(self):
+    def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
+        # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
+        # paid deepseek, no paid meta muse), so the closing leg is the vertex
+        # credit and the banned tail is asserted absent instead of pinned last.
         for rid in self.SENSITIVE:
-            self.assertEqual(self.reg["routes"][rid]["legs"][-1],
-                             "deepseek/deepseek-flash", rid)
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[-1], "vertex/gemini-3.8-flash", rid)
+            for banned in ("deepseek/deepseek-flash",
+                           "antigravity/claude-sonnet-5-5-medium"):
+                self.assertNotIn(banned, legs, "%s carries the SS8-banned %s"
+                                 % (rid, banned))
+            for leg in legs:
+                self._leg(leg)
 
     def test_clean_trial_legs_span_at_least_two_families(self):
+        # D657-D2 serves only the vertex leg on a clean chain, so this pins the
+        # REGISTERED trial band - the two families a re-probe 200 would put back
+        # on the lead, which is what the >=2-family promise needs to survive.
         families = {self.reg["models"][self._leg(leg)[1]]["family"]
                     for leg in self.TRIAL_LEGS}
         self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
@@ -3996,15 +4018,25 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self.assertFalse(leg.startswith(banned), (rid, leg))
 
-    def test_stale_ovh_coder_legs_are_marked_unavailable(self):
+    def test_the_404_ovh_legs_ride_no_chain_after_d657(self):
+        """L2-CLEAN kept ovhcloud/Qwen3-Coder-30B-A3B-Instruct in l2-worker and
+        l3-driver as an available:false gate ("not in OVH AI Endpoints catalog
+        2026-10-01"). D657-D2 deletes the gate with the leg it gated: probe-d657
+        records ack fail / HTTP 404 on BOTH gateways for all three ovhcloud
+        spellings, and the D-657 rule omits a leg until a re-probe returns 200,
+        so no chain carries an OVH leg and no chain carries a gate for one. The
+        three pinned single-provider credit combos keep their own legs - they are
+        an operator-facing seat, not a fallback, and the report names them."""
         stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-        for rid in ("l2-worker", "l3-driver"):
-            route = self.reg["routes"][rid]
-            self.assertIn(stale, route["legs"], rid)
-            entry = route["unavailable_legs"][stale]
-            self.assertIs(entry["available"], False, rid)
-            self.assertIn("not in OVH AI Endpoints catalog 2026-10-01",
-                          entry["$comment"], rid)
+        chains = {rid: route for rid, route in self.reg["routes"].items()
+                  if rid.startswith(("l1-", "l2-", "l3-", "t"))}
+        for rid, route in chains.items():
+            self.assertNotIn(stale, route.get("legs") or [], rid)
+            self.assertNotIn(stale, route.get("unavailable_legs") or {}, rid)
+            for leg in route.get("legs") or []:
+                self.assertFalse(leg.startswith("ovhcloud/"), (rid, leg))
+        self.assertIn(stale,
+                      self.reg["routes"]["ovh-qwen3-coder-30b"]["legs"])
 
 
 class ModelKeyCaseHygieneTests(unittest.TestCase):
@@ -4236,13 +4268,19 @@ _MISSING = object()
 # verdict at all: its Vertex leg is documented-cached (Google implicit caching)
 # and its AI-Studio leg was never measured - that split lives in
 # `prompt_cache_by_provider` (D1 judge nit: caching is a provider+model fact).
+# D657-D2 (2026-10-08) registers the two legs the re-cut chains need
+# (cohere/command-a-plus-05-2026, openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)
+# and takes their verdict from the same TSV cells: ack ok, tool ok, cache false
+# on both gateways, so both rows join the "false" group and ride no L0-L2 chain.
 _D657_BY_VALUE = {
     "true": ("deepseek/deepseek-v4-flash-0731free:free",
              "nvidia/nemotron-3-super-120b-a12b:free"),
     "false": ("cohere/north-mini-code:free",
               "command-a-03-2025",
+              "command-a-plus-05-2026",
               "command-r-plus-08-2024",
               "mistral-code-latest",
+              "nvidia/nemotron-3-ultra-550b-a55b:free",
               "poolside/laguna-s-2.1:free"),
     "unknown": ("Qwen3-Coder-30B-A3B-Instruct",
                 "Qwen3.8-27B",
