@@ -203,7 +203,10 @@ DATE_EXEMPT_KEYS = ("source", "verified", "version", "unavailable_until", "month
                     # fight rule-for-field honesty (SB-C2 item 4). price_as_of
                     # is the machine-readable sibling (T1-CREDIT-FIX-6): a bare
                     # YYYY-MM-DD the validator itself checks, not prose.
-                    "price_source", "price_as_of",
+                    # prompt_cache_source is the same shape for the caching
+                    # verdict (AO-PROBE-D657, D-658): the dated run or vendor
+                    # document behind it, owned by _check_prompt_cache.
+                    "price_source", "price_as_of", "prompt_cache_source",
                     # providers.<id>.privacy.evidence[].accessed is the schema's
                     # own YYYY-MM-DD field (L1-CLEAN 2026-10-01) - a citation
                     # date, not a stale value rule 5 should flag.
@@ -3436,28 +3439,46 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
-def _check_prompt_cache(registry) -> list:
-    """models.<id>.prompt_cache, when present, is one of true / false / null
-    (AO-PROBE-D657, D-657 2026-10-08): the measured prompt-caching verdict of
-    `tools/probe-free.py --cache` -- true when the second same-prefix call
-    reports cached tokens > 0, false when it reports 0, null when nothing was
-    measured (a failed or unreported call is unknown, not a verdict).
+PROMPT_CACHE_VALUES = ("true", "documented", "false", "unknown")
 
-    The type is owned here because readers of a flag disagree about a malformed
-    one: `value is True` says no to the string "false" while a plain truthiness
-    test says yes, so the same leg could be gated twice in opposite directions.
-    A bad value is named here, where the model id is still attached to it.
+
+def _check_prompt_cache(registry) -> list:
+    """models.<id>.prompt_cache, when present, is one of the four strings
+    "true" / "documented" / "false" / "unknown" (AO-PROBE-D657, D-657/D-658
+    2026-10-08): the prompt-caching verdict of a leg -- `true` measured by
+    `tools/probe-free.py --cache` (the second same-prefix call reports cached
+    tokens > 0), `false` measured a reported 0, `documented` the vendor's own
+    docs attest prefix caching with no measured hit (Google implicit caching),
+    `unknown` nothing has answered for it. Absence means the same as unknown;
+    a failed or unreported call is never written as `false`.
+
+    The value set is owned here because readers of a flag disagree about a
+    malformed one: `value is True` says no to the string "false" while a plain
+    truthiness test says yes, so the same leg could be gated twice in opposite
+    directions. Strings are the whole set because the probe's TSV cell, the
+    vendor's claim and the measured hit are three spellings of one fact a
+    boolean could only hold two of. A bad value is named here, where the model
+    id is still attached to it.
     """
     problems = []
     for model_id, model in sorted(_section(registry, "models").items()):
         if not isinstance(model, dict) or "prompt_cache" not in model:
             continue
         value = model["prompt_cache"]
-        if value is not None and not isinstance(value, bool):
+        if not isinstance(value, str) or value not in PROMPT_CACHE_VALUES:
             problems.append(
-                "models.%s.prompt_cache must be true, false or null (got %r) - "
-                "an unmeasured leg is null, and probe-free.py never writes a "
-                "string here" % (model_id, value))
+                "models.%s.prompt_cache must be one of %s (got %r) - "
+                "an unmeasured leg is \"unknown\", never true/false/null "
+                "(probe D-657 writes the string its TSV cell carries)"
+                % (model_id, ", ".join(repr(v) for v in PROMPT_CACHE_VALUES),
+                   value))
+        if "prompt_cache_source" in model:
+            source = model["prompt_cache_source"]
+            if not isinstance(source, str) or not source.strip():
+                problems.append(
+                    "models.%s.prompt_cache_source must be a non-empty string "
+                    "naming the probe run or vendor document behind "
+                    "prompt_cache (got %r)" % (model_id, source))
     return problems
 
 

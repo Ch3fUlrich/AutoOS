@@ -290,8 +290,14 @@
         },
         "price_cache_read": { "type": "number", "minimum": 0 },
         "prompt_cache": {
-          "type": ["boolean", "null"],
-          "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-657 2026-10-08): measured prompt caching, from `tools/probe-free.py --cache` - two calls over one identical >=4k-token prefix, where a cached-token field > 0 is true, a reported 0 is false, and null means no probe has answered (an un-measured or failed call is unknown, never a claim that the leg does not cache). A long-context L0-L2 leg is only safe when this is true, so the combo-contract gate tests `is True` and registry.py check owns the type."
+          "type": "string",
+          "enum": ["true", "documented", "false", "unknown"],
+          "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-657/D-658 2026-10-08): the prompt-caching verdict for this model row, one of four STRINGS - `true` measured by `tools/probe-free.py --cache` (two calls over one identical >=4k-token prefix, a cached-token field > 0 on the second), `documented` the vendor's own docs attest prefix caching with no measured hit (Google implicit caching), `false` measured a reported 0 cached tokens, and `unknown` nothing has answered for it yet. A failed call is `unknown`, never `false`, and absence means the same as `unknown` - the field is optional. Strings not booleans because the probe, its TSV and the vendor claim are three spellings of one fact, and a boolean could only hold two of them; a consumer that needs a measured hit tests `== \"true\"`, never truthiness (the string \"false\" is truthy) - registry.py check owns the value set."
+        },
+        "prompt_cache_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-658 2026-10-08): dated attribution for `prompt_cache` - which probe run or which vendor document it came from (same convention as `price_source`). Only meaningful next to a set `prompt_cache`; a `documented` row must name the document."
         },
         "provider_prices": {
           "type": "object",
