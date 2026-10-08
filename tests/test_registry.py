@@ -4087,5 +4087,117 @@ class DenyGemini31ProPreviewTests(unittest.TestCase):
         self.assertTrue(any("leg_rules" in r for r in skipped["vertex/gemini-3.1-pro-preview"]))
 
 
+_MISSING = object()
+
+# AO-PROBE-D657 data (D-658, 2026-10-08): the registry model rows the probe's
+# legs resolved to through tools/registry.py's resolve_leg, at the verdict the
+# two gateways' `cache` cells add up to - "true" on either gateway wins over
+# "false" on either, anything else is "unknown". gemini-3.8-flash is the one
+# documented value: Google's implicit caching covers its vertex legs, and the
+# probe never had to measure what the vendor already states.
+_D657_BY_VALUE = {
+    "true": ("deepseek/deepseek-v4-flash-0731free:free",
+             "nvidia/nemotron-3-super-120b-a12b:free"),
+    "documented": ("gemini-3.8-flash",),
+    "false": ("cohere/north-mini-code:free",
+              "command-a-03-2025",
+              "command-r-plus-08-2024",
+              "mistral-code-latest",
+              "poolside/laguna-s-2.1:free"),
+    "unknown": ("Qwen3-Coder-30B-A3B-Instruct",
+                "Qwen3.8-27B",
+                "claude-sonnet-5",
+                "google/gemini-3.8-flash",
+                "gpt-oss-120b",
+                "llama-4-maverick",
+                "morph-dsv4flash",
+                "muse-spark-1.3-contributor-free",
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "qwen/qwen3.8-27b:free",
+                "qwen7b"),
+}
+PROMPT_CACHE_D657 = {model_id: value
+                     for value, ids in _D657_BY_VALUE.items()
+                     for model_id in ids}
+
+
+
+class PromptCacheFieldTests(unittest.TestCase):
+    """AO-PROBE-D657 (D-657/D-658, 2026-10-08): ``models.<id>.prompt_cache`` is
+    the prompt-caching verdict of a leg - one of the STRINGS "true" /
+    "documented" / "false" / "unknown", never a boolean or null, because the
+    probe's TSV cell, the vendor's documented claim and the measured hit are
+    three spellings of one fact. The schema (additionalProperties: false) has
+    to name the field and its companion ``prompt_cache_source``, and check owns
+    the value set because a gate reading ``is True`` and a gate reading
+    truthiness disagree about a string (``"false"`` is truthy)."""
+
+    MODEL_ID = "gemini-3.8-flash"
+
+    def problems(self, value, source=_MISSING):
+        reg = mutated()
+        reg["models"][self.MODEL_ID]["prompt_cache"] = value
+        if source is not _MISSING:
+            reg["models"][self.MODEL_ID]["prompt_cache_source"] = source
+        return [p for p in registry.check_registry(reg) if "prompt_cache" in p]
+
+    def test_the_committed_registry_carries_the_D657_probe_rows_and_nothing_else(self):
+        """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
+        leg resolved to, at the verdict its TSV cells add up to - no invented
+        row, no verdict for a leg the probe never answered."""
+        reg = load_registry()
+        rows = {model_id: model["prompt_cache"]
+                for model_id, model in reg["models"].items()
+                if "prompt_cache" in model}
+        self.assertEqual(rows, PROMPT_CACHE_D657)
+        self.assertEqual(registry.check_registry(reg), [])
+
+    def test_every_set_verdict_names_where_it_came_from(self):
+        reg = load_registry()
+        for model_id, model in sorted(reg["models"].items()):
+            if "prompt_cache" not in model:
+                continue
+            self.assertIn("probe D-657 2026-10-08 central+workstation",
+                          model["prompt_cache_source"], model_id)
+
+    def test_the_four_strings_validate(self):
+        for value in ("true", "documented", "false", "unknown"):
+            self.assertEqual(self.problems(value), [], repr(value))
+
+    def test_a_source_string_rides_with_the_verdict(self):
+        self.assertEqual(self.problems(
+            "documented", source="probe D-657 2026-10-08 central+workstation"), [])
+
+    def test_any_other_shape_is_named_with_its_model(self):
+        for value in (True, False, None, "True", "TRUE", "yes", "unmeasured",
+                      1, 0, "", {"cached": True}, ["true"]):
+            problems = self.problems(value)
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("models.%s.prompt_cache" % self.MODEL_ID, problems[0])
+            self.assertIn("documented", problems[0])
+
+    def test_a_source_must_name_something(self):
+        for source in ("", "   ", None, 7, ["probe"]):
+            problems = self.problems("true", source=source)
+            self.assertEqual(len(problems), 1, (repr(source), problems))
+            self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
+                          problems[0])
+
+    def test_the_schema_permits_the_field_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        self.assertFalse(model["additionalProperties"])
+        self.assertEqual(model["properties"]["prompt_cache"]["type"], "string")
+        self.assertEqual(model["properties"]["prompt_cache"]["enum"],
+                         ["true", "documented", "false", "unknown"])
+        self.assertEqual(model["properties"]["prompt_cache_source"]["type"],
+                         "string")
+        for key in ("prompt_cache", "prompt_cache_source"):
+            self.assertNotIn(key, model["required"])
+
+
 if __name__ == "__main__":
     unittest.main()

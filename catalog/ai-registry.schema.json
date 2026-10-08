@@ -305,6 +305,16 @@
           "description": "Additive field, not in spec 3.1 (brief FREEKEYS-1b, 2026-09-28): where `price_in`/`price_out` came from, dated (`gateway /v1/models 2026-09-28`, `vendor pricing page <url> <date>`). A `tier: credit` provider's leg is refused by the resolver while its price is 0 or absent (an uncostable grant bills $0 and would drain invisibly), so this is the field that turns a dropped leg back on - record the source, not just the number."
         },
         "price_cache_read": { "type": "number", "minimum": 0 },
+        "prompt_cache": {
+          "type": "string",
+          "enum": ["true", "documented", "false", "unknown"],
+          "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-657/D-658 2026-10-08): the prompt-caching verdict for this model row, one of four STRINGS - `true` measured by `tools/probe-free.py --cache` (two calls over one identical >=4k-token prefix, a cached-token field > 0 on the second), `documented` the vendor's own docs attest prefix caching with no measured hit (Google implicit caching), `false` measured a reported 0 cached tokens, and `unknown` nothing has answered for it yet. A failed call is `unknown`, never `false`, and absence means the same as `unknown` - the field is optional. Strings not booleans because the probe, its TSV and the vendor claim are three spellings of one fact, and a boolean could only hold two of them; a consumer that needs a measured hit tests `== \"true\"`, never truthiness (the string \"false\" is truthy) - registry.py check owns the value set."
+        },
+        "prompt_cache_source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-658 2026-10-08): dated attribution for `prompt_cache` - which probe run or which vendor document it came from (same convention as `price_source`). Only meaningful next to a set `prompt_cache`; a `documented` row must name the document."
+        },
         "provider_prices": {
           "type": "object",
           "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX-6, D-220, 2026-10-01): per-provider leg prices for a model id served at two prices at once (gemini-3.8-flash is free through AI-Studio and billed through Vertex AI). The shared price_in/price_out row must stay 0 so the free leg bills $0; each provider id here carries its own positive price_in/price_out with a non-empty price_source and a YYYY-MM-DD price_as_of, enforced by registry.py check.",

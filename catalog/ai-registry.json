@@ -235,7 +235,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "anthropic/claude-sonnet-5": {
       "$comment": "FAIK 2026-10-07 (operator): freeaiapikey credit-pool leg, live 200 ack probe 2026-10-07 (16-token chat, usage counted). Context 128000 from the live catalog row. Per-token prices unsourced (price 0.0 = no price on file) so credit legs stay gated until priced. tool_calls unproven (ack only, no tool-call trial yet). Operator: usable for implementation/review/research within the $6 grant.",
@@ -305,7 +307,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "command-r-plus-08-2024": {
       "$comment": "t4-rag overflow leg; same trial-key note as command-a-03-2025. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -321,7 +325,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "deepseek-flash": {
       "$comment": "deepseek-direct leg. A *different snapshot* from deepseek-v4.1-flash (the providers' own snapshot names, not a good-vs-bad ranking). Re-verified 2026-09-27: the native deepseek/deepseek-flash leg measured 200 through the gateway (2026-09-27T14:5xZ), so the earlier '400 / not available in the live catalog' note is withdrawn (L0 2026-09-27T12:55:16Z, operator). DSMAX (operator 2026-09-27T15:05:54Z) moved the reasoning ladder here from the retired OpenRouter twin, so routes.deepseek-v4.1-flash kept its #low/#high/#max aliases while this was legs[0]. Since 2026-09-27T16:4xZ providers.deepseek is 402 (available: false): the route fails closed and the aliases are out of the renders until the balance is topped up - the ladder stays here so they re-render unchanged. price_in/price_out approximate: reused from models.'deepseek-v4-flash' (llm-models.json), the closest priced sibling in this family - no published price found specifically for this snapshot in this migration. DSAMEND (routing-00 measured GET /models at 2026-09-28T10:0xZ): the native catalog is exactly ['deepseek-flash', 'deepseek-v4-pro'], so THIS is the only id ever sent to api.deepseek.com and it now owns the `direct` block (the installers and the vendored OpenHands profile take their wire model from it); the legacy 'deepseek-v4-flash' direct row was an alias, not a catalog model. DSAMEND effort ladder, measured live with max_tokens 16 and 512 on POST /chat/completions (7 + 6 calls, ~200 completion tokens, source 'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): the wire parameter IS `reasoning_effort`, and a 422 names the accepted enum as none, minimal, low, medium, high, xhigh, ultra, max - so all four rungs below are real wire values and the ladder needs no re-mapping. Two measured behaviours matter to whoever sends them: reasoning is ON by default (omitting the parameter costs reasoning tokens - 20 of 22 completion tokens at max_tokens 512), and `reasoning_effort: 'none'` (like `thinking: {'type': 'disabled'}`) is what switches it off, returning no completion_tokens_details at all. So a caller that expresses rung 'none' by SENDING NOTHING gets rung max-equivalent behaviour, not the off switch: render_ide filters 'none' out of the ide ladder and tools/autoos-agent.py apply_effort_rung emits no suffix for it, which is correct for the legs that were measured there but is NOT off for this one. low/high/max answered 200 at 18/25/18 reasoning tokens for a one-word prompt - accepted, indistinguishable at n=1, so no rung is reordered on this evidence. DS1M (operator 2026-09-30): vendor Models & Pricing (https://api-docs.deepseek.com/quick_start/pricing) states MODEL deepseek-flash = VERSION DeepSeek-V4.1-Flash with CONTEXT LENGTH 1M and MAX OUTPUT 384K (393216); OpenRouter's live catalog agrees (deepseek/deepseek-v4.1-flash context_length 1048576). context_advertised/output_max corrected from the stale 131072/32768; context_usable stays at the 50% default (524288) until probe-recall measures it.",
@@ -571,7 +577,9 @@
           "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (list price from 2027-01-01; intro $0.75/$3.75 through 2026-12-31 via 50% credits back)",
           "price_as_of": "2026-10-01"
         }
-      }
+      },
+      "prompt_cache": "documented",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation; vertex legs documented - Google implicit caching"
     },
     "glm-4.5-air": {
       "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -623,7 +631,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "gpt-oss-120b": {
       "$comment": "cerebras's and sambanova's shared bare spelling of the same free GPT-OSS-120B model as 'openai/gpt-oss-120b' (groq's spelling); one entry covers both providers' legs. Q1 extension 2026-09-26: samba/gpt-oss-120b (new paid-credit provider) also resolves to this entry; tier/trains_on_prompts still resolve correctly per-leg via each serving provider's own fields (samba: paid+trains; groq/cerebras/sambanova: free+no-train) since this entry carries no model-level override. Probed 2026-09-26 (Q1 lane): samba/gpt-oss-120b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq/cerebras/sambanova's copies were not themselves probed by this run. FREEKEYS-1b (2026-09-28, item 1 confirmation): the reused row is NOT `tool_calls: proven` - it is `unproven`, and the proven verdict lives only in the gitignored leg-scoped overlay (`logs/routing/measured.json`), so a host without that overlay falls through every leg pointing here on an agentic card, scaleway's `scw/gpt-oss-120b` (FREEKEYS-1) included. A fresh probe is what makes it true in the tracked data.",
@@ -643,7 +653,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "kimi-k3": {
       "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -751,7 +763,9 @@
       "price_out": 0.0,
       "reasoning": false,
       "tool_calls": "unproven",
-      "trains_on_prompts": true
+      "trains_on_prompts": true,
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "mistral-small-latest": {
       "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses l2-worker-clean's 32768 (its larger use site) as the model's own ceiling; l3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). MISTRALFIX (2026-09-28): this model answers 429 at 0 requests/minute on the operator's plan (the number lives on providers.mistral.limits.mistral-small-latest, one home per fact), so it is no leg of any route - the resolver would skip it anyway via plan_dead_reasons(), and a route must not carry a leg it can never serve. MISTRALFIX2 (L1-routing gateway probe 2026-09-28T11:5xZ, evidence work/L1-routing/MISTRALREPL.probe.jsonl): 0/3, 429 - the gateway agrees with the 0 rpm reading; its replacement is mistral/mistral-code-latest (the operator's tie-break between the two codestral siblings, both measured 3/3 200) everywhere a leg may train, and no leg at all in a -clean route (spec 3.1 rule 3).",
@@ -825,7 +839,9 @@
       "price_out": 0.0,
       "reasoning": true,
       "tool_calls": "unproven",
-      "trains_on_prompts": true
+      "trains_on_prompts": true,
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "muse-spark-1.3-contributor": {
       "$comment": "Meta Model API direct (not via OpenRouter), contributor tier. L0 measured 2026-09-27T17:25:11Z: GET /models 200 lists muse-spark-1.3-contributor; POST /chat/completions model muse-spark-1.3-contributor reasoning_effort minimal 200 1.3s, xhigh 200 3.9s. Context 1,048,576 in / 131,072 out. reasoning_effort minimal|low|medium|high|xhigh (no 'none' -> 400, no 'max' on contributor). Contributor pricing: $0.10 in / $0.20 out per 1M tokens (https://dev.meta.ai/docs/pricing-rate-limits). trains_on_prompts true (contributor contract). tool_calls stays 'unproven': the L0 call measured reasoning_effort only, and 'tools supported' is a docs claim (dev.meta.ai/docs/quickstart), not a tool-calling probe - registry rule (docs/plans/2026-09-25-registry-mapping.md section 3) promotes this field only from a probe, so it stays the conservative unknown until tools/probe-toolcalls.py says otherwise.",
@@ -929,7 +945,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "openai/gpt-oss-20b": {
       "$comment": "groq's vendor-prefixed spelling of GPT-OSS-20B (free tier). Added for its free-tier rate limits (brief R4, 2026-09-27) -- the limits key must resolve via resolve_leg, so the model entry exists even though no route leg uses it yet. Non-limit fields mirror the 120b sibling (same openai-oss family, reasoning, low/medium/high ladder): unsourced defaults, not a measured context/output guarantee (D20) -- price_in/price_out 0.0 follows the existing 'vendor price not sourced' convention (see openrouter sibling entries); do not use for cost math until priced. FREEWIRE 2026-09-30 (free-probe evidence): tool_calls promoted to 'proven' after ack 200 and one get_weather tool call ok (301 ms) for groq/openai/gpt-oss-20b through the gateway.",
@@ -949,7 +967,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "openrouter-dots3-note": {
       "$comment": "Same conservative default as openrouter-nemotron-ultra.",
@@ -1363,7 +1383,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "qwen/qwen3.8-flash": {
       "$comment": "openrouter's leg for the SPEED directive (operator 2026-09-26T15:44Z/15:49Z, common.md 'Model mix' UPDATE): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid (providers.openrouter.tier), trains_on_prompts false inherited from providers.openrouter (no model-level override needed - the provider itself is already paid + non-training). Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
@@ -1411,7 +1433,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven"
+      "tool_calls": "unproven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "deepseek/deepseek-v4-flash-0731free:free": {
       "id": "deepseek/deepseek-v4-flash-0731free:free",
@@ -1428,7 +1452,9 @@
       "tool_calls": "proven",
       "price_in": 0,
       "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'bzl/deepseek/deepseek-v4-flash-0731free:free', which is why providers.bazaarlink.model_prefix is 'bzl'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedbazaarlink. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-2b DECISION (operator rule 'DeepSeek only V4.1 Flash'): these are V4 weights (v4-flash-0731), so this row stays registered and measured, but it routes NOWHERE - no combo carries it and policy.leg_rules carries no per-leg allow for it, so the blanket `deny-deepseek` refuses any attempt to pin it."
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'bzl/deepseek/deepseek-v4-flash-0731free:free', which is why providers.bazaarlink.model_prefix is 'bzl'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedbazaarlink. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141). FREEKEYS-2b DECISION (operator rule 'DeepSeek only V4.1 Flash'): these are V4 weights (v4-flash-0731), so this row stays registered and measured, but it routes NOWHERE - no combo carries it and policy.leg_rules carries no per-leg allow for it, so the blanket `deny-deepseek` refuses any attempt to pin it.",
+      "prompt_cache": "true",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "google/gemini-2.5-flash": {
       "id": "google/gemini-2.5-flash",
@@ -1564,7 +1590,9 @@
       "tool_calls": "proven",
       "price_in": 0,
       "price_out": 0,
-      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-dsv4flash', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141)."
+      "$comment": "FREEKEYS-1 (measured 2026-09-28: tools/probe-toolcalls.py-style trial through the OmniRoute gateway - single tool call + round trip - HTTP 200 and both checks passed, so tool_calls is proven): the gateway serves this leg as 'morph/morph-dsv4flash', which is why providers.morph.model_prefix is 'morph'. context_advertised/output_max are what the gateway's own GET /v1/models row reportedmorph. price_in/price_out are 0 because NO PRICE IS ON FILE (the catalog row carries no pricing block), so a dollar spend estimate reads this leg as free - the vendor's own balance, not autoos_usage's paid_spend, is what shows the real spend until a price is added. trains_on_prompts is unset and inherits providers. (output_max 32768 is the registry's conservative unknown - the gateway reported none).trains_on_prompts (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Raw row: logs/freekeys1-probe.jsonl (sandbox work file, brief D-132/D-141).",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "morph-glm52-744b": {
       "id": "morph-glm52-744b",
@@ -1700,7 +1728,9 @@
       "price_in": 7e-08,
       "price_out": 2.6e-07,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route."
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route.",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "Qwen3.5-397B-A17B": {
       "id": "Qwen3.5-397B-A17B",
@@ -1734,7 +1764,9 @@
       "price_in": 4.7e-07,
       "price_out": 3.19e-06,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000). 2026-10-04 catalogue re-confirmed: '0.4€ /Mtoken(input)' and '2.7€ /Mtoken(output)' ($0.47 in / $3.19 out per 1M at 1.18 USD/EUR)."
+      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000). 2026-10-04 catalogue re-confirmed: '0.4€ /Mtoken(input)' and '2.7€ /Mtoken(output)' ($0.47 in / $3.19 out per 1M at 1.18 USD/EUR).",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "cohere/north-mini-code:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/cohere/north-mini-code:free answered ack 200 and one get_weather tool call ok (809 ms); gateway /v1/models row context_length 256000, output 64000. tier 'free' is a MODEL-level override so the leg can stay in a *-free-only route and is honestly priced ($0 at the vendor), while providers.openrouter.tier stays paid. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
@@ -1751,7 +1783,9 @@
       "price_out": 0.0,
       "reasoning": false,
       "tier": "free",
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "nvidia/nemotron-3-super-120b-a12b:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/nvidia/nemotron-3-super-120b-a12b:free answered ack 200 and one get_weather tool call ok (801 ms); gateway /v1/models row context_length 262144, output 235929. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
@@ -1768,7 +1802,9 @@
       "price_out": 0.0,
       "reasoning": true,
       "tier": "free",
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "true",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "poolside/laguna-s-2.1:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/poolside/laguna-s-2.1:free answered ack 200 and one get_weather tool call ok (1961 ms); gateway /v1/models row context_length 262144, output 32768. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
@@ -1785,7 +1821,9 @@
       "price_out": 0.0,
       "reasoning": false,
       "tier": "free",
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "qwen/qwen3.8-27b:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/qwen/qwen3.8-27b:free answered ack 200 and one get_weather tool call ok (5842 ms); gateway /v1/models row context_length 262144, output 235929. Distinct from models.'qwen/qwen3.8-27b' (groq's lowercase spelling, output_max 16384) - the :free suffix is part of the vendor id. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false). ORQWEN-DEAD 2026-10-06: vendor withdrew the :free slug (live 404 'unavailable for free'; gateway pre-dispatch skips); leg dropped from every band and gated on its single (unavailable_legs) so it renders omitted. Row kept for pricing history.",
@@ -1802,7 +1840,9 @@
       "price_out": 0.0,
       "reasoning": false,
       "tier": "free",
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "claude-opus-5-5-medium": {
       "$comment": "CLAUDE55 2026-10-05 (operator): swap target for the retired claude-opus-4-6-thinking - the agy CLI model list (measured 2026-10-05) carries only the 5-5 generation; the live gateway /v1/models serves agy/claude-opus-5-5-medium at context 1000000. price stays $0 marginal (antigravity seat-metered, same basis as the 4-6 row). tool_calls unproven until a live seat quotes one. low/high spellings can be added when a lane needs them.",
@@ -1888,7 +1928,9 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "proven"
+      "tool_calls": "proven",
+      "prompt_cache": "unknown",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     }
   },
   "policy": {
