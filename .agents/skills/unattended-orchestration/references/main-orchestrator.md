@@ -135,15 +135,12 @@ rerun, and one found on ten rows costs seconds.
    `subagent-driven-development` or `executing-plans`. A plan's tasks are small enough that each
    has its own test and its own commit.
 2. **Test-driven and fast.** Failing test first ([`AGENTS.md`](../../../../AGENTS.md) §5). A test that needs minutes is split until the inner loop takes seconds.
-3. **The data ladder.** Every run that processes data climbs three rungs, and never skips one:
-   1. **Small artificial data with a known output.** A fixture you built, where you can state
-      the expected result before running. It proves the logic.
-   2. **A small slice of real data.** A few files, rows or items. It proves the code meets
-      reality's formats, encodings and edge cases.
-   3. **The full data.** Only after rungs 1 and 2 are green.
-
-   A red result at any rung sends you back to rung 1, with a new fixture that reproduces the
-   failure.
+3. **The data ladder** (synthetic data with a known output → a small, varied real batch → the
+   full data once, at the end) is owned by
+   [`coding-principles` Principle 10](../../coding-principles/SKILL.md). Follow it there. What
+   orchestration adds:
+   - an investigator or L2/L3 brief never asks for a full-data pass to answer a question;
+   - it names the small batch and says that a full run needs L1's approval.
 4. The same ladder applies to **tooling**: a new L3 route, a new script or a new migration is
    run on a tiny task before it is scaled (see the rule above the pairings).
 5. L2 briefs name each rung's command and expected result. The DONE note quotes each rung's
