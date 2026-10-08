@@ -2412,7 +2412,12 @@ combos = {c["name"]: c["models"]
 # GLM55 2026-10-05 (operator): combos render the opencode_gateway legs under
 # the gateway's canonical `oc/*` prefix (providers.opencode_gateway
 # model_prefix), while LiteLLM addresses the provider by name.
-namespace = {"scw": "scaleway", "oc": "opencode_gateway"}
+# BZL (D657-CHAIN 2026-10-08): the same for bazaarlink, whose head free leg
+# every tier now carries — providers.bazaarlink.model_prefix is `bzl`, so the
+# render emits `bzl/deepseek/...` while the hand group addresses
+# `bazaarlink/deepseek/...` (the connection is registered as `bazaarlink`,
+# omniroute_id says so, and that is the spelling config.yaml already uses).
+namespace = {"scw": "scaleway", "oc": "opencode_gateway", "bzl": "bazaarlink"}
 transport = {"opencode-zen": "openai", "cheaperinference": "openai",
              "free-ai": "openai"}
 def litellm_model(ref):
