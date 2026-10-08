@@ -146,7 +146,8 @@
     "TORDER 2026-10-01: t1 1M-only (>=600k gate, D-TORDER-1b), t2/t3 trial->free->credits->paid deepseek LAST, gemini head restored + output 65536/usable 1048576, providers.google_ai_studio re-opened with 3x429/120s->300s cooldown +30min park (gateway 08:07Z ACTIVE), 4 credit singles (ovh-qwen3.8-27b, ovh-gpt-oss-120b, ovh-qwen3-coder-30b, vertex-gemini-3.8-flash), nebius removed (6 legs), openrouter NO credits -> :free only (7 paid legs dropped, t1-clean kept declared+gated so stays omitted), combos regenerated from render (fixpoint).",
     "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). l2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
-    "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time)."
+    "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time).",
+    "OVHCODER-DROP 2026-10-08 (hotfix): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured 17:34Z central: HTTP 404 'The model Qwen3-Coder-30B-A3B-Instruct does not exist'; probe D-657 2026-10-08 had already 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b / Qwen3.8-27B / Qwen3.5-397B-A17B answered 200). TORDER's 4 credit singles is now 3: the ovh-qwen3-coder-30b combo is deleted and its id moved to `retired` so apply prunes the live combo (ORQWEN404 precedent); the leg was already gated out of l2-worker/l3-driver and is now struck from the registry there too. Rendered from the registry, hand $comment kept (render omniroute --check is semantic and excludes this key)."
   ],
   "retired": [
     "tier1",
@@ -176,7 +177,8 @@
     "t3-driver-clean",
     "t3-driver-free-only",
     "t3-driver-paid",
-    "t4-researcher"
+    "t4-researcher",
+    "ovh-qwen3-coder-30b"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
@@ -399,14 +401,6 @@
       "context": "128k",
       "models": [
         "ovh/gpt-oss-120b"
-      ]
-    },
-    {
-      "name": "ovh-qwen3-coder-30b",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ovh/Qwen3-Coder-30B-A3B-Instruct"
       ]
     },
     {

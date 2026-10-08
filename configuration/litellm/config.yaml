@@ -477,12 +477,6 @@ model_list:
       api_key: os.environ/OVHCLOUD_API_KEY
   # AUTOOS-MANAGED-END ovh-gpt-oss-120b
 
-  # AUTOOS-MANAGED-START ovh-qwen3-coder-30b
-  - model_name: ovh-qwen3-coder-30b
-    litellm_params:
-      model: ovhcloud/Qwen3-Coder-30B-A3B-Instruct
-      api_key: os.environ/OVHCLOUD_API_KEY
-  # AUTOOS-MANAGED-END ovh-qwen3-coder-30b
 
 
   # ── cheaperinference pinned single-model aliases ───────────────────────────
