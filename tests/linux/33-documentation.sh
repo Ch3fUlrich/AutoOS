@@ -959,6 +959,13 @@ if it "probe-ledger: availability ledger record/check/credit/dump (unit tests)";
     out="$(python3 tests/test_probe_ledger.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/probe-free.py: ack / tool-call / prompt-cache probe and its TSV output
+# (D-657 AO-PROBE-D657). Offline: the gateway is a fake OpenAI-shape server on a
+# loopback socket, the key a fake env value - no live call, no real key read.
+if it "probe-free: cache probe verdicts, empty-vs-fail ack and TSV rows (unit tests)"; then
+    out="$(python3 tests/test_probe_free.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-rtk.py: the RTK A/B behind decision D19 (routing v2 spec section 10).
 # Offline: subprocess.run is monkeypatched, so this never calls the omniroute CLI
 # and never reads a manage key - the live A/B stays an operator run.

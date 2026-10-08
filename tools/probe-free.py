@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -58,6 +59,8 @@ RETRY_STATUSES = (429, 503, 504)
 RETRY_DELAYS_S = (60, 120)
 
 ACK_MAX_TOKENS = 16
+# A reply counts as an ack only with one of these as a word of its own.
+ACK_TOKENS = frozenset(("ack", "ack_ok"))
 
 # The cache probe's prefix: ~4 characters per token, so 4096 tokens needs
 # 16384 characters - and every gateway with a documented cache minimum
@@ -196,9 +199,12 @@ def usage_of(parsed):
 def ack_result(parsed):
     """(verdict, note) - verdict is "ok", "fail" or "empty".
 
-    "empty" is kept apart from "fail" (AO-PROBE-D657): a reasoning leg answers
-    200 with no content once the budget is small (measured: vertex gemini at
-    max_tokens 16), and that is our budget, not the leg refusing.
+    The reply must carry the asked-for token as a word of its own: the old
+    "ACK" in content.upper() scored "ACKNOWLEDGED" and "packaged" as an ack,
+    which then reads as a passing leg in the TSV. "empty" is kept apart from
+    "fail" (AO-PROBE-D657): a reasoning leg answers 200 with no content once
+    the budget is small (measured: vertex gemini at max_tokens 16), and that
+    is our budget, not the leg refusing.
     """
     if not isinstance(parsed, dict):
         return "fail", "no parsed body"
@@ -210,9 +216,9 @@ def ack_result(parsed):
         return "fail", "malformed response"
     if not content.strip():
         return "empty", "200 with empty content (reasoning budget too small?)"
-    if "ACK" in content.upper():
+    if set(re.findall(r"[a-z0-9_]+", content.lower())) & ACK_TOKENS:
         return "ok", "ok"
-    return "fail", "no ACK in content: %r" % content[:80]
+    return "fail", "no ACK token in content: %r" % content[:80]
 
 
 def tool_result(parsed):
