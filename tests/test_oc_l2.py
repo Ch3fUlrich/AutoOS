@@ -292,6 +292,11 @@ class LaneTest(unittest.TestCase):
                        "autoos-agent", "tier-3", "REPORT", "DONE",
                        str(self.l1_inbox), HINT_EXPECTED):
             self.assertIn(needle, text, needle)
+        # AO-L2-LAUNCH criterion b: the report is an MCP tool the L2 calls
+        # directly, no longer a tier-3 spawn whose whole task was to append the
+        # line - so the footer names `l2_report` and drops the old indirection.
+        self.assertIn("l2_report", text)
+        self.assertNotIn("the report is a tier-3 spawn", text)
         # the L1 relaunch head is not part of an L2's first prompt
         self.assertNotIn("relaunched from the handoff", text)
 

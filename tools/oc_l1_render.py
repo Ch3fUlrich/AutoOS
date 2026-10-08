@@ -68,6 +68,10 @@ ENV_KEY = "AUTOOS_OMNIROUTE_KEY"
 # child's environment; named here too because importing oc_l1 would close the
 # cycle oc_l1 -> render. tests/test_agent_mcp_tool_profile.py pins the three.
 ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# AO-L2-LAUNCH criterion b: the L2's report tool stamps this lane name, read
+# from the MCP's own environment. Duplicated for the same import-cycle reason as
+# ENV_AGENT_LAYER; the same suite pins it across the three sides.
+ENV_L2_LANE = "AUTOOS_L2_LANE"
 RENDERED_FILENAME = "opencode.json"
 PROVIDER_NPM = "@ai-sdk/openai-compatible"
 PROVIDER_NAME = "workstation gateway"
@@ -181,6 +185,10 @@ def render(lane, repo_config_path):
             # rather than trusting what the launching shell happened to export.
             if lane.get("agent_layer"):
                 env[ENV_AGENT_LAYER] = str(lane["agent_layer"])
+                # The lane's own name, fixed here rather than passed as a tool
+                # argument: `l2_report` stamps the lane it came from, and only
+                # this render knows which lane that is.
+                env[ENV_L2_LANE] = str(lane["name"])
             e["environment"] = env
         mcp_out[sname] = e
 

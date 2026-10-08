@@ -308,6 +308,15 @@ def _child_env(lane, rendered, password):
             env[_var] = lane[_key]
         else:
             env.pop(_var, None)
+    # AO-L2-LAUNCH criterion b: `l2_report` stamps the lane it came from from
+    # this variable. It rides with the agent-layer marker - only a lane that
+    # declares itself an L2 names one - so an L1 child never gains a lane name a
+    # report could be misattributed to, and a host export is denied by
+    # LANE_ONLY_ENV above.
+    if lane.get("agent_layer") and lane.get("name"):
+        env[oc_l1.ENV_L2_LANE] = str(lane["name"])
+    else:
+        env.pop(oc_l1.ENV_L2_LANE, None)
     return env
 
 

@@ -134,12 +134,15 @@ ROLE_LINES = (
     "tier 2 and a `role: orchestrate` card are refused before a run starts. "
     "Spawn the work that way (writer, then a cross-family reviewer), judge "
     "their reports, and report upward.",
-    "Report to the L1 inbox at `%s`: append one line per milestone prefixed "
-    "`REPORT` and a final line prefixed `DONE` (or `BLOCKED`), each opened by "
-    "a UTC `%%Y-%%m-%%dT%%H:%%M:%%SZ` timestamp - that stamp is what the reader "
-    "parses, a line without it is invisible to it. Your own shell cannot "
-    "append and cannot run the writer that would: the report is a tier-3 "
-    "spawn whose whole task is that one line.",
+    "Report upward with the `l2_report` tool on the `autoos-agent` MCP - never a "
+    "spawn, never your own shell. Each call appends one line to the L1 inbox at "
+    "`%s`, opened by a UTC `%%Y-%%m-%%dT%%H:%%M:%%SZ` timestamp (that stamp is what "
+    "the reader parses; a line without it is invisible to it) and prefixed "
+    "`REPORT` at a milestone, `DONE` when the phase finishes, `BLOCKED` when it "
+    "cannot. `l2_report` stamps your lane for you from the MCP's own environment; "
+    "you pass only the text and the kind. Your shell cannot append anywhere and "
+    "must not spend a tier-3 worker on a report: the tool is the one write path "
+    "an L2 has.",
 )
 
 _KILL_WAIT_S = 5.0

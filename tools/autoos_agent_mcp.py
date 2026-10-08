@@ -164,6 +164,15 @@ def _oc_l1_env() -> dict:
 # allowed: an L2 watching its own phase is ordinary work, and it reports upward to
 # the L1 inbox instead of steering.
 ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# AO-L2-LAUNCH merge criterion b: the L2 report tool stamps this name as the
+# lane the report came from. Set by the lane render (tools/oc_l1_render.py) into
+# the MCP's own environment, so it is never a tool argument a model could point
+# at a peer lane. The three-sides name agreement is pinned by
+# tests/test_agent_mcp_tool_profile.py.
+ENV_L2_LANE = "AUTOOS_L2_LANE"
+# Where an L2 report lands; the same name the renderer/serve child export. Named
+# here so `l2_report` reads it from one constant, matching ENV_L2_LANE above.
+ENV_L1_INBOX = "AUTOOS_L1_INBOX"
 # The tools this fence covers. It is a list, not a comment, so the suite can pin
 # that the set of tools it refuses is exactly the set it tests: a lane-control
 # tool added later makes that test say which one is unfenced.
@@ -200,8 +209,16 @@ MCP_TOOL_NAMES = ("list_clients", "spawn", "status", "result", "cancel",
                   "l2_status", "l2_stop", "l2_inbox", "heartbeat")
 FULL_PROFILE = "full"
 NARROWEST_PROFILE = "l2"
+# AO-L2-LAUNCH merge criterion b: an L2 reports its own REPORT/DONE/BLOCKED line
+# through this tool, so the profile is not merely a subset of the full menu - it
+# is the spawner set PLUS one tool the full profile never registers. An L1 does
+# not report through it and must not see it, which is why it is absent from
+# MCP_TOOL_NAMES and present only in the narrow profile.
+L2_REPORT_TOOL = "l2_report"
+L2_REPORT_KINDS = ("REPORT", "DONE", "BLOCKED")
+L2_REPORT_MAX = 500
 MCP_TOOL_PROFILES = {FULL_PROFILE: MCP_TOOL_NAMES,
-                     NARROWEST_PROFILE: SPAWNER_TOOLS}
+                     NARROWEST_PROFILE: SPAWNER_TOOLS + (L2_REPORT_TOOL,)}
 
 
 def mcp_tool_profile(env=None) -> str:
@@ -427,6 +444,69 @@ def l2_inbox(lane: str, text: str) -> dict:
     if fence is not None:
         return fence
     return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
+
+
+def _l2_report_scrub(text) -> str:
+    """The body of a report forced to one printable line, capped: the report is a
+    single inbox record, so a newline a caller smuggled in would forge a second
+    one and any control character would confuse the reader that parses the stamp."""
+    kept = [ch for ch in str(text)
+            if ch == " " or (0x20 <= ord(ch) and ord(ch) != 0x7F)]
+    return "".join(kept).strip()[:L2_REPORT_MAX]
+
+
+def l2_report(text: str, kind: str = "REPORT", env=None, now=None) -> dict:
+    """Append the L2's own REPORT/DONE/BLOCKED line to the L1 inbox: one call,
+    one well-formed record - no longer a tier-3 spawn whose whole task was to
+    write a line (AO-L2-LAUNCH merge criterion b).
+
+    The lane is never an argument. It is read from this MCP's own environment
+    (`AUTOOS_L2_LANE`), fixed when the lane rendered, so a report cannot name a
+    lane that did not write it. Refused outside profile l2, on an empty body, an
+    unknown kind, or a missing lane/inbox - a report that would mis-attribute or
+    land nowhere is worse than no report. `env`/`now` are the test seams; the
+    server calls this with neither, so it reads the live environment and clock.
+    """
+    source = os.environ if env is None else env
+    if mcp_tool_profile(source) != NARROWEST_PROFILE:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "l2_report is an L2 tool: this server does not run "
+                          "inside an L2 lane (%s=L2)" % ENV_AGENT_LAYER}
+    kind = str(kind or "REPORT").strip().upper()
+    if kind not in L2_REPORT_KINDS:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "kind must be one of %s" % ", ".join(L2_REPORT_KINDS)}
+    body = _l2_report_scrub(text)
+    if not body:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "report text is empty"}
+    lane = str(source.get(ENV_L2_LANE, "")).strip()
+    if not lane:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "no lane in this MCP's environment (%s): an unattributed "
+                          "report is refused" % ENV_L2_LANE}
+    inbox = source.get(ENV_L1_INBOX)
+    if not inbox:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "no L1 inbox (%s): the report would land nowhere"
+                          % ENV_L1_INBOX}
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    line = "%s %s %s: %s\n" % (stamp, lane, kind, body)
+    parent = os.path.dirname(str(inbox))
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(str(inbox), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as e:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "cannot open the L1 inbox %s: %s" % (inbox, e)}
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return {"ok": True, "lane": lane, "kind": kind, "inbox": str(inbox),
+            "appended": line.rstrip("\n")}
 
 
 def kill_store_dir() -> str:
@@ -1907,6 +1987,18 @@ def build_server(profile: str | None = None):
         (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
         the L1 inbox instead."""
         return l2_inbox(lane, text)
+
+    @_register(L2_REPORT_TOOL)
+    def _l2_report(text: str, kind: str = "REPORT") -> dict:
+        """AO-L2-LAUNCH criterion b: the L2's own report line. Appends ONE
+        stamped record `<UTC> <lane> <kind>: <text>` to the L1 inbox
+        (AUTOOS_L1_INBOX), so a milestone no longer costs a tier-3 spawn whose
+        whole task was to write it. `kind` is REPORT, DONE or BLOCKED. The lane
+        is this server's own environment (AUTOOS_L2_LANE), NEVER an argument - a
+        report cannot name a lane that did not write it. The text is forced to a
+        single printable line and capped at 500 chars. Present only in profile l2.
+        """
+        return l2_report(text, kind)
 
     @_register("heartbeat")
     def _heartbeat(inbox: str | None = None, transcript: str | None = None,

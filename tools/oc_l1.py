@@ -62,6 +62,11 @@ PERMISSION_EFFECTS = ("allow", "deny", "ask")
 ENV_GUARD_ROLE = "AUTOOS_GUARD_ROLE"
 ENV_L1_INBOX = "AUTOOS_L1_INBOX"
 ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# AO-L2-LAUNCH merge criterion b: `l2_report` stamps the lane it came from, and
+# it reads that from this variable rather than a tool argument - so a report can
+# never be attributed to a lane that did not write it. A lane property, never a
+# host one: only an L2 lane's own config sets it.
+ENV_L2_LANE = "AUTOOS_L2_LANE"
 
 # --- the lane child environment (Sonnet final REJECT 2026-10-08, finding 2) ---
 #
@@ -110,11 +115,12 @@ LANE_ENV_CREDENTIAL_SUFFIXES = ("_PW", "_PWD", "_KEY", "_KEYFILE", "_APIKEY",
 LANE_ENV_CREDENTIAL_WORDS = ("PASSWORD", "PASSPHRASE", "SECRET", "CREDENTIAL",
                              "TOKEN", "APIKEY")
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-# Three variables are LANE properties, never host ones: the guard's role, where
-# the lane reports to, and which level the lane runs at. Each is written from the
-# lane config and denied here, so an unrelated shell that happened to export one
-# cannot decide what a lane is.
-LANE_ONLY_ENV = (ENV_GUARD_ROLE, ENV_L1_INBOX, ENV_AGENT_LAYER)
+# These variables are LANE properties, never host ones: the guard's role, where
+# the lane reports to, which level the lane runs at, and the lane's own name.
+# Each is written from the lane config and denied here, so an unrelated shell
+# that happened to export one cannot decide what a lane is - or, for the lane
+# name, forge a report's attribution.
+LANE_ONLY_ENV = (ENV_GUARD_ROLE, ENV_L1_INBOX, ENV_AGENT_LAYER, ENV_L2_LANE)
 
 
 def env_is_credential_name(name):
