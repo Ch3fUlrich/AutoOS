@@ -77,6 +77,12 @@ For the current combo `deepseek-v4.1-flash` → upstream `deepseek/deepseek-flas
 
 ### 1. Model Path (opencode config)
 
+> Superseded 2026-10-08 (AO-DENYLEGS D2 / operator D-657): no probe-d657 gateway
+> acked `deepseek/deepseek-flash`, so its route renders no combo and apply.sh
+> prunes `deepseek-v4.1-flash` from the store. The instruction below is kept as
+> the measured reasoning analysis, not as a current model path — read
+> `docs/models.md` for what serves.
+
 Use `omniroute/deepseek-v4.1-flash` (combo through the gateway), NOT
 `deepseek/deepseek-v4-flash` (no deepseek provider in opencode — unresolvable)
 or `deepseek/deepseek-flash` (direct, bypasses combo context/override config).

@@ -5776,6 +5776,11 @@ providers['ollama'] = {
 # behind is taken out (an already-broken machine has to be repaired, not just
 # avoided). A meta provider of the user's own shape is theirs and stays
 # (AGENTS.md §4/§5).
+# D657-D2 (2026-10-08) narrows that rationale: no probe-d657 gateway acked
+# meta_api/muse-spark-1.3-contributor and operator §8 bans the paid Muse leg, so
+# the route renders no combo and policy.reviewers no longer names it. Rendering
+# the user's own `meta` provider on a real META_API_KEY still stands on its own
+# — it is the direct path, independent of the gateway store.
 _muse = REPO_BY_ID['muse-spark']['direct']
 _muse_model_id = _muse['model'].split('/', 1)[1]
 if os.environ.get('META_API_KEY'):

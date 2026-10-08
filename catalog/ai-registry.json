@@ -2902,14 +2902,6 @@
     "paid_local_cap_usd": 20,
     "reviewers": [
       {
-        "client": "opencode",
-        "model": "omniroute/spark-1.3-contributor",
-        "family": "meta",
-        "leg": "meta_api/muse-spark-1.3-contributor",
-        "paid": true,
-        "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
-      },
-      {
         "client": "gemini",
         "model": "gemini-3.8-flash",
         "family": "google",

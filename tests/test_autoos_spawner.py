@@ -9110,19 +9110,33 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
                      encoding="utf-8") as fh:
             return json.load(fh)["policy"]["reviewers"]
 
-    def test_the_paid_muse_reviewer_heading_is_declared_in_the_repo_config(self):
-        # The brief's requirement, on the files a real run reads: the default
-        # reviewer is the paid Meta leg, reached as the gateway's own heading.
+    def test_the_head_reviewer_is_a_model_its_client_can_start(self):
+        # The brief's requirement, on the files a real run reads: the entry the
+        # walk reaches first has to be something this host can launch. It no
+        # longer pins a name or a family — D-657 removed the paid Muse head
+        # (`omniroute/spark-1.3-contributor` renders no combo: no probe-d657
+        # gateway acked meta_api/muse-spark-1.3-contributor, and §8 bans the paid
+        # leg), and a test that only re-asserted the operator's pick would go
+        # stale on the next re-cut. The property is what REVROUTE item 4 was for.
         entry = self.real_reviewers()[0]
-        self.assertEqual((entry["client"], entry["model"], entry["family"],
-                          entry["paid"]),
-                         ("opencode", "omniroute/spark-1.3-contributor", "meta", True))
+        model = entry["model"]
         cfg = self.real_cfg()
-        self.assertIn(entry["model"], self.agent.declared_models(cfg),
-                      "run tools/sync-ide-models.py: the paid Muse reviewer must be "
-                      "declared for opencode to start it")
-        self.assertEqual(self.agent.resolve_model(cfg, 3, False, entry["model"]),
-                         "omniroute/spark-1.3-contributor")
+        if model.startswith("omniroute/"):
+            self.assertIn(model, self.agent.declared_models(cfg),
+                          "run tools/sync-ide-models.py: the head reviewer must be "
+                          "declared for opencode to start it")
+            self.assertEqual(self.agent.resolve_model(cfg, 3, False, model), model)
+        else:
+            # A client's own provider (the shape a `--free` run uses): the gateway
+            # never sees the name, so the registry's `clients` is what has to know
+            # it. A head that is neither declared to a gateway nor bound to a
+            # client is a review that silently never happens.
+            with io.open(os.path.join(self.REPO, "catalog", "ai-registry.json"),
+                         encoding="utf-8") as fh:
+                clients = json.load(fh)["clients"]
+            self.assertIn(entry["client"], clients,
+                          "policy.reviewers head %r names no gateway route and no "
+                          "client the registry declares" % model)
 
     def test_every_gateway_spelled_reviewer_is_declared(self):
         declared = self.agent.declared_models(self.real_cfg())
