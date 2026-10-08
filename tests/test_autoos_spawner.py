@@ -20786,7 +20786,7 @@ class HostAdmissionTests(unittest.TestCase):
 
     # --- the rule itself --------------------------------------------------
 
-    def test_the_shipped_registry_is_the_single_source_of_both_limits(self):
+    def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}
         self.assertEqual(shipped.get("max_live_workers"), 6)
         self.assertEqual(shipped.get("mem_available_floor_mb"), 6144)
@@ -20796,12 +20796,12 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
-    def test_a_host_with_room_admits(self):
+    def test_admission_grants_a_host_with_room(self):
         self.live(1)
         self.assertIsNone(self.agent.host_admission_refusal(
             registry=self.registry(2, 6144), meminfo=self.meminfo(8000)))
 
-    def test_a_host_at_the_cap_is_refused(self):
+    def test_admission_refuses_a_host_at_the_cap(self):
         self.live(2)
         r = self.agent.host_admission_refusal(
             registry=self.registry(2, 6144), meminfo=self.meminfo(8000))
@@ -20812,7 +20812,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIn("floor 6144 MB", r)
         self.assertIn("queue or run on workstation", r)
 
-    def test_a_host_below_the_memory_floor_is_refused(self):
+    def test_admission_refuses_below_the_memory_floor(self):
         # Nothing running, and the rule still fires: an empty host with 4 GB
         # free cannot take a worker that needs 6.
         r = self.agent.host_admission_refusal(
@@ -20823,7 +20823,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIn("4000 MB", r)
         self.assertIn("queue or run on workstation", r)
 
-    def test_dead_worker_records_are_not_live(self):
+    def test_admission_does_not_count_dead_worker_records(self):
         # `ps` shows a died row; the cap counts a running one. A crashed worker
         # that left its record behind must not keep the host closed forever.
         dead = self.dead_pid()
@@ -20833,7 +20833,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIsNone(self.agent.host_admission_refusal(
             registry=self.registry(2, 6144), meminfo=self.meminfo(8000)))
 
-    def test_an_unreadable_meminfo_leaves_the_count_rule_in_charge(self):
+    def test_admission_reads_the_count_when_meminfo_is_unreadable(self):
         # Windows and a container without /proc: the memory half stands down
         # rather than refusing every run on a host that cannot be measured.
         self.assertIsNone(self.agent.host_admission_refusal(
@@ -20844,7 +20844,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("unknown", r)
 
-    def test_the_off_switch_admits_a_full_host(self):
+    def test_admission_off_is_the_test_only_escape(self):
         self.live(9)
         kwargs = {"registry": self.registry(2, 6144), "meminfo": self.meminfo(1)}
         self.assertIsNotNone(self.agent.host_admission_refusal(**kwargs))
@@ -20890,7 +20890,7 @@ class HostAdmissionTests(unittest.TestCase):
                 rc = self.agent.cmd_run(self.args(dry_run), {})
         return rc, out.getvalue(), err.getvalue(), started
 
-    def test_cmd_run_refuses_a_full_host_with_its_own_exit_code(self):
+    def test_cmd_run_refuses_for_admission_with_its_own_exit_code(self):
         # The shipped cap, the shipped floor, a host at both: the run ends before
         # the clone, the record and the client, and its code says admission —
         # not 2 (a bad argument) and not 9 (a queue that timed out).
@@ -20905,14 +20905,14 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIn("floor 6144 MB", err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
-    def test_cmd_run_refuses_on_memory_alone(self):
+    def test_cmd_run_refuses_on_memory_alone_for_admission(self):
         rc, out, err, started = self.run_cmd(
             False, {"AUTOOS_MEMINFO_PATH": self.meminfo(100)})
         self.assertEqual(rc, self.agent.EXIT_HOST_ADMISSION, out + err)
         self.assertEqual(started, [])
         self.assertIn("100 MB", err)
 
-    def test_a_dry_run_is_unaffected_by_a_full_host(self):
+    def test_a_dry_run_is_admitted_however_full_the_host(self):
         # Planning touches nothing, so a preview of a run the host could not take
         # still prints its plan: the operator sees the route, then queues it.
         self.live(9)
@@ -20922,7 +20922,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIn("would run:", out)
         self.assertEqual(started, [])
 
-    def test_the_mcp_spawn_path_returns_rejected_with_the_same_text(self):
+    def test_mcp_spawn_is_rejected_for_admission_with_the_same_text(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         popens = []

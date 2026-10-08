@@ -638,7 +638,7 @@ fi
 # run is never refused. Filtered out of the suite above so a CI box that is short
 # on memory reports the refusal it hit by name instead of 1262 unrelated cases.
 if it "autoos-agent host admission: live workers and free memory gate the spawn"; then
-    out="$(python3 tests/test_autoos_spawner.py -k HostAdmission 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_autoos_spawner.py -k admission 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # T0-FREEZE (plan v3): the sixth `ready` gate -- main CI red freezes normal
