@@ -16,6 +16,14 @@ A malformed NDJSON line is skipped and counted in `bad_rows`. A missing or
 unreadable file, a directory, malformed JSON, or a file whose every line is
 malformed exits 2 with a one-line message and prints no verdict.
 
+Zero-token rows: a row whose (in + out) token counts are both 0 costs $0 and
+is never counted as unpriced default spend — whatever its status. This is what
+keeps a failed call (a 501 or 402 with an empty usage block) from showing up as
+Gemini-Flash-priced spend and raising the gate's PRICE-GAP flag. A non-2xx row
+that does carry tokens is still priced at the default, and so is a row whose
+token field is garbage: neither proves that nothing was billed, and
+under-counting real spend is the worse failure.
+
 Tag matching (`run --tag`): the tag matches the full sessionTag, or its first
 segment (the lane), or its last segment (the run id).
 
@@ -461,9 +469,35 @@ def _unpriced_list(counter):
     return [{"model": m, "count": n} for m, n in sorted(counter.items())]
 
 
+def _row_tokens(row):
+    """Coerce a row's token block to (in, out, cache_read, bad).
+
+    Missing counts as 0 and is not bad; a non-numeric value coerces to 0 and
+    flags the row, so `bad` means the zero cannot be trusted.
+    """
+    toks = row.get("tokens") if isinstance(row.get("tokens"), dict) else {}
+    tin, b_in = _coerce_token(toks.get("in"))
+    tout, b_out = _coerce_token(toks.get("out"))
+    tcache, b_cache = _coerce_token(toks.get("cacheRead"))
+    return tin, tout, tcache, (b_in or b_out or b_cache)
+
+
 def _row_cost_dec(r, prices, unpriced):
-    """Exact-decimal cost of one row; registers unpriced Google-paid models."""
+    """Exact-decimal cost of one row; registers unpriced Google-paid models.
+
+    A row that billed no tokens (in + out == 0) is priced at zero rates and is
+    never registered as unpriced spend: a failed call (501/402) with an empty
+    usage block cost nothing, and counting it as Flash-default spend turned a
+    provider error into a PRICE-GAP. A non-2xx row that *does* carry tokens
+    keeps the default — a failed status is not proof that nothing was billed,
+    and under-counting real tokens is the worse failure. Garbage token fields
+    coerce to 0 but do not prove a free call, so such a row stays counted.
+    """
     prov = google_paid_provider(r)
+    tin, tout, _tcache, tok_bad = _row_tokens(r)
+    if tin + tout == 0 and not tok_bad:
+        return prov, {"price_in": 0.0, "price_out": 0.0, "price_cache_read": 0.0,
+                      "unverified": False, "source": "zero-tokens"}
     pr = get_price(r.get("model"), prov if prov else r.get("provider"), prices)
     if pr["source"] == "unpriced" and prov:
         # A Google-paid row whose model has no price row would otherwise be
@@ -496,12 +530,9 @@ def evaluate_run(rows, tag=None, prices=None):
     unpriced = {}
 
     for r in matching:
-        toks = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
-        tin, b_in = _coerce_token(toks.get("in"))
-        tout, b_out = _coerce_token(toks.get("out"))
-        tcache, b_cache = _coerce_token(toks.get("cacheRead"))
+        tin, tout, tcache, tok_bad = _row_tokens(r)
         ts = parse_timestamp(r.get("timestamp"))
-        if b_in or b_out or b_cache or ts is None:
+        if tok_bad or ts is None:
             bad_rows += 1
         cached = min(tcache, tin)
         uncached = tin - cached
@@ -575,11 +606,8 @@ def evaluate_day(rows, day_str=None, budget=DAY_DEFAULT_BUDGET_USD, warn=DAY_DEF
             continue
         if ts.strftime("%Y-%m-%d") != day_str:
             continue
-        toks = r.get("tokens") if isinstance(r.get("tokens"), dict) else {}
-        tin, b_in = _coerce_token(toks.get("in"))
-        tout, b_out = _coerce_token(toks.get("out"))
-        tcache, b_cache = _coerce_token(toks.get("cacheRead"))
-        if b_in or b_out or b_cache:
+        tin, tout, tcache, tok_bad = _row_tokens(r)
+        if tok_bad:
             bad_rows += 1
         cached = min(tcache, tin)
         uncached = tin - cached
