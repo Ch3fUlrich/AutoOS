@@ -190,7 +190,11 @@ value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - th
 mode and the client's accepted list);
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted; 9 a --free run waited the whole bounded queue
-(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2).
+(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2);
+13 HOST-ADMISSION: this host has no room for one more worker (HOSTADMISSION) - the live worker
+count reached host_admission.max_live_workers, or /proc/meminfo's MemAvailable is below
+host_admission.mem_available_floor_mb. It starts nothing and never waits: queueing is the caller's
+job, or the run goes to another machine. The message names the count, the memory, both limits.
 
 `heartbeat` (R-heartbeat-02/03, R-pause-01, R-handoff-07) is read-only - it never pushes,
 commits or writes anything. Exit codes of its own: 3 an inbox PAUSE is active (takes
@@ -2263,6 +2267,21 @@ EXIT_READ_ONLY_WRITE = 11
 # result a cross-family review. This is the code for "nothing outside that family is
 # left to serve the run" — the run refuses rather than lie.
 EXIT_NO_OTHER_FAMILY = 12
+# HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): a spawn that starts a worker on
+# a host that is already full does not fail, it succeeds somewhere worse - the
+# box swaps, every lane on it goes red at once, and nothing in the routing layer
+# says which run caused it. So the spawner asks the host for permission: the live
+# worker count (`ps` state "running", all lanes of this checkout) and MemAvailable
+# from /proc/meminfo, both measured against catalog/ai-registry.json's
+# `host_admission` section. Distinct from 9 on purpose: 9 is "the provider said
+# no, wait and it may open", this is "the machine said no, and waiting on it is
+# the caller's decision, not a bounded sleep here".
+EXIT_HOST_ADMISSION = 13
+ADMISSION_MAX_LIVE_DEFAULT = 6
+ADMISSION_MEM_FLOOR_MB_DEFAULT = 6144
+ADMISSION_OFF_ENV = "AUTOOS_ADMISSION_OFF"
+ADMISSION_MEMINFO_ENV = "AUTOOS_MEMINFO_PATH"
+MEMINFO_PATH = "/proc/meminfo"
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -9888,6 +9907,94 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
             or (_parse_iso(r["ended"]) or cutoff) > cutoff]
 
 
+def host_admission_config(registry=None) -> tuple:
+    """(max_live_workers, mem_available_floor_mb) - the host's own limits.
+
+    catalog/ai-registry.json's top-level `host_admission` is the single source
+    (operator order 2026-10-08). A section that is absent, or a field that is not
+    a number, takes the documented default rather than no limit: an unparseable
+    cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
+    test-only escape, honoured by `host_admission_refusal`, not by the numbers.
+    """
+    if registry is None:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError):
+            registry = {}
+    section = (registry or {}).get("host_admission")
+    section = section if isinstance(section, dict) else {}
+    out = []
+    for field, default in (("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+                           ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)):
+        value = section.get(field)
+        out.append(value if isinstance(value, int) and not isinstance(value, bool)
+                   else default)
+    return tuple(out)
+
+
+def mem_available_mb(path=None):
+    """MemAvailable from /proc/meminfo in MB, or None where it cannot be read.
+
+    The kernel writes it in kB. None is Windows, or a container mounted without
+    /proc: the live-worker half of the rule still binds there, and the memory
+    half stands down instead of refusing every run on a host it cannot measure.
+    """
+    path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    fields = line.split()
+                    if len(fields) >= 2:
+                        return int(fields[1]) // 1024
+                    return None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def live_worker_count(directory=None) -> int:
+    """The workers this host is running now - the rows `ps` shows, not the files.
+
+    Same directory (the checkout's git-common `logs/workers`, so every worktree
+    and every lane of it counts), same `died` verdict: a record whose pid is gone
+    is a crashed worker and must not keep its host closed.
+    """
+    directory = workers_dir() if directory is None else directory
+    return sum(1 for row in visible_workers(directory)
+               if row.get("state") == "running")
+
+
+def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str:
+    """One shape for both halves, naming all four numbers: a caller that reads
+    "queue or run on workstation" has to be able to tell which of the two ran
+    out, and how far off it was, without a second command."""
+    free = "unknown" if free_mb is None else "%d MB" % free_mb
+    return ("host admission: %d live workers, cap %d; MemAvailable %s, floor %d MB: "
+            "%s reached, queue or run on workstation"
+            % (live, cap, free, floor, which))
+
+
+def host_admission_refusal(registry=None, workers=None, meminfo=None):
+    """Why this host cannot take another worker right now, or None to admit.
+
+    Read-only, and it never waits (R-worker: queueing is the caller's job - the
+    CLI's caller decides whether to sleep and retry, or to route the task to a
+    different machine). `workers` and `meminfo` name the two sources for a
+    caller that has them (a test); otherwise the host's own are read.
+    """
+    if os.environ.get(ADMISSION_OFF_ENV) == "1":
+        return None
+    cap, floor = host_admission_config(registry)
+    live = live_worker_count(workers)
+    free_mb = mem_available_mb(meminfo)
+    if live >= cap:
+        return _admission_text(live, cap, free_mb, floor, "the live-worker cap")
+    if free_mb is not None and free_mb < floor:
+        return _admission_text(live, cap, free_mb, floor, "the memory floor")
+    return None
+
+
 def _print_worker_table(rows: list) -> None:
     head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "FAMILY", "LANE", "PID", "TITLE/TASK"]
     cells = []
@@ -10374,6 +10481,13 @@ def cmd_run(args, cfg: dict) -> int:
             # T2 item 2: the preview names the swap the real run would refuse.
             print("note: spawning this plan is refused: %s" % mismatch)
         return 0
+    # HOSTADMISSION: the host is a gate too. Read after the preview above (a dry
+    # run starts nothing, so a full host never refuses one - an operator previews
+    # a route before deciding where to run it) and before the leaf fence, the
+    # clone, the worker record and the client.
+    admission = host_admission_refusal(registry=registry)
+    if admission is not None:
+        return refuse(admission, EXIT_HOST_ADMISSION)
     # KEYDENY3b: the leaf fence returns here, after the preview above and before
     # anything is cloned or started.
     if leaf_refusal is not None:

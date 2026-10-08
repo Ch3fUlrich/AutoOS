@@ -67,16 +67,27 @@ def allow_in_place(case, agent):
 # real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
 # whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
 _WORKERS_TMP = None
+_MEMINFO_TMP = None
 
 
 def setUpModule():
-    global _WORKERS_TMP
+    global _WORKERS_TMP, _MEMINFO_TMP
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
+    # memory than the floor would refuse every real-launch test in this file for
+    # a reason none of them is about. Pin the source to a healthy fake; the
+    # admission tests name their own path per case.
+    _MEMINFO_TMP = os.path.join(_WORKERS_TMP, "meminfo")
+    with io.open(_MEMINFO_TMP, "w", encoding="utf-8") as fh:
+        fh.write("MemTotal:       67108864 kB\nMemFree:        1 kB\n"
+                 "MemAvailable:   67108864 kB\n")
+    os.environ["AUTOOS_MEMINFO_PATH"] = _MEMINFO_TMP
 
 
 def tearDownModule():
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    os.environ.pop("AUTOOS_MEMINFO_PATH", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 

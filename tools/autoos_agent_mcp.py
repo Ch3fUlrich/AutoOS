@@ -736,6 +736,16 @@ def spawn(req: dict) -> dict:
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
+    # HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the same rule the CLI's
+    # cmd_run applies, and it has to be read HERE. This tool starts the detached
+    # runner, not the CLI's launch path, and it preflights with the CLI's own dry
+    # run - which a full host must not refuse (an operator previews a route
+    # before deciding where to run it). So the one gate that speaks for the machine
+    # is applied before the run dir exists, and the caller gets state "rejected"
+    # with the CLI's own text instead of a runner that dies on rc 13.
+    admission = agent.host_admission_refusal()
+    if admission is not None:
+        return _refused(admission)
     max_attempts = 5
     for attempt in range(max_attempts):
         # FLEETP0b (FLEETSPEC §5.1): the spawner's own mint, so this run dir, the
