@@ -214,12 +214,15 @@ fi
 # above became machine-dependent.
 if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
     keys="$(mktemp)"
-    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    # D657-D2: every google_ai_studio leg is gated now, so apply no longer plans
+    # a gemini row at all. `vertex` is a provider the D2 chains do ride, so the
+    # placeholder-counts-as-no-key rule is proved on a row that is still planned.
+    printf 'vertex: REPLACE_WITH_VERTEX_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     ok=1
-    [[ "$out" == *"gemini: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "gemini: $out" >&2; }
+    [[ "$out" == *"vertex: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "vertex: $out" >&2; }
     [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
     [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
@@ -573,6 +576,23 @@ if it "apply prune: a down gateway is never listed and nothing is pruned"; then
     if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
 fi
 
+# _node_registry <dir> - the fixture registry the meta-api cases point apply at.
+# AO-DENYLEGS D2 gated every muse-spark-1.3-contributor leg (§8), so the shipped
+# catalog says meta_api has no leg that can ever route and apply.sh — correctly —
+# skips the provider instead of registering a connection nothing can route to.
+# That removes the only node-type provider the suite could exercise, so these
+# cases run against a copy whose gate is lifted. Test data only:
+# catalog/ai-registry.json is never modified and nothing here claims the leg
+# should be served.
+_node_registry() {
+    python3 - "$ROOT/catalog/ai-registry.json" "$1/registry.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+doc.setdefault("routes", {}).setdefault("spark-1.3-contributor", {})["unavailable_legs"] = {}
+json.dump(doc, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
+PY
+}
+
 # ─── MUSEAPI step 4: a provider that reads another's api-keys.yml key ───────
 # providers.meta_api has no key entry of its own — the registry says key_name:
 # meta, because the user's single Meta key serves both the direct opencode
@@ -582,10 +602,14 @@ fi
 # that already holds meta-api must not add it a second time.
 if it "svc: apply registers meta_api from the shared 'meta' key, not a phantom 'meta_api'"; then
     keys="$(mktemp)"
+    reg="$(mktemp -d)"
+    _node_registry "$reg"
     printf 'meta: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        AUTOOS_REGISTRY_FILE="$reg/registry.json" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
+    rm -rf "$reg"
     ok=1
     [[ "$out" == *"  - meta-api: would register (key from meta)"* ]] || { ok=0; echo "plan: $out" >&2; }
     [[ "$out" == *"meta-api: no key in api-keys.yml"* ]] && { ok=0; echo "looked for a 'meta_api' key" >&2; }
@@ -858,6 +882,7 @@ if [[ -n "$out" ]]; then printf '%s' "$reply" >"$out"; else printf '%s' "$reply"
 exit 0
 NODECURL
     chmod +x "$d/bin/omniroute" "$d/bin/curl"
+    _node_registry "$d"
     printf '%s\n' "$d"
 }
 # _node_apply <dir> [apply args] - apply.sh against the two stand-ins. The
@@ -868,6 +893,7 @@ _node_apply() {
     local d="$1"
     shift
     PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" \
         bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
 }
@@ -1028,6 +1054,7 @@ if it "svc: apply removes the REST temp files when a call is interrupted"; then
     # finish and clean up behind it, and the case proves nothing.
     set -m
     PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
         bash "$ROOT/configuration/omniroute/apply.sh" >"$d/run.out" 2>&1 &
     apply_pid=$!
