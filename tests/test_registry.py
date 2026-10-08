@@ -3529,7 +3529,14 @@ def usable_legs(reg: dict, route_id: str) -> list:
     rev-freekeys2 finding 2 -- asked of `autoos_resolver.route_leg_context_fits`,
     the resolver's own promise check, never restated here: a 32k leg was counted
     as one of t1's three fallbacks for a 1M card, and three "usable" legs that
-    cannot carry the request are one usable leg and two 413s)."""
+    cannot carry the request are one usable leg and two 413s).
+
+    D657-D2 (2026-10-08) moved the price filter onto the resolver's own
+    `credit_leg_priced(model_id, registry, provider_id)` as well: one model id can
+    be served at two prices at once (T1-CREDIT-FIX-6, D-220) -- `gemini-3.8-flash`
+    is $0 through AI Studio and billed through Vertex -- so reading the
+    model-level `price_in` alone called a priced credit leg unpriced and counted
+    the chain one usable leg too few."""
     route = reg["routes"][route_id]
     out = []
     for leg in live_legs(reg, route_id):
@@ -3538,11 +3545,7 @@ def usable_legs(reg: dict, route_id: str) -> list:
         if model.get("tool_calls") != "proven":
             continue
         if leg_tier(reg, leg) == "credit":
-            try:
-                priced = float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
-            except (TypeError, ValueError):
-                priced = False
-            if not priced:
+            if not resolver.credit_leg_priced(model_id, reg, provider_id):
                 continue
         if not resolver.route_leg_context_fits(leg, route, reg):
             continue
@@ -3551,24 +3554,25 @@ def usable_legs(reg: dict, route_id: str) -> list:
 
 
 class ComboCrossProviderTests(unittest.TestCase):
-    """Each agentic tier route must keep two or three fallback legs on DIFFERENT
-    providers that a card can actually use, and the new free legs must sit in the
-    route's free band — ahead of the paid legs — so a run spends a free grant
-    before the operator's money."""
+    """Each agentic tier route must keep fallback legs on DIFFERENT providers
+    that a card can actually use, and the new free legs must sit in the route's
+    free band — ahead of the paid legs — so a run spends a free grant before the
+    operator's money. D657-D2 pins the usable band each re-cut chain really has
+    (see USABLE_LEG_BAND) instead of a fixed three, since the D-657 probe rules
+    removed legs rather than adding them."""
 
     @classmethod
     def setUpClass(cls):
         cls.reg = load_registry()
 
     def test_every_agentic_route_has_two_distinct_usable_providers(self):
-        # TORDER D-TORDER-2: l1-orchestrator keeps only >=600k legs (all
-        # 1048576 live) but none is tool_calls:proven yet, so usable_legs is 0.
-        # Exempt l1-orchestrator here; contract (d) still gates 1M + >=600k.
+        # TORDER D-TORDER-2 skipped l1-orchestrator here because none of its
+        # >=600k legs was tool_calls:proven. D657-D2 proved the vertex leg on
+        # both gateways (probe-d657-central/workstation ack ok + tool ok), so
+        # the skip is lifted: the route now answers with two providers.
         # l1-orchestrator-free-only is L0 ACCEPT single-provider (see
         # test_t1_free_only_single_provider_exemption below), not skipped here.
         for route_id in AGENTIC_TIER_ROUTES:
-            if route_id in ("l1-orchestrator",):
-                continue
             if route_id == "l1-orchestrator-free-only":
                 continue  # asserted in exemption test, not silently passed
             providers = {registry.resolve_leg(leg, self.reg)[0]
@@ -3581,7 +3585,8 @@ class ComboCrossProviderTests(unittest.TestCase):
 
     def test_t1_free_only_single_provider_exemption(self):
         # L0 D-TORDER-2 ACCEPT: l1-orchestrator-free-only is deliberately
-        # single-provider (gemini only). Passes ONLY via named exemption +
+        # single-provider. D657-D2 re-cut it from google_ai_studio (401 on both
+        # gateways) to the bazaarlink free leg. Passes ONLY via named exemption +
         # registry constraint note; a missing note fails (so a future
         # single-provider route without one still fails). Same style as
         # CLEAN_ROUTE_EXEMPTIONS.
@@ -3595,21 +3600,54 @@ class ComboCrossProviderTests(unittest.TestCase):
         # single servable provider
         provs = {registry.resolve_leg(leg, self.reg)[0]
                  for leg in registry.gateway_legs(route, self.reg)}
-        self.assertEqual(provs, {"google_ai_studio"})
+        self.assertEqual(provs, {"bazaarlink"})
+        # the exemption's own reason names the same provider, so the gate and
+        # the registry cannot drift apart silently
+        self.assertIn("bazaarlink", cc.SINGLE_PROVIDER_EXEMPTIONS["l1-orchestrator-free-only"])
         # exemption note present with required phrases (fails if missing)
         note = route.get("$comment") or ""
         for phrase in cc.REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES:
             self.assertIn(phrase, note, "constraint note missing %r" % phrase)
         self.assertIn("deliberately single-provider", note)
 
-    def test_every_agentic_route_has_three_usable_legs(self):
-        # TORDER D-TORDER-2: see two_distinct test - t1 pair exempt (0 usable
-        # proven; 5/2 servable 1M legs await probes).
-        for route_id in AGENTIC_TIER_ROUTES:
-            if route_id in ("l1-orchestrator", "l1-orchestrator-free-only"):
-                continue
-            self.assertGreaterEqual(
-                len(usable_legs(self.reg, route_id)), 3, route_id)
+    # D657-D2 (2026-10-08): the >=3-usable-legs bar was written when the chains
+    # still carried legs the D-657 probe rules removed. Counting what the
+    # resolver would actually plan (tool_calls proven, credit legs priced,
+    # context fitting the route's declared need), the bands are these; each
+    # shortfall names its cause instead of a floor the registry no longer
+    # supports. Shortfall != defect — inventing a leg to reach 3 would be.
+    USABLE_LEG_BAND = {
+        # the gemini AI-Studio leg 401s on both gateways and free-ai's tool call
+        # never landed, so the free band keeps one leg and stays exempt above.
+        "l1-orchestrator-free-only": 1,
+        # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
+        # second providers are all either paid (banned from a free-only band) or
+        # unproven, so two is what passes.
+        "l1-orchestrator": 2,
+        # the openrouter :free legs top out at 262144 < the route's 1M need, so
+        # only the two below are counted for a full-size card.
+        "l2-worker-free-only": 2,
+        "l2-worker": 3,
+        "l3-driver": 10,
+        "l3-driver-free-only": 9,
+    }
+
+    def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
+        """TORDER D-TORDER-2 wanted three fallbacks per agentic tier. D657-D2
+        pins the band each route really has and refuses drift in both
+        directions: a lost leg fails the count, and a leg that stops carrying
+        the route's promise (unproven tools, unpriced credit, too small a
+        window) fails the count too rather than quietly becoming a 413."""
+        for route_id, count in self.USABLE_LEG_BAND.items():
+            usable = usable_legs(self.reg, route_id)
+            self.assertEqual(
+                len(usable), count,
+                "%s plans %d usable leg(s) (%s), expected %d"
+                % (route_id, len(usable), usable, count))
+            if route_id != "l1-orchestrator-free-only":
+                # the named single-provider exemption is the one route allowed
+                # below two; every other band must still reach a fallback.
+                self.assertGreaterEqual(len(usable), 2, route_id)
 
     def test_a_new_free_leg_never_trails_a_paid_leg(self):
         # The band order the brief asks for: free -> credit -> paid. A new free
@@ -3661,13 +3699,13 @@ class ComboCrossProviderTests(unittest.TestCase):
             for leg in NEW_FREE_LEGS:
                 self.assertNotIn(leg, route.get("legs") or [], route_id)
 
-    def test_the_three_usable_legs_carry_the_route_promise(self):
-        """FREEKEYS-2c (rev-freekeys2 finding 2): the >=3-usable-legs bar is only
+    def test_the_usable_legs_carry_the_route_promise(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 2): a usable-legs count is only
         worth having if those legs answer the requests this route's cards make.
         Measured 128k of `context_advertised` behind a 128k route, they do; drop
         one leg's window to 32k -- the shape the finding named, a small free
         model counted as a fallback for full-size cards -- and the filter stops
-        counting it, while the two legs that do carry the promise stay counted.
+        counting it, while the legs that do carry the promise stay counted.
         The small leg is the weak link, not the band."""
         reg = copy.deepcopy(self.reg)
         small = "groq/qwen/qwen3.8-27b"
@@ -3678,8 +3716,13 @@ class ComboCrossProviderTests(unittest.TestCase):
         self.assertNotIn(small, after,
                          "a 32k leg was still counted usable for a 128k route")
         # TORDER: nebius removed (6 legs); SCWREMOVAL 2026-10-06: scaleway gone
-        # too; remaining usable band still carries promise
-        self.assertIn("ovhcloud/Qwen3.8-27B", after)
+        # too; D657-D2: the ovhcloud leg leaves every chain (OVH credits out of
+        # L0-L2, no documented cache) — the band that remains still carries the
+        # promise, head and paid tail included.
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
+        self.assertIn("cohere/command-a-plus-05-2026", after)
+        self.assertIn("vertex/gemini-3.8-flash", after)
+        self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
         # `context`), so 128k is what a counted fallback must carry.
