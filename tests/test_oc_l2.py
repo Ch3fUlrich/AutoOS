@@ -515,16 +515,18 @@ class LaneTest(unittest.TestCase):
         return not pid_alive(pid)
 
     def _hard_kill_group(self, pgid):
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        if os.name != "nt":
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     def _hard_kill_pid(self, pid):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        if os.name != "nt":
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
 
     def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset"):
         """A lane whose state file names a PID stop must not accept.
