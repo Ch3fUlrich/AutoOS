@@ -25,9 +25,12 @@ PRICES_FILE = REPO_ROOT / "configuration" / "google-prices.json"
 REGISTRY_NONE = str(REPO_ROOT / "no-such-registry.json")
 
 
-def _row(model, provider, tin, tout, cache, ts="2026-10-03T10:00:00Z"):
-    return {"timestamp": ts, "model": model, "provider": provider,
-            "tokens": {"in": tin, "out": tout, "cacheRead": cache}}
+def _row(model, provider, tin, tout, cache, ts="2026-10-03T10:00:00Z", status=None):
+    row = {"timestamp": ts, "model": model, "provider": provider,
+           "tokens": {"in": tin, "out": tout, "cacheRead": cache}}
+    if status is not None:
+        row["status"] = status
+    return row
 
 
 def _provider_block(price_in, price_out, cache_read, unverified=True):
@@ -176,6 +179,96 @@ class TestUnpricedFlagSemantics(unittest.TestCase):
         res = rb.evaluate_day(rows, day_str="2026-10-03", prices=table)
         self.assertFalse(res["unpriced_default_used"])
         self.assertAlmostEqual(res["usd"], 0.75, places=6)
+
+
+class TestZeroTokenRowsAreFree(unittest.TestCase):
+    """(f) PRICE-GAP: a row that bills no tokens is not unpriced spend.
+
+    Measured 2026-10-08 (workstation): 11 failed calls — vertex/claude-sonnet-5
+    x5 (501), vertex/claude-opus-5 x5 (501), gemini/deep-research-max-preview-04-2026
+    x1 (402), all with 0 tokens — were counted as unpriced rows priced at the
+    Gemini Flash default, which is what raised the gate's PRICE-GAP flag.
+
+    The rule: a row whose (in + out) token counts are both 0 costs $0 and is
+    never registered in `unpriced` / `unpriced_default_used`, whatever its
+    status. A non-2xx row that *does* carry tokens keeps the default: the
+    provider may have billed partial work, and under-counting real tokens is
+    the worse failure (so a bare non-2xx status is deliberately not a free
+    pass). A 2xx row with tokens and no price keeps the default, unchanged.
+    """
+
+    def _table(self):
+        # One priced Flash model (so the default rate is non-zero) and no row
+        # for the Claude / deep-research models under test.
+        return _table({"vertex-flash-a": _provider_block(1.2, 3.0, 0.05)})
+
+    def test_failed_zero_token_unpriced_row_is_free_in_run(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 0, 0, 0, status=501)
+                for _ in range(5)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["calls"], 5)
+        self.assertEqual(res["est_usd"], 0.0)
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertEqual(res["verdict"], "ok")
+
+    def test_failed_zero_token_unpriced_row_is_free_in_day(self):
+        rows = ([_row("vertex/claude-opus-5", "vertex", 0, 0, 0, status=501)
+                 for _ in range(5)] +
+                [_row("gemini/deep-research-max-preview-04-2026", "gemini",
+                      0, 0, 0, status=402)])
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["usd"], 0.0)
+        self.assertEqual(res["by_provider"], {"vertex": 0.0, "gemini": 0.0})
+        self.assertEqual(res["unpriced_models"], [])
+        self.assertFalse(res["unpriced_default_used"])
+        self.assertEqual(res["verdict"], "ok")
+
+    def test_priced_zero_token_row_is_not_counted_as_unpriced(self):
+        # A successful call that reported no usage: still nothing to price.
+        rows = [_row("vertex-flash-a", "vertex", 0, 0, 0, status=200)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["est_usd"], 0.0)
+        self.assertFalse(res["unpriced_default_used"])
+
+    def test_ok_unpriced_row_with_tokens_still_uses_default(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 1_000_000, 0, 0, status=200)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-sonnet-5", "count": 1}])
+        self.assertAlmostEqual(res["est_usd"], 1.2, places=6)
+
+    def test_failed_row_with_tokens_keeps_the_default_conservatively(self):
+        # 4xx + tokens: a failed call is not proof that nothing was billed.
+        rows = [_row("vertex/claude-opus-5", "vertex", 1_000_000, 0, 0, status=429)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertTrue(res["unpriced_default_used"])
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-opus-5", "count": 1}])
+        self.assertAlmostEqual(res["est_usd"], 1.2, places=6)
+
+    def test_row_with_garbage_tokens_is_not_read_as_zero(self):
+        # A non-numeric token field coerces to 0 but does not *prove* a free
+        # call: it stays counted as unpriced spend and lands in bad_rows.
+        rows = [_row("vertex/claude-opus-5", "vertex", "n/a", 0, 0, status=500)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        self.assertEqual(res["bad_rows"], 1)
+        self.assertTrue(res["unpriced_default_used"])
+
+    def test_missing_token_block_is_free(self):
+        rows = [{"timestamp": "2026-10-03T10:00:00Z", "model": "vertex/claude-opus-5",
+                 "provider": "vertex", "status": 501}]
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["usd"], 0.0)
+        self.assertFalse(res["unpriced_default_used"])
+
+    def test_mixed_day_counts_only_the_rows_that_billed(self):
+        rows = [_row("vertex/claude-sonnet-5", "vertex", 0, 0, 0, status=501)
+                for _ in range(11)]
+        rows.append(_row("vertex/claude-sonnet-5", "vertex", 100_000, 0, 0, status=200))
+        res = rb.evaluate_day(rows, day_str="2026-10-03", prices=self._table())
+        self.assertEqual(res["unpriced_models"], [{"model": "vertex/claude-sonnet-5", "count": 1}])
+        self.assertAlmostEqual(res["usd"], 0.12, places=6)
+        self.assertTrue(res["unpriced_default_used"])
 
 
 class TestRealPriceFileConsistency(unittest.TestCase):
