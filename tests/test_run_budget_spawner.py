@@ -260,6 +260,12 @@ class CmdRunGateTests(GateFileCase):
 
     def _env(self, gate_path, extra=None):
         env = dict(os.environ, **(extra or {}))
+        # HOSTADMISSION reads the host's own free memory. This file is about the
+        # cost gate: a CI box below the floor would refuse every real launch here
+        # for a reason none of them is about, so the test-only escape is set in
+        # the one place this file builds a child env. HostAdmissionTests in
+        # tests/test_autoos_spawner.py is where the rule itself is tested.
+        env.setdefault("AUTOOS_ADMISSION_OFF", "1")
         if gate_path is None:
             env.pop(GATE_ENV, None)
         else:

@@ -67,16 +67,27 @@ def allow_in_place(case, agent):
 # real registry (<main checkout>/logs/workers): pin it to a throwaway dir for the
 # whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
 _WORKERS_TMP = None
+_MEMINFO_TMP = None
 
 
 def setUpModule():
-    global _WORKERS_TMP
+    global _WORKERS_TMP, _MEMINFO_TMP
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
+    # memory than the floor would refuse every real-launch test in this file for
+    # a reason none of them is about. Pin the source to a healthy fake; the
+    # admission tests name their own path per case.
+    _MEMINFO_TMP = os.path.join(_WORKERS_TMP, "meminfo")
+    with io.open(_MEMINFO_TMP, "w", encoding="utf-8") as fh:
+        fh.write("MemTotal:       67108864 kB\nMemFree:        1 kB\n"
+                 "MemAvailable:   67108864 kB\n")
+    os.environ["AUTOOS_MEMINFO_PATH"] = _MEMINFO_TMP
 
 
 def tearDownModule():
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    os.environ.pop("AUTOOS_MEMINFO_PATH", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 
@@ -20715,6 +20726,423 @@ class GeminiSideModelPinTests(unittest.TestCase):
             {"env": self.pin("gemini", flag), "cwd": "."}, None,
             base={"GEMINI_MODEL": "gemini-3-pro-preview"})
         self.assertEqual(child.get("GEMINI_MODEL"), flag)
+
+
+class HostAdmissionTests(unittest.TestCase):
+    """HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner counts the LIVE
+    workers this host already runs and reads MemAvailable before it starts one
+    more, and refuses when either runs out.
+
+    Both measurements come from a path a test can name: the count from the
+    workers dir `ps` reads (``AUTOOS_WORKERS_DIR``, records carrying a pid), the
+    memory from ``AUTOOS_MEMINFO_PATH``. The two limits come from
+    catalog/ai-registry.json's ``host_admission`` section — the registry is the
+    single source, so one test here reads the shipped file rather than a copy of
+    its numbers. ``AUTOOS_ADMISSION_OFF=1`` is the test-only escape.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers, mode=0o700)
+        env = mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers})
+        env.start()
+        self.addCleanup(env.stop)
+        # The escape hatch must never leak in from the suite's own environment:
+        # these tests are the rule, so they run with it explicitly off-but-absent.
+        os.environ.pop("AUTOOS_ADMISSION_OFF", None)
+        os.environ.pop("AUTOOS_MEMINFO_PATH", None)
+
+    # --- fixtures ---------------------------------------------------------
+
+    def live(self, n, start=0):
+        """n worker records whose pid is this test process: live to `ps`."""
+        for i in range(n):
+            self.record("live%d" % (start + i), os.getpid())
+
+    def record(self, wid, pid):
+        rec = {"id": wid, "pid": pid, "started": self.agent.utc_now_iso(),
+               "client": "opencode", "model": "m", "task_head": "do a thing"}
+        with io.open(os.path.join(self.workers, wid + ".json"), "w",
+                     encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def dead_pid(self):
+        for pid in (4194300, 4194299, 4194298):
+            if not self.agent._pid_alive(pid):
+                return pid
+        self.skipTest("no unused pid on this host")
+
+    def meminfo(self, mb):
+        """A /proc/meminfo in the kernel's own shape (values in kB)."""
+        path = os.path.join(self.tmp, "meminfo")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("MemTotal:       %d kB\nMemFree:        1 kB\n"
+                     "MemAvailable:   %d kB\n" % (mb * 1024, mb * 1024))
+        return path
+
+    def registry(self, cap, floor):
+        return {"host_admission": {"max_live_workers": cap,
+                                   "mem_available_floor_mb": floor}}
+
+    # --- the rule itself --------------------------------------------------
+
+    def test_host_admission_limits_come_from_the_shipped_registry(self):
+        shipped = SHIPPED_REGISTRY.get("host_admission") or {}
+        self.assertEqual(shipped.get("max_live_workers"), 6)
+        self.assertEqual(shipped.get("mem_available_floor_mb"), 6144)
+        # An unreadable registry leaves the documented defaults, not a free-for-all.
+        self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(None), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
+                         (2, 100))
+
+    def test_admission_grants_a_host_with_room(self):
+        self.live(1)
+        self.assertIsNone(self.agent.host_admission_refusal(
+            registry=self.registry(2, 6144), meminfo=self.meminfo(8000)))
+
+    def test_admission_refuses_a_host_at_the_cap(self):
+        self.live(2)
+        r = self.agent.host_admission_refusal(
+            registry=self.registry(2, 6144), meminfo=self.meminfo(8000))
+        self.assertIsNotNone(r, "cap 2 with 2 live workers must not admit")
+        self.assertIn("2 live workers", r)
+        self.assertIn("cap 2", r)
+        self.assertIn("8000 MB", r)
+        self.assertIn("floor 6144 MB", r)
+        self.assertIn("queue or run on workstation", r)
+
+    def test_admission_refuses_below_the_memory_floor(self):
+        # Nothing running, and the rule still fires: an empty host with 4 GB
+        # free cannot take a worker that needs 6.
+        r = self.agent.host_admission_refusal(
+            registry=self.registry(6, 6144), meminfo=self.meminfo(4000))
+        self.assertIsNotNone(r)
+        self.assertIn("0 live workers", r)
+        self.assertIn("cap 6", r)
+        self.assertIn("4000 MB", r)
+        self.assertIn("queue or run on workstation", r)
+
+    def test_admission_does_not_count_dead_worker_records(self):
+        # `ps` shows a died row; the cap counts a running one. A crashed worker
+        # that left its record behind must not keep the host closed forever.
+        dead = self.dead_pid()
+        for i in range(5):
+            self.record("dead%d" % i, dead)
+        self.assertEqual(self.agent.live_worker_count(self.workers), 0)
+        self.assertIsNone(self.agent.host_admission_refusal(
+            registry=self.registry(2, 6144), meminfo=self.meminfo(8000)))
+
+    def test_admission_reads_the_count_when_meminfo_is_unreadable(self):
+        # Windows and a container without /proc: the memory half stands down
+        # rather than refusing every run on a host that cannot be measured.
+        self.assertIsNone(self.agent.host_admission_refusal(
+            registry=self.registry(6, 6144), meminfo=os.path.join(self.tmp, "none")))
+        self.live(6)
+        r = self.agent.host_admission_refusal(
+            registry=self.registry(6, 6144), meminfo=os.path.join(self.tmp, "none"))
+        self.assertIsNotNone(r)
+        self.assertIn("unknown", r)
+
+    def test_admission_off_is_the_test_only_escape(self):
+        self.live(9)
+        kwargs = {"registry": self.registry(2, 6144), "meminfo": self.meminfo(1)}
+        self.assertIsNotNone(self.agent.host_admission_refusal(**kwargs))
+        with mock.patch.dict(os.environ, {"AUTOOS_ADMISSION_OFF": "1"}):
+            self.assertIsNone(self.agent.host_admission_refusal(**kwargs))
+
+    # --- where the rule is enforced -------------------------------------
+
+    def plan(self):
+        return {"agent": "l2-worker", "client": "opencode", "model": "m",
+                "cmd": [sys.executable, "-c", "pass"], "env": {},
+                "route": {"combo": "l2-worker", "reason": "card", "privacy": "public",
+                          "review": False, "tier": 2},
+                "run_id": "20260928-092516-test-run-abc123",
+                "depth": (1, 2), "free": False, "sandbox": None, "cwd": self.tmp,
+                "session_tag": "lane-a"}
+
+    def args(self, dry_run):
+        return argparse.Namespace(client="opencode", task="do it", free=False,
+                                  dry_run=dry_run, card=None, clean=False, tier=2,
+                                  joinable=False, lean=False, isolate=False, auto=True,
+                                  title=None, model=None, plan=None,
+                                  free_model=self.agent.DEFAULT_FREE_MODEL,
+                                  max_depth=None, allow_training=False, no_defer=False)
+
+    def run_cmd(self, dry_run, extra_env=None):
+        """cmd_run with the route settled (build_plan patched) and the client
+        neutralised, so the only thing that can stop it is the host's own room."""
+        started = []
+        env = {"AUTOOS_WORKERS_DIR": self.workers, "AUTOOS_STATE_DIR": self.tmp}
+        env.update(extra_env or {})
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(self.agent, "build_plan", return_value=self.plan()), \
+                mock.patch.object(self.agent, "run_client",
+                                  side_effect=lambda *a, **k: started.append(1)), \
+                mock.patch.object(self.agent, "gateway_up", return_value=True), \
+                mock.patch.object(self.agent, "client_key", return_value="sk-test-key"), \
+                mock.patch.object(self.agent.clients, "signin_state",
+                                  lambda client, env=None: (None, "")), \
+                mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(self.args(dry_run), {})
+        return rc, out.getvalue(), err.getvalue(), started
+
+    def test_cmd_run_refuses_for_admission_with_its_own_exit_code(self):
+        # The shipped cap, the shipped floor, a host at both: the run ends before
+        # the clone, the record and the client, and its code says admission —
+        # not 2 (a bad argument) and not 9 (a queue that timed out).
+        self.assertEqual(self.agent.EXIT_HOST_ADMISSION, 13)
+        self.live(6)
+        rc, out, err, started = self.run_cmd(
+            False, {"AUTOOS_MEMINFO_PATH": self.meminfo(100)})
+        self.assertEqual(rc, self.agent.EXIT_HOST_ADMISSION, out + err)
+        self.assertEqual(started, [], "the client never started")
+        self.assertIn("queue or run on workstation", err)
+        self.assertIn("cap 6", err)
+        self.assertIn("floor 6144 MB", err)
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
+
+    def test_cmd_run_refuses_on_memory_alone_for_admission(self):
+        rc, out, err, started = self.run_cmd(
+            False, {"AUTOOS_MEMINFO_PATH": self.meminfo(100)})
+        self.assertEqual(rc, self.agent.EXIT_HOST_ADMISSION, out + err)
+        self.assertEqual(started, [])
+        self.assertIn("100 MB", err)
+
+    def test_a_dry_run_is_admitted_by_host_admission_unchanged(self):
+        # Planning touches nothing, so a preview of a run the host could not take
+        # still prints its plan: the operator sees the route, then queues it.
+        self.live(9)
+        rc, out, err, started = self.run_cmd(
+            True, {"AUTOOS_MEMINFO_PATH": self.meminfo(100)})
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("would run:", out)
+        self.assertEqual(started, [])
+
+    def test_mcp_spawn_is_rejected_for_admission_with_the_same_text(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        popens = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": tmp,
+                                          "AUTOOS_MEMINFO_PATH": self.meminfo(100)}), \
+                mock.patch.object(mcp_server.subprocess, "Popen",
+                                  side_effect=lambda *a, **k: popens.append(1)):
+            self.live(6)
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected")
+        self.assertIn("queue or run on workstation", out["error"])
+        self.assertEqual(popens, [], "a rejected spawn starts no runner")
+        self.assertEqual(os.listdir(tmp), [], "a rejected spawn creates no run dir")
+
+    def test_a_runner_refused_on_admission_reads_as_rejected_not_failed(self):
+        # HOSTADMISSION-OFF: the pre-check and the runner's own gate are two
+        # reads of one machine, and the machine may fill between them. When it
+        # does, the run exits 13 having started nothing — a refusal the caller
+        # can only act on if `status` says so. A "failed" here reads as a bug in
+        # the run, and there was no run.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        run_id = "20261008-135433-admission-reject-abc123"
+        path = os.path.join(tmp, "agents", run_id)
+        os.makedirs(path)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            mcp_server._write_json(os.path.join(path, "job.json"),
+                                   {"id": run_id, "request": {}, "task": "t",
+                                    "argv": [], "cwd": str(ROOT), "route": {},
+                                    "started": time.time()})
+            mcp_server._write_exit(path, {"rc": self.agent.EXIT_HOST_ADMISSION,
+                                          "ended": time.time()})
+            st = mcp_server.status(run_id)
+        self.assertEqual(st["state"], "rejected", st)
+        self.assertEqual(st["detail"], "host-admission")
+        self.assertEqual(st["rc"], self.agent.EXIT_HOST_ADMISSION)
+
+    # --- HOSTADMISSION-RACE (fix 1) ---------------------------------------
+    # The gate used to be check-then-act: it counted the live workers, and the
+    # worker record — the thing the next count reads — landed minutes later,
+    # after the clone. N spawners that arrived at live=cap-1 each counted the
+    # others as absent and all N started. `host_admission_claim` now takes the
+    # count and the slot in one fcntl critical section, the same lock the free
+    # leg claims with, and the placeholder it writes is what the next spawner
+    # counts. `AUTOOS_ADMISSION_OFF` must be absent for these to mean anything:
+    # setUp pops it, and the claim honours it like the rule it gates.
+
+    def claims(self):
+        return sorted(n for n in os.listdir(self.workers)
+                      if n.endswith(self.agent.ADMISSION_RESERVATION_SUFFIX))
+
+    def test_N_simultaneous_gates_admit_exactly_one_at_the_last_slot(self):
+        # Real concurrency, no patched clock: cap 2, one live worker already
+        # running (live = cap-1), memory far above the floor, and 4 threads that
+        # all reach the gate at the same barrier. Before the claim there were two
+        # steps between the count and the record, so all 4 counted 1 and all 4
+        # started. Now exactly one is admitted and the other three are refused by
+        # the host, each of them told the same cap it ran out of.
+        agent = self.agent
+        registry, mem = self.registry(2, 6144), self.meminfo(8000)
+        self.live(1)
+        self.assertEqual(agent.live_worker_count(self.workers), 1)
+        n = 4
+        start = threading.Barrier(n)
+        results = []
+
+        def gate():
+            start.wait()
+            results.append(agent.host_admission_claim(registry=registry,
+                                                      workers=self.workers,
+                                                      meminfo=mem))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            threads = [threading.Thread(target=gate) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(len(results), n, results)
+        admitted = [r for r in results if r[0] is None]
+        refused = [r[0] for r in results if r[0] is not None]
+        self.assertEqual(len(admitted), 1, "one slot left, one spawner admitted")
+        self.assertEqual(len(refused), n - 1)
+        self.assertEqual(len(self.claims()), 1, self.claims())
+        for text in refused:
+            self.assertIn("the live-worker cap", text)
+            self.assertIn("2 live workers", text)
+            self.assertIn("cap 2", text)
+        # The claim is the record's stand-in: while it stands, the host is full.
+        self.assertEqual(agent.live_worker_count(self.workers), 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.free_reservation_release(admitted[0][1])
+        self.assertEqual(self.claims(), [])
+        self.assertEqual(agent.live_worker_count(self.workers), 1)
+
+    def test_a_host_claim_is_never_a_ps_row(self):
+        # `ps` reads every *.json in the workers dir; the claim is not one, so a
+        # host slot that is spoken for is never listed as a worker that is not.
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNone(refusal)
+        self.assertEqual(agent.list_workers(self.workers), [])
+        self.assertEqual(len(self.claims()), 1, self.claims())
+        agent.free_reservation_release(token)
+
+    def test_a_claim_from_a_dead_spawner_does_not_hold_the_host_closed(self):
+        # A spawner killed between its claim and its record leaves a placeholder
+        # nobody can release. Trusting it would keep the host shut for a worker
+        # that never existed, so a dead pid is reaped on the way past, exactly as
+        # a dead free-leg placeholder is.
+        agent = self.agent
+        dead = self.dead_pid()
+        for i in range(3):
+            path = os.path.join(self.workers, "dead%d%s" % (i, agent.ADMISSION_RESERVATION_SUFFIX))
+            with io.open(path, "w", encoding="utf-8") as fh:
+                json.dump({"id": "dead%d" % i, "pid": dead, "pid_start": 1,
+                           "started": agent.utc_now_iso()}, fh)
+        junk = os.path.join(self.workers, "corrupt" + agent.ADMISSION_RESERVATION_SUFFIX)
+        with io.open(junk, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.live_admission_reservations(self.workers), 0,
+                         "a stale or unreadable claim never counts")
+        self.assertEqual(self.claims(), [], "and it is reaped, not left to rot")
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNone(refusal)
+        agent.free_reservation_release(token)
+
+    def test_a_refused_gate_claims_nothing(self):
+        # A refusal must leave no trace: the whole cost of a run the host said no
+        # to is the exit code, not a placeholder that then refuses the next run.
+        agent = self.agent
+        self.live(2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNotNone(refusal)
+        self.assertIsNone(token)
+        self.assertEqual(self.claims(), [])
+
+    def test_the_memory_half_fails_open_when_meminfo_cannot_be_read(self):
+        # DOCUMENTED FAIL-OPEN: no /proc/meminfo (Windows, a container mounted
+        # without it) means the memory half of the rule stands down rather than
+        # refusing every run on a machine it cannot measure. What still binds is
+        # the live-worker cap, because that count is of this host's own records.
+        agent = self.agent
+        unreadable = os.path.join(self.tmp, "no-such-meminfo")
+        self.assertIsNone(agent.mem_available_mb(unreadable))
+        kwargs = {"registry": self.registry(4, 6144), "workers": self.workers,
+                  "meminfo": unreadable}
+        self.live(3)
+        self.assertIsNone(agent.host_admission_refusal(**kwargs),
+                          "3 live of a cap of 4, memory unmeasurable: admit")
+        self.live(1, start=3)
+        r = agent.host_admission_refusal(**kwargs)
+        self.assertIsNotNone(r, "the cap still binds a host with no meminfo")
+        self.assertIn("the live-worker cap", r)
+        self.assertIn("MemAvailable unknown", r)
+
+    # --- HOSTADMISSION-OFF (fix 2) ----------------------------------------
+    # The escape and the gate were read in two different processes and the env
+    # name was scrubbed between them: AUTOOS_ADMISSION_OFF=1 in the MCP server's
+    # environment answered "spawned" there while the runner, which never saw it,
+    # exited 13. One decision now — the name reaches our own CLI child, and stops
+    # there.
+
+    def test_cmd_run_hands_its_host_claim_to_the_worker_record(self):
+        # The claim is only a stand-in for the record. A run that leaves one
+        # behind after its record exists would count as two live workers for the
+        # rest of its life, and a host of cap 2 would admit one run, not two.
+        agent = self.agent
+        started = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_MEMINFO_PATH": self.meminfo(8000)}), \
+                mock.patch.object(agent, "build_plan", return_value=self.plan()), \
+                mock.patch.object(agent, "run_client",
+                                  lambda *a, **k: started.append(1) or agent.ClientExit(0)), \
+                mock.patch.object(agent, "gateway_up", return_value=True), \
+                mock.patch.object(agent, "client_key", return_value="sk-test-key"), \
+                mock.patch.object(agent.clients, "signin_state",
+                                  lambda client, env=None: (None, "")), \
+                mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = agent.cmd_run(self.args(False), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(started, [1])
+        self.assertEqual(self.claims(), [], "the claim became the record")
+        rows = agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(agent.live_worker_count(self.workers), 0,
+                         "the run is over: the host is empty again")
+
+    def test_admission_off_reaches_the_cli_child_and_stops_there(self):
+        agent = self.agent
+        src = {"AUTOOS_ADMISSION_OFF": "1", "PATH": os.environ.get("PATH", ""),
+               "HOME": self.tmp}
+        cli = agent.spawner_child_env(base=src)
+        self.assertEqual(cli.get("AUTOOS_ADMISSION_OFF"), "1",
+                         "the runner evaluates the gate: it must see the escape")
+        self.assertTrue(agent._child_env_passed("AUTOOS_ADMISSION_OFF"))
+        # ...and it is not a token, so a caller can still hand it down; but it is
+        # not on the WORKER allowlist, so the client the run launches never gets
+        # it: a worker cannot turn the host's gate off for its own spawns.
+        worker = agent.worker_env({"env": {"AUTOOS_ADMISSION_OFF": "1"},
+                                   "cwd": self.tmp}, None, base=src)
+        self.assertNotIn("AUTOOS_ADMISSION_OFF", worker,
+                         "a client worker never inherits the escape")
 
 
 if __name__ == "__main__":

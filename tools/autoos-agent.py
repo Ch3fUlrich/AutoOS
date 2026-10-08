@@ -190,7 +190,11 @@ value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - th
 mode and the client's accepted list);
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
 PAUSE (R-pause-01); 4 depth budget exhausted; 9 a --free run waited the whole bounded queue
-(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2).
+(FREE_QUEUE_TIMEOUT_SECONDS) for a slot on its free provider and nothing started (SPAWNFREE item 2);
+13 HOST-ADMISSION: this host has no room for one more worker (HOSTADMISSION) - the live worker
+count reached host_admission.max_live_workers, or /proc/meminfo's MemAvailable is below
+host_admission.mem_available_floor_mb. It starts nothing and never waits: queueing is the caller's
+job, or the run goes to another machine. The message names the count, the memory, both limits.
 
 `heartbeat` (R-heartbeat-02/03, R-pause-01, R-handoff-07) is read-only - it never pushes,
 commits or writes anything. Exit codes of its own: 3 an inbox PAUSE is active (takes
@@ -1747,9 +1751,20 @@ def _child_env_passed(name: str) -> bool:
     is named here rather than left to a wholesale ``dict(os.environ)``, so the
     fence stays the only channel a child env is built through. A client worker
     never gets it — ``worker_env`` strips the namespace on its way out.
+
+    HOSTADMISSION-OFF (lane AO-ADMISSION fix 2) is the second name in that
+    exception, for the same reason and with the same shape: ``AUTOOS_ADMISSION_OFF``
+    is read by whichever process evaluates the gate, so a value the MCP server
+    honours MUST reach the runner that evaluates it again or the two answer the
+    same question differently — the server answers "spawned" and the runner exits
+    13. Forwarding it to our own CLI (named here, copied in ``spawner_child_env``)
+    is the whole fix, and it stops there: ``worker_env``'s allowlist does not name
+    it, so a client worker never inherits the escape and cannot turn the host's
+    gate off for its own nested spawns. One behaviour: the escape means what it
+    says in every process that starts a worker, and in no process that is one.
     """
-    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS or
-            name == resolver.CLAUDE_CRITICAL_ENV)
+    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS
+            or name in (resolver.CLAUDE_CRITICAL_ENV, ADMISSION_OFF_ENV))
 
 
 def spawner_child_env(base: dict | None = None, extra: dict | None = None,
@@ -1788,6 +1803,13 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None,
     # else in it is let back in.
     if src.get(resolver.CLAUDE_CRITICAL_ENV):
         env[resolver.CLAUDE_CRITICAL_ENV] = src[resolver.CLAUDE_CRITICAL_ENV]
+    # HOSTADMISSION-OFF: same rule, same one name, for the reason in
+    # `_child_env_passed` — the escape is read by the process that evaluates the
+    # gate, and the runner evaluates it, so the server's answer and the runner's
+    # exit code must come from the same environment. `worker_env` above never
+    # lets it through to a client worker: this copy is for our own CLI only.
+    if src.get(ADMISSION_OFF_ENV) == "1":
+        env[ADMISSION_OFF_ENV] = src[ADMISSION_OFF_ENV]
     for n, v in (extra or {}).items():
         if _worker_env_denied(n):
             print("autoos-agent: refused child env %s: secret-shaped name"
@@ -2263,6 +2285,28 @@ EXIT_READ_ONLY_WRITE = 11
 # result a cross-family review. This is the code for "nothing outside that family is
 # left to serve the run" — the run refuses rather than lie.
 EXIT_NO_OTHER_FAMILY = 12
+# HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): a spawn that starts a worker on
+# a host that is already full does not fail, it succeeds somewhere worse - the
+# box swaps, every lane on it goes red at once, and nothing in the routing layer
+# says which run caused it. So the spawner asks the host for permission: the live
+# worker count (`ps` state "running", all lanes of this checkout) and MemAvailable
+# from /proc/meminfo, both measured against catalog/ai-registry.json's
+# `host_admission` section. Distinct from 9 on purpose: 9 is "the provider said
+# no, wait and it may open", this is "the machine said no, and waiting on it is
+# the caller's decision, not a bounded sleep here". A child that exits 13 on its
+# own reads the same from the code alone, so stderr is what tells them apart: an
+# admission refusal always starts "host admission:".
+EXIT_HOST_ADMISSION = 13
+ADMISSION_MAX_LIVE_DEFAULT = 6
+ADMISSION_MEM_FLOOR_MB_DEFAULT = 6144
+ADMISSION_OFF_ENV = "AUTOOS_ADMISSION_OFF"
+ADMISSION_MEMINFO_ENV = "AUTOOS_MEMINFO_PATH"
+MEMINFO_PATH = "/proc/meminfo"
+# HOSTADMISSION-RACE (lane AO-ADMISSION fix 1, 2026-10-08): the gate's other
+# placeholder. `FREE_RESERVATION_SUFFIX` is one provider's leg; this one is the
+# host's slot — taken by the spawner that the host admitted, released when that
+# run's worker record exists. Not `.json`, so `ps` never lists it.
+ADMISSION_RESERVATION_SUFFIX = ".admission-reservation"
 
 # SPAWNFIX (S2 fix of SPAWNFREE) item 2: counting the live workers and starting
 # are two steps, and the worker record — the thing the count reads — used to be
@@ -2338,13 +2382,17 @@ def free_slot_lock_give(fh) -> None:
         pass
 
 
-def _reservation_rows(directory: str, provider: str) -> tuple:
+def _reservation_rows(directory: str, provider: str | None = None,
+                      suffix: str = FREE_RESERVATION_SUFFIX) -> tuple:
     """(live paths, stale paths) of the reservations in `directory` naming `provider`.
 
     A reservation is claimed by a live process or by none at all: the pid in it
     is gone (a killed spawner, a reboot) or its file cannot be read, so it is
     stale and reaped. A stale placeholder must never queue a run — the cost of
     dropping one is a 429, the cost of trusting it is a leg nothing can leave.
+
+    `suffix` names which placeholder family (a free leg's, the host's);
+    `provider=None` means the family is not provider-scoped.
     """
     live, stale = [], []
     try:
@@ -2352,7 +2400,7 @@ def _reservation_rows(directory: str, provider: str) -> tuple:
     except OSError:
         return live, stale
     for name in names:
-        if not name.endswith(FREE_RESERVATION_SUFFIX):
+        if not name.endswith(suffix):
             continue
         path = os.path.join(directory, name)
         try:
@@ -2361,7 +2409,9 @@ def _reservation_rows(directory: str, provider: str) -> tuple:
         except (OSError, ValueError):
             stale.append(path)
             continue
-        if not isinstance(record, dict) or record.get("provider") != provider:
+        if not isinstance(record, dict):
+            continue
+        if provider is not None and record.get("provider") != provider:
             continue
         try:
             alive = _worker_state(record) == "running"
@@ -2386,13 +2436,25 @@ def live_free_reservations(directory: str, provider: str) -> int:
     return len(live)
 
 
-def _reserve_free_slot(directory: str, provider: str, model: str):
+def _reserve_free_slot(directory: str, provider: str, model: str,
+                       suffix: str = FREE_RESERVATION_SUFFIX,
+                       prefix: str = "free"):
     """Write this run's placeholder and return its path (None when it cannot be
-    written — the run then proceeds unreserved, exactly as it used to)."""
-    wid = "free-%d-%s" % (os.getpid(), os.urandom(3).hex())
+    written — the run then proceeds unreserved, exactly as it used to).
+
+    Two families write one shape: the free leg's (`provider` names it, so a
+    second provider's run never counts it) and the host's (no provider, so every
+    admitted spawner counts every other one's). The name never ends `.json`, so
+    `ps` — which reads each `.json` in the directory as a worker — cannot list a
+    placeholder.
+    """
+    wid = "%s-%d-%s" % (prefix, os.getpid(), os.urandom(3).hex())
     record = {"id": wid, "pid": os.getpid(), "pid_start": _proc_starttime(os.getpid()),
-              "started": utc_now_iso(), "provider": provider, "model": model}
-    path = os.path.join(directory, wid + FREE_RESERVATION_SUFFIX)
+              "started": utc_now_iso()}
+    if provider is not None:
+        record["provider"] = provider
+        record["model"] = model
+    path = os.path.join(directory, wid + suffix)
     try:
         _write_worker_record(path, record)
     except OSError:
@@ -9888,6 +9950,154 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
             or (_parse_iso(r["ended"]) or cutoff) > cutoff]
 
 
+def host_admission_config(registry=None) -> tuple:
+    """(max_live_workers, mem_available_floor_mb) - the host's own limits.
+
+    catalog/ai-registry.json's top-level `host_admission` is the single source
+    (operator order 2026-10-08). A section that is absent, or a field that is not
+    a number, takes the documented default rather than no limit: an unparseable
+    cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
+    test-only escape, honoured by `host_admission_refusal`, not by the numbers.
+    """
+    if registry is None:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError):
+            registry = {}
+    section = (registry or {}).get("host_admission")
+    section = section if isinstance(section, dict) else {}
+    out = []
+    for field, default in (("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+                           ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)):
+        value = section.get(field)
+        out.append(value if isinstance(value, int) and not isinstance(value, bool)
+                   else default)
+    return tuple(out)
+
+
+def mem_available_mb(path=None):
+    """MemAvailable from /proc/meminfo in MB, or None where it cannot be read.
+
+    The kernel writes it in kB. None is Windows, or a container mounted without
+    /proc: the live-worker half of the rule still binds there, and the memory
+    half stands down instead of refusing every run on a host it cannot measure.
+    """
+    path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    fields = line.split()
+                    if len(fields) >= 2:
+                        return int(fields[1]) // 1024
+                    return None
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def live_worker_count(directory=None) -> int:
+    """The workers this host is running now - the rows `ps` shows, not the files,
+    plus the host slots another spawner has claimed but not yet recorded.
+
+    Same directory (the checkout's git-common `logs/workers`, so every worktree
+    and every lane of it counts), same `died` verdict: a record whose pid is gone
+    is a crashed worker and must not keep its host closed.
+
+    HOSTADMISSION-RACE: a claim placeholder is a worker for this purpose and not
+    for `ps`. The count and the taking of a slot happen together in
+    `host_admission_claim`, so a spawner is never shown a slot another one has
+    already claimed - which is the difference between a cap and a suggestion.
+    """
+    directory = workers_dir() if directory is None else directory
+    live = sum(1 for row in visible_workers(directory)
+               if row.get("state") == "running")
+    return live + live_admission_reservations(directory)
+
+
+def live_admission_reservations(directory: str) -> int:
+    """Host slots claimed in `directory` by a spawner that is still alive.
+
+    Reaps the stale ones on the way, exactly as the free-leg count does: a
+    spawner killed between its claim and its worker record leaves a placeholder
+    no one can release, and trusting it would keep the host closed forever.
+    """
+    live, stale = _reservation_rows(directory, None, ADMISSION_RESERVATION_SUFFIX)
+    for path in stale:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    return len(live)
+
+
+def host_admission_claim(registry=None, workers=None, meminfo=None):
+    """Ask the host for a worker, and take the slot when it says yes.
+
+    Returns (refusal, claim-token). The two are one critical section: the same
+    fcntl lock the free leg uses, held only across the count and the write of
+    this run's placeholder — not across the clone or the client start, which are
+    minutes and belong to nobody's lock. N spawners that arrive at live=cap-1
+    therefore admit one, not N: each one after the first counts the placeholder
+    the one before wrote.
+
+    A lock that cannot be taken (an unwritable state dir, a spawner wedged for a
+    minute) degrades to today's best-effort count, as `free_slot_lock_take` does:
+    it never refuses a run and never hangs one. The token is released by
+    `free_reservation_release()` once this run's worker record exists — the
+    record is the same fact, and `ps` reads it — or when the run is over.
+    """
+    directory = workers_dir() if workers is None else workers
+    lock = free_slot_lock_take(directory)
+    try:
+        refusal = host_admission_refusal(registry=registry, workers=directory,
+                                         meminfo=meminfo)
+        if refusal is not None:
+            return refusal, None
+        return None, _reserve_free_slot(directory, None, None,
+                                        suffix=ADMISSION_RESERVATION_SUFFIX,
+                                        prefix="host")
+    finally:
+        free_slot_lock_give(lock)
+
+
+def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str:
+    """One shape for both halves, naming all four numbers: a caller that reads
+    "queue or run on workstation" has to be able to tell which of the two ran
+    out, and how far off it was, without a second command."""
+    free = "unknown" if free_mb is None else "%d MB" % free_mb
+    return ("host admission: %d live workers, cap %d; MemAvailable %s, floor %d MB: "
+            "%s reached, queue or run on workstation"
+            % (live, cap, free, floor, which))
+
+
+def host_admission_refusal(registry=None, workers=None, meminfo=None):
+    """Why this host cannot take another worker right now, or None to admit.
+
+    Read-only, and it never waits (R-worker: queueing is the caller's job - the
+    CLI's caller decides whether to sleep and retry, or to route the task to a
+    different machine). `workers` and `meminfo` name the two sources for a
+    caller that has them (a test); otherwise the host's own are read.
+    """
+    if os.environ.get(ADMISSION_OFF_ENV) == "1":
+        return None
+    cap, floor = host_admission_config(registry)
+    live = live_worker_count(workers)
+    free_mb = mem_available_mb(meminfo)
+    # HOSTADMISSION-FAILOPEN: `free_mb is None` means the host could not be
+    # measured (no /proc/meminfo: Windows, a container mounted without it, an
+    # unreadable path), and the memory half of the rule then stands down — it
+    # FAILS OPEN rather than refuse every run on a machine it cannot read. The
+    # live-worker half does not: `live >= cap` still binds, and it is the half
+    # that counts the slots claimed below it. A host that cannot say how much
+    # memory it has free can always say how many workers it is running.
+    if live >= cap:
+        return _admission_text(live, cap, free_mb, floor, "the live-worker cap")
+    if free_mb is not None and free_mb < floor:
+        return _admission_text(live, cap, free_mb, floor, "the memory floor")
+    return None
+
+
 def _print_worker_table(rows: list) -> None:
     head = ["ID", "STATE", "ELAPSED", "CLIENT", "MODEL", "FAMILY", "LANE", "PID", "TITLE/TASK"]
     cells = []
@@ -10475,6 +10685,30 @@ def cmd_run(args, cfg: dict) -> int:
         queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
         if queue_msg is not None:
             return refuse(queue_msg, EXIT_FREE_QUEUE_TIMEOUT)
+    # HOSTADMISSION: the host is a gate too. Read after the preview above (a dry
+    # run starts nothing, so a full host never refuses one - an operator previews
+    # a route before deciding where to run it) and before the clone, the worker
+    # record and the client.
+    # HOSTADMISSION-RACE: and the answer is *taken*, not just read. Counting the
+    # live workers and recording this one were two steps with the clone between
+    # them, so N spawners that arrived at live=cap-1 each counted the others as
+    # absent and all N started - the storm the cap exists to prevent. One fcntl
+    # critical section (the free leg's lock, the free leg's placeholder shape)
+    # now covers the count and the claim of the slot; the placeholder is released
+    # where this run's worker record takes its place, so the host never sees the
+    # same run twice, and a spawner killed before its record is down is stale and
+    # reaped by the next count.
+    # HOSTADMISSION-PLACE: taken here, not at the top of the command, because a
+    # claim is a held resource and every `return` between here and that handover
+    # would leave one behind until this pid dies. The plan gates, the client and
+    # the sign-in, the key, the provisioned directories and the free-leg queue all
+    # refuse before it and claim nothing; a run that waited minutes for a free
+    # model and then found the host full is refused with both slots released.
+    # After this point exactly one path still exits before the record: the privacy
+    # refusal below, and it releases the claim on its way out.
+    admission, host_claim = host_admission_claim(registry=registry)
+    if admission is not None:
+        return refuse(admission, EXIT_HOST_ADMISSION)
     parent_snap = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
@@ -10490,6 +10724,10 @@ def cmd_run(args, cfg: dict) -> int:
             sandbox_root_prepare(source, sb["path"])
             isolate_clone(source, sb["path"], sb["branch"])
         except PrivacyRefused as exc:
+            # HOSTADMISSION-RACE: the one exit between the claim and this run's
+            # worker record, so it is the one place that gives the host slot back
+            # by hand instead of at the handover.
+            free_reservation_release(host_claim)
             return refuse(str(exc))
         sb["base"] = subprocess.run(["git", "-C", sb["path"], "rev-parse", "HEAD"],
                                     capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL).stdout.strip()
@@ -10583,6 +10821,11 @@ def cmd_run(args, cfg: dict) -> int:
             # share the leg with one.
             free_reservation_release(free_reservation)
             free_reservation = None
+            # HOSTADMISSION-RACE: the same handover for the host's slot. The two
+            # are never both live for one run, so a spawner that arrives while
+            # this one runs counts one occupant, not two.
+            free_reservation_release(host_claim)
+            host_claim = None
         attempt_start = time.time()
         run_rc = None
         missing = None
@@ -10892,6 +11135,12 @@ def cmd_run(args, cfg: dict) -> int:
     # the next spawner wait for nothing.
     free_reservation_release(free_reservation)
     free_reservation = None
+    # HOSTADMISSION-RACE: the host slot on the same rule, for the run that never
+    # got a worker record at all (a refused attempt, a registry that could not be
+    # written). A spawner that returns before either release still exits, and its
+    # placeholder is stale by pid for the next count.
+    free_reservation_release(host_claim)
+    host_claim = None
     if plan["sandbox"] and not args.joinable:
         sb = plan["sandbox"]
         branch = sb["branch"]
