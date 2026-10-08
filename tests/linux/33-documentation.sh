@@ -780,6 +780,14 @@ if it "credential files: vertex/service-account JSONs are ignored, never tracked
     out="$(python3 tests/test_credential_files_ignored.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Public-ids gate (AGENTS Hard Rule 1, lane PUBLIC-IDS-SCRUB 2026-10-08): no real
+# GCP project id and no service-account address may sit in a tracked file. The
+# id leaked through the *documentation* of the credential path, which the ignore
+# gate above cannot see — it only ever looks at paths.
+if it "public ids: no real GCP project id or service-account address ships (unit tests)"; then
+    out="$(python3 tests/test_public_ids.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "omnigraph gateway policy: static refusal and least-privilege checks (unit tests)"; then
     out="$(python3 tests/test_gateway_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

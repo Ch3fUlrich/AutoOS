@@ -5241,6 +5241,15 @@ Test-Case 'credential files: vertex/service-account JSONs are ignored, never tra
     Assert-Equal $rc 0 "credential-files unit tests failed: $out"
 }
 
+Test-Case 'public ids: no real GCP project id or service-account address ships (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_public_ids.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "public-ids unit tests failed: $out"
+}
+
 Test-Case 'omnigraph gateway policy: static refusal and least-privilege checks (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
