@@ -604,10 +604,14 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                     "cat proc/self/environ"):
             self._l2_denied(cmd, "proc")
 
-    def test_proc_static_reads_kept(self):
-        self._l2_allowed("cat /proc/cpuinfo")
-        self._l2_allowed("cat /proc/meminfo")
-        self._l2_allowed("head -3 /proc/version")
+    def test_absolute_paths_denied_even_when_harmless(self):
+        # The rule is an ALLOW rule, not a spelling list: a path operand must be
+        # repo-relative, so an absolute path is denied whatever it points at.
+        # /proc/./self, //proc//self, /proc/*/environ and /proc/$$/environ each
+        # walked past a deny list that named one spelling at a time.
+        for cmd in ("cat /proc/cpuinfo", "cat /proc/meminfo",
+                    "head -3 /proc/version", "ls /etc", "cat /etc/hosts"):
+            self._l2_denied(cmd, "path outside repo")
 
     def test_env_assignment_prefix_denied(self):
         # `FOO=x <head>` sets the environment of a command the list approved,
@@ -621,6 +625,55 @@ class TestL2ReadOnlyRole(unittest.TestCase):
     def test_wrapper_of_read_only_head_without_assignment_still_kept(self):
         self._l2_allowed("timeout 5 ls")
         self._l2_allowed("nice ls")
+
+    # ------------------------------------------------------------------
+    # Sonnet round-3 REJECT (criterion b, again): three holes left.
+    #
+    # (1) `skipLeading` walks past the `env` wrapper, so a bare `env` — whose
+    # whole job is printing the lane's environment, server password and gateway
+    # keys included — had no head at all and passed. `printenv`/`set`/`declare`/
+    # `export` are the same read with different names.
+    # (2) the /proc rule named the SHAPES it had seen. Every other absolute
+    # path — /proc/./self/environ, //proc//self//environ, /proc/$$/environ, a
+    # globbed /proc, ~/.claude.json, ~/.config/opencode/auth.json — was simply
+    # not on the list. A read head may only name a path that is inside the lane
+    # checkout and cannot move after the shell expands it.
+    # (3) a short-flag bundle (`rg -uz`) hid the denied `-z` inside a token the
+    # exact-match flag list never saw.
+    # ------------------------------------------------------------------
+
+    def test_env_dumping_heads_denied(self):
+        for cmd in ("env", "printenv", "set", "declare", "export", "declare -p",
+                    "env | head -1", "env cat README.md", "env -i ls",
+                    "env FOO=1 cat README.md", "sudo env printenv"):
+            self._l2_denied(cmd, "environment")
+
+    def test_paths_outside_the_lane_repo_denied(self):
+        for cmd in ("cat /proc/./self/environ", "cat //proc//self//environ",
+                    "cat /proc/$$/environ", "cat /proc/se*", "cat /proc/*",
+                    "rg foo /proc/self", "cat ~/.claude.json",
+                    "cat ~/.config/opencode/auth.json", "cat ../sibling/file",
+                    "cat docs/../../etc/passwd", "ls $HOME", "cat .config/../auth.json",
+                    "rg foo ~/", "git diff HEAD -- /etc/passwd"):
+            self._l2_denied(cmd, "path outside repo")
+
+    def test_secret_files_inside_the_repo_still_denied(self):
+        for cmd in ("cat .env", "cat config/.env.local", "cat keys/lane.key",
+                    "cat srv.pem", "cat api-keys.yml", "cat credentials.json",
+                    "cat db-credentials.prod.json", "rg -f .env foo"):
+            self._l2_denied(cmd, "secret")
+
+    def test_short_flag_bundles_hide_a_denied_flag(self):
+        for cmd in ("rg -uz x .", "rg -zi x", "rg -iz x .", "rg -iuz foo tools/",
+                    "rg -C2 -z foo"):
+            self._l2_denied(cmd, "rg")
+
+    def test_repo_relative_reads_kept(self):
+        for cmd in ("cat README.md", "rg foo tools/", "git log -5",
+                    "git diff HEAD~1 -- tools/x.py", "ls docs",
+                    "head -3 AGENTS.md", "wc -l CHANGELOG.md", "tail -n 5 README.md",
+                    "cat .gitignore", "ls -la ./docs"):
+            self._l2_allowed(cmd)
 
 
 if __name__ == "__main__":
