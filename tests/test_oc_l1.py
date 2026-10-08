@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -175,6 +176,69 @@ class PortDerivationTest(unittest.TestCase):
                 rc, _, _ = run_main(["render", "--name", "l1test", "--config", str(cfg)])
                 self.assertEqual(rc, 2, "serve_port=%r must be refused" % (bad,))
                 self.assertFalse((tmp / "scratch").exists())
+
+
+class PortFreeTest(unittest.TestCase):
+    """Fix 6: a derived port is a guess, and two lane names can guess the same
+    one. `start` must find that out by binding it BEFORE spawning, not by
+    watching the health poll time out on a port somebody else holds."""
+
+    def _listen(self, port):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", port))
+        srv.listen(1)
+        return srv
+
+    def test_a_live_listener_is_not_free_and_a_closed_one_is(self):
+        srv = self._listen(0)
+        port = srv.getsockname()[1]
+        try:
+            self.assertFalse(oc_l1.port_is_free(port))
+        finally:
+            srv.close()
+        self.assertTrue(oc_l1.port_is_free(port))
+
+    def test_the_walk_starts_at_the_given_port_and_stops_at_the_first_free(self):
+        seen = []
+
+        def probe(p, host="127.0.0.1"):
+            seen.append(p)
+            return p == 47203
+
+        self.assertEqual(oc_l1.next_free_port(47201, probe=probe), 47203)
+        self.assertEqual(seen, [47201, 47202, 47203])
+
+    def test_the_walk_wraps_the_range(self):
+        def probe(p, host="127.0.0.1"):
+            return p == oc_l1.PORT_MIN
+        self.assertEqual(oc_l1.next_free_port(oc_l1.PORT_MAX - 1, probe=probe),
+                         oc_l1.PORT_MIN)
+
+    def test_an_exhausted_range_is_refused_not_guessed(self):
+        with self.assertRaises(oc_l1.LaneError):
+            oc_l1.next_free_port(oc_l1.PORT_MIN,
+                                 probe=lambda p, host="127.0.0.1": False)
+
+    def test_the_real_probe_answers_for_a_port_in_the_lane_range(self):
+        # production takes this branch: a port of the range genuinely held by a
+        # listener must read as taken, and the walk must land on one that is not.
+        held = held_port = None
+        for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
+            if oc_l1.port_is_free(p):
+                held = self._listen(p)
+                held_port = p
+                break
+        if held is None:
+            self.skipTest("no free port in the lane range on this host")
+        try:
+            self.assertFalse(oc_l1.port_is_free(held_port))
+            chosen = oc_l1.next_free_port(held_port)
+            self.assertNotEqual(chosen, held_port)
+            self.assertTrue(oc_l1.PORT_MIN <= chosen <= oc_l1.PORT_MAX)
+            self.assertTrue(oc_l1.port_is_free(chosen))
+        finally:
+            held.close()
 
 
 class DefaultConfigPathTest(unittest.TestCase):

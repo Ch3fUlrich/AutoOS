@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -78,6 +79,44 @@ def derive_port(name):
     """Stable per-name port in 47200-47299 (sha256, platform independent)."""
     digest = hashlib.sha256(name.encode("utf-8")).digest()
     return PORT_MIN + int.from_bytes(digest[:4], "big") % (PORT_MAX - PORT_MIN + 1)
+
+
+def port_is_free(port, host="127.0.0.1"):
+    """Can a server still take this port? A bind test, run BEFORE the child is
+    spawned: a port somebody else holds costs a health-poll timeout (30 s by
+    default) and a killed child, and reads as a broken lane rather than a
+    collision. SO_REUSEADDR skips the wait over a socket nobody is listening on
+    any more, while a live listener still answers EADDRINUSE."""
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def next_free_port(start, probe=None, host="127.0.0.1"):
+    """The first free port from `start` upward, wrapping inside the lane range.
+
+    Deterministic: two lanes that collide on one derived port always resolve to
+    the same pair of ports, so a relaunch lands where the last one did."""
+    probe = probe or port_is_free
+    span = PORT_MAX - PORT_MIN + 1
+    first = min(max(int(start), PORT_MIN), PORT_MAX)
+    for offset in range(span):
+        port = PORT_MIN + (first - PORT_MIN + offset) % span
+        if probe(port, host):
+            return port
+    raise LaneError("no free port in %d-%d - every lane port of this range is "
+                    "taken; stop a lane or set serve_port" % (PORT_MIN, PORT_MAX))
 
 
 def load_config(path):

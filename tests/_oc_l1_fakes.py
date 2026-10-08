@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 # the incident shape is the canary's contract; the fake transcript quotes it
 # rather than copying it, so the two cannot drift
 from oc_l1_canary import INCIDENT_COMMAND as CANARY_COMMAND  # noqa: E402
+import oc_l1_serve  # noqa: E402
 
 PW_ENV = "AUTOOS_OCL1_TEST_PW"
 PW_VALUE = "sk-TEST-SRV-PW-001"
@@ -71,7 +72,7 @@ def make_fake_bin(td, fake_py, python_exe):
 class FakeServer:
     """A thread-bound fake of the opencode v2 API on 127.0.0.1:<port>."""
 
-    def __init__(self, password, active_503=False, canary_mode="denied"):
+    def __init__(self, password, active_503=False, canary_mode="denied", port=0):
         self.password = password
         self.active_503 = active_503
         self.canary_mode = canary_mode
@@ -221,8 +222,9 @@ class FakeServer:
             def do_POST(self):
                 self._handle("POST")
 
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.port = self._httpd.server_address[1]
+        self._real_probe = None
         # poll_interval=0.05: shutdown() must not wait up to 0.5 s for the
         # serve_forever loop to notice (test-suite time budget).
         self._thread = threading.Thread(
@@ -231,6 +233,16 @@ class FakeServer:
         )
 
     def start(self):
+        # The fake answers on the lane's OWN port, which is exactly what the
+        # launcher's pre-spawn bind probe (fix 6) would read as a foreign holder.
+        # So the fake reports its own port bindable and leaves every other port
+        # to the real probe - a collision test can hold a second port with a live
+        # listener and the launcher really does move off it.
+        mine = self.port
+        real = oc_l1_serve.port_is_free
+        self._real_probe = real
+        oc_l1_serve.port_is_free = lambda port, host=oc_l1_serve.HOST: (
+            True if port == mine else real(port, host))
         self._thread.start()
 
     def stop(self):
@@ -239,6 +251,9 @@ class FakeServer:
         self._stopped = True
         self._httpd.shutdown()
         self._httpd.server_close()
+        if self._real_probe is not None:
+            oc_l1_serve.port_is_free = self._real_probe
+            self._real_probe = None
 
 
 def make_lane(td, port):

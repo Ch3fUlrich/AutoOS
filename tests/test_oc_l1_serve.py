@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -382,6 +383,90 @@ class StartTest(unittest.TestCase):
         self.assertTrue(state_pid is not None)
         time.sleep(0.5)
         self.assertFalse(pid_alive(state_pid), "child %s still alive" % state_pid)
+
+
+class TestPortCollision(unittest.TestCase):
+    """Fix 6: a port somebody else holds is found by binding it BEFORE the
+    spawn, and the port the child actually got is what the state records.
+
+    Nothing here patches the probe. The foreign holder is a live listener, the
+    lane's server is the fake bound to the port the launcher moved to, and the
+    argv the fake binary recorded is the spawn that really ran - so the walk,
+    the child's `--port` and the state file are all the production path.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="oc_l1_port_")
+        self.td = Path(self._td.name)
+        self.held = self.held_port = None
+        for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
+            if not oc_l1.port_is_free(p):
+                continue
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", p))
+                sock.listen(1)
+            except OSError:
+                sock.close()
+                continue
+            self.held, self.held_port = sock, p
+            break
+        if self.held is None:
+            self.skipTest("every lane port of the range is taken on this host")
+        # where the launcher must land: the first free port after the held one,
+        # read with the same probe it uses, before this test binds it
+        self.chosen = oc_l1.next_free_port(self.held_port + 1)
+        if self.chosen == self.held_port:
+            self.skipTest("the walk did not move off the held port")
+        self.srv = FakeServer(PW_VALUE, port=self.chosen)
+        self.srv.start()
+        self.lane = make_lane(self.td, self.held_port)
+        self.cfg = write_cfg(self.td, self.lane)
+        self.rec = self.td / "bin_record.json"
+        self._pids = []
+        self._envs = {}
+        for k in (PW_ENV, RECORD_ENV):
+            self._envs[k] = os.environ.get(k)
+            os.environ[k] = PW_VALUE if k == PW_ENV else str(self.rec)
+
+    def tearDown(self):
+        for pid in self._pids:
+            oc_l1_serve._kill_pid(pid)
+        self.srv.stop()
+        self.held.close()
+        for k, v in self._envs.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self._td.cleanup()
+
+    def _start(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = oc_l1_serve.cmd_start(
+                self.lane, SimpleNamespace(name="l1test", config=str(self.cfg)))
+        if rc == 0:
+            self._pids.append(
+                oc_l1_serve._read_state(self.lane["state_file"])["pid"])
+        return rc, out.getvalue()
+
+    def test_a_held_port_moves_the_lane_and_everything_reads_the_move(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("serves on %d" % self.chosen, out)
+        st = oc_l1_serve._read_state(self.lane["state_file"])
+        self.assertEqual(st["port"], self.chosen)
+        self.assertNotEqual(st["port"], self.held_port)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        self.assertEqual(rec["argv"][-2:], ["--port", str(self.chosen)],
+                         "the child was spawned on the port the config named, "
+                         "not the one it moved to")
+        self.assertTrue([r for r in self.srv.requests
+                         if r["path"].endswith("/prompt")],
+                        "the lane never talked to the server it moved to")
 
 
 @unittest.skipIf(os.name == "nt", "process groups")

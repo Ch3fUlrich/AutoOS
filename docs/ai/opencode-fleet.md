@@ -84,7 +84,9 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 - `opencode_bin` is the explicit path of the npm `opencode` binary. It is never looked up on PATH and never the desktop app's
   background service.
 - The server binds to 127.0.0.1 only (`--hostname 127.0.0.1`), on `serve_port` (default: a stable hash of the lane name in
-  47200-47299).
+  47200-47299). That number is a guess, so `start` binds it before spawning and, when a listener already holds it, walks forward to
+  the next free port in the range — deterministic, so a relaunch lands where the last run did. The port the server really took is
+  what the state file records, and status/stop/inbox all read that number.
 - `render` writes a scratch config under `scratch_dir`; the user's own opencode config is never touched. Only the MCP servers
   listed in the lane's `mcp` are enabled; every other server of the repo `opencode.jsonc` is disabled.
 - `plugins` lists plugin DIRECTORIES (each holding an `index.mjs`), for example the bash-guard plugin of the section above.

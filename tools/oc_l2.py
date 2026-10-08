@@ -499,7 +499,11 @@ def cmd_stop(name):
                 "detail": "no lane config at %s - nothing was started" % config_path(name)}
     state = _read_state(lane.get("state_file") or "")
     pid = state.get("pid") if isinstance(state, dict) else None
-    out = {"lane": name, "port": lane.get("serve_port") or oc_l1.derive_port(name),
+    # the port the server actually took (fix 6 moves a lane off a held port),
+    # with the config's number only as the fallback for a lane that never started
+    port = ((state.get("port") if isinstance(state, dict) else None)
+            or lane.get("serve_port") or oc_l1.derive_port(name))
+    out = {"lane": name, "port": port,
            "killed_pids": [], "orphan": False, "removed_state": []}
     if not (isinstance(pid, int) and pid > 0):
         out["stopped"] = True

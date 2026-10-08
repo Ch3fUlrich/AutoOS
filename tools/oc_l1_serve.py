@@ -229,7 +229,33 @@ def _child_stderr_log(scratch):
         return None
 
 
-def _spawn(lane, rendered, password):
+# The bind probe is read as a module attribute, not imported into the call, so
+# a suite whose fake server IS the lane's server (it listens on the lane's port
+# on purpose) can answer for that one port without faking the check itself.
+port_is_free = oc_l1.port_is_free
+
+
+def _resolve_port(lane, name):
+    """The port the child will actually serve on: the lane's, if it can still be
+    bound, otherwise the next free one in the range (fix 6).
+
+    A derived port is a hash guess - two lane names can land on one port, and so
+    can an unrelated service. Spawning onto a held port costs a health-poll
+    timeout and a killed child, and reads as a broken lane instead of a
+    collision. The number chosen here is what the state file records, so status,
+    stop and the canary all talk to the server that is really answering."""
+    port = lane["serve_port"]
+    if port_is_free(port, HOST):
+        return port
+    # the probe is passed explicitly: this module's `port_is_free` is the one
+    # probe the launcher uses, so a suite that stands its own server up on the
+    # lane's port answers for the whole walk, not just the first check.
+    chosen = oc_l1.next_free_port(port + 1, probe=port_is_free, host=HOST)
+    print("port %d is taken; lane '%s' serves on %d instead" % (port, name, chosen))
+    return chosen
+
+
+def _spawn(lane, rendered, password, port):
     """Start the explicit opencode binary; child env isolated in scratch."""
     scratch = Path(lane["scratch_dir"])
     _private_dir(scratch)
@@ -251,7 +277,7 @@ def _spawn(lane, rendered, password):
         else:
             env.pop(_var, None)
     argv = [lane["opencode_bin"], "serve", "--hostname", HOST,
-            "--port", str(lane["serve_port"])]
+            "--port", str(port)]
     err_log = _child_stderr_log(scratch)
     kwargs = {
         "cwd": lane["cwd"],
@@ -398,7 +424,13 @@ def cmd_start(lane, args):
         return 2
 
     try:
-        proc = _spawn(lane, rendered, password)
+        port = _resolve_port(lane, name)
+    except oc_l1.LaneError as e:
+        print("oc_l1: error: %s" % e, file=sys.stderr)
+        return 2
+
+    try:
+        proc = _spawn(lane, rendered, password, port)
     except OSError as e:
         print("oc_l1: error: cannot start %s: %s"
               % (lane["opencode_bin"], e), file=sys.stderr)
