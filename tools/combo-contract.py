@@ -104,9 +104,11 @@ AGENTIC_ROUTES = ("l1-orchestrator", "l1-orchestrator-free-only",
 # single-provider route without such a note still fails rule (e).
 SINGLE_PROVIDER_EXEMPTIONS = {
     "l1-orchestrator-free-only": (
-        "L0 D-TORDER-2 ACCEPT: deliberately single-provider "
-        "(gemini/gemini-3.8-flash only); no verified genuinely-free live 1M "
-        "tool-calling second provider (free-ai premium_requires_purchase; "
+        "L0 D-TORDER-2 ACCEPT, re-headed by D657-D2 (2026-10-08): deliberately "
+        "single-provider (bazaarlink/deepseek/deepseek-v4-flash-0731free:free "
+        "only — the gemini AI-Studio leg it used to name 401s on both gateways); "
+        "no verified genuinely-free live 1M tool-calling second provider "
+        "(free-ai premium_requires_purchase and its D-657 tool call failed; "
         "openrouter :free <=262k sub-1M; huggingface unusable); real load on "
         "l1-orchestrator vertex credits."
     ),

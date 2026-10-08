@@ -565,7 +565,7 @@
       "tool_calls": "unproven"
     },
     "gemini-3.8-flash": {
-      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded). GEMINI-MIN-TOKENS 2026-10-06 (operator task 10): every Gemini call needs max_tokens >= ~600 - the reasoning burn comes off the completion budget first, so a smaller cap truncates before any content (measured on review seats).",
+      "$comment": "Native Gemini free head. context/output from catalog/ide-models.json's own 'gemini-3.8-flash' pinned route. Ladder from docs/models.md ('low, medium, high only'). GEM1M (operator 2026-09-30): Google AI Studio model card states Gemini 3.8 Flash context window 1M; live gateway GET /v1/models agrees (context_length 1048576 for both gemini/gemini-3.8-flash and vertex/gemini-3.8-flash). context_advertised corrected from stale 131072; context_usable stays at the 50% default (524288) until probe-recall measures it. TORDER 2026-10-01: output_max 32768->65536 per live /v1/models (gemini/gemini-3.8-flash max_output_tokens 65536, openrouter twin same); context_usable.tokens 65536->1048576 per operator update (4) (source stays default; validator does not clamp usable>advertised, so 100% window kept; prior $comment claimed 524288 50% default - superseded). GEMINI-MIN-TOKENS 2026-10-06 (operator task 10): every Gemini call needs max_tokens >= ~600 - the reasoning burn comes off the completion budget first, so a smaller cap truncates before any content (measured on review seats). D657-PROBE 2026-10-08 (AO-DENYLEGS D2): probe-d657-central.tsv answers this leg ack ok with one tool call ok (5846 ms, served=gemini-3.8-flash) and the workstation row acked ok/tool ok as well (its error cell records a trailing transport TimeoutError, not a refused call), so tool_calls is proven, which is what the resolver needs to plan an agentic card on the leg at all.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -582,7 +582,7 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": true,
-      "tool_calls": "unproven",
+      "tool_calls": "proven",
       "provider_prices": {
         "vertex_ai": {
           "price_in": 1.5e-06,
@@ -778,10 +778,11 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven",
+      "tool_calls": "proven",
       "trains_on_prompts": true,
       "prompt_cache": "false",
-      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation",
+      "$comment": "D657-PROBE 2026-10-08 (AO-DENYLEGS D2): ack ok with the tool call ok on both gateways, so tool_calls is proven; prompt_cache measured false and the model trains on prompts, so it rides no L0-L2 chain (the cache rule) and no -clean route (rule 3). It is registered, priced at 0 pending a sourced figure, and routes nowhere until a later decision."
     },
     "mistral-small-latest": {
       "$comment": "mistral direct, keyed/billed account (docs/models.md: 'same key bills past the free pool'). output_max uses l2-worker-clean's 32768 (its larger use site) as the model's own ceiling; l3-driver's surface still declares its own clamped 16384. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). MISTRALFIX (2026-09-28): this model answers 429 at 0 requests/minute on the operator's plan (the number lives on providers.mistral.limits.mistral-small-latest, one home per fact), so it is no leg of any route - the resolver would skip it anyway via plan_dead_reasons(), and a route must not carry a leg it can never serve. MISTRALFIX2 (L1-routing gateway probe 2026-09-28T11:5xZ, evidence work/L1-routing/MISTRALREPL.probe.jsonl): 0/3, 429 - the gateway agrees with the 0 rpm reading; its replacement is mistral/mistral-code-latest (the operator's tie-break between the two codestral siblings, both measured 3/3 200) everywhere a leg may train, and no leg at all in a -clean route (spec 3.1 rule 3).",
