@@ -631,6 +631,16 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner asks the host for
+# permission before it starts another worker - the live count from the records
+# `ps` reads, MemAvailable from /proc/meminfo, both against catalog's
+# host_admission. Refusal is exit 13 and the MCP tool's state "rejected"; a dry
+# run is never refused. Filtered out of the suite above so a CI box that is short
+# on memory reports the refusal it hit by name instead of 1262 unrelated cases.
+if it "autoos-agent host admission: live workers and free memory gate the spawn"; then
+    out="$(python3 tests/test_autoos_spawner.py -k HostAdmission 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # T0-FREEZE (plan v3): the sixth `ready` gate -- main CI red freezes normal
 # lanes, --fixes-main + AUTOOS_FIXES_MAIN waives it. Same fakes-and-real-CLI
 # shape as the spawner gate tests above; fixtures are temp repos, no CI read.

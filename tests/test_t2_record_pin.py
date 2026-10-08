@@ -80,10 +80,15 @@ def setUpModule():
             os.environ.pop(k, None)
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-t2-workers-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # HOSTADMISSION reads the host's own free memory; this file pins the record's
+    # model, so the gate is escaped (the test-only switch) rather than faked -
+    # HostAdmissionTests in tests/test_autoos_spawner.py tests the rule itself.
+    os.environ["AUTOOS_ADMISSION_OFF"] = "1"
 
 
 def tearDownModule():
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
+    os.environ.pop("AUTOOS_ADMISSION_OFF", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
 
 
