@@ -4,6 +4,23 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- L2GATES-r3 (2026-10-08, lane AO-L2-LAUNCH, Sonnet round-3 REJECT of the `l2` read-only shell): three holes closed, failing-first
+  tests first. **(1) the wrapper was the read** — `skipLeading` walks past `env` by design, so a bare `env` had no head to audit and
+  dumped the lane's own environment (server password, gateway keys) past the gate; `env`, `printenv`, `set`, `export`, `declare` are
+  now denied wherever the skip left them, prefix word or head word. **(2) paths became an allow rule, not a spelling list** — naming
+  `/proc/self/environ` left `/proc/./self/environ`, `//proc//self//environ`, `/proc/$$/environ`, a globbed `/proc`, `~/.claude.json`
+  and `~/.config/opencode/auth.json` all readable, so a path operand of any allowed head (`cat`/`head`/`tail`/`wc`/`ls`/`rg` and a
+  `git` pathspec) is allowed only when it is relative and the shell cannot move it: no leading `/`, no leading `~`, no `..` segment,
+  no `//`, no `$`, no backtick, no glob character, denied as `bash-guard: DENIED - l2 read-only: path outside repo`. The cost of the
+  rule is stated where it bites: an absolute path is refused whatever it points at (`/proc/cpuinfo` included, a test that had been
+  passing now asserts the denial), and a glob character is refused even inside a search pattern. The secret files that live *inside*
+  the repo stay denied on their own rule: `.env*`, `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`. **(3) a short-flag bundle
+  hid the denied flag** — `l2OptionDenial` matched whole tokens, so `rg -uz` passed while `rg -z` did not; the deny sets are now split
+  by spelling and a bundle is tested character by character (`git`'s `-x`/`-a` get the same parsing).
+  Tests: `tests/test_opencode_bash_guard.py` (+5 methods / 43 commands, the `l2` role's env heads, escaping paths, in-repo secrets,
+  bundles, and the repo-relative reads that must survive); verify set `tests.test_oc_l2`(46) `tests.test_oc_l1_canary`(35)
+  `tests.test_opencode_bash_guard`(63) `tests.test_bash_guard`(162) `tests.test_agent_mcp_tool_profile`(41) = 347 green.
+  Docs: `docs/ai/opencode-fleet.md`, `configuration/opencode/plugins/bash-guard/index.mjs`.
 - L2GATES (2026-10-08, lane AO-L2-LAUNCH, the three merge criteria left open by L2LAUNCH-REJECT), one commit and failing-first tests
   each. **(1) the L2 shell is read-only, not scoped-write**: the bash-guard gained its own role, `AUTOOS_GUARD_ROLE=l2` (set by
   `tools/oc_l2.py`), whose allow list is `git status|log|diff|show`, `ls`, `cat`, `rg`, `head`, `tail`, `wc`, `pwd` and nothing else —

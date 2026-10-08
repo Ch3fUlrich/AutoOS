@@ -201,8 +201,13 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
 - `permission` merged over the L1 defaults with every file-mutating and spawn key denied (`edit`, `write`, `patch`, `apply_patch`,
   `task`, `subagent`; `read` and `bash` stay allowed), plus the bash-guard plugin with `guard_role: "l2"` — a role of its own, not
   the orchestrator's scoped write: an L2's shell is a CLOSED READ-ONLY list (`git status|log|diff|show`, `ls`, `cat`, `rg`, `head`,
-  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document and no command substitution, and anything
-  else is denied with `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
+  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document and no command substitution; no
+  environment-assignment prefix and no `env`/`printenv`/`set`/`export`/`declare` head (the lane's own environment holds the server
+  password and the gateway keys); no flag that hands the read a program, a repository or a pager, tested inside a short bundle
+  (`rg -uz`) as well as spelled out; and no path operand the shell can move outside the checkout — absolute, `~`-led, `..`-crossing,
+  `//`-spaced, or containing a `$`, a backtick or a glob character is refused as `path outside repo`, and the secret files that sit
+  *inside* the repo (`.env*`, `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it. Anything else is denied with
+  `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
   is a lane whose guard works;
 - the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 workers —
   and only tier-3 — through the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox as a tier-3 spawn, since a read-only
