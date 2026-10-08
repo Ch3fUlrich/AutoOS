@@ -2,12 +2,14 @@
 """oc_l1_http.py - HTTP and state helpers for the O1-LITE launcher.
 
 Small v2 API client (Basic auth, user 'opencode'), health poll, atomic state
-file read/write, password scrub, and raw lane option lookup.
+file read/write, credential scrub (the password, its base64 Basic form and any
+Authorization header value), and raw lane option lookup.
 """
 
 import base64
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -26,17 +28,39 @@ class ServerDown(Exception):
     """The opencode server on 127.0.0.1:<port> does not answer at all."""
 
 
-def _scrub(text, password):
-    """Remove the Basic-auth password from any text we may emit."""
-    if password:
-        text = text.replace(password, "***")
-    return text
-
-
 def _basic_header(password):
     return "Basic " + base64.b64encode(
         ("%s:%s" % (AUTH_USER, password)).encode("utf-8")
     ).decode("ascii")
+
+
+# F5: the credential reaches a log line in more than one shape. urllib puts the
+# request's Authorization header into the error text it raises, and a lane
+# config echo can carry the whole header dict.
+_BASIC_TOKEN_RE = re.compile(r"(?i)\bBasic\s+[A-Za-z0-9+/=_\-]{16,}")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(Authorization[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\r\n]+)"
+)
+
+
+def _scrub(text, password):
+    """Remove every shape of the Basic-auth credential from text we may emit.
+
+    The bare password is not the only leak: the `Basic <b64(user:pw)>` form and
+    any `Authorization:` header value travel in exception messages and logs, and
+    some call paths have no password in scope to compare against — so those are
+    matched structurally, not by the secret (F5). An unquoted header value takes
+    the rest of its line: redacting a little trailing prose is cheap, echoing a
+    token is not.
+    """
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    if password:
+        text = text.replace(_basic_header(password), "Basic ***")
+        text = text.replace(password, "***")
+    text = _AUTH_HEADER_RE.sub(r"\1***", text)
+    return _BASIC_TOKEN_RE.sub("Basic ***", text)
 
 
 def _request(port, method, path, body=None, password=""):

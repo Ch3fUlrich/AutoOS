@@ -56,6 +56,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1_serve  # noqa: E402
 import oc_l1_canary  # noqa: E402
+import oc_l1_http  # noqa: E402
 from oc_l1_canary import (  # noqa: E402
     GUARDED_TOOL_NAMES,
     INCONCLUSIVE_TEXT_ONLY,
@@ -622,6 +623,23 @@ class TestNoLeak(_Base):
         for where, blob in (("argv", argv), ("state file", state_text),
                             ("heartbeat.json", hb_text), ("stdout", out)):
             self.assertNotIn(PW_VALUE, blob, "password leaked in %s" % where)
+
+    # (8c) F5: the base64 Basic form is the same secret in another shape — an
+    #      HTTP error echoes the request header, so a bare-string replace of the
+    #      password would leave the token behind.
+    def test_the_basic_auth_token_is_in_no_output(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 0)
+        token = oc_l1_http._basic_header(PW_VALUE).split(" ", 1)[1]
+        blobs = {
+            "state file": Path(self.lane["state_file"]).read_text(
+                encoding="utf-8"),
+            "heartbeat.json": Path(self.lane["heartbeat_file"]).read_text(
+                encoding="utf-8"),
+            "stdout": out,
+        }
+        for where, blob in blobs.items():
+            self.assertNotIn(token, blob, "auth token leaked in %s" % where)
 
     # (8b) D-665 fix 4 added a new file the launcher opens for the child: the
     #      child env carries the password, so nothing of the launcher's may

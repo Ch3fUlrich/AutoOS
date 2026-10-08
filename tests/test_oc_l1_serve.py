@@ -8,6 +8,10 @@ values) of selected env vars to a JSON file, then sleeps.
 TestPrivateScratchModes covers F4: the scratch tree is 0700 and the child's
 stderr log 0600, both modes applied at creation, with no chmod-after-open
 window and a permissive umask unable to loosen them.
+
+TestScrubCredentialShapes covers F5: _scrub removes the bare password, the
+base64 'Basic <b64(user:pw)>' form and any Authorization header value —
+including on a path that has no password to compare against.
 """
 
 import contextlib
@@ -27,6 +31,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1  # noqa: E402
+import oc_l1_http  # noqa: E402
 import oc_l1_serve  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
     FAKE_SESSION_ID,
@@ -411,6 +416,67 @@ class TestPrivateScratchModes(unittest.TestCase):
         self.assertIn("os.O_CREAT", src)
         self.assertIn("os.O_APPEND", src)
         self.assertIn("0o600", src)
+
+
+class TestScrubCredentialShapes(unittest.TestCase):
+    """F5: the password travels in more shapes than the bare string.
+
+    urllib and friends echo the request's Authorization header into the messages
+    the launcher prints and logs, so `_scrub` must remove the base64 Basic form
+    and any `Authorization:` value — even in a call path that has no password
+    to compare against.
+    """
+
+    def setUp(self):
+        self.pw = PW_VALUE
+        self.header = oc_l1_http._basic_header(self.pw)
+        self.b64 = self.header.split(" ", 1)[1]
+
+    def test_the_bare_password_is_scrubbed(self):
+        self.assertNotIn(self.pw,
+                         oc_l1_http._scrub("bad pw %s" % self.pw, self.pw))
+
+    def test_the_basic_header_the_launcher_builds_is_scrubbed(self):
+        out = oc_l1_http._scrub(
+            "401 Client Error: %s" % self.header, self.pw)
+        self.assertNotIn(self.b64, out)
+        self.assertNotIn(self.pw, out)
+
+    def test_the_basic_form_is_scrubbed_with_no_password_in_scope(self):
+        # an exception path that lost the password must still not leak the token
+        out = oc_l1_http._scrub("Authorization: %s" % self.header, "")
+        self.assertNotIn(self.b64, out)
+
+    def test_a_quoted_authorization_value_is_scrubbed(self):
+        out = oc_l1_http._scrub(
+            "request %s" % json.dumps({"Authorization": self.header}), self.pw)
+        self.assertNotIn(self.b64, out)
+        self.assertNotIn(self.pw, out)
+
+    def test_any_authorization_value_is_scrubbed(self):
+        out = oc_l1_http._scrub(
+            "header Authorization: Bearer sk-abcdef123456, retrying", "")
+        self.assertNotIn("sk-abcdef123456", out)
+        self.assertEqual(out, "header Authorization: ***")
+
+    def test_an_unquoted_header_value_takes_only_its_own_line(self):
+        out = oc_l1_http._scrub(
+            "Authorization: %s\nthe next line stays\n" % self.header, "")
+        self.assertNotIn(self.b64, out)
+        self.assertIn("the next line stays", out)
+
+    def test_prose_that_says_basic_auth_is_left_alone(self):
+        self.assertEqual(
+            oc_l1_http._scrub("use Basic auth with the server", ""),
+            "use Basic auth with the server")
+
+    def test_ordinary_text_is_left_alone(self):
+        for text in ("create session returned HTTP 401",
+                     "bash-guard: DENIED - unquoted heredoc"):
+            self.assertEqual(oc_l1_http._scrub(text, self.pw), text)
+
+    def test_non_string_input_does_not_raise(self):
+        self.assertIsInstance(oc_l1_http._scrub(None, ""), str)
 
 
 if __name__ == "__main__":
