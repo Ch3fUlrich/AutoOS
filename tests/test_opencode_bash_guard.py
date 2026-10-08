@@ -8,18 +8,23 @@ under Node.js, verifying:
 - Safe command allow paths (quoted heredoc, plain commands, echo with <<)
 - Forward-compat tool naming ('shell' and 'bash' intercepted; others bypassed)
 - Resilient fail-open behavior (missing guard, non-zero guard exit, timeout)
+- Orchestrator-role denials carry the canary's "bash-guard: DENIED" marker (D-665)
 - Absence of embedded rule logic in the plugin source
 """
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+# the marker and the incident shape are the canary's contract, not a copy
+from oc_l1_canary import DENIED_MARKER, INCIDENT_COMMAND  # noqa: E402
 PLUGIN_PATH = ROOT / "configuration" / "opencode" / "plugins" / "bash-guard" / "index.mjs"
 NODE_BIN = shutil.which("node")
 
@@ -374,6 +379,32 @@ class TestOpenCodeBashGuard(unittest.TestCase):
                          env_overrides={"AUTOOS_GUARD_ROLE": None})
         self.assertTrue(res["allowed"], f"Role unset must keep old behaviour: {res['error']}")
         self.assertIsNone(res["error"])
+
+    # ------------------------------------------------------------------
+    # D-665: the c0 orchestrator-role throw runs BEFORE the python guard, so its
+    # message is the only thing the L1 canary ever sees on a role denial. The
+    # canary reads a denial by DENIED_MARKER alone (tools/oc_l1_canary.py), so a
+    # role denial without the marker reads as "shell call inconclusive" and the
+    # lane refuses forever.
+    # ------------------------------------------------------------------
+
+    def test_orchestrator_role_throw_carries_denied_marker(self):
+        res = run_plugin({"tool": "shell", "input": {"command": "echo hi > outside.txt"}},
+                         env_overrides=dict(self.ORCH_ENV))
+        self.assertFalse(res["allowed"], f"role must deny: {res['error']}")
+        self.assertIn(DENIED_MARKER, res["error"],
+                      "the canary matches DENIED_MARKER only")
+        self.assertIn("outside.txt", res["error"],
+                      "prefixing must keep the reason")
+
+    def test_orchestrator_role_canary_incident_carries_denied_marker(self):
+        for cmd in (INCIDENT_COMMAND,
+                    INCIDENT_COMMAND + "\n",
+                    "echo hi > outside.txt\n" + INCIDENT_COMMAND):
+            res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                             env_overrides=dict(self.ORCH_ENV))
+            self.assertFalse(res["allowed"], f"role must deny the incident shape: {cmd!r}")
+            self.assertIn(DENIED_MARKER, res["error"], f"marker missing for {cmd!r}")
 
 
 if __name__ == "__main__":

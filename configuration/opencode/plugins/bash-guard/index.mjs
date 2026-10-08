@@ -907,7 +907,10 @@ export default {
       if (process.env.AUTOOS_GUARD_ROLE === "orchestrator") {
         const reason = orchestratorDenialReason(command);
         if (reason) {
-          throw new Error(`bash-guard: orchestrator role: ${reason}`);
+          // The canary recognises a denial only by the "bash-guard: DENIED"
+          // marker, and this throw runs before the python guard, so the role
+          // denial must carry that marker verbatim (D-665).
+          throw new Error(`bash-guard: DENIED - orchestrator role: ${reason}`);
         }
       }
 
