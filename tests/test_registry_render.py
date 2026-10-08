@@ -1141,12 +1141,15 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"]
         rendered = registry.render_models_doc(reg)
         # FREEKEYS-2c: the numeric fallback is clamped like every other context
-        # cell (clamp_route_context narrows a numeric surface context too), and
-        # l3-driver's servable legs now head with the free band, whose smallest
-        # advertised window is the scaleway/nebius 128k. The surface promise of
-        # 131,072 no longer survives the clamp; the comma-spelled number is the
-        # fallback's signature - "128k" is the label form the deleted cell had.
-        self.assertIn("128,000", row_for(rendered, "l3-driver"))
+        # cell (clamp_route_context narrows a numeric surface context too).
+        # D657-CHAIN 2026-10-08 moved the clamped number from 128,000 to 131,072:
+        # the scaleway/nebius 128k legs left the chain and the smallest window a
+        # serving leg now advertises is the groq/cohere 131072 band, which equals
+        # the surface promise - so the cell follows the numeric field rather than
+        # the deleted "128k" label. The comma-spelled number is the fallback's
+        # signature either way.
+        self.assertIn("131,072", row_for(rendered, "l3-driver"))
+        self.assertNotIn("128k", row_for(rendered, "l3-driver"))
 
     def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
         reg = copy.deepcopy(real_registry())
@@ -1218,12 +1221,14 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
         # antigravity leg too): the route carried ovhcloud legs then. Moved
         # again by the operator's CACHEORCH order (2026-10-05: l2-orchestrator
         # dropped its OVH legs - orchestrators serve long sessions and OVH does
-        # not cache), so the provider-wide flip uses l2-worker, which still
-        # reaches through ovhcloud.
-        reg["providers"]["ovhcloud"]["available"] = False
+        # not cache), and once more by D657-CHAIN 2026-10-08, which took every
+        # ovhcloud leg out of every chain (SS8: OVH credits off), so the
+        # provider-wide flip uses openrouter - l2-worker still reaches a ':free'
+        # leg through it.
+        reg["providers"]["openrouter"]["available"] = False
         rendered = registry.render_models_doc(reg)
         row = row_for(rendered, "l2-worker")
-        self.assertIn("~~ovhcloud", row)
+        self.assertIn("~~openrouter", row)
         self.assertIn("(unavailable)", row)
 
     def test_available_leg_is_not_marked(self):
@@ -1412,75 +1417,74 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("no-such-tier", str(ctx.exception))
 
     def test_real_omniroute_drops_gated_legs_and_keeps_live_order(self):
+        # D657-CHAIN 2026-10-08 (AO-DENYLEGS D2) replaced the L1-CLEAN/DSBACK leg
+        # sets this test pinned: SS8 took the ovh/* credit legs and the paid
+        # native deepseek leg out of every chain, and probe D-657 refused
+        # gemini/gemini-3.8-flash (401 on both gateways) while vertex answered, so
+        # the cached pool is the bazaarlink DeepSeek mirror plus vertex only.
+        # Every -clean combo is one leg now: spec 3.1 rule 3 admits only a
+        # non-training paid/credit/subscription leg and rule (b-or) forces every
+        # openrouter leg ':free', so no free band can ever be clean.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
-        # DSBACK 2026-09-28: l2-worker-clean serves deepseek FIRST again —
-        # providers.deepseek is back on after the operator top-up. The openrouter
-        # leg stays out (provider off, DSMAX) and the zen leg stays out (its own
-        # route gate). MISTRALFIX 2026-09-28 took the route's fourth leg,
-        # mistral/mistral-small-latest, out of the registry itself (0 rpm on the
-        # measured plan), so the combo is now exactly the one live leg — and the
-        # combo survives, which is what the invariant in tests/test_registry.py
-        # requires of a route that still serves traffic.
-        # L1-CLEAN 2026-10-01 supersedes the DSBACK single-leg shape: the trial
-        # credits lead and the native DeepSeek leg is the last paid fallback.
         self.assertEqual(
-            combos["l2-worker-clean"]["models"],
-            ["ovh/gpt-oss-120b", "ovh/Qwen3.8-27B", "vertex/gemini-3.8-flash",
-             "deepseek/deepseek-flash"])
+            combos["l2-worker"]["models"],
+            ["bzl/deepseek/deepseek-v4-flash-0731free:free",
+             "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+             "vertex/gemini-3.8-flash"])
+        self.assertEqual(combos["l2-worker-clean"]["models"], ["vertex/gemini-3.8-flash"])
+        # A gated leg is dropped while the route survives on its other leg:
+        # l1-orchestrator-clean's contributor copy is probe-denied (402/403), the
+        # vertex leg serves, so the combo carries one model, not none.
+        self.assertEqual(combos["l1-orchestrator-clean"]["models"], ["vertex/gemini-3.8-flash"])
+        self.assertNotIn("openrouter/meta/muse-spark-1.3-contributor",
+                         combos["l1-orchestrator-clean"]["models"])
         # samba/SambaNova is available: false, so every one of its legs goes -
-        # including the pinned one-leg routes.
-        # l1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
-        # servable leg. l3-driver-free-only is NOT gone: FREEAI gave it a
-        # servable leg.
-        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3"):
+        # including the pinned one-leg routes, and with them spark-1.3-contributor,
+        # whose only legs are the SS8-banned contributor copies (OR1d: declared
+        # legs, none servable -> no declaration).
+        for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3", "spark-1.3-contributor",
+                     "ovh-qwen3.8-27b", "deepseek-v4.1-flash"):
             self.assertNotIn(gone, combos)
+            self.assertIn(gone, registry.render_omniroute(real_registry())["omitted"])
 
     def test_real_litellm_drops_gated_legs(self):
         rendered = registry.render_litellm_blocks(
             real_registry(), real_litellm_config())
-        # sambanova/openrouter gpt-oss-120b legs are unavailable and dropped;
-        # the ovhcloud credit-tier leg (added 2026-09-30,
-        # L1-backlog/ws-ovh-20260930) is available and kept.
-        self.assertNotIn("sambanova/gpt-oss-120b", rendered["l2-worker"])
-        # FREEWIRE 2026-09-30: allow-groq-gpt-oss re-opened this leg on a
-        # single-tool-call probe, so the render now mirrors it.
-        self.assertIn("groq/openai/gpt-oss-120b", rendered["l2-worker"])
-        self.assertIn("ovhcloud/gpt-oss-120b", rendered["l2-worker"])
-        self.assertNotIn("model: openai/deepseek-v4-flash", rendered["l2-worker"])
-        # the client-bound opencode-zen leg (litellm transport openai/…) is
-        # dropped, and so is the openrouter leg of the same model (DSMAX moved
-        # to the route level in FREEWIRE 2026-09-30). The deepseek DIRECT leg is
-        # back in since DSBACK 2026-09-28 topped the balance up — pinned here as
-        # present, so a future flip that drops it again names it.
-        self.assertIn("model: deepseek/deepseek-flash", rendered["l2-worker"])
-        self.assertNotIn("model: openai/deepseek-v4.1-flash", rendered["l2-worker"])
-        self.assertNotIn("model: openrouter/deepseek/deepseek-v4.1-flash", rendered["l2-worker"])
-        # CIGREEN: expectation moved by 018438ed (TASK1 re-added the gemini
-        # head) + ba73f1cf (TASK2) + 20c4a816 (TASK3 re-opened google_ai_studio
-        # available:true): the render correctly mirrors the live head. Gated
-        # legs are still dropped - every assertNotIn above still holds.
-        self.assertIn("gemini-3.8-flash", rendered["l2-worker"])
-        # l3-driver: samba/sambanova/cerebras provider-dead; opencode-zen
-        # client-bound. FREEWIRE re-opened the groq qwen3.8-27b and openrouter
-        # ':free' qwen3.8-27b legs, so the lowercase spelling is now present.
+        # D657-CHAIN 2026-10-08: the chains are the probe union, so the legs this
+        # test used to pin as available (the ovhcloud credit legs, the deepseek
+        # DIRECT leg, mistral-code-latest) are out of every route now, and the
+        # bazaarlink DeepSeek mirror is the head of every LiteLLM-served tier.
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                      rendered["l2-worker"])
+        for gone in ("sambanova/gpt-oss-120b", "ovhcloud/gpt-oss-120b",
+                     "groq/openai/gpt-oss-120b", "model: openai/deepseek-v4-flash",
+                     "model: deepseek/deepseek-flash",
+                     "model: openai/deepseek-v4.1-flash",
+                     "model: openrouter/deepseek/deepseek-v4.1-flash"):
+            self.assertNotIn(gone, rendered["l2-worker"], gone)
+        # vertex/gemini-3.8-flash IS a live leg but authenticates without a LiteLLM
+        # api_key, so it lands as a litellm-skip comment, never a model line.
+        self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", rendered["l2-worker"])
+        self.assertNotIn("model: vertex/gemini-3.8-flash", rendered["l2-worker"])
+        # l3-driver keeps the proven free band: groq carries both the qwen3.8-27b
+        # and the gpt-oss-120b spelling, and nothing of the dead providers
+        # (samba/cerebras) or of the retired mistral leg survives.
         self.assertIn("qwen3.8-27b", rendered["l3-driver"])
+        self.assertIn("groq/openai/gpt-oss-120b", rendered["l3-driver"])
         self.assertNotIn("MiniMax-M3", rendered["l3-driver"])
-        self.assertIn("mistral-code-latest", rendered["l3-driver"])
-        # ovhcloud credit-tier legs (added 2026-09-30) are available;
-        # groq's lowercase qwen3.8-27b is denied and dropped, and the
-        # OVH model ID is mixed-case (Qwen3.8-27B) so the assertNotIn
-        # above still passes.
-        self.assertIn("ovhcloud/gpt-oss-120b", rendered["l3-driver"])
-        self.assertIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
+        self.assertNotIn("mistral-code-latest", rendered["l3-driver"])
+        self.assertNotIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
-        # L1-CLEAN (2026-10-01): the -clean twins no longer carry a gated leg
-        # (their trial-first legs are all servable), so the stale OVH coder leg
-        # kept in l2-worker's legs and marked unavailable_legs is the example.
-        row = row_for(registry.render_models_doc(real_registry()), "l2-worker")
-        self.assertIn(
-            "~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable)", row)
+        # D657-CHAIN 2026-10-08: l2-worker no longer keeps a gated leg at all (SS8
+        # deleted the OVH credit legs from its declared chain), so
+        # l1-orchestrator-clean is the example - it serves vertex/gemini-3.8-flash
+        # and still shows the probe-denied contributor copy struck through for the
+        # human reader, which no gateway render mirrors.
+        row = row_for(registry.render_models_doc(real_registry()), "l1-orchestrator-clean")
+        self.assertIn("~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable)", row)
+        self.assertIn("vertex `gemini-3.8-flash`", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
@@ -1758,66 +1762,52 @@ class OmittedRoutesListTests(unittest.TestCase):
 
 
 class FreeAiRenderTests(unittest.TestCase):
-    """BRIEF FREEAI (2026-09-27): adding free_ai/qwen7b to the two zero-spend
-    routes makes l3-driver-free-only servable again - it leaves combos.json's
-    `omitted` list, gains an OmniRoute combo, a LiteLLM block, an IDE model and
-    both OpenHands tiers - and free_ai never enters a -clean declaration."""
+    """BRIEF FREEAI (2026-09-27) wired free_ai/qwen7b into the two zero-spend
+    routes. D657-CHAIN 2026-10-08 (operator D-657) took it back out: probe
+    D-657 recorded `free-ai/qwen7b` ack ok on both gateways but its ONE TOOL CALL
+    FAILED (configuration/omniroute/probes/probe-d657-{central,workstation}.tsv,
+    columns ack/tool) and cache `unknown`, and an agent lane that cannot call a
+    tool is not a leg - so it rides no chain. What survives here is the part of
+    the brief that was never about free_ai: the zero-spend routes stay servable,
+    and no training leg enters a -clean declaration."""
 
     def test_t3_driver_free_only_leaves_omitted_and_gains_a_combo(self):
         rendered = registry.render_omniroute(real_registry())
         self.assertNotIn("l3-driver-free-only", rendered["omitted"])
         combos = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("l3-driver-free-only", combos)
-        # CIGREEN (ba73f1cf TORDER TASK2): the trial-free-credits-paid band
-        # leads and the self-hosted free_ai rides mid-list under its
-        # omniroute_id spelling (D: model_prefix free-ai).
         models = combos["l3-driver-free-only"]["models"]
-        # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
-        # trial-free-credits-paid order - gemini trial head, free band, the
-        # self-hosted free_ai mid-list, scaleway grants trail it, deepseek
-        # last where present). Moved again by the operator's GLM55/AINATIVE
-        # order (2026-10-05): oc/glm-5.3-flash (expiring grant) and
-        # ainative/llama-4-maverick (trial burn-down) lead the band. The
-        # band head and tail below pin the new order.
-        # SCWREMOVAL 2026-10-06: scaleway tails gone, free-ai rides last.
-        self.assertEqual(models[-1], "free-ai/qwen7b")
-        self.assertIn("free-ai/qwen7b", models)
-        # GLM55 gate amendment (2026-10-05): the oc leg is gated (402 - the
-        # connection's account auth does not cover the paid Zen model), so
-        # ainative/llama-4-maverick leads the render until the operator adds
-        # an OpenCode API key.
-        self.assertEqual(models[:6],
-                         ["ainative/llama-4-maverick",
-                          "gemini/gemini-3.8-flash",
-                          "groq/qwen/qwen3.8-27b",
-                          "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-                          "openrouter/poolside/laguna-s-2.1:free",
-                          "groq/openai/gpt-oss-20b"])
+        # D657-CHAIN: the route heads the probe-confirmed bazaarlink DeepSeek
+        # mirror (free, cache hit measured) and closes with the cohere leg, which
+        # is the tail the free band has once SCWREMOVAL's grants and free-ai are
+        # gone. The GLM55/AINATIVE leaders were agy/trial legs SS8 keeps out of
+        # position 1 or that expire 2026-11-02.
+        self.assertEqual(models[0], "bzl/deepseek/deepseek-v4-flash-0731free:free")
+        self.assertEqual(models[-1], "cohere/command-a-plus-05-2026")
+        self.assertNotIn("free-ai/qwen7b", models)
 
-    def test_free_ai_is_last_in_the_free_only_combos(self):
-        # CIGREEN: expectation moved by ba73f1cf (TORDER TASK2:
-        # trial-free-credits-paid, free_ai middle, scaleway grants trail it).
-        # Pins the new band tails: free-ai/qwen7b rides last among servable
-        # legs (SCWREMOVAL 2026-10-06 dropped the scw grants behind it) - a
-        # future reorder that buries it mid-list fails loudly here.
-        combos = {c["name"]: c for c in
-                  registry.render_omniroute(real_registry())["combos"]}
-        self.assertEqual(combos["l2-worker-free-only"]["models"][-1],
-                         "free-ai/qwen7b")
-        self.assertEqual(combos["l3-driver-free-only"]["models"][-1],
-                         "free-ai/qwen7b")
+    def test_free_ai_rides_no_chain_after_the_d657_tool_probe(self):
+        # The tail pin this test used to hold (free-ai/qwen7b last) is gone with
+        # the leg. Pinned instead as an absence, in both spellings, across every
+        # combo - a re-add that ignores the tool-call failure fails here.
+        combos = registry.render_omniroute(real_registry())["combos"]
+        for combo in combos:
+            self.assertFalse(
+                [m for m in combo["models"]
+                 if m.startswith(("free-ai/", "free_ai/"))],
+                combo["name"])
 
-    def test_t2_worker_combo_ends_with_the_free_ai_leg(self):
+    def test_l2_worker_combo_closes_with_the_vertex_leg(self):
         # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:
-        # paid last, deepseek last). The T2FREE-era last-leg invariant is
-        # superseded - free_ai rides mid-list under the provider's own
-        # spelling (model_prefix free-ai) and deepseek closes the combo.
+        # paid last, deepseek last). D657-CHAIN supersedes that tail again - SS8
+        # removed deepseek/deepseek-flash from every chain, so the combo closes
+        # on the cached vertex leg and free_ai appears nowhere.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         models = combos["l2-worker"]["models"]
-        self.assertEqual(models[-1], "deepseek/deepseek-flash")
-        self.assertIn("free-ai/qwen7b", models)
-        self.assertLess(models.index("free-ai/qwen7b"), len(models) - 1)
+        self.assertEqual(models[-1], "vertex/gemini-3.8-flash")
+        self.assertNotIn("deepseek/deepseek-flash", models)
+        self.assertNotIn("free-ai/qwen7b", models)
 
     def test_free_ai_never_enters_a_clean_combo(self):
         # PROV finding 11: neither spelling may appear - the rendered omniroute_id
@@ -1830,15 +1820,21 @@ class FreeAiRenderTests(unittest.TestCase):
                  if m.startswith(("free-ai/", "free_ai/"))],
                 combo["name"])
 
-    def test_litellm_blocks_carry_free_ai_on_both_free_only_routes(self):
+    def test_litellm_blocks_carry_the_free_band_on_both_free_only_routes(self):
+        # D657-CHAIN: the zero-spend band is the probe-confirmed free legs, not
+        # free_ai (its tool call failed). The block must still be a real spend
+        # -nothing chain, so the bazaarlink mirror leads and every leg is a ':free'
+        # spelling; no qwen7b line survives anywhere.
         rendered = registry.render_litellm_blocks(
             real_registry(), real_litellm_config())
         for route_id in ("l2-worker-free-only", "l3-driver-free-only"):
-            self.assertIn("model: openai/qwen7b", rendered[route_id], route_id)
-            self.assertIn("api_base: https://api.free.ai/v1",
+            self.assertIn("model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
                           rendered[route_id], route_id)
-            self.assertIn("api_key: os.environ/FREE_AI_API_KEY",
+            self.assertIn("api_key: os.environ/BAZAARLINK_API_KEY",
                           rendered[route_id], route_id)
+            self.assertNotIn("model: openai/qwen7b", rendered[route_id], route_id)
+            self.assertNotIn("api_key: os.environ/FREE_AI_API_KEY",
+                             rendered[route_id], route_id)
 
     def test_ide_lists_t3_driver_free_only_again(self):
         ids = [m["id"] for m in registry.render_ide(real_registry())["models"]]
