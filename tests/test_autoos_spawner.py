@@ -20793,10 +20793,10 @@ class HostAdmissionTests(unittest.TestCase):
     def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}
         self.assertEqual(shipped.get("max_live_workers"), 6)
-        self.assertEqual(shipped.get("mem_available_floor_mb"), 6144)
+        self.assertEqual(shipped.get("mem_available_floor_mb"), 4608)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
-        self.assertEqual(self.agent.host_admission_config(None), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(None), (6, 4608))
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
@@ -20906,7 +20906,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(started, [], "the client never started")
         self.assertIn("queue or run on workstation", err)
         self.assertIn("cap 6", err)
-        self.assertIn("floor 6144 MB", err)
+        self.assertIn("floor 4608 MB", err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
     def test_cmd_run_refuses_on_memory_alone_for_admission(self):
