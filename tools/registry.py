@@ -438,6 +438,84 @@ def resolve_leg(leg, registry) -> tuple:
     return provider_id, model_id
 
 
+def provider_spellings_for(provider_id, registry) -> list:
+    """One provider's spellings: its id, then each namespace its own row
+    declares. A provider the registry does not carry answers to its own name
+    only -- the old hand-read of `omniroute_id`/`model_prefix`, kept in one
+    place instead of restated by every consumer. Order is stable and
+    de-duplicated; see `provider_alias_map` for why the spellings come from the
+    data."""
+    entry = ((registry or {}).get("providers") or {}).get(provider_id)
+    spellings = [provider_id]
+    if isinstance(entry, dict):
+        declared = []
+        for field in ("omniroute_id", "model_prefix"):
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip():
+                declared.append(value.strip())
+        declared.extend(_alias_values(entry.get("aliases")))
+        spellings.extend(declared)
+    return list(dict.fromkeys(spellings))
+
+
+def provider_alias_map(registry) -> dict:
+    """{provider id: [its own id, every namespace its rows may carry]}.
+
+    LANE-PRICE-GAP (2026-10-08): the gateway bills a call-log row under the
+    connection id (`providers.<id>.omniroute_id`, e.g. `vertex` for `vertex_ai`)
+    and serves its models under `model_prefix` (`ovh` for `ovhcloud`), while the
+    registry keys everything -- routes, prices, `provider_prices` -- by provider
+    id. Every consumer that prices a row has to cross that gap, and the
+    hand-written name lists that did so priced exactly the providers their
+    author had measured. All spellings come from the data, so a renamed
+    connection is covered the moment its row lands. A provider entry may also
+    declare `aliases` (a string or a list) for spellings no field of the schema
+    carries; that is the extension point, and adding a name there is a data edit.
+
+    Values are declared spellings verbatim (a model namespace keeps its case).
+    `{}` for a registry with no providers section."""
+    providers = (registry or {}).get("providers")
+    if not isinstance(providers, dict):
+        return {}
+    return {provider_id: provider_spellings_for(provider_id, registry)
+            for provider_id in providers}
+
+
+def _alias_values(aliases) -> list:
+    """A provider's declared `aliases`, spellings only: a string is one
+    spelling, a list all of its non-empty strings, anything else none."""
+    if isinstance(aliases, str):
+        return [aliases.strip()] if aliases.strip() else []
+    if isinstance(aliases, list):
+        return [value.strip() for value in aliases
+                if isinstance(value, str) and value.strip()]
+    return []
+
+
+def provider_id_from_spelling(spelling, registry):
+    """The provider id a call-log namespace names, or None.
+
+    The provider id itself answers first (a key is never shadowed by another
+    provider's gateway id), then a unique case-insensitive match among every
+    declared spelling. Two providers claiming one spelling resolve to nothing:
+    either reading would bill one grant at the other's price, and an unpriced
+    row is the loud gap the guard already reports (`models_unpriced`)."""
+    text = str(spelling or "").strip()
+    if not text:
+        return None
+    providers = (registry or {}).get("providers")
+    if isinstance(providers, dict) and text in providers:
+        return text
+    owners = {}
+    for provider_id, spellings in provider_alias_map(registry).items():
+        for value in spellings:
+            owners.setdefault(value.strip().lower(), set()).add(provider_id)
+    candidates = owners.get(text.lower()) or set()
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    return None
+
+
 def leg_price(model_id, provider_id, registry):
     """(price_in, price_out) USD per token for one provider/model leg, or None.
 
@@ -451,6 +529,15 @@ def leg_price(model_id, provider_id, registry):
     Anything unparseable or non-positive reads as unpriced (None) -- the
     validator refuses such rows loudly, and the runtime degrades to the same
     gap instead of billing a made-up number.
+
+    LANE-PRICE-GAP (2026-10-08): `provider_id` may be the spelling a call-log
+    row carries -- the gateway connection id (``vertex``) or the model namespace
+    (``ovh``) rather than the registry key the price is filed under
+    (``vertex_ai``, ``ovhcloud``). It is resolved through
+    `provider_id_from_spelling` first, so a grant's rows bill at the grant's own
+    price instead of reading as free money. An unresolvable spelling is passed on
+    unchanged: it then matches no scoped entry and the model-level row decides,
+    exactly the old behaviour (never borrow a stranger's price).
     """
     models = (registry or {}).get("models")
     model = models.get(model_id) if isinstance(models, dict) else None
@@ -458,7 +545,8 @@ def leg_price(model_id, provider_id, registry):
         return None
     if provider_id:
         scoped = model.get("provider_prices")
-        entry = scoped.get(provider_id) if isinstance(scoped, dict) else None
+        priced_as = provider_id_from_spelling(provider_id, registry) or provider_id
+        entry = scoped.get(priced_as) if isinstance(scoped, dict) else None
         if isinstance(entry, dict):
             try:
                 price_in = float(entry.get("price_in"))

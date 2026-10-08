@@ -572,10 +572,10 @@
       "tool_calls": "unproven",
       "provider_prices": {
         "vertex_ai": {
-          "price_in": 1.5e-06,
-          "price_out": 7.5e-06,
-          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (list price from 2027-01-01; intro $0.75/$3.75 through 2026-12-31 via 50% credits back)",
-          "price_as_of": "2026-10-01"
+          "price_in": 7.5e-07,
+          "price_out": 3.75e-06,
+          "price_source": "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing (intro rate IN FORCE: $0.75 in / $3.75 out per 1M through 2026-12-31 via 50% credits back; list $1.50/$7.50 from 2027-01-01. provider_prices carries no dated price (schema allows none), so this row is the rate of the day - raise it to the list price when 2027-01-01 opens)",
+          "price_as_of": "2026-10-08"
         }
       },
       "prompt_cache": "documented",

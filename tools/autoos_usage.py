@@ -102,6 +102,7 @@ import urllib.request
 from pathlib import Path
 
 import autoos_resolver as resolver  # tools/ is on sys.path for every caller
+from registry import provider_alias_map, provider_spellings_for
 
 DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
@@ -231,13 +232,16 @@ def prices_from_registry(registry):
 
     T1-CREDIT-FIX-6 (D-220): a model id served at two prices at once also lands
     here once per provider spelling -- `models.<id>.provider_prices.<provider>`
-    is emitted under both `<provider>/<model>` and, when the provider declares
-    one, `<omniroute_id>/<model>` (the spelling call-log rows carry), so an
-    exact `price_for` hit bills the provider's own price. The bare model id
-    stays absent (its row is 0), so the free provider's rows keep counting as
-    unpriced instead of borrowing the paid provider's price.
+    is emitted under `<provider>/<model>` and under every namespace that
+    provider's own row declares (`omniroute_id`, `model_prefix`, `aliases`: the
+    spellings call-log rows carry, from registry.provider_alias_map), so an
+    exact `price_for` hit bills the provider's own price however the gateway
+    named it. The bare model id stays absent (its row is 0), so the free
+    provider's rows keep counting as unpriced instead of borrowing the paid
+    provider's price.
     """
     prices = {}
+    alias_map = provider_alias_map(registry)
     for model_id, model in (registry.get("models") or {}).items():
         if not isinstance(model, dict):
             continue
@@ -262,11 +266,8 @@ def prices_from_registry(registry):
             if not (scoped_in > 0.0 and scoped_out > 0.0):
                 continue
             pair = (scoped_in, scoped_out)
-            prices["%s/%s" % (provider_id, model_id)] = pair
-            provider = (registry.get("providers") or {}).get(provider_id)
-            alias = provider.get("omniroute_id") if isinstance(provider, dict) else None
-            if alias and alias != provider_id:
-                prices["%s/%s" % (alias, model_id)] = pair
+            for spelling in alias_map.get(provider_id, [provider_id]):
+                prices["%s/%s" % (spelling, model_id)] = pair
     return prices
 
 
@@ -849,17 +850,15 @@ def _provider_spellings(provider, registry=None):
     T1-CREDIT-FIX-7 R1: the gateway bills under the connection id
     (`providers.<id>.omniroute_id` -- `vertex` for `vertex_ai`), not the
     registry id, and model spellings carry the same namespace
-    (`vertex/...`, `ovh/...` via `model_prefix`). All three are read from
-    the data, never a name list, so a renamed connection is covered the
-    moment its row lands. Without a registry only the id itself matches
+    (`vertex/...`, `ovh/...` via `model_prefix`). All of them are read from
+    the data through registry.provider_spellings_for -- the same normaliser
+    that prices the row, applied to this one provider's row -- so the guard's
+    row filter and the report's price lookup can never disagree about which
+    namespaces a provider owns. Without a registry only the id itself matches
     (the old behaviour exactly)."""
-    spellings = {str(provider).strip().lower()}
-    entry = ((registry or {}).get("providers") or {}).get(provider)
-    if isinstance(entry, dict):
-        for key in ("omniroute_id", "model_prefix"):
-            val = entry.get(key)
-            if isinstance(val, str) and val.strip():
-                spellings.add(val.strip().lower())
+    spellings = set()
+    for value in provider_spellings_for(str(provider).strip(), registry or {}):
+        spellings.add(str(value).strip().lower())
     return spellings
 
 
@@ -2330,7 +2329,7 @@ def _new_group(key, priced=False):
     return group
 
 
-def _add_row(group, row, prices=None):
+def _add_row(group, row, prices=None, registry=None):
     group["calls"] += 1
     status = row.get("status") if isinstance(row, dict) else None
     try:
@@ -2351,13 +2350,20 @@ def _add_row(group, row, prices=None):
     if prices is not None:
         # Registry prices are per token, so tokens * price is the USD cost of
         # the row. A model with no price on file adds 0.
-        pair = price_for(row.get("model") if isinstance(row, dict) else None, prices)
+        # LANE-PRICE-GAP (2026-10-08): the row's own provider is part of the
+        # price lookup, exactly as it is in `paid_spend` -- a model id billed
+        # by two providers at once has no price on the bare id, so a report
+        # that ignored which provider answered the call priced a $250 Vertex
+        # grant at $0.0000 while the guard reading the same rows priced it.
+        model = row.get("model") if isinstance(row, dict) else None
+        provider = row.get("provider") if isinstance(row, dict) else None
+        pair = price_for(model, prices, provider=provider, registry=registry)
         if pair:
             group["cost_in"] += tin * pair[0]
             group["cost_out"] += tout * pair[1]
 
 
-def aggregate(rows, dims, prices=None):
+def aggregate(rows, dims, prices=None, registry=None):
     """{dim: [group, ...]} sorted by calls desc, ties by key asc."""
     priced = prices is not None
     by = {}
@@ -2366,37 +2372,43 @@ def aggregate(rows, dims, prices=None):
         for r in rows:
             key = _group_key(dim, r)
             groups.setdefault(key, _new_group(key, priced))
-            _add_row(groups[key], r, prices)
+            _add_row(groups[key], r, prices, registry)
         by[dim] = sorted(groups.values(), key=lambda g: (-g["calls"], g["key"]))
     return by
 
 
-def totals(rows, prices=None):
+def totals(rows, prices=None, registry=None):
     t = _new_group("(all)", prices is not None)
     for r in rows:
-        _add_row(t, r, prices)
+        _add_row(t, r, prices, registry)
     del t["key"]
     return t
 
 
 def build_report(rows, dims, cutoff, pages, truncated, prices=None, price_source=None,
-                 spend=None, credit_guards=None):
+                 spend=None, credit_guards=None, registry=None):
     """The `--json` shape. `credit_guards` is `credit_guards()` for the same rows,
     so one fetch answers both the money spent and the grants that gate the next
     call (brief FREEKEYS-1b item 2: the warn belongs in the daily usage line, not
-    only in the router's head)."""
+    only in the router's head). `registry` is the parsed price file the rows are
+    priced against: with it a row's provider decides which provider's price of a
+    shared model id bills it (LANE-PRICE-GAP); without it the table alone does,
+    exactly as before."""
     kept = [r for r in rows
             if not (row_timestamp(r) is not None and row_timestamp(r) < cutoff)]
     report = {
         "since": cutoff.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "pages": pages,
         "truncated": truncated,
-        "totals": totals(kept, prices),
-        "by": aggregate(kept, dims, prices),
+        "totals": totals(kept, prices, registry),
+        "by": aggregate(kept, dims, prices, registry),
     }
     if prices is not None:
         unpriced = {r.get("model") for r in kept if isinstance(r, dict)
-                    and r.get("model") and price_for(r.get("model"), prices) is None}
+                    and r.get("model")
+                    and price_for(r.get("model"), prices,
+                                  provider=r.get("provider"),
+                                  registry=registry) is None}
         report["cost"] = {"source": price_source, "models_unpriced": len(unpriced)}
     if spend is not None:
         report["paid_spend"] = spend
@@ -2698,7 +2710,7 @@ def main(argv=None, *, fetch=None, env=None, now=None):
     report = build_report(rows, dims, cutoff, pages, truncated,
                           prices=prices if show_cost else None,
                           price_source=price_source if show_cost else None,
-                          spend=spend, credit_guards=guards)
+                          spend=spend, credit_guards=guards, registry=registry)
     if args.json:
         print(json.dumps(report, indent=2))
     elif args.lines:
