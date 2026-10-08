@@ -11,10 +11,11 @@ renders the marker into the MCP server's environment so the selection happens
 where the server starts, not in a prompt.
 
 Criterion 3 is the next layer of the same fence: inside profile l2 a `spawn`
-may only be a tier-3 worker. An L2 that could spawn tier 1 or an orchestrate
-card would own a session that can write, which is the thing the whole lane
-exists to prevent. (The full ROLE-GATE is a later lane; this is the minimal
-check that an L2 cannot climb.)
+may only be a tier-2 or tier-3 worker, always in its own clone. Tier 3 is the
+review-only seat, so a tier-3-only lane could never start a writer (found live
+by AO-L2-PRODTEST); the fence that stays is tier 1 - an L2 that could spawn an
+orchestrate card would own the lane above itself. (The full ROLE-GATE is a later
+lane; this is the minimal check that an L2 cannot climb.)
 
 The tool-set pin drives the real registration (`build_server(...).list_tools()`),
 so it is evidence about the server an L2 actually talks to, not about a list
@@ -422,13 +423,18 @@ class LaneMcpRealSpawnTest(unittest.TestCase):
 
 
 class L2SpawnTierGateTest(unittest.TestCase):
-    """Criterion 3: inside profile l2 a spawn is a tier-3 worker or nothing.
+    """Criterion 3, as AO-L2-PRODTEST's live run corrected it: inside profile l2 a
+    spawn is a tier-2 OR tier-3 worker, and never anything else.
 
     The gate reads the profile the same server was registered under, so it cannot
-    drift from the list the lane was shown. A tier below 3 is a session that
-    holds its own editor - exactly what an L2 must not own - and a
-    `role: orchestrate` card is the same thing reached through the resolver
-    instead of the flag.
+    drift from the list the lane was shown. The fence that made an L2's spawn
+    tier-3-only was "below tier 3 is a session that holds its own editor and a
+    checkout of the main tree" - the second half is false, because every spawned
+    tier runs in its own `--isolate` clone, which profile l2 now forces whatever
+    the caller passed. Tier 1 is still refused: it is the L1's seat (the
+    expensive combo and the orchestration legs), and an L2 that could start one
+    owns the lane above itself. A `role: orchestrate` card is the same seat
+    reached through the resolver instead of the flag.
     """
 
     def _argv(self, req, **env):
@@ -444,18 +450,58 @@ class L2SpawnTierGateTest(unittest.TestCase):
         self.assertIn("l2", msg.lower(), msg)
         return msg
 
-    def test_an_explicit_tier_below_three_is_refused(self):
-        for tier in (1, 2):
-            self._refused({"task": "t", "tier": tier}, "tier %s" % tier)
-        # a caller that sends the tier as text (JSON) is the same spawn
-        self._refused({"task": "t", "tier": "2"}, "tier 2")
+    def _allowed(self, req, **env):
+        """A legal L2 spawn: the argv it builds, with the isolation the profile
+        owes it already asserted, so every allowed-shape test proves it too."""
+        argv, route = self._argv(req, **dict(env, AUTOOS_AGENT_LAYER="L2"))
+        self.assertIn("--isolate", argv, argv)
+        self.assertTrue(route.get("l2_forced_isolate"), route)
+        return argv, route
 
-    def test_a_card_below_three_is_refused_by_its_resolved_tier(self):
-        # The default card routes to tier 2, so an L2 that asks for nothing gets
-        # the same refusal - the gate reads the route, never only the flag.
-        self._refused({"task": "t"}, "tier 2")
-        self._refused({"task": "t", "card": {"role": "implement",
-                                             "complexity": "standard"}}, "tier 2")
+    def test_the_gate_is_two_tiers_of_worker_and_no_tier_one_seat(self):
+        # The pin the live run found wrong: an L2 spawns tier 2 and tier 3.
+        self.assertEqual(mcp_server.L2_SPAWN_TIER, 2)
+
+    def test_an_explicit_tier_one_spawn_is_refused(self):
+        self._refused({"task": "t", "tier": 1}, "tier 1")
+        # a caller that sends the tier as text (JSON) is the same spawn
+        self._refused({"task": "t", "tier": "1"}, "tier 1")
+
+    def test_an_explicit_tier_two_spawn_is_allowed(self):
+        argv, _ = self._allowed({"task": "t", "tier": 2})
+        self.assertEqual(argv[argv.index("--tier") + 1], "2")
+        argv, _ = self._allowed({"task": "t", "tier": "2"})
+        self.assertEqual(argv[argv.index("--tier") + 1], "2")
+
+    def test_an_implement_card_is_allowed_by_its_resolved_tier(self):
+        # The bug AO-L2-PRODTEST hit live: tier 3 is the review-only seat, so an
+        # L2 that could only spawn tier 3 could never start a writer. The default
+        # card and an explicit implement card both route to tier 2 and pass.
+        argv, route = self._allowed({"task": "t"})
+        self.assertEqual(agent_tier(route["combo"]), 2, route)
+        argv, route = self._allowed({"task": "t", "card": {"role": "implement",
+                                                           "complexity": "standard"}})
+        self.assertIn("role=implement", argv[argv.index("--card") + 1], argv)
+        self.assertEqual(agent_tier(route["combo"]), 2, route)
+
+    def test_profile_l2_forces_isolation_whatever_the_caller_passed(self):
+        # The rationale for the tier-3-only fence was an L2 worker standing in the
+        # main tree; that is only true of a run that was NOT isolated, so the fix
+        # is the force, not the tier. An `isolate=False` from inside a lane is
+        # overridden, not honoured and not refused.
+        for req in ({"task": "t", "tier": 2, "isolate": False},
+                    {"task": "t", "tier": 3, "read_only": True, "isolate": False},
+                    {"task": "t", "card": {"role": "implement",
+                                           "complexity": "standard"},
+                     "isolate": False}):
+            argv, _ = self._allowed(req)
+            self.assertNotIn("--allow-shared-checkout", argv, argv)
+        # The force is the PROFILE's leg, not a re-labelled general rule: the same
+        # spawn outside profile l2 is isolated by the pre-existing KEYDENY3 leg
+        # and carries no l2 marker.
+        argv, route = self._argv({"task": "t", "tier": 3, "read_only": True})
+        self.assertIn("--isolate", argv, argv)
+        self.assertFalse(route.get("l2_forced_isolate"), route)
 
     def test_an_orchestrate_card_is_refused_whatever_tier_it_routes_to(self):
         msg = self._refused({"task": "t", "card": {"role": "orchestrate",
@@ -467,16 +513,13 @@ class L2SpawnTierGateTest(unittest.TestCase):
         # 3 is the review-only seat still applies (T2-RECORD-PIN), so a tier-3
         # spawn that is legal is `--read-only` or a review card - the L2 gate must
         # refuse nothing the lane was built to ask for.
-        argv, _ = self._argv({"task": "t", "tier": 3, "read_only": True},
-                             AUTOOS_AGENT_LAYER="L2")
+        argv, _ = self._allowed({"task": "t", "tier": 3, "read_only": True})
         self.assertEqual(argv[argv.index("--tier") + 1], "3")
         self.assertIn("--read-only", argv)
-        argv, _ = self._argv({"task": "t", "tier": "3", "read_only": True},
-                             AUTOOS_AGENT_LAYER="L2")
+        argv, _ = self._allowed({"task": "t", "tier": "3", "read_only": True})
         self.assertEqual(argv[argv.index("--tier") + 1], "3")
-        argv, route = self._argv({"task": "t", "card": {"role": "review",
-                                                        "complexity": "trivial"}},
-                                 AUTOOS_AGENT_LAYER="L2")
+        argv, route = self._allowed({"task": "t", "card": {"role": "review",
+                                                            "complexity": "trivial"}})
         self.assertEqual(agent_tier(route["combo"]), 3, route)
 
     # AO-L2-LAUNCH criterion b (Claude off the L2): an L2 lane runs free/credit
@@ -544,11 +587,20 @@ class L2SpawnTierGateTest(unittest.TestCase):
 
     def test_the_helper_reads_the_profile_and_the_resolved_tier(self):
         l2 = {"AUTOOS_AGENT_LAYER": "L2"}
-        self.assertIsNone(mcp_server.l2_spawn_refusal(3, None, env=l2))
-        self.assertIsNotNone(mcp_server.l2_spawn_refusal(2, None, env=l2))
-        # the role is refused whatever tier it happens to route to
+        # a worker at either allowed tier answers None, whatever the card says
+        for tier in (2, 3):
+            self.assertIsNone(mcp_server.l2_spawn_refusal(tier, None, env=l2))
+            self.assertIsNone(mcp_server.l2_spawn_refusal(
+                tier, {"role": "implement"}, env=l2))
+        # tier 1 is the L1's seat, and the role is refused whatever tier it
+        # happens to route to
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(1, None, env=l2))
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            1, {"role": "implement"}, env=l2))
         self.assertIsNotNone(mcp_server.l2_spawn_refusal(
             3, {"role": "orchestrate"}, env=l2))
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            2, {"role": "orchestrate"}, env=l2))
         # and none of it applies outside profile l2
         self.assertIsNone(mcp_server.l2_spawn_refusal(1, {"role": "orchestrate"},
                                                       env={}))

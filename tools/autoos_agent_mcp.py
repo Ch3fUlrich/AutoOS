@@ -9,8 +9,8 @@ spec 9 ask-back). Which of those a client can even LIST is a profile
 (MCP_TOOL_PROFILES): a server whose environment marks it as running inside an L2
 lane (`AUTOOS_AGENT_LAYER=L2`, rendered by oc_l1_render) registers the spawner's
 tools - spawn, status, result, ps, list_clients, route, context, heartbeat - and
-nothing else, and inside that profile a `spawn` is a tier-3 worker only
-(L2_SPAWN_TIER).
+nothing else, and inside that profile a `spawn` is a tier-2 or tier-3 worker,
+always in its own clone (L2_SPAWN_TIER, and the isolation profile l2 forces).
 spawn is asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
@@ -236,8 +236,10 @@ def tool_names_for(profile: str) -> tuple:
     return MCP_TOOL_PROFILES.get(profile) or MCP_TOOL_PROFILES[NARROWEST_PROFILE]
 
 
-# The one tier an L2 lane may start a worker at (AO-L2-LAUNCH merge criterion 3).
-L2_SPAWN_TIER = 3
+# The lowest tier an L2 lane may start a worker at (AO-L2-LAUNCH merge criterion 3,
+# corrected by AO-L2-PRODTEST's live run: tier 3 is the review-only seat, so a
+# tier-3-only lane could never start a writer).
+L2_SPAWN_TIER = 2
 
 
 def l2_spawn_refusal(run_tier: int, card: dict | None, client: str | None = None,
@@ -252,14 +254,21 @@ def l2_spawn_refusal(run_tier: int, card: dict | None, client: str | None = None
       and any Claude MODEL PIN are refused whatever the tier, checked FIRST, so an
       L2 cannot spend the Claude allowance even with a declared reason - the credit
       budget is the L1's to apply, and cross-family review rides with it.
-    * Tier (criterion 3): an L2 coordinates - its shell is a closed read-only list
-      and its editor is denied - so the only thing it may start is a tier-3 worker
-      writing in its own clone. Below that is a session holding an editor and a
-      checkout of the main tree, and a `role: orchestrate` card is the L1's own
-      seat reached through the resolver instead of through `--tier` - both are an
-      L2 climbing out of its lane. The check reads the TIER THE REQUEST RESOLVES
-      TO, not the flag the caller typed, so a card that routes to tier 2 is refused
-      exactly as `--tier 2` is.
+    * Tier (criterion 3): the only thing an L2 may start is a worker, tier 2 or
+      tier 3, running in its own `--isolate` clone (profile l2 forces the clone,
+      whatever the caller passed). Tier 1 stays with the L1: it is the seat that
+      carries the orchestration combo, and an L2 that could start one owns the
+      lane above itself. A `role: orchestrate` card is that same seat reached
+      through the resolver instead of through `--tier`. The check reads the TIER
+      THE REQUEST RESOLVES TO, not the flag the caller typed, so a card cannot
+      route its way into the L1's seat.
+
+    The original wording of this rule - "below tier 3 is a session that holds its
+    own editor and a checkout of the main tree" - was half false: an isolated
+    worker holds a clone, so the editor was never the danger, and the fence that
+    mattered is the one the tier keeps anyway (tier 1 = the orchestrator's combo).
+    It cost the lane its only write path, because tier 3 refuses an implement
+    card (T2-RECORD-PIN).
 
     This is the minimal gate; the full ROLE-GATE (which role may spawn which) is a
     later lane.
@@ -281,11 +290,10 @@ def l2_spawn_refusal(run_tier: int, card: dict | None, client: str | None = None
         return None
     why = ("a role=orchestrate card is an L1's own seat"
            if role == "orchestrate" else
-           "below tier %d is a session that holds its own editor and a checkout "
-           "of the main tree" % L2_SPAWN_TIER)
-    return ("l2 lane: an L2 spawns tier-%d workers only, this request is tier %d "
-            "and %s. Report the work to the L1 inbox and let the L1 start the "
-            "tier." % (L2_SPAWN_TIER, int(run_tier), why))
+           "below tier %d is the L1's own seat" % L2_SPAWN_TIER)
+    return ("l2 lane: an L2 spawns tier-%d and tier-3 workers only, this request "
+            "is tier %d and %s. Report the work to the L1 inbox and let the L1 "
+            "start the tier." % (L2_SPAWN_TIER, int(run_tier), why))
 
 
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -810,11 +818,11 @@ def build_argv(req: dict, run_id: str | None = None,
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
     # D-665 (AO-L2-LAUNCH criteria 3 and b): the L2 gate. A spawn that resolves
-    # below tier 3 is not a worker an L2 may start, and a Claude client or a
+    # below tier 2 is not a worker an L2 may start, and a Claude client or a
     # Claude model pin is a spend an L2 may not make. Checked here, at the one
     # place the tier is known after routing (a flag, or whatever combo a card
     # selected), so the caller's own `--tier` cannot talk its way past a card that
-    # routes to tier 2 - and a dry run is refused too, because a preview an agent
+    # routes to tier 1 - and a dry run is refused too, because a preview an agent
     # would believe is the same lie as the launch. The pins travel to the ONE L2
     # helper so the tier rule and the Claude rule cannot drift apart.
     l2_refusal = l2_spawn_refusal(
@@ -822,6 +830,16 @@ def build_argv(req: dict, run_id: str | None = None,
         models=tuple(p for p in (req.get("model"), req.get("free_model")) if p))
     if l2_refusal is not None:
         raise ValueError(l2_refusal)
+    # ...and the isolation profile l2 owes every spawn it lets past that gate,
+    # whatever the caller passed: the worker edits a clone of the lane's repo,
+    # never the lane's checkout. The KEYDENY3 leg below already forces a clone at
+    # the spawned tiers; this one does not depend on which tiers that table holds
+    # or on which client lists NO_ISOLATE_CLIENTS, because "an L2 never writes in
+    # a shared tree" is the L2's rule, not a tier's.
+    if mcp_tool_profile() == NARROWEST_PROFILE and not req.get("isolate"):
+        req = dict(req, isolate=True)
+        route["forced_isolate"] = True
+        route["l2_forced_isolate"] = True
     # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
     # The CLI's own helper, so both entry points read one rule; a dry run only
     # previews it (the server's preflight IS a dry run), and every non-dry
@@ -1809,14 +1827,18 @@ def build_server(profile: str | None = None):
         does not unlock it — routing.select_combo is explicit that the flag is
         inert there; it only waives the privacy check on an explicit --model).
 
-        L2 SPAWN GATE (D-665, AO-L2-LAUNCH criterion 3): when this server's own
-        environment marks it as running inside an L2 lane (`AUTOOS_AGENT_LAYER=L2`
-        — the same marker that lists only the spawner's tools), a spawn is a
-        tier-3 worker only. Tier 1, tier 2 and any `role: orchestrate` card are
-        refused before a run dir exists, whatever the request typed: the gate
-        reads the tier the request RESOLVES to, and below tier 3 is a session that
-        holds its own editor, which is what an L2 exists not to have. An L2 that
-        needs one reports to the L1 inbox and the L1 starts the tier.
+        L2 SPAWN GATE (D-665, AO-L2-LAUNCH criterion 3, as AO-L2-PRODTEST's live
+        run corrected it): when this server's own environment marks it as running
+        inside an L2 lane (`AUTOOS_AGENT_LAYER=L2` — the same marker that lists
+        only the spawner's tools), a spawn is a tier-2 or tier-3 worker, always in
+        its own clone: profile l2 FORCES `isolate`, whatever the caller passed, so
+        a lane's worker never edits a shared tree. Tier 1 and any `role:
+        orchestrate` card are refused before a run dir exists, whatever the
+        request typed: the gate reads the tier the request RESOLVES to, and tier 1
+        is the L1's own seat. It used to be tier-3-only, which was a dead end —
+        tier 3 is the review-only seat and refuses an implement card, so an L2
+        could never start a writer. An L2 that needs tier 1 reports to the L1
+        inbox and the L1 starts the tier.
 
         claude_reason: this spawn's own Claude-budget declaration, for a `model`
         that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that
