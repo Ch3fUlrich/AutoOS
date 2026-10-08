@@ -4087,5 +4087,46 @@ class DenyGemini31ProPreviewTests(unittest.TestCase):
         self.assertTrue(any("leg_rules" in r for r in skipped["vertex/gemini-3.1-pro-preview"]))
 
 
+class PromptCacheFieldTests(unittest.TestCase):
+    """AO-PROBE-D657 (D-657, 2026-10-08): ``models.<id>.prompt_cache`` is the
+    measured prompt-caching verdict of `tools/probe-free.py --cache` - true /
+    false / null. The schema (additionalProperties: false) has to name it, and
+    check owns its type because a gate reading `is True` and a gate reading
+    truthiness disagree about a string. No leg is recorded cached until the
+    probe answers for it, so the committed registry carries none yet."""
+
+    MODEL_ID = "gemini-3.8-flash"
+
+    def problems(self, value):
+        reg = mutated()
+        reg["models"][self.MODEL_ID]["prompt_cache"] = value
+        return [p for p in registry.check_registry(reg) if "prompt_cache" in p]
+
+    def test_the_committed_registry_records_no_cache_verdict_yet(self):
+        reg = load_registry()
+        self.assertEqual([m for m, row in reg["models"].items()
+                          if "prompt_cache" in row], [])
+        self.assertEqual(registry.check_registry(reg), [])
+
+    def test_true_false_and_null_validate(self):
+        for value in (True, False, None):
+            self.assertEqual(self.problems(value), [], repr(value))
+
+    def test_any_other_shape_is_named_with_its_model(self):
+        for value in ("true", "unknown", 1, 0, "", {"cached": True}):
+            problems = self.problems(value)
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("models.%s.prompt_cache" % self.MODEL_ID, problems[0])
+
+    def test_the_schema_permits_the_field_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        self.assertFalse(model["additionalProperties"])
+        self.assertEqual(model["properties"]["prompt_cache"]["type"],
+                         ["boolean", "null"])
+        self.assertNotIn("prompt_cache", model["required"])
+
+
 if __name__ == "__main__":
     unittest.main()

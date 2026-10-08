@@ -3436,6 +3436,31 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
+def _check_prompt_cache(registry) -> list:
+    """models.<id>.prompt_cache, when present, is one of true / false / null
+    (AO-PROBE-D657, D-657 2026-10-08): the measured prompt-caching verdict of
+    `tools/probe-free.py --cache` -- true when the second same-prefix call
+    reports cached tokens > 0, false when it reports 0, null when nothing was
+    measured (a failed or unreported call is unknown, not a verdict).
+
+    The type is owned here because readers of a flag disagree about a malformed
+    one: `value is True` says no to the string "false" while a plain truthiness
+    test says yes, so the same leg could be gated twice in opposite directions.
+    A bad value is named here, where the model id is still attached to it.
+    """
+    problems = []
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict) or "prompt_cache" not in model:
+            continue
+        value = model["prompt_cache"]
+        if value is not None and not isinstance(value, bool):
+            problems.append(
+                "models.%s.prompt_cache must be true, false or null (got %r) - "
+                "an unmeasured leg is null, and probe-free.py never writes a "
+                "string here" % (model_id, value))
+    return problems
+
+
 def _check_paid_local_cap(registry) -> list:
     """policy.paid_local_cap_usd, when present, is a number > 0.
 
@@ -3473,6 +3498,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_provider_limits(registry))
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_provider_prices(registry))
+    problems.extend(_check_prompt_cache(registry))
     problems.extend(_check_paid_local_cap(registry))
     problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))
