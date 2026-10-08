@@ -485,6 +485,7 @@ class LaneTest(unittest.TestCase):
         self.assertEqual(rc, 0, result)
         out = oc_l2.cmd_inbox(result["lane"], "2026-10-08T00:00:00Z take the phase")
         self.assertTrue(out["nudged"], out)
+        self.assertIs(out["refused"], False)
         path = Path(out["inbox"])
         self.assertTrue(path.is_file())
         records, malformed = autoos_inbox.parse_file(str(path))
@@ -516,6 +517,39 @@ class LaneTest(unittest.TestCase):
     def test_inbox_refuses_empty_text(self):
         with self.assertRaises(oc_l2.L2Error):
             oc_l2.cmd_inbox(self._lane_name(), "   ")
+
+    def test_inbox_refuses_to_nudge_a_lane_that_never_cleared_the_canary(self):
+        # Sonnet final REJECT finding 3: an rc5 start leaves a server whose
+        # session answers for a live lane, but no guard denial was seen and the
+        # pilot was never prompted - nudging it would hand work to an unverified
+        # session as though it were running.
+        bad = FakeServer(PW_VALUE, canary_mode="allowed")
+        bad.start()
+        mock.patch.object(oc_l1, "PORT_MIN", 1024).start()
+        mock.patch.object(oc_l1, "PORT_MAX", 65535).start()
+        try:
+            result, rc = self._start(port=bad.port)
+            self.assertEqual(rc, 5)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli_rc = oc_l2.main(["inbox", "--lane", result["lane"],
+                                    "--text", "work for a guarded lane"])
+            self.assertEqual(cli_rc, 2,
+                             "a caller that only reads the exit code must see the refusal")
+            out = json.loads(buf.getvalue())
+            self.assertIs(out["refused"], True, out)
+            self.assertIs(out["nudged"], False)
+            self.assertIn("canary", out["detail"])
+            self.assertIn("work for a guarded lane",
+                          Path(out["inbox"]).read_text(encoding="utf-8"),
+                          "the inbox is the durable half of the contract")
+            self.assertEqual([r for r in bad.requests
+                              if FAKE_SESSION_ID in r["path"]
+                              and r["path"].endswith("/prompt")], [],
+                             "an unverified session was nudged")
+            oc_l2.cmd_stop(result["lane"])
+        finally:
+            bad.stop()
 
     # (5) status
     def test_status_verdicts(self):

@@ -565,7 +565,13 @@ def append_record(path, text, source="l1"):
 def cmd_inbox(name, text):
     """L1 -> L2: land the line in the lane's inbox, then wake the session. The
     append happens whether or not the nudge gets through - a line lost because
-    the server was mid-restart would otherwise have to be re-sent by hand."""
+    the server was mid-restart would otherwise have to be re-sent by hand.
+
+    The nudge is for a lane that proved itself guarded: the canary was DENIED
+    and the pilot got its first prompt (Sonnet final REJECT, finding 3). An
+    rc5 start leaves a server that answers for a live session while its pilot
+    sits idle and unverified - waking that would send work to a session nobody
+    has shown to be under the guard, and read to L1 as a running lane."""
     name = check_lane(name)
     if not isinstance(text, str) or not text.strip():
         raise L2Error("inbox text must not be empty")
@@ -576,11 +582,20 @@ def cmd_inbox(name, text):
                  or lane_inbox(Path(lane.get("scratch_dir") or lane_dir(name))))
     line = append_record(inbox, text)
     out = {"lane": name, "inbox": str(inbox), "appended": line.rstrip("\n"),
-           "nudged": False}
+           "nudged": False, "refused": False}
     state = live_session(lane)
     if state is None:
         out["detail"] = "the lane is not live - the line is in the inbox and will " \
                         "be read when it starts; nudge it with l2_status/l2_stop"
+        return out
+    canary = state.get("canary") if isinstance(state.get("canary"), dict) else {}
+    if canary.get("denied") is not True or state.get("prompted") is not True:
+        out["refused"] = True
+        out["detail"] = ("the line is in the inbox, but the session is not nudged: "
+                         "this lane never cleared its canary (canary denied=%s, "
+                         "prompted=%s) - stop it and start it again to get a "
+                         "guarded, running lane"
+                         % (canary.get("denied"), state.get("prompted")))
         return out
     password = os.environ.get(lane.get("password_env") or ENV_PW)
     try:
@@ -753,7 +768,11 @@ def main(argv=None):
             # reads the exit code cannot mistake a live server for a stopped one.
             rc = 0 if result.get("stopped") else 2
         else:
-            result, rc = cmd_inbox(args.lane, args.text), 0
+            result = cmd_inbox(args.lane, args.text)
+            # A refused nudge is not a delivered one: say so in the exit code as
+            # well as in the JSON, so an L1 that reads neither cannot count the
+            # line as handed over.
+            rc = 2 if result.get("refused") else 0
     except (L2Error, oc_l1.LaneError) as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return 2

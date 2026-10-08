@@ -301,7 +301,8 @@ def l2_stop(lane: str) -> dict:
 def l2_inbox(lane: str, text: str) -> dict:
     """Hand a line of work to a running phase lane: append one timestamped
     record to the lane's inbox and nudge its session with the launcher's own
-    prompt call. The line is kept even when the lane is not live."""
+    prompt call. The line is kept even when the lane is not live; a lane whose
+    canary never denied is refused the nudge (refused=true, exit_code 2)."""
     return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
 
 
