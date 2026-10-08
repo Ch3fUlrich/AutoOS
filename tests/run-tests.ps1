@@ -4811,8 +4811,8 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
-        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-t1-orchestrator.json') -Raw | ConvertFrom-Json
-        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-t3-driver.json') -Raw | ConvertFrom-Json
+        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-l1-orchestrator.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-l3-driver.json') -Raw | ConvertFrom-Json
         Assert-Equal $t1.model 'openai/l1-orchestrator'
         Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $t1.api_key 'test-omni-key'
@@ -4820,10 +4820,10 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Assert-Equal $t3.model 'openai/l3-driver'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
-        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-t2-worker-clean.json')) 'clean twin missing'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-l2-worker-clean.json')) 'clean twin missing'
         $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
-        Assert-True ($null -ne $lp.profiles.'omniroute-t1-orchestrator') 't1 not published to llm_profiles'
-        Assert-Equal $lp.active 'omniroute-t1-orchestrator'
+        Assert-True ($null -ne $lp.profiles.'omniroute-l1-orchestrator') 't1 not published to llm_profiles'
+        Assert-Equal $lp.active 'omniroute-l1-orchestrator'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -4846,7 +4846,7 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
-        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-t1-orchestrator.json'))) 'tier profile written without a key'
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-l1-orchestrator.json'))) 'tier profile written without a key'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }

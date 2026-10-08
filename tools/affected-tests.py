@@ -22,7 +22,7 @@ list is derivable, so it is derived here: every test block whose text mentions o
 of the ids, matched only where the id ends, across all three suites. Over-inclusion
 is allowed and a miss is not, so the match is strict against a *longer* id
 (`l1-orchestrator` does not name `l1-orchestrator-clean`) and loose against a name
-this id generated (`omniroute-t1-orchestrator` is).
+this id generated (`omniroute-l1-orchestrator` is).
 
 What it reads
     tests/linux/*.sh      `if it "name"; then` blocks
@@ -478,7 +478,7 @@ def id_pattern(an_id: str) -> re.Pattern:
     `l1-orchestrator.json` and a sentence-ending `l1-orchestrator.` still count:
     dropping those would be a *miss*, which - unlike over-inclusion - this tool may
     not emit. The left side keeps the plain word boundary for the same reason:
-    `omniroute-t1-orchestrator` is the profile file this route generates, and a
+    `omniroute-l1-orchestrator` is the profile file this route generates, and a
     strict left edge hides 24 blocks here - among them every service case naming
     that profile and every cap case naming `claude-opus-4-6`, the model the route
     serves. What that looseness lets back in (`chip-auto`, `AUTOOS_WIPE_TARGET`)

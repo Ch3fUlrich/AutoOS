@@ -952,6 +952,13 @@ if it "probe-effort: effort-ladder probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_effort.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/probe-ledger.py: the availability ledger - measured per-leg serving
+# state, so lanes stop re-probing known-good and known-dead legs. Every case
+# runs against a temp state file; logs/routing/availability.json is never read.
+if it "probe-ledger: availability ledger record/check/credit/dump (unit tests)"; then
+    out="$(python3 tests/test_probe_ledger.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-rtk.py: the RTK A/B behind decision D19 (routing v2 spec section 10).
 # Offline: subprocess.run is monkeypatched, so this never calls the omniroute CLI
 # and never reads a manage key - the live A/B stays an operator run.

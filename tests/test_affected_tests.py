@@ -521,7 +521,7 @@ class FixtureTests(unittest.TestCase):
         # The other direction is a miss, not over-inclusion: `omniroute-…json` is
         # the profile this route generates, and a leading `-` or a trailing `.` is
         # not part of the id.
-        self.assertIsNotNone(short.search("omniroute-t1-orchestrator.json"))
+        self.assertIsNotNone(short.search("omniroute-l1-orchestrator.json"))
         flash = at.id_pattern("gemini-3.8-flash")
         self.assertIsNone(flash.search("gemini-3.8-flash-lite"))
         self.assertIsNotNone(flash.search("gemini-3.8-flash"))
@@ -708,7 +708,7 @@ class RealRepoTests(unittest.TestCase):
                                 % (t.runner, t.name, terms))
 
     def test_a_boundary_tightening_keeps_the_case_naming_a_profile_the_route_makes(self):
-        # tests/linux/34-ai-services.sh names `omniroute-t1-orchestrator`: the
+        # tests/linux/34-ai-services.sh names `omniroute-l1-orchestrator`: the
         # profile file this route generates. A boundary that also rejected a
         # leading `-` would hide these cases from a flip of the very route they
         # cover - a miss, which the tool's own contract does not allow.

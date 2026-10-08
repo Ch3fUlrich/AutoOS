@@ -185,23 +185,23 @@ if it "setup_openhands_config writes gateway tier profiles with a key, none with
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "omniroute-t1-orchestrator.json"), encoding="utf-8"))
-t3 = json.load(open(os.path.join(d, "profiles", "omniroute-t3-driver.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "omniroute-l1-orchestrator.json"), encoding="utf-8"))
+t3 = json.load(open(os.path.join(d, "profiles", "omniroute-l3-driver.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
       t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"],
-      lp["active"], "omniroute-t1-orchestrator" in lp["profiles"])
+      lp["active"], "omniroute-l1-orchestrator" in lp["profiles"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/l3-driver none False omniroute-t1-orchestrator True"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/l3-driver none False omniroute-l1-orchestrator True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
         unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
-        test -e "$tmp/.openhands/profiles/omniroute-t1-orchestrator.json" && echo PRESENT || echo ABSENT
+        test -e "$tmp/.openhands/profiles/omniroute-l1-orchestrator.json" && echo PRESENT || echo ABSENT
     )"
     rm -rf "$tmp"
     assert_eq "$out" "ABSENT"
@@ -217,14 +217,14 @@ if it "setup_openhands_config writes litellm fallback tiers with a litellm key o
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "litellm-t1-orchestrator.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "litellm-l1-orchestrator.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], lp["active"],
-      os.path.exists(os.path.join(d, "profiles", "omniroute-t1-orchestrator.json")))
+      os.path.exists(os.path.join(d, "profiles", "omniroute-l1-orchestrator.json")))
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:4000/v1 test-lit-key litellm-t1-orchestrator False"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:4000/v1 test-lit-key litellm-l1-orchestrator False"
 fi
 
 if it "tier profiles come from the spec, installer and tool agree"; then

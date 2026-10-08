@@ -6512,6 +6512,9 @@ _lit_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("AUTOOS_LITELL
 # carries its own key: it does NOT go through either gateway.
 _or_key = os.environ.get("OPENROUTER_API_KEY") or secrets.get("openrouter")
 _spec_file = os.path.join(REPO_ROOT, "configuration", "openhands", "tier-profiles.json") if REPO_ROOT else ""
+# {gateway: the spec's top-ranked tier id for it} - the app's default profile
+# per gateway, derived from the spec below. Empty when no spec was read.
+_spec_seed = {}
 if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_file):
     # Gateway-routed tier profiles for the 3-level hierarchy, read from the
     # spec (single source - never inline tiers here). These are NOT catalog
@@ -6526,6 +6529,9 @@ if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_fil
         _lit_base = _spec.get("litellm_base_url", _gw)
         _gateway_keys = {"litellm": _lit_key, "openrouter": _or_key}
         for _t in _spec["tiers"]:
+            # ranked before the key check below: a tier this run cannot build
+            # is still the spec's default for its gateway.
+            _spec_seed.setdefault(_t.get("gateway") or "omniroute", _t["id"])
             _g = _t.get("gateway")
             if _g in _gateway_keys:
                 _t_key = _gateway_keys[_g]
@@ -6562,11 +6568,12 @@ agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # is installer-managed desired state only. Without this merge the UI shows
 # just the fossil Default profile no matter how many sidecars exist.
 # Only installer-managed entries are written (never touch anything else in
-# llm_profiles); active becomes omniroute-t1-orchestrator (or litellm-t1-orchestrator when only
-# the fallback key is in play) only when the current selection is missing
-# (None or dangling) - a live user selection is never yanked. The fossil
-# Default (ollama fallback this installer wrote before any key existed) is
-# refreshed to mirror the current default llm; anything else stays untouched.
+# llm_profiles); active becomes the spec's top-ranked gateway tier (or its
+# top-ranked litellm tier when only the fallback key is in play) only when the
+# current selection is missing (None or dangling) - a live user selection is
+# never yanked. The fossil Default (ollama fallback this installer wrote before
+# any key existed) is refreshed to mirror the current default llm; anything
+# else stays untouched.
 _lp = settings.setdefault("llm_profiles", {})
 _managed = _lp.setdefault("profiles", {})
 for _fn in sorted(os.listdir(profiles_dir)):
@@ -6577,8 +6584,10 @@ for _fn in sorted(os.listdir(profiles_dir)):
             _managed[_fn[:-5]] = json.load(_pf)
     except Exception:
         pass
-if (omni_key and "omniroute-t1-orchestrator" in _managed) or (_lit_key and "litellm-t1-orchestrator" in _managed):
-    _want_active = "omniroute-t1-orchestrator" if (omni_key and "omniroute-t1-orchestrator" in _managed) else "litellm-t1-orchestrator"
+_omni_seed = _spec_seed.get("omniroute") if omni_key else None
+_lit_seed = _spec_seed.get("litellm") if _lit_key else None
+if (_omni_seed and _omni_seed in _managed) or (_lit_seed and _lit_seed in _managed):
+    _want_active = _omni_seed if (_omni_seed and _omni_seed in _managed) else _lit_seed
     if _lp.get("active") is None or _lp.get("active") not in _managed:
         _lp["active"] = _want_active
     _default_entry = _managed.get("Default")

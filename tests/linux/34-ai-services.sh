@@ -2830,7 +2830,7 @@ fi
 # native Linux host. Like resolve_ollama_base_url: keep it where it resolves.
 if it "svc: profile sync picks the gateway host per consumer"; then
     d="$(mktemp -d)"
-    # sync_base <resolves 0|1> [--consumer X]: the omniroute-t2-worker base_url.
+    # sync_base <resolves 0|1> [--consumer X]: the omniroute-l2-worker base_url.
     sync_base() {
         local resolves="$1"; shift
         rm -rf "$d/oh"
@@ -2838,7 +2838,7 @@ if it "svc: profile sync picks the gateway host per consumer"; then
             python3 "$ROOT/tools/sync-openhands-profiles.py" --openhands-dir "$d/oh" \
             --keys-file "$d/none.yml" --litellm-env "$d/none.env" "$@" >/dev/null 2>&1
         python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"])' \
-            "$d/oh/profiles/omniroute-t2-worker.json" 2>/dev/null
+            "$d/oh/profiles/omniroute-l2-worker.json" 2>/dev/null
     }
     got="$(sync_base 0)|$(sync_base 0 --consumer native)|$(sync_base 1 --consumer native)"
     rm -rf "$d"
@@ -2881,21 +2881,21 @@ if it "svc: profile sync pushes the tiers into a running app, idempotently and c
     second="$(push)"
     kill "$fake_pid" 2>/dev/null
     ok=1
-    [[ "$first" == *"app settings seeded with omniroute-t1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
+    [[ "$first" == *"app settings seeded with omniroute-l1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
     # Spec order = configuration/openhands/tier-profiles.json: the three
     # hierarchy tiers (t1 -> t2 -> t3) fill the fake's cap of 3; the red-by-
-    # design the last tier (litellm-t2-worker-free-only) is last and never
+    # design the last tier (litellm-l2-worker-free-only) is last and never
     # takes a slot.
-    for _t in omniroute-t1-orchestrator omniroute-t2-worker omniroute-t3-driver; do
+    for _t in omniroute-l1-orchestrator omniroute-l2-worker omniroute-l3-driver; do
         [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
     done
-    [[ "$first" == *"app profile omniroute-t2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before l2-orchestrator" >&2; }
-    [[ "$first" == *"app profile litellm-t2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
+    [[ "$first" == *"app profile omniroute-l2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before l2-orchestrator" >&2; }
+    [[ "$first" == *"app profile litellm-l2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
-    grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" \
+    grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/omniroute-l1-orchestrator$' "$d/req.log" \
         && { ok=0; echo "second run re-posted an unchanged profile" >&2; }
-    [[ "$second" == *"omniroute-t1-orchestrator skipped (up to date)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"omniroute-l1-orchestrator skipped (up to date)"* ]] || { ok=0; echo "second: $second" >&2; }
     [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "profile push is wrong"; fi
@@ -2963,7 +2963,7 @@ JSON
         grep -qx "$_k" <<<"$after" || { ok=0; echo "a foreign profile was deleted: $_k" >&2; }
         grep -q "^DELETE .*/$_k\$" <<<"$first_log" && { ok=0; echo "DELETE sent for $_k" >&2; }
     done
-    grep -qx omniroute-t1-orchestrator <<<"$after" || { ok=0; echo "t1 not pushed: $after" >&2; }
+    grep -qx omniroute-l1-orchestrator <<<"$after" || { ok=0; echo "t1 not pushed: $after" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run deleted again ($second_deletes)" >&2; }
     [[ "$second" == *"deleted"* ]] && { ok=0; echo "second run reports a delete: $second" >&2; }
     [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
@@ -2982,7 +2982,7 @@ if it "svc: profile push deletes retired profiles before it saves any"; then
     rm -rf "$d"
     ok=1
     [[ -n "$last_delete" && -n "$first_save" && "$last_delete" -lt "$first_save" ]] || { ok=0; echo "delete line $last_delete, first save line $first_save" >&2; }
-    [[ "$out" == *"app profile omniroute-t3-driver saved"* ]] || { ok=0; echo "freed slots unused: $out" >&2; }
+    [[ "$out" == *"app profile omniroute-l3-driver saved"* ]] || { ok=0; echo "freed slots unused: $out" >&2; }
     if (( ok )); then pass; else fail "retired profiles still hold slots during the push"; fi
 fi
 
@@ -3046,8 +3046,8 @@ fi
 # MUSEAPI 2026-09-27 (the omniroute spark tier re-entered the spec above them).
 if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-t2-worker-free-only": {"model": "openai/l2-worker-free-only"}, "litellm-t3-driver-free-only": {"model": "openai/l3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker-free-only litellm-t3-driver-free-only
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-l2-worker-free-only": {"model": "openai/l2-worker-free-only"}, "litellm-l3-driver-free-only": {"model": "openai/l3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-l2-worker-free-only litellm-l3-driver-free-only
     _fake_app "$d" "$d/seed.json"
     first="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -3058,9 +3058,9 @@ if it "svc: profile push makes room for a higher-ranked tier by removing the low
     rm -rf "$d"
     ok=1
     # One slot is the user's; the two AutoOS slots go to the spec's top two.
-    [[ "$after" == "my-own-profile omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$first" == *"litellm-t3-driver-free-only removed to make room for omniroute-t1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
-    [[ "$first" == *"litellm-t2-worker-free-only removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
+    [[ "$after" == "my-own-profile omniroute-l1-orchestrator omniroute-l2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$first" == *"litellm-l3-driver-free-only removed to make room for omniroute-l1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-l2-worker-free-only removed to make room for omniroute-l2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
     [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
     [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
     if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
@@ -3071,8 +3071,8 @@ fi
 # room for a higher tier. A prefix-named profile nobody recorded never does.
 if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
     d="$(mktemp -d)"
-    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-t2-worker": {"model": "openai/l2-worker"}, "litellm-t2-worker-free-only": {"model": "openai/l2-worker-free-only"}}}' >"$d/seed.json"
-    _seed_pushed "$d" litellm-t2-worker litellm-t2-worker-free-only
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-l2-worker": {"model": "openai/l2-worker"}, "litellm-l2-worker-free-only": {"model": "openai/l2-worker-free-only"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-l2-worker litellm-l2-worker-free-only
     _fake_app "$d" "$d/seed.json"
     out="$(_push_to "$d" "$url")"
     after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
@@ -3080,8 +3080,8 @@ if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, ne
     personal_deletes="$(grep -c '^DELETE .*/omniroute-personal$' "$d/req.log" || true)"
     rm -rf "$d"
     ok=1
-    [[ "$after" == "omniroute-personal omniroute-t1-orchestrator omniroute-t2-worker " ]] || { ok=0; echo "app holds: $after" >&2; }
-    [[ "$out" == *"litellm-t2-worker removed to make room for omniroute-t2-worker"* ]] || { ok=0; echo "unbuilt tier not ranked: $out" >&2; }
+    [[ "$after" == "omniroute-l1-orchestrator omniroute-l2-worker omniroute-personal " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$out" == *"litellm-l2-worker removed to make room for omniroute-l2-worker"* ]] || { ok=0; echo "unbuilt tier not ranked: $out" >&2; }
     [[ "$personal_deletes" == 0 ]] || { ok=0; echo "omniroute-personal DELETEd" >&2; }
     if (( ok )); then pass; else fail "eviction ranks or ownership are wrong"; fi
 fi
@@ -3100,10 +3100,10 @@ if it "svc: profile push re-sends a profile whose key was rotated"; then
     push sk-fake-key-one >/dev/null
     : >"$d/req.log"
     same="$(push sk-fake-key-one)"
-    same_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" || true)"
+    same_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-l1-orchestrator$' "$d/req.log" || true)"
     : >"$d/req.log"
     rotated="$(push sk-fake-key-two)"
-    rotated_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-t1-orchestrator$' "$d/req.log" || true)"
+    rotated_posts="$(grep -c '^POST /api/v1/settings/profiles/omniroute-l1-orchestrator$' "$d/req.log" || true)"
     kill "$fake_pid" 2>/dev/null
     state_mode="$(stat -c %a "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null)"
     leaked="$(grep -c 'sk-fake-key' "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null || true)"
