@@ -409,13 +409,19 @@ fi
 # api-keys.example.yml says "fill in what you have", so a copied file keeps
 # REPLACE_WITH_* for the rest. Those must never be registered as keys: once
 # registered, "already registered" would also shadow the real key forever.
+# D657-D2 (AO-DENYLEGS D2, 2026-10-08) moved the placeholder row off `gemini`:
+# every google_ai_studio leg is now gated (the D-657 probe left the route with
+# its Vertex spelling only), so that provider exits the plan at the
+# all-legs-unavailable step and never reaches the key lookup this test is about.
+# `vertex` is the provider the chains actually serve on today, so the placeholder
+# rule is proved on a row apply.sh still plans.
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
-    printf 'google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'vertex: REPLACE_WITH_VERTEX_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
-    assert_contains "$out" "gemini: no key in api-keys.yml, skipped"
+    assert_contains "$out" "vertex: no key in api-keys.yml, skipped"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
     else fail "the real mistral key was not planned"; fi
 fi
