@@ -718,6 +718,21 @@ class ProviderSpellingCostTests(UsageCliTests):
                                places=6)
         self.assertEqual(guards["vertex_ai"]["models_unpriced"], 0)
 
+    def test_the_row_filter_reads_the_normalisers_own_row_for_that_provider(self):
+        # is_spend_row's namespace set and the price table's key set come from
+        # the same per-provider row (registry.provider_spellings_for), so one
+        # data edit moves both. A provider the registry does not carry answers
+        # to its own name only.
+        from registry import provider_alias_map
+        alias_map = provider_alias_map(self.REG)
+        for provider_id in self.REG["providers"]:
+            self.assertEqual(
+                usage._provider_spellings(provider_id, self.REG),
+                {spelling.lower() for spelling in alias_map[provider_id]},
+                provider_id)
+        self.assertEqual(usage._provider_spellings("whoever", self.REG), {"whoever"})
+        self.assertEqual(usage._provider_spellings("vertex_ai", None), {"vertex_ai"})
+
 
 class SpendTests(UsageCliTests):
     """DSGUARD: the paid-spend section — DeepSeek spend since a date, and the

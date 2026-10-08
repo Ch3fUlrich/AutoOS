@@ -102,7 +102,7 @@ import urllib.request
 from pathlib import Path
 
 import autoos_resolver as resolver  # tools/ is on sys.path for every caller
-from registry import provider_alias_map  # the one provider-spelling normaliser
+from registry import provider_alias_map, provider_spellings_for
 
 DEFAULT_GATEWAY = "http://127.0.0.1:20128"
 PAGE_LIMIT = 500
@@ -851,13 +851,14 @@ def _provider_spellings(provider, registry=None):
     (`providers.<id>.omniroute_id` -- `vertex` for `vertex_ai`), not the
     registry id, and model spellings carry the same namespace
     (`vertex/...`, `ovh/...` via `model_prefix`). All of them are read from
-    the data through registry.provider_alias_map -- the same normaliser that
-    prices the row -- so the guard's row filter and the report's price lookup
-    can never disagree about which namespaces a provider owns. Without a
-    registry only the id itself matches (the old behaviour exactly)."""
-    spellings = {str(provider).strip().lower()}
-    for value in provider_alias_map(registry or {}).get(provider, []):
-        spellings.add(value.strip().lower())
+    the data through registry.provider_spellings_for -- the same normaliser
+    that prices the row, applied to this one provider's row -- so the guard's
+    row filter and the report's price lookup can never disagree about which
+    namespaces a provider owns. Without a registry only the id itself matches
+    (the old behaviour exactly)."""
+    spellings = set()
+    for value in provider_spellings_for(str(provider).strip(), registry or {}):
+        spellings.add(str(value).strip().lower())
     return spellings
 
 

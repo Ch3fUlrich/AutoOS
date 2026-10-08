@@ -438,6 +438,26 @@ def resolve_leg(leg, registry) -> tuple:
     return provider_id, model_id
 
 
+def provider_spellings_for(provider_id, registry) -> list:
+    """One provider's spellings: its id, then each namespace its own row
+    declares. A provider the registry does not carry answers to its own name
+    only -- the old hand-read of `omniroute_id`/`model_prefix`, kept in one
+    place instead of restated by every consumer. Order is stable and
+    de-duplicated; see `provider_alias_map` for why the spellings come from the
+    data."""
+    entry = ((registry or {}).get("providers") or {}).get(provider_id)
+    spellings = [provider_id]
+    if isinstance(entry, dict):
+        declared = []
+        for field in ("omniroute_id", "model_prefix"):
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip():
+                declared.append(value.strip())
+        declared.extend(_alias_values(entry.get("aliases")))
+        spellings.extend(declared)
+    return list(dict.fromkeys(spellings))
+
+
 def provider_alias_map(registry) -> dict:
     """{provider id: [its own id, every namespace its rows may carry]}.
 
@@ -447,31 +467,18 @@ def provider_alias_map(registry) -> dict:
     registry keys everything -- routes, prices, `provider_prices` -- by provider
     id. Every consumer that prices a row has to cross that gap, and the
     hand-written name lists that did so priced exactly the providers their
-    author had measured. All three spellings come from the data, so a renamed
+    author had measured. All spellings come from the data, so a renamed
     connection is covered the moment its row lands. A provider entry may also
     declare `aliases` (a string or a list) for spellings no field of the schema
     carries; that is the extension point, and adding a name there is a data edit.
 
-    Values are declared spellings verbatim (a model namespace keeps its case),
-    de-duplicated in this order: the provider id, then each declared field.
+    Values are declared spellings verbatim (a model namespace keeps its case).
     `{}` for a registry with no providers section."""
     providers = (registry or {}).get("providers")
-    out = {}
     if not isinstance(providers, dict):
-        return out
-    for provider_id, entry in providers.items():
-        spellings = [provider_id]
-        if isinstance(entry, dict):
-            declared = []
-            for field in ("omniroute_id", "model_prefix"):
-                value = entry.get(field)
-                if isinstance(value, str) and value.strip():
-                    declared.append(value.strip())
-            for value in _alias_values(entry.get("aliases")):
-                declared.append(value)
-            spellings.extend(declared)
-        out[provider_id] = list(dict.fromkeys(spellings))
-    return out
+        return {}
+    return {provider_id: provider_spellings_for(provider_id, registry)
+            for provider_id in providers}
 
 
 def _alias_values(aliases) -> list:
