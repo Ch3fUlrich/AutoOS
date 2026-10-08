@@ -454,6 +454,15 @@ _prune_apply() {
         bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
     kill "$pid" 2>/dev/null
 }
+# _omitted_combo - one orphaned id, read from combos.json's own "omitted" list.
+# Derived, not hardcoded: which route is orphaned right now is registry data,
+# and a pinned name goes stale the moment a re-cut gates a leg (AO-DENYLEGS D2
+# did exactly that to the l1-orchestrator-clean pin this replaced).
+_omitted_combo() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(data["omitted"][0])' "$ROOT/configuration/omniroute/combos.json"
+}
 
 if it "apply prune: deletes only the retired combos the store holds, never a user-made one"; then
     d="$(_prune_sandbox)"
@@ -498,32 +507,34 @@ fi
 # OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
 # declared legs but has no servable one left. A live combo with such an id is a
 # managed orphan, so apply prunes it - but never a user-made combo, and never a
-# current combo. l1-orchestrator-clean is the orphan on show today; DSBACK
-# 2026-09-28 re-serviced deepseek-v4.1-flash, so it is no longer one.
+# current combo. Which id that is today comes from the render (_omitted_combo),
+# not from a name pinned here.
 if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
+    orphan="$(_omitted_combo)"
     d="$(_prune_sandbox)"
-    _prune_list "$d" l1-orchestrator-clean l2-worker my-own-combo
+    _prune_list "$d" "$orphan" l2-worker my-own-combo
     out="$(_prune_apply "$d")"
     ok=1
     deletes="$(grep '^combo delete' "$d/calls.log")"
-    [[ "$deletes" == "combo delete l1-orchestrator-clean --yes" ]] \
+    [[ "$deletes" == "combo delete $orphan --yes" ]] \
         || { ok=0; echo "deleted: [$deletes]" >&2; }
     grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
-    [[ "$out" == *"  - l1-orchestrator-clean: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
 fi
 
 if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
+    orphan="$(_omitted_combo)"
     d="$(_prune_sandbox)"
-    _prune_list "$d" l1-orchestrator-clean my-own-combo
+    _prune_list "$d" "$orphan" my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
     grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
-    [[ "$out" == *"  - l1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
     [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
     rm -rf "$d"
@@ -534,14 +545,15 @@ fi
 # "omitted", so a live combo a user or OmniRoute itself named "auto" (or
 # "l2-worker-paid") is never deleted - and a dry run never even names it.
 if it "apply prune: a live legless combo (auto, l2-worker-paid) is never deleted or named"; then
+    orphan="$(_omitted_combo)"
     d="$(_prune_sandbox)"
-    _prune_list "$d" auto l2-worker-paid l1-orchestrator-clean my-own-combo
+    _prune_list "$d" auto l2-worker-paid "$orphan" my-own-combo
     out="$(_prune_apply "$d" --dry-run)"
     ok=1
     grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
     [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
     [[ "$out" == *"  - l2-worker-paid:"* ]] && { ok=0; echo "a live l2-worker-paid combo was named: $out" >&2; }
-    [[ "$out" == *"  - l1-orchestrator-clean: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
 fi
@@ -1287,49 +1299,66 @@ fi
 # <provider>` is called — that call rebuilds the document from catalog.base
 # plus provider_models.tsv, exactly as the gateway learns a fresh provider's
 # models on demand. A run that skips the refresh cannot see the leg.
+# D657-D2 (2026-10-08): free_ai and the single combo named here are both out of
+# the render now, so which provider and which combos carry its legs is read from
+# the render instead of pinned — the check is the same, only the names come from
+# the data (and it covers EVERY combo that carries the fresh leg, not one).
 if it "apply: one run registers a provider, refreshes the catalog, and writes its leg into the combos"; then
     d="$(_prune_sandbox)"
     _prune_list "$d"
-    printf 'free_ai: not-a-real-key-123\n' >"$d/keys.yml"
     python3 - "$d" "$ROOT" <<'PY'
 import json, os, sys
 d, root = sys.argv[1], sys.argv[2]
-path = os.path.join(root, "configuration", "omniroute", "combos.json")
-combos = json.load(open(path, encoding="utf-8"))
-refs = {ref for c in combos["combos"] for ref in c["models"]}
-fresh = sorted(r for r in refs if r.startswith("free-ai/"))
+combos = json.load(open(os.path.join(root, "configuration", "omniroute", "combos.json"),
+                        encoding="utf-8"))["combos"]
+# A provider the stand-in CLI lists as built-in, so registering it needs no
+# gateway provider node: the test is about the refresh order, not the node path.
+builtins = {l.strip() for l in open(os.path.join(d, "builtins.txt"), encoding="utf-8")
+            if l.strip()}
+refs = {ref for c in combos for ref in c["models"]}
+by_provider = {}
+for ref in sorted(refs):
+    prefix = ref.split("/", 1)[0]
+    if prefix in builtins:
+        by_provider.setdefault(prefix, []).append(ref)
+if not by_provider:
+    sys.exit("no built-in provider carries a leg in the render")
+provider = max(by_provider, key=lambda p: (len(by_provider[p]), p))
+fresh = by_provider[provider]
 base = sorted(refs - set(fresh))
 os.makedirs(os.path.join(d, "gw", "v1"), exist_ok=True)
 with open(os.path.join(d, "catalog.base"), "w", encoding="utf-8") as fh:
     fh.write("".join(r + "\n" for r in base))
 with open(os.path.join(d, "provider_models.tsv"), "w", encoding="utf-8") as fh:
-    fh.write("".join("free-ai\t%s\n" % r for r in fresh))
+    fh.write("".join("%s\t%s\n" % (provider, r) for r in fresh))
 with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
     json.dump({"data": [{"id": r} for r in base]}, fh)
-# The whole combo the first run must write, read from the file apply reads
-# rather than hardcoded: FREEKEYS-2 put scaleway's and nebius' free grants in
-# front of free-ai's stopgap, so the old single-leg expectation pinned one
-# tier's pre-FREEKEYS leg list. Pinning the file's own ordered list is the
-# stronger check - it fails if ANY leg goes missing, not only if free-ai does.
-want = next(c for c in combos["combos"] if c["name"] == "l3-driver-free-only")
-with open(os.path.join(d, "expected.combo"), "w", encoding="utf-8") as fh:
-    fh.write("combo create l3-driver-free-only --strategy %s --models %s\n"
-             % (want["strategy"], ",".join(want["models"])))
+with open(os.path.join(d, "provider"), "w", encoding="utf-8") as fh:
+    fh.write(provider + "\n")
+# Every combo the fresh provider's legs ride, as the exact line apply must write.
+with open(os.path.join(d, "expected.combos"), "w", encoding="utf-8") as fh:
+    for c in combos:
+        if set(c["models"]) & set(fresh):
+            fh.write("combo create %s --strategy %s --models %s\n"
+                     % (c["name"], c["strategy"], ",".join(c["models"])))
 PY
+    provider="$(cat "$d/provider")"
+    printf '%s: not-a-real-key-123\n' "$provider" >"$d/keys.yml"
     out="$(_prune_apply "$d")"
     ok=1
-    # The leg is in the combo the FIRST run writes.
-    grep -qxF "$(cat "$d/expected.combo")" "$d/calls.log" \
-        || { ok=0; echo "created: [$(grep '^combo create l3-driver-free-only' "$d/calls.log")]" >&2; }
-    # ... and specifically the freshly registered provider's leg is in it.
-    grep -q '^combo create l3-driver-free-only .*--models .*free-ai/qwen7b' \
-        "$d/calls.log" \
+    # The leg is in the combo the FIRST run writes, in every combo that rides it.
+    while IFS= read -r want; do
+        grep -qxF "$want" "$d/calls.log" \
+            || { ok=0; echo "missing write: [$want] created: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    done <"$d/expected.combos"
+    # ... and specifically the freshly registered provider's leg is in them.
+    grep -q "^combo create .* --models .*${provider}/" "$d/calls.log" \
         || { ok=0; echo "the new leg is not in the first combo write" >&2; }
-    [[ "$out" != *"catalog does not know free-ai"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
+    [[ "$out" != *"catalog does not know ${provider}"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
     # The refresh is what put it there, and it happened before any combo write.
-    [[ "$out" == *"  + free-ai registered"* ]] || { ok=0; echo "register: $out" >&2; }
-    [[ "$out" == *"  + free-ai enumerated"* ]] || { ok=0; echo "refresh: $out" >&2; }
-    refresh_line="$(grep -nx 'models free-ai' "$d/calls.log" | cut -d: -f1 | head -1)"
+    [[ "$out" == *"  + ${provider} registered"* ]] || { ok=0; echo "register: $out" >&2; }
+    [[ "$out" == *"  + ${provider} enumerated"* ]] || { ok=0; echo "refresh: $out" >&2; }
+    refresh_line="$(grep -nx "models ${provider}" "$d/calls.log" | cut -d: -f1 | head -1)"
     combo_line="$(grep -nx 'combo create .*' "$d/calls.log" | cut -d: -f1 | head -1)"
     [[ -n "$refresh_line" && -n "$combo_line" && $refresh_line -lt $combo_line ]] \
         || { ok=0; echo "order: refresh=$refresh_line first-combo=$combo_line" >&2; }
