@@ -1728,7 +1728,7 @@
       "price_in": 7e-08,
       "price_out": 2.6e-07,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route.",
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. UNAVAILABLE - OVHCODER-DROP 2026-10-08 (measured 17:34Z central): OVH withdrew the id upstream, a completion request answers HTTP 404 'The model Qwen3-Coder-30B-A3B-Instruct does not exist'; probe D-657 2026-10-08 had already recorded 404 for both the ovh/ and ovhcloud/ spellings on central and workstation, while OVH's gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answered 200. This row is the last reference to the model: its leg is struck from l2-worker/l3-driver, the ovh-qwen3-coder-30b route is deleted and its id retired (combos.json 'retired', so apply prunes the live combo), and the opencode.jsonc ovh-direct-qwen3-coder-30b hand entry is removed - nothing dispatches here any more. Row kept for pricing history; re-add a leg only if OVH re-lists the id and a fresh probe answers 200.",
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
@@ -4580,7 +4580,6 @@
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
         "ovhcloud/gpt-oss-120b",
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
         "meta_api/muse-spark-1.3-contributor",
@@ -4653,10 +4652,6 @@
         },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
-          "available": false
-        },
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
-          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
           "available": false
         },
         "opencode_gateway/glm-5.3-flash": {
@@ -4801,7 +4796,6 @@
         "openrouter/poolside/laguna-s-2.1:free",
         "free_ai/qwen7b",
         "ovhcloud/gpt-oss-120b",
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct",
         "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash",
         "mistral/mistral-code-latest",
@@ -4873,10 +4867,6 @@
         },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
-          "available": false
-        },
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
-          "$comment": "L1-CLEAN 2026-10-01: not in OVH AI Endpoints catalog 2026-10-01 (measured), so there is no price on file and the resolver never spends the grant. Kept in legs as a verbatim reference; remove when OVH re-lists it or after a re-probe.",
           "available": false
         },
         "opencode_gateway/glm-5.3-flash": {
@@ -5118,27 +5108,6 @@
           "context": 131072,
           "context_declared": "128k",
           "display_name": "GPT-OSS-120B via OVH (credit)",
-          "output": 32768
-        }
-      }
-    },
-    "ovh-qwen3-coder-30b": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3-Coder-30B-A3B-Instruct (live 128000 matches registry 128000; priced, proven). Class credit. opencode/zed only.",
-      "class": "credit",
-      "id": "ovh-qwen3-coder-30b",
-      "legs": [
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "Qwen3-Coder-30B via OVH (credit)",
           "output": 32768
         }
       }

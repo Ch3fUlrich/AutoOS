@@ -1194,6 +1194,12 @@ OMNIROUTE_RETIRED_IDS = [
     "t1-orchestrator-paid", "t2-orchestrator", "t2-worker", "t2-worker-clean",
     "t2-worker-free-only", "t2-worker-paid", "t3-driver", "t3-driver-clean",
     "t3-driver-free-only", "t3-driver-paid", "t4-researcher",
+    # OVHCODER-DROP 2026-10-08 (hotfix): OVH withdrew Qwen3-Coder-30B-A3B-Instruct
+    # upstream (measured 17:34Z central: HTTP 404 "The model
+    # Qwen3-Coder-30B-A3B-Instruct does not exist"); its single-leg route is
+    # deleted and the id retires so apply prunes the live combo, the same way
+    # ORQWEN404 retired or-qwen3.8-27b-free.
+    "ovh-qwen3-coder-30b",
 ]
 
 
@@ -1596,7 +1602,10 @@ IDE_MODEL_ORDER = (
     # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
     # Listed here because render_ide() requires this constant to name every
     # route id (a route added without it raises rather than silently mis-ordering).
-    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
+    # OVHCODER-DROP 2026-10-08: ovh-qwen3-coder-30b left IDE_MODEL_ORDER with its
+    # route (OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream, live 404), so
+    # TORDER's ovh x3 is now ovh x2.
+    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b",
     "vertex-gemini-3.8-flash",
     # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
     # within the $6 grant; legs gated until per-token prices land).
