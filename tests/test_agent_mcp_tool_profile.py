@@ -28,6 +28,7 @@ Run from the repo root:
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -302,6 +303,14 @@ class LaneMcpStartsInAnyRepoDirTest(unittest.TestCase):
             self.assertEqual((cmd3, changed3), (untouched, False), untouched)
 
 
+# uv's shared cache is one lock: another lane on this host can hold it while this
+# test spawns. That is a host condition; a script path that does not resolve is
+# the defect, and it says so ("No such file or directory"), so it stays a failure.
+_UV_CONTENTION_RE = re.compile(
+    r"lock (?:is held|could not be acquired)|failed to acquire|"
+    r"error sending request|failed to fetch|network failure", re.I)
+
+
 class LaneMcpRealSpawnTest(unittest.TestCase):
     """D3, live proof: the rendered command and env answer an MCP initialize.
 
@@ -327,7 +336,29 @@ class LaneMcpRealSpawnTest(unittest.TestCase):
         return subprocess.run(command, input=self.INIT + "\n", cwd=cwd, env=env,
                               capture_output=True, text=True, timeout=240)
 
+    @staticmethod
+    def _answers(stdout):
+        """The JSON-RPC messages on stdout, ignoring any line that is not one.
+
+        uv writes its own progress to stderr, but a resolver note can reach the
+        stream too; a non-JSON line is noise about the host, not about the
+        server, and this test claims only that the server answered `initialize`.
+        """
+        out = []
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and "jsonrpc" in msg:
+                out.append(msg)
+        return out
+
     def _rendered(self, lane_repo):
+        """The rendered autoos-agent entry: command and environment as opencode gets them."""
         with tempfile.TemporaryDirectory(prefix="mcp_render_") as td:
             lane = {"name": "l2-scratch-abcdef-spawn", "cwd": str(lane_repo),
                     "mcp": ["autoos-agent"], "instructions": [], "plugins": [],
@@ -337,7 +368,6 @@ class LaneMcpRealSpawnTest(unittest.TestCase):
             path = oc_l1_render.render(lane, ROOT / "opencode.jsonc")
             cfg = json.loads(Path(path).read_text(encoding="utf-8"))
         entry = cfg["mcp"]["autoos-agent"]
-        # the lane child env minus the credentials: what opencode hands a local MCP
         return entry["command"], dict(entry["environment"])
 
     def test_the_rendered_server_answers_initialize_from_a_foreign_cwd(self):
@@ -357,10 +387,14 @@ class LaneMcpRealSpawnTest(unittest.TestCase):
             child_env.update(env)
             self.assertFalse((Path(lane_repo) / "tools").exists())
             proc = self._spawn(command, child_env, lane_repo)
+        if proc.returncode and _UV_CONTENTION_RE.search(proc.stderr or ""):
+            # another lane holding the shared uv cache: a host condition, and the
+            # bug this test pins (a script path that does not resolve) is a
+            # "No such file or directory", which stays a hard failure
+            self.skipTest("uv cache contention on this host: %r" % proc.stderr[-200:])
         self.assertEqual(proc.returncode, 0,
                          "stdout=%r stderr=%r" % (proc.stdout[-400:], proc.stderr[-400:]))
-        answered = [json.loads(line) for line in proc.stdout.splitlines()
-                    if line.strip().startswith("{")]
+        answered = self._answers(proc.stdout)
         self.assertTrue(answered, "no JSON-RPC answer: %r" % proc.stdout[-400:])
         result = answered[0].get("result", {})
         self.assertEqual(result.get("serverInfo", {}).get("name"), "autoos-agent")
