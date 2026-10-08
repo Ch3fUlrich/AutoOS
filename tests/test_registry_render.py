@@ -1985,9 +1985,14 @@ class RouteContextCapTests(unittest.TestCase):
             self.assertEqual(cap, 1048576, route_id)
             self.assertEqual(combos[route_id]["context"],
                              registry.context_tokens_to_label(cap), route_id)
-        # spark-1.3-contributor's only servable leg is the 1M contributor model,
-        # so its promise is not clamped.
-        self.assertEqual(combos["spark-1.3-contributor"]["context"], "1M")
+        # spark-1.3-contributor promised 1M from its contributor leg. SS8 (operator
+        # D-657) banned that leg and probe D-657 refused the free copies, so the
+        # route declares legs and serves none: OR1d gives it no combo at all, which
+        # means there is no window left to over-promise - the clamp rule now
+        # polices its absence.
+        rendered = registry.render_omniroute(real_registry())
+        self.assertNotIn("spark-1.3-contributor", combos)
+        self.assertIn("spark-1.3-contributor", rendered["omitted"])
 
     def test_no_combo_in_the_real_render_overshoots_a_leg_it_serves(self):
         # The rule as a loop over real data, not just the two flagged combos:
@@ -2070,32 +2075,34 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "l1-orchestrator")
         self.assertNotIn("reasoning_effort", entry)
 
-    def _t1_headed_by_contributor(self):
-        reg = copy.deepcopy(real_registry())
-        route = reg["routes"]["l1-orchestrator"]
-        route.setdefault("unavailable_legs", {})
-        for leg in list(route["legs"]):
-            if leg != "meta_api/muse-spark-1.3-contributor":
-                route["unavailable_legs"][leg] = {"available": False}
-        return reg
-
     def test_a_default_the_served_head_carries_is_still_forwarded(self):
         # FREEKEYS-2 (D-141) made a free leg the real head, and gemini's ladder
         # tops out at "high" - so the positive branch needs a registry whose
-        # served head DOES carry the surface default: gate the band and
-        # meta_api/muse-spark-1.3-contributor answers with its "xhigh".
-        entry = self._ide_entry(self._t1_headed_by_contributor(), "l1-orchestrator")
-        self.assertEqual(entry.get("reasoning_effort"), "xhigh")
-        self.assertIn("xhigh", entry["effort_ladder"])
+        # served head DOES carry the surface default. D657-CHAIN 2026-10-08 took
+        # meta_api/muse-spark-1.3-contributor (whose "xhigh" this was) out of every
+        # chain under SS8, so the branch uses the vertex gemini leg the route does
+        # serve - ladder low/medium/high - and names "high" as the surface default.
+        reg = self._t1_gated_to_vertex_gemini()
+        reg["routes"]["l1-orchestrator"]["surfaces"]["omniroute"]["effort_default"] = "high"
+        entry = self._ide_entry(reg, "l1-orchestrator")
+        self.assertEqual(entry.get("reasoning_effort"), "high")
+        self.assertIn("high", entry["effort_ladder"])
 
-    def test_the_real_free_head_keeps_its_own_default(self):
+    def test_the_real_head_carries_no_ladder_rather_than_an_invented_one(self):
         # CIGREEN: expectation moved by 018438ed (TASK1 put the gemini head
-        # first: ladder low/medium/high, no xhigh). render_ide()'s served-head
-        # rule drops a surface default the head rejects instead of forwarding
-        # it, so the picker is not offered a level the answering leg refuses.
-        entry = self._ide_entry(real_registry(), "l1-orchestrator")
+        # first: ladder low/medium/high, no xhigh). D657-CHAIN 2026-10-08 moved
+        # it again: the served head of every orchestrator chain is now the
+        # bazaarlink DeepSeek mirror, whose registry row documents NO effort
+        # ladder, so render_ide() omits the field rather than inventing rungs -
+        # test_sync_ide_models.py pins the same thing on the picker surface. The
+        # cached clean band still heads vertex gemini and keeps its ladder.
+        for route_id in ("l1-orchestrator", "l1-orchestrator-free-only",
+                         "l2-orchestrator", "l3-researcher"):
+            entry = self._ide_entry(real_registry(), route_id)
+            self.assertNotIn("effort_ladder", entry, route_id)
+            self.assertNotIn("reasoning_effort", entry, route_id)
+        entry = self._ide_entry(real_registry(), "l1-orchestrator-clean")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
-        self.assertNotIn("reasoning_effort", entry)
 
     def test_openhands_max_input_tokens_is_clamped(self):
         # CIGREEN: expectation moved by 20c4a816 (TASK3 window raise) +
@@ -2151,10 +2158,15 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
     def test_a_key_provider_keeps_its_leg(self):
         # the drop is declared-auth only: providers that do have a LiteLLM key
         # (the <UPPER>_API_KEY convention) must keep rendering, or this "fix"
-        # would silently gut the mirror.
+        # would silently gut the mirror. D657-CHAIN 2026-10-08 moved the example
+        # off ovhcloud, whose credit legs SS8 took out of every chain: the keys
+        # the served chains actually reach through are bazaarlink, openrouter,
+        # groq and cohere.
         joined = "\n".join(self.blocks.values())
-        self.assertIn("model: ovhcloud/gpt-oss-120b", joined)
-        self.assertIn("OVHCLOUD_API_KEY", joined)
+        self.assertIn("model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free", joined)
+        self.assertIn("BAZAARLINK_API_KEY", joined)
+        self.assertIn("model: groq/qwen/qwen3.8-27b", joined)
+        self.assertIn("GROQ_API_KEY", joined)
 
 
 class CombosDeclaredAuthSkipTests(unittest.TestCase):
