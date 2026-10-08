@@ -86,20 +86,22 @@ def plugin_guarded_tool_names():
     return sorted(set(re.findall(r'\be\.tool\s*!==\s*"([A-Za-z_]+)"', src)))
 
 
-def denied_items(tool_name):
-    """A canary transcript: one shell-tool item denied by the guard."""
+def denied_items(tool_name, command=INCIDENT):
+    """A canary transcript: one shell-tool item denied by the guard.
+
+    The denied call carries its OWN command (opencode records the tool
+    arguments under `state.input`, the same shape the plugin is handed:
+    `{"tool": "shell", "input": {"command": ...}}`), because a denial is only
+    evidence about the command it was raised for.
+    """
+    state = {"status": "error",
+             "error": "bash-guard: DENIED - unquoted heredoc <<CANARY_EOF with a backtick"}
+    if command is not None:
+        state["input"] = {"command": command}
     return [{
         "type": "assistant",
         "content": [
-            {
-                "type": "tool",
-                "tool": tool_name,
-                "state": {
-                    "status": "error",
-                    "error": "bash-guard: DENIED - unquoted heredoc "
-                             "<<CANARY_EOF with a backtick",
-                },
-            }
+            {"type": "tool", "tool": tool_name, "state": state}
         ],
     }]
 
@@ -484,10 +486,48 @@ class TestDenialMarkerAnchor(_Base):
     it, or an error from a non-error status.
     """
 
-    def _err_item(self, error, status="error", tool="shell"):
+    def _err_item(self, error, status="error", tool="shell", command=INCIDENT):
+        state = {"status": status, "error": error}
+        if command is not None:
+            state["input"] = {"command": command}
         return [{"type": "assistant", "content": [
-            {"type": "tool", "tool": tool,
-             "state": {"status": status, "error": error}}]}]
+            {"type": "tool", "tool": tool, "state": state}]}]
+
+    # Sonnet final REJECT 2026-10-08 finding 5: a denial is evidence about the
+    # command it was raised for. The guard denies plenty of things (an L2's
+    # `git commit` in orchestrator role, for one), so ANY anchored denial used
+    # to pass the canary - the probe never had to run its own incident command,
+    # and rc 0 then certified an unguarded lane as unattended-capable.
+    def test_denial_of_another_command_is_not_a_canary_pass(self):
+        self.srv.canary_items = self._err_item(
+            "bash-guard: DENIED - orchestrator role runs no writes",
+            command="git commit -m 'wip'")
+        rc, out = self._start()
+        self.assertEqual(rc, 5, out)
+        self.assertFalse(self._state()["canary"]["denied"])
+        self.assertIn("git commit", self._state()["canary"]["detail"],
+                      "the refusal must name the command that was denied")
+
+    def test_a_denial_that_records_no_command_is_not_a_pass(self):
+        self.srv.canary_items = self._err_item(
+            "bash-guard: DENIED - unquoted heredoc", command=None)
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_the_canary_command_is_matched_exactly_or_by_its_unique_token(self):
+        from oc_l1_canary import _is_canary_call
+        self.assertTrue(_is_canary_call(
+            {"state": {"input": {"command": INCIDENT}}}))
+        # a model that re-wraps the heredoc still ran the probe: the delimiter
+        # token is what makes the command the canary's own
+        self.assertTrue(_is_canary_call(
+            {"state": {"input": {"command": "cat <<CANARY_EOF\nx\nCANARY_EOF"}}}))
+        self.assertTrue(_is_canary_call(
+            {"input": {"command": INCIDENT}}), "the flat part shape too")
+        self.assertFalse(_is_canary_call({"state": {"input": {"command": "ls"}}}))
+        self.assertFalse(_is_canary_call({"state": {}}))
+        self.assertFalse(_is_canary_call({}))
 
     def test_marker_midway_is_not_a_denial(self):
         self.srv.canary_items = self._err_item(

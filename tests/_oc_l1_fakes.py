@@ -10,6 +10,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+# the incident shape is the canary's contract; the fake transcript quotes it
+# rather than copying it, so the two cannot drift
+from oc_l1_canary import INCIDENT_COMMAND as CANARY_COMMAND  # noqa: E402
+
 PW_ENV = "AUTOOS_OCL1_TEST_PW"
 PW_VALUE = "sk-TEST-SRV-PW-001"
 RECORD_ENV = "OC_L1_FAKE_RECORD"
@@ -135,6 +140,8 @@ class FakeServer:
                         if outer.canary_items is not None:
                             self._send(200, {"data": outer.canary_items})
                         elif outer.canary_mode == "denied":
+                            # the denial carries the command it was raised for:
+                            # the canary only counts a denial OF ITS OWN probe
                             self._send(200, {"data": [
                                 {
                                     "type": "assistant",
@@ -144,6 +151,7 @@ class FakeServer:
                                             "tool": "shell",
                                             "state": {
                                                 "status": "error",
+                                                "input": {"command": CANARY_COMMAND},
                                                 "error": "bash-guard: DENIED - unquoted heredoc <<CANARY_EOF with a backtick",
                                             },
                                         }
@@ -160,6 +168,7 @@ class FakeServer:
                                             "tool": "shell",
                                             "state": {
                                                 "status": "completed",
+                                                "input": {"command": CANARY_COMMAND},
                                                 "output": "canary Sun Oct 04 2026",
                                             },
                                         }

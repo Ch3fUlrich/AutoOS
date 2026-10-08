@@ -2,7 +2,9 @@
 
 Runs a probe shell command through a throwaway canary session to verify that
 the bash-guard plugin is active and denying dangerous execution before the
-lane is declared unattended-capable.
+lane is declared unattended-capable. A denial counts only when it was raised
+for the probe itself (`_is_canary_call`): the guard denies other commands too,
+so an unrelated one certifies nothing.
 """
 
 from datetime import datetime, timezone
@@ -35,6 +37,9 @@ DENIED_MARKER = "bash-guard: DENIED"
 # model echoing the marker - a false pass. tests/test_oc_l1_canary.py pins this
 # tuple against the names parsed out of the plugin source (F1).
 GUARDED_TOOL_NAMES = ("shell", "bash")
+# The probe's unique heredoc delimiter: a command that carries it IS the probe,
+# however the model re-wrapped it (`_is_canary_call`).
+CANARY_TOKEN = "CANARY_EOF"
 
 
 def _is_denial(err):
@@ -48,6 +53,37 @@ def _is_denial(err):
     evidence of a denial either.
     """
     return isinstance(err, str) and err.strip().startswith(DENIED_MARKER)
+
+
+def _call_command(item):
+    """The command a tool item ran, or None.
+
+    opencode records a tool call's arguments under `state.input` (the transcript
+    part) or `input` (the flat item), the same shape the bash-guard hook is
+    handed: `{"tool": "shell", "input": {"command": ...}}`."""
+    for holder in (item.get("state"), item):
+        if not isinstance(holder, dict):
+            continue
+        args = holder.get("input")
+        if isinstance(args, dict) and isinstance(args.get("command"), str):
+            return args["command"]
+    return None
+
+
+def _is_canary_call(item):
+    """Did THIS guarded call run the canary's own probe?
+
+    Sonnet final REJECT 2026-10-08 finding 5: an anchored denial was enough, but
+    the guard denies many commands - an orchestrator-role `git commit`, for one -
+    so any unrelated denial certified the lane. A match is the probe verbatim,
+    or a command carrying its unique heredoc delimiter: a model that re-wraps the
+    probe still let the guard see the incident shape. A call with no recorded
+    command proves nothing about which command was denied, so it is not a pass
+    either - the canary fails closed."""
+    command = _call_command(item)
+    if command is None:
+        return False
+    return command.strip() == INCIDENT_COMMAND.strip() or CANARY_TOKEN in command
 # Distinct from "tool completed without denial": a prose-only reply says the
 # model never let the guard run, which is not evidence about the guard.
 INCONCLUSIVE_TEXT_ONLY = "inconclusive: text-only answer"
@@ -269,6 +305,7 @@ def run_canary(base_url, auth, lane, now=None):
     shell_call_found = False
     tools_seen = []
     assistant_text = []
+    denials_of_other = []
     for msg in mdata:
         if not isinstance(msg, dict):
             continue
@@ -302,10 +339,17 @@ def run_canary(base_url, auth, lane, now=None):
             # F3: a denial is an error-status guarded call whose text is the
             # plugin's throw - the marker anchored at its start.
             if status_val == "error" and _is_denial(err):
-                result["denied"] = True
-                result["detail"] = _truncate(_scrub(err, password))
-                return result
-            if status_val == "completed":
+                # F6 (Sonnet final REJECT 2026-10-08, finding 5): and it is a
+                # denial OF THE PROBE. The guard denies other commands too, so an
+                # unrelated denial certifies nothing about the incident shape.
+                if _is_canary_call(item):
+                    result["denied"] = True
+                    result["detail"] = _truncate(_scrub(err, password))
+                    return result
+                denials_of_other.append(_truncate(
+                    _scrub(_call_command(item) or "<no command recorded>", password), 60))
+                continue
+            if status_val == "completed" and _is_canary_call(item):
                 result["denied"] = False
                 result["detail"] = "tool completed without denial"
                 return result
@@ -324,6 +368,9 @@ def run_canary(base_url, auth, lane, now=None):
             result["detail"] = "%s; %s" % (INCONCLUSIVE_TEXT_ONLY, evidence)
         else:
             result["detail"] = "no shell tool call in canary session; %s" % evidence
+    elif denials_of_other:
+        result["detail"] = "the guard denied another command, not the canary " \
+                           "probe: %s" % "; ".join(denials_of_other)
     else:
         result["detail"] = "shell call inconclusive"
     return result
