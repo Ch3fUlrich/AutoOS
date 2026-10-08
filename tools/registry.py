@@ -3439,7 +3439,16 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
-PROMPT_CACHE_VALUES = ("true", "documented", "false", "unknown")
+PROMPT_CACHE_UNKNOWN = "unknown"
+PROMPT_CACHE_VALUES = ("true", "documented", "false", PROMPT_CACHE_UNKNOWN)
+
+
+def _names_its_cache_source(model) -> bool:
+    """True when a model row attributes its caching verdict: a non-empty string
+    in ``prompt_cache_source``. One predicate, because both caching rules --
+    the model row's and the per-provider map's -- ask the same question of it."""
+    source = model.get("prompt_cache_source")
+    return isinstance(source, str) and bool(source.strip())
 
 
 def _check_prompt_cache(registry) -> list:
@@ -3474,11 +3483,82 @@ def _check_prompt_cache(registry) -> list:
                    value))
         if "prompt_cache_source" in model:
             source = model["prompt_cache_source"]
-            if not isinstance(source, str) or not source.strip():
+            if not _names_its_cache_source(model):
                 problems.append(
                     "models.%s.prompt_cache_source must be a non-empty string "
                     "naming the probe run or vendor document behind "
                     "prompt_cache (got %r)" % (model_id, source))
+    return problems
+
+
+def leg_prompt_cache(registry, leg) -> str:
+    """The prompt-caching verdict of ONE leg, keyed provider+model (D1, D-658).
+
+    ``models.<id>.prompt_cache`` is one row per model id, but a model served
+    through two providers is cached at one and unmeasured at the other, so
+    ``models.<id>.prompt_cache_by_provider.<provider_id>`` carries the
+    per-provider answer and is read FIRST; then the model-level row; then
+    "unknown". Absence is "unknown" -- same rule as ``prompt_cache`` itself, so
+    a caller never has to tell "no row" from "no answer".
+
+    Resolution accepts any leg spelling (``vertex_ai/``, ``vertex/``, a declared
+    ``model_prefix``, the gateway form ``combos.json`` carries) through
+    ``registry_ref()`` + ``resolve_leg()``; a leg that does not resolve reads
+    "unknown" rather than raising, because a gate that cannot name the provider
+    must not claim caching for it. A caller that needs a measured hit tests
+    ``== "true"``, never truthiness.
+    """
+    try:
+        provider_id, model_id = resolve_leg(registry_ref(leg, registry), registry)
+    except ValueError:
+        return PROMPT_CACHE_UNKNOWN
+    model = _section(registry, "models").get(model_id)
+    if not isinstance(model, dict):
+        return PROMPT_CACHE_UNKNOWN
+    scoped = model.get("prompt_cache_by_provider")
+    for value in ((scoped.get(provider_id)
+                   if isinstance(scoped, dict) else None),
+                  model.get("prompt_cache")):
+        if isinstance(value, str) and value in PROMPT_CACHE_VALUES:
+            return value
+    return PROMPT_CACHE_UNKNOWN
+
+
+def _check_prompt_cache_by_provider(registry) -> list:
+    """models.<id>.prompt_cache_by_provider, when present, answers one
+    provider's leg of a model the model row cannot answer (D1, D-658): a
+    non-empty object keyed by provider id, each value one of the four
+    ``prompt_cache`` strings, and any verdict other than "unknown" has to name
+    where it came from through the model row's ``prompt_cache_source`` -- the
+    same attribution rule ``prompt_cache`` follows.
+    """
+    problems = []
+    providers = _section(registry, "providers")
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict) or "prompt_cache_by_provider" not in model:
+            continue
+        label = "models.%s.prompt_cache_by_provider" % model_id
+        scoped = model["prompt_cache_by_provider"]
+        if not isinstance(scoped, dict) or not scoped:
+            problems.append("%s must be a non-empty object" % label)
+            continue
+        for provider_id, value in sorted(scoped.items()):
+            entry_label = "%s.%s" % (label, provider_id)
+            if provider_id not in providers:
+                problems.append("%s: unknown provider %r" % (label, provider_id))
+            if not isinstance(value, str) or value not in PROMPT_CACHE_VALUES:
+                problems.append(
+                    "%s must be one of %s (got %r) - an unmeasured leg is "
+                    "\"unknown\", never true/false/null"
+                    % (entry_label,
+                       ", ".join(repr(v) for v in PROMPT_CACHE_VALUES), value))
+        answered = any(value != PROMPT_CACHE_UNKNOWN for value in scoped.values())
+        if answered and not _names_its_cache_source(model):
+            problems.append(
+                "%s carries a measured or documented verdict, so "
+                "models.%s.prompt_cache_source must name the probe run or "
+                "vendor document behind it (got %r)"
+                % (label, model_id, model.get("prompt_cache_source")))
     return problems
 
 
@@ -3520,6 +3600,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_provider_prices(registry))
     problems.extend(_check_prompt_cache(registry))
+    problems.extend(_check_prompt_cache_by_provider(registry))
     problems.extend(_check_paid_local_cap(registry))
     problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))

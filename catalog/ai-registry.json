@@ -573,8 +573,11 @@
           "price_as_of": "2026-10-01"
         }
       },
-      "prompt_cache": "documented",
-      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation; vertex legs documented - Google implicit caching"
+      "prompt_cache_by_provider": {
+        "google_ai_studio": "unknown",
+        "vertex_ai": "documented"
+      },
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation; vertex_ai documented - Google implicit caching; google_ai_studio (AI-Studio free leg) was never answered, so the verdict is per provider, not per model (AO-DENYLEGS D1)"
     },
     "glm-4.5-air": {
       "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",

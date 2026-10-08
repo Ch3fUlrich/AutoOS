@@ -299,6 +299,12 @@
           "minLength": 1,
           "description": "Additive field, not in spec 3.1 (AO-PROBE-D657, D-658 2026-10-08): dated attribution for `prompt_cache` - which probe run or which vendor document it came from (same convention as `price_source`). Only meaningful next to a set `prompt_cache`; a `documented` row must name the document."
         },
+        "prompt_cache_by_provider": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Additive field, not in spec 3.1 (AO-DENYLEGS D1, D-658 2026-10-08): the judge nit on D-657 - prompt caching is a fact about a PROVIDER+MODEL leg, not about a model id. A model served through several providers is cached at one and unmeasured at the other (gemini-3.8-flash is documented-cached through Vertex AI and never measured through AI-Studio), so a model-level verdict would claim caching for a leg no probe answered. Same shape as `provider_prices`: keyed by provider id, each value one of the four `prompt_cache` strings. `tools/registry.py leg_prompt_cache()` reads the provider entry first, then the model-row `prompt_cache`, then \"unknown\".",
+          "additionalProperties": { "enum": ["true", "documented", "false", "unknown"] }
+        },
         "provider_prices": {
           "type": "object",
           "description": "Additive field, not in spec 3.1 (T1-CREDIT-FIX-6, D-220, 2026-10-01): per-provider leg prices for a model id served at two prices at once (gemini-3.8-flash is free through AI-Studio and billed through Vertex AI). The shared price_in/price_out row must stay 0 so the free leg bills $0; each provider id here carries its own positive price_in/price_out with a non-empty price_source and a YYYY-MM-DD price_as_of, enforced by registry.py check.",

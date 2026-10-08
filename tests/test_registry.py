@@ -4092,13 +4092,14 @@ _MISSING = object()
 # AO-PROBE-D657 data (D-658, 2026-10-08): the registry model rows the probe's
 # legs resolved to through tools/registry.py's resolve_leg, at the verdict the
 # two gateways' `cache` cells add up to - "true" on either gateway wins over
-# "false" on either, anything else is "unknown". gemini-3.8-flash is the one
-# documented value: Google's implicit caching covers its vertex legs, and the
-# probe never had to measure what the vendor already states.
+# "false" on either, anything else is "unknown". gemini-3.8-flash is the one row
+# the probe answered for only SOME of its providers, so it has no model-level
+# verdict at all: its Vertex leg is documented-cached (Google implicit caching)
+# and its AI-Studio leg was never measured - that split lives in
+# `prompt_cache_by_provider` (D1 judge nit: caching is a provider+model fact).
 _D657_BY_VALUE = {
     "true": ("deepseek/deepseek-v4-flash-0731free:free",
              "nvidia/nemotron-3-super-120b-a12b:free"),
-    "documented": ("gemini-3.8-flash",),
     "false": ("cohere/north-mini-code:free",
               "command-a-03-2025",
               "command-r-plus-08-2024",
@@ -4181,9 +4182,13 @@ class PromptCacheFieldTests(unittest.TestCase):
     def test_a_source_must_name_something(self):
         for source in ("", "   ", None, 7, ["probe"]):
             problems = self.problems("true", source=source)
-            self.assertEqual(len(problems), 1, (repr(source), problems))
-            self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
-                          problems[0])
+            # gemini-3.8-flash is the one row that carries a per-provider
+            # verdict beside the model-level one, so a missing attribution is
+            # named by both rules -- same fact, two readers of it.
+            self.assertEqual(len(problems), 2, (repr(source), problems))
+            for problem in problems:
+                self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
+                              problem)
 
     def test_the_schema_permits_the_field_without_requiring_it(self):
         schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
@@ -4197,6 +4202,125 @@ class PromptCacheFieldTests(unittest.TestCase):
                          "string")
         for key in ("prompt_cache", "prompt_cache_source"):
             self.assertNotIn(key, model["required"])
+
+
+class PromptCachePerProviderTests(unittest.TestCase):
+    """AO-DENYLEGS D1 (D-658 judge nit, 2026-10-08): caching is a fact about a
+    PROVIDER+MODEL leg, not a model id -- gemini-3.8-flash is documented-cached
+    through Vertex AI and was never measured through AI-Studio. The per-provider
+    verdict lives in ``models.<id>.prompt_cache_by_provider`` (same shape as
+    ``provider_prices``) and ``leg_prompt_cache()`` is the one reader: provider
+    entry first, model row next, "unknown" last -- so a model-level verdict can
+    never claim caching for a provider no probe answered."""
+
+    _SOURCE = "probe D-657 2026-10-08 central+workstation"
+
+    def mini(self, model_row):
+        return {
+            "version": "2026-10-08",
+            "providers": {
+                "vertex_ai": {"omniroute_id": "vertex"},
+                "google_ai_studio": {"omniroute_id": "gemini"},
+                "bazaarlink": {"model_prefix": "bzl"},
+            },
+            "models": {"gemini-3.8-flash": model_row},
+            "routes": {}, "clients": {}, "policy": {},
+        }
+
+    def problems(self, model_row, source=_SOURCE):
+        row = dict(model_row)
+        if source is not _MISSING:
+            row.setdefault("prompt_cache_source", source)
+        return [p for p in registry.check_registry(self.mini(row))
+                if "prompt_cache" in p]
+
+    def test_the_provider_entry_beats_the_model_row(self):
+        reg = self.mini({"prompt_cache": "documented",
+                         "prompt_cache_source": "probe D-657 2026-10-08",
+                         "prompt_cache_by_provider":
+                             {"google_ai_studio": "unknown"}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+
+    def test_the_model_row_answers_for_a_provider_with_no_entry(self):
+        reg = self.mini({"prompt_cache": "false"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "false")
+
+    def test_absence_and_a_bad_leg_both_read_unknown(self):
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "gemini/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "nowhere/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}), "not-a-leg"),
+                         "unknown")
+
+    def test_a_malformed_verdict_is_not_promoted_to_the_fallback(self):
+        """"true" spelled as a boolean is the value set's own defect (rule
+        names it); the lookup must still not read it as a caching claim."""
+        reg = self.mini({"prompt_cache_by_provider": {"vertex_ai": True}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"), "unknown")
+
+    def test_the_committed_gemini_row_splits_by_provider(self):
+        """The move D1 makes: no model-level verdict for gemini-3.8-flash, a
+        documented Vertex leg and an unmeasured AI-Studio leg -- so the free
+        AI-Studio leg stops inheriting Vertex's caching claim."""
+        reg = load_registry()
+        row = reg["models"]["gemini-3.8-flash"]
+        self.assertNotIn("prompt_cache", row)
+        self.assertEqual(row["prompt_cache_by_provider"],
+                         {"google_ai_studio": "unknown",
+                          "vertex_ai": "documented"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+
+    def test_a_known_provider_names_the_value_set(self):
+        problems = self.problems({"prompt_cache_by_provider": {"nope": "true"}})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("unknown provider", problems[0])
+
+    def test_a_bad_per_provider_value_is_named_with_model_and_provider(self):
+        for value in (True, "True", None, "", "yes", 1, ["true"]):
+            problems = self.problems(
+                {"prompt_cache_by_provider": {"vertex_ai": value}})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("prompt_cache_by_provider.vertex_ai", problems[0])
+
+    def test_an_empty_or_non_object_map_is_rejected(self):
+        for value in ({}, [], None, "true"):
+            problems = self.problems({"prompt_cache_by_provider": value})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("must be a non-empty object", problems[0])
+
+    def test_a_verdict_other_than_unknown_must_name_where_it_came_from(self):
+        for value in ("true", "documented", "false"):
+            problems = self.problems({"prompt_cache_by_provider":
+                                      {"vertex_ai": value}}, source=_MISSING)
+            self.assertEqual(len(problems), 1, (value, problems))
+            self.assertIn("prompt_cache_source must name", problems[0])
+        # "unknown" is the absence of an answer, so it owes no attribution.
+        self.assertEqual(self.problems({"prompt_cache_by_provider":
+                                        {"vertex_ai": "unknown"}},
+                                       source=_MISSING), [])
+
+    def test_the_schema_permits_the_map_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        prop = model["properties"]["prompt_cache_by_provider"]
+        self.assertEqual(prop["type"], "object")
+        self.assertEqual(prop["additionalProperties"]["enum"],
+                         ["true", "documented", "false", "unknown"])
+        self.assertNotIn("prompt_cache_by_provider", model["required"])
 
 
 if __name__ == "__main__":
