@@ -28,6 +28,8 @@ Run from the repo root:
 import asyncio
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -226,6 +228,163 @@ class LaneRendersTheMarkerTest(unittest.TestCase):
         env = self._render(agent_layer=None)["mcp"]["autoos-agent"]["environment"]
         self.assertNotIn("AUTOOS_AGENT_LAYER", env)
         self.assertNotIn("AUTOOS_L2_LANE", env)
+
+
+class LaneMcpStartsInAnyRepoDirTest(unittest.TestCase):
+    """D3 (live check 2026-10-08): the lane's MCP must start whatever its repo is.
+
+    The repo config runs the spawner as `uv ... python tools/autoos_agent_mcp.py` -
+    a path RELATIVE to the working directory, and opencode starts a local MCP with
+    cwd = the lane's directory. For a lane whose repo is a scratch dir outside
+    AutoOS the child died at once and the serve log said
+    `mcp connect failed server=autoos-agent status.error="Connection closed"`: an
+    L2 with no spawner cannot do the one job it exists for. The renderer therefore
+    pins the script to THIS checkout's tools/, absolutely.
+    """
+
+    def _render(self, lane_repo):
+        with tempfile.TemporaryDirectory(prefix="mcp_render_") as td:
+            lane = {"name": "l2-scratch-abcdef-spawn", "cwd": str(lane_repo),
+                    "mcp": ["autoos-agent"], "instructions": [], "plugins": [],
+                    "scratch_dir": td,
+                    "model": {"provider": "omniroute", "modelID": "combo"},
+                    "agent_layer": "L2", "guard_role": "l2"}
+            path = oc_l1_render.render(lane, ROOT / "opencode.jsonc")
+            return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def test_the_script_path_is_absolute_and_is_this_checkouts(self):
+        with tempfile.TemporaryDirectory() as lane_repo:
+            # a lane repo that has NO tools/ - exactly the scratch dir that failed
+            cfg = self._render(Path(lane_repo))
+        cmd = cfg["mcp"]["autoos-agent"]["command"]
+        self.assertIsInstance(cmd, list, cmd)
+        script = [t for t in cmd
+                  if isinstance(t, str)
+                  and t.endswith(oc_l1_render.AGENT_MCP_SCRIPT)]
+        self.assertEqual(len(script), 1, "the command must name the script once: %r" % cmd)
+        self.assertTrue(os.path.isabs(script[0]),
+                        "a relative script path resolves against the lane cwd: %r" % script[0])
+        self.assertEqual(Path(script[0]).resolve(),
+                         (TOOLS / oc_l1_render.AGENT_MCP_SCRIPT).resolve())
+        self.assertTrue(Path(script[0]).is_file(), script[0])
+        self.assertNotIn("tools/" + oc_l1_render.AGENT_MCP_SCRIPT, cmd)
+
+    def test_the_mcp_environment_carries_the_names_the_server_reads(self):
+        with tempfile.TemporaryDirectory() as lane_repo:
+            env = self._render(Path(lane_repo))["mcp"]["autoos-agent"]["environment"]
+        # the workers dir (the git-rev-parse hang), the profile marker, the lane name
+        self.assertEqual(
+            set(env),
+            {"AUTOOS_WORKERS_DIR", oc_l1_render.ENV_AGENT_LAYER,
+             oc_l1_render.ENV_L2_LANE})
+        self.assertEqual(env[oc_l1_render.ENV_AGENT_LAYER], "L2")
+        self.assertEqual(env[oc_l1_render.ENV_L2_LANE], "l2-scratch-abcdef-spawn")
+        self.assertEqual(env["AUTOOS_WORKERS_DIR"],
+                         str(Path(lane_repo) / "logs" / "workers"))
+
+    def test_the_helper_pins_only_a_relative_script_token(self):
+        script = str(TOOLS / oc_l1_render.AGENT_MCP_SCRIPT)
+        cmd, changed = oc_l1_render._abs_agent_mcp_command(
+            ["uv", "run", "--no-project", "python", "tools/autoos_agent_mcp.py"])
+        self.assertTrue(changed)
+        self.assertEqual(cmd[-1], script)
+        # a string command is the other shape opencode accepts
+        cmd2, changed2 = oc_l1_render._abs_agent_mcp_command(
+            "python3 ./tools/autoos_agent_mcp.py")
+        self.assertTrue(changed2)
+        self.assertEqual(cmd2, "python3 %s" % script)
+        # already absolute, or not this server: untouched
+        for untouched in (["python", script],
+                          ["npx", "-y", "@modernrelay/omnigraph-mcp@0.8.0"],
+                          ["python", "other_script.py"],
+                          None, []):
+            cmd3, changed3 = oc_l1_render._abs_agent_mcp_command(untouched)
+            self.assertEqual((cmd3, changed3), (untouched, False), untouched)
+
+
+class LaneMcpRealSpawnTest(unittest.TestCase):
+    """D3, live proof: the rendered command and env answer an MCP initialize.
+
+    Runs for real, from a working directory that is NOT this checkout - the
+    condition a lane repo outside AutoOS puts the MCP server under. Skipped when
+    `uv` cannot resolve its environment here (no binary, or no cache and no
+    network): that is evidence about the host, not about the render.
+    """
+
+    INIT = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                       "params": {"protocolVersion": "2024-11-05",
+                                  "capabilities": {},
+                                  "clientInfo": {"name": "test", "version": "1"}}})
+
+    def _uv_ok(self):
+        probe = subprocess.run(
+            ["uv", "--quiet", "run", "--no-project", "--with", "mcp<2",
+             "python", "-c", "import mcp"],
+            capture_output=True, text=True, timeout=240, cwd=str(ROOT))
+        return probe.returncode == 0
+
+    def _spawn(self, command, env, cwd):
+        return subprocess.run(command, input=self.INIT + "\n", cwd=cwd, env=env,
+                              capture_output=True, text=True, timeout=240)
+
+    def _rendered(self, lane_repo):
+        with tempfile.TemporaryDirectory(prefix="mcp_render_") as td:
+            lane = {"name": "l2-scratch-abcdef-spawn", "cwd": str(lane_repo),
+                    "mcp": ["autoos-agent"], "instructions": [], "plugins": [],
+                    "scratch_dir": td,
+                    "model": {"provider": "omniroute", "modelID": "combo"},
+                    "agent_layer": "L2", "guard_role": "l2"}
+            path = oc_l1_render.render(lane, ROOT / "opencode.jsonc")
+            cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+        entry = cfg["mcp"]["autoos-agent"]
+        # the lane child env minus the credentials: what opencode hands a local MCP
+        return entry["command"], dict(entry["environment"])
+
+    def test_the_rendered_server_answers_initialize_from_a_foreign_cwd(self):
+        if shutil.which("uv") is None:
+            self.skipTest("uv is not installed on this host")
+        with tempfile.TemporaryDirectory() as lane_repo:
+            command, env = self._rendered(Path(lane_repo))
+            if not self._uv_ok():
+                self.skipTest("uv cannot resolve 'mcp<2' here (no cache, no network)")
+            # the server's own env plus what uv needs to find a cache and a home:
+            # no PYTHONPATH, no repo-relative anything
+            child_env = {"PATH": os.environ.get("PATH", ""),
+                         "HOME": os.environ.get("HOME", "")}
+            for name in ("XDG_CACHE_HOME", "XDG_CONFIG_HOME", "TMPDIR"):
+                if name in os.environ:
+                    child_env[name] = os.environ[name]
+            child_env.update(env)
+            self.assertFalse((Path(lane_repo) / "tools").exists())
+            proc = self._spawn(command, child_env, lane_repo)
+        self.assertEqual(proc.returncode, 0,
+                         "stdout=%r stderr=%r" % (proc.stdout[-400:], proc.stderr[-400:]))
+        answered = [json.loads(line) for line in proc.stdout.splitlines()
+                    if line.strip().startswith("{")]
+        self.assertTrue(answered, "no JSON-RPC answer: %r" % proc.stdout[-400:])
+        result = answered[0].get("result", {})
+        self.assertEqual(result.get("serverInfo", {}).get("name"), "autoos-agent")
+
+    def test_the_relative_form_the_repo_config_used_dies_in_a_foreign_cwd(self):
+        """The repro: a relative script token resolves against the lane, not the repo."""
+        if shutil.which("uv") is None:
+            self.skipTest("uv is not installed on this host")
+        with tempfile.TemporaryDirectory() as lane_repo:
+            command, env = self._rendered(Path(lane_repo))
+            idx = [i for i, t in enumerate(command) if isinstance(t, str)
+                   and t.endswith(oc_l1_render.AGENT_MCP_SCRIPT)]
+            self.assertEqual(len(idx), 1, "the command names the script once: %r" % command)
+            broken = list(command)
+            broken[idx[0]] = "tools/" + oc_l1_render.AGENT_MCP_SCRIPT
+            child_env = {"PATH": os.environ.get("PATH", ""),
+                         "HOME": os.environ.get("HOME", "")}
+            child_env.update(env)
+            if not self._uv_ok():
+                self.skipTest("uv cannot resolve 'mcp<2' here (no cache, no network)")
+            proc = self._spawn(broken, child_env, lane_repo)
+        self.assertNotEqual(proc.returncode, 0,
+                            "the relative path must not start outside the repo")
+        self.assertNotIn('"result"', proc.stdout)
 
 
 class L2SpawnTierGateTest(unittest.TestCase):
