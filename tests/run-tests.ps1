@@ -5325,6 +5325,24 @@ Test-Case 'oc_l1 launcher: rendered opencode config shape (unit tests)' {
     Assert-Equal $rc 0 "test_oc_l1_render unit tests failed: $out"
 }
 
+Test-Case 'oc_l2 L2 phase lane: start, stop, inbox (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l2.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l2 unit tests failed: $out"
+}
+
+Test-Case 'agent MCP tool profile (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_agent_mcp_tool_profile.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_agent_mcp_tool_profile unit tests failed: $out"
+}
+
 Test-Case 'cost guard: run and daily budget evaluations (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

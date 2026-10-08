@@ -2100,9 +2100,13 @@ class McpStdioTests(unittest.TestCase):
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             # c2 2026-10-06: the lane lifecycle tools (oc_status/oc_start/
             # oc_restart) join the set.
+            # D-665 2026-10-08 (AO-L2-LAUNCH): the L2 phase-lane tools
+            # (l2_start/l2_status/l2_stop/l2_inbox) join it (R-orch-11: a new
+            # tool is only reachable if the pin says so).
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
                                      "respond", "route", "list_agents", "context", "heartbeat",
-                                     "ps", "oc_status", "oc_start", "oc_restart"})
+                                     "ps", "oc_status", "oc_start", "oc_restart",
+                                     "l2_start", "l2_status", "l2_stop", "l2_inbox"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "l3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])
@@ -20929,10 +20933,10 @@ class HostAdmissionTests(unittest.TestCase):
     def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}
         self.assertEqual(shipped.get("max_live_workers"), 6)
-        self.assertEqual(shipped.get("mem_available_floor_mb"), 6144)
+        self.assertEqual(shipped.get("mem_available_floor_mb"), 4608)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
-        self.assertEqual(self.agent.host_admission_config(None), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(None), (6, 4608))
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
@@ -21042,7 +21046,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(started, [], "the client never started")
         self.assertIn("queue or run on workstation", err)
         self.assertIn("cap 6", err)
-        self.assertIn("floor 6144 MB", err)
+        self.assertIn("floor 4608 MB", err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
     def test_cmd_run_refuses_on_memory_alone_for_admission(self):

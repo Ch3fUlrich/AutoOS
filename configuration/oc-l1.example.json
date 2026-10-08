@@ -5,7 +5,11 @@
     "  Windows: %LOCALAPPDATA%\\autoos\\oc-l1.json",
     "All values below are placeholders. 'password_env' is the NAME of the environment variable holding the Basic auth password - never a value.",
     "Top-level keys are lane names; the 'name' field inside a lane must equal its key.",
-    "Optional keys with defaults: serve_port (stable hash of the lane name, 47200-47299), instructions ([AGENTS.md, handoff]), mcp ([autoos-agent]), plugins ([]), state_file (<scratch_dir>/oc-l1-<name>.state.json), scratch_dir (<tempdir>/autoos-oc-l1/<name>), canary_timeout_s (120), heartbeat_file (<scratch_dir>/heartbeat.json), workers_dir (<cwd>/logs/workers, pinned as AUTOOS_WORKERS_DIR for the autoos-agent MCP).",
+    "Optional keys with defaults: serve_port (stable hash of the lane name, 47200-47299; it is a guess, so `start` binds it before spawning and walks forward to the next free port inside the range when something else holds it - the port the server really took is what the state file records), instructions ([AGENTS.md, handoff]), mcp ([autoos-agent]), plugins ([]), state_file (<scratch_dir>/oc-l1-<name>.state.json), scratch_dir (<tempdir>/autoos-oc-l1/<name>), canary_timeout_s (120), heartbeat_file (<scratch_dir>/heartbeat.json), workers_dir (<cwd>/logs/workers, pinned as AUTOOS_WORKERS_DIR for the autoos-agent MCP).",
+    "'plugins' must list the bash-guard plugin DIRECTORY: an unguarded lane has no plugin to deny the canary, so 'start' refuses it with exit 2 before spawning anything (D-665).",
+    "The lane child's environment is an ALLOWLIST, never the launcher's own (D-665 fix 2): the child gets the names a session legitimately needs (PATH/HOME/locale/XDG/GIT/proxy-certificate, the AUTOOS_* and SESSION_* knobs, and the two gateway names the rendered config references as {env:...}) and no credential - anything whose name ends in _PW/_KEY/_TOKEN/_SECRET/_PASSWORD or contains PASSWORD/SECRET/TOKEN/CREDENTIAL/APIKEY stays with the launcher, and the server password reaches the child under OPENCODE_SERVER_PASSWORD only. 'child_env' is an optional list of extra variable NAMES (never values) a lane needs beyond that; a credential-shaped name there is refused, and AUTOOS_GUARD_ROLE, AUTOOS_L1_INBOX and AUTOOS_AGENT_LAYER can never be declared - they are set from the lane, not inherited.",
+    "'agent_layer' (optional, an upper-case identifier such as 'L2') is exported to the child as AUTOOS_AGENT_LAYER; the autoos-agent MCP server reads it and refuses the lane-control tools (l2_start, l2_stop, l2_inbox, oc_start, oc_restart) inside an L2 lane, because only the L1 that owns lanes may steer them. An L1 lane marks nothing.",
+    "Orchestrator-lane keys (D-665, all optional, all absolute-path-free except where noted): 'permission' is a map of OpenCode permission key -> allow|deny|ask merged OVER the rendered defaults (e.g. {\"task\": \"deny\"} for a lane that must only coordinate); the reserved key 'external_directory' is refused there - it has its own lane list. 'guard_role' is exported to the server child as AUTOOS_GUARD_ROLE, and the bash-guard plugin's orchestrator role answers to it. 'inbox_file' is exported as AUTOOS_L1_INBOX - the file the lane's own REPORT/DONE lines are told to append to. 'first_prompt_file' is posted VERBATIM as the pilot's first prompt instead of the handoff head; 'start' refuses (exit 2) before spawning if it is named and missing.",
     "All paths (cwd, handoff, opencode_bin, scratch_dir, state_file, plugins, instructions, heartbeat_file) must be absolute paths on the host that runs the config - opencode_bin must point at the explicit npm opencode binary, never a PATH-lookup name, never the desktop 'service'."
   ],
   "l1-pilot": {
@@ -28,7 +32,9 @@
     ],
     "serve_port": 47250,
     "password_env": "AUTOOS_OCL1_PLACEHOLDER_PW",
-    "plugins": [],
+    "plugins": [
+      "/path/to/your/AutoOS/configuration/opencode/plugins/bash-guard"
+    ],
     "state_file": "/path/to/your/project/oc-l1-l1-pilot.state.json",
     "opencode_bin": "/path/to/opencode-binary",
     "scratch_dir": "/path/to/your/project/oc-l1-scratch",

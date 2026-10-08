@@ -2,9 +2,16 @@
 """MCP server (stdio) over tools/autoos-agent.py: spawn agents from any MCP client.
 
 Tools: list_clients, spawn, status, result, cancel, respond, route,
-list_agents, context, heartbeat (spec 6.2; heartbeat: R-heartbeat-02/03,
-R-pause-01, R-handoff-07; respond: the spec 9 ask-back). spawn is
-asynchronous: it validates the request (card ->
+list_agents, context, heartbeat, ps, oc_status/oc_start/oc_restart (L1 lane
+lifecycle, c2), l2_start/l2_status/l2_stop/l2_inbox (L2 phase lanes, D-665)
+(spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01, R-handoff-07; respond: the
+spec 9 ask-back). Which of those a client can even LIST is a profile
+(MCP_TOOL_PROFILES): a server whose environment marks it as running inside an L2
+lane (`AUTOOS_AGENT_LAYER=L2`, rendered by oc_l1_render) registers the spawner's
+tools - spawn, status, result, ps, list_clients, route, context, heartbeat - and
+nothing else, and inside that profile a `spawn` is a tier-3 worker only
+(L2_SPAWN_TIER).
+spawn is asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
@@ -138,11 +145,149 @@ _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
 _OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
                    "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL",
                    "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME",
-                   "AUTOOS_OMNIROUTE_URL")
+                   # the gateway PAIR: the rendered lane config references both
+                   # as {env:...}, and the lane child inherits this process's
+                   # environment - forward only the URL and a lane starts with no
+                   # key for its model
+                   "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY")
 
 
 def _oc_l1_env() -> dict:
     return {k: os.environ[k] for k in _OC_L1_ENV_KEYS if k in os.environ}
+
+
+# Sonnet final REJECT 2026-10-08 finding 2: one MCP server answers an L1 and an
+# L2, so an L2 could start, stop and nudge lanes - relaunch its own supervisor, or
+# switch off a phase it does not own. A lane marks the layer it runs at in its own
+# environment (tools/oc_l2.py marks L2; an L1 lane marks nothing) and this server
+# refuses the lane-CONTROL tools when it reads L2 back. Reading a lane stays
+# allowed: an L2 watching its own phase is ordinary work, and it reports upward to
+# the L1 inbox instead of steering.
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# AO-L2-LAUNCH merge criterion b: the L2 report tool stamps this name as the
+# lane the report came from. Set by the lane render (tools/oc_l1_render.py) into
+# the MCP's own environment, so it is never a tool argument a model could point
+# at a peer lane. The three-sides name agreement is pinned by
+# tests/test_agent_mcp_tool_profile.py.
+ENV_L2_LANE = "AUTOOS_L2_LANE"
+# Where an L2 report lands; the same name the renderer/serve child export. Named
+# here so `l2_report` reads it from one constant, matching ENV_L2_LANE above.
+ENV_L1_INBOX = "AUTOOS_L1_INBOX"
+# The tools this fence covers. It is a list, not a comment, so the suite can pin
+# that the set of tools it refuses is exactly the set it tests: a lane-control
+# tool added later makes that test say which one is unfenced.
+LANE_CONTROL_TOOLS = ("l2_start", "l2_stop", "l2_inbox", "oc_start", "oc_restart")
+
+
+def lane_control_fence(tool: str) -> dict | None:
+    """The refusal an L2 gets for a lane-control tool; None when this server is
+    not running inside an L2 lane."""
+    if os.environ.get(ENV_AGENT_LAYER, "").strip().upper() != "L2":
+        return None
+    return {"ok": False, "refused": True, "tool": tool,
+            "detail": "refused: this MCP server runs inside an L2 lane (%s=L2), and "
+                      "only the L1 that owns the lanes may start, stop or nudge one; "
+                      "an L2 works through the spawner (%s) and reports to the L1 "
+                      "inbox instead" % (ENV_AGENT_LAYER, ", ".join(SPAWNER_TOOLS))}
+
+
+# --- the tool profile (AO-L2-LAUNCH merge criterion 2) ----------------------
+#
+# `lane_control_fence` refuses the lane-control tools inside an L2, but a
+# refusal is still a menu entry: opencode shows an L2 every tool it is going to
+# be denied, and each one it reaches for is a turn spent reading a refusal. So
+# the same marker also picks the set the server REGISTERS, at registration time:
+# an L2's server lists the spawner and its read-only companions and nothing
+# else - no lane control, no `cancel` of someone else's run, no `respond` to a
+# question this lane did not ask.
+SPAWNER_TOOLS = ("spawn", "status", "result", "ps", "list_clients", "route",
+                 "context", "heartbeat")
+# Every tool `build_server` can register, in the order it registers them.
+MCP_TOOL_NAMES = ("list_clients", "spawn", "status", "result", "cancel",
+                  "respond", "route", "list_agents", "ps", "context",
+                  "oc_status", "oc_start", "oc_restart", "l2_start",
+                  "l2_status", "l2_stop", "l2_inbox", "heartbeat")
+FULL_PROFILE = "full"
+NARROWEST_PROFILE = "l2"
+# AO-L2-LAUNCH merge criterion b: an L2 reports its own REPORT/DONE/BLOCKED line
+# through this tool, so the profile is not merely a subset of the full menu - it
+# is the spawner set PLUS one tool the full profile never registers. An L1 does
+# not report through it and must not see it, which is why it is absent from
+# MCP_TOOL_NAMES and present only in the narrow profile.
+L2_REPORT_TOOL = "l2_report"
+L2_REPORT_KINDS = ("REPORT", "DONE", "BLOCKED")
+L2_REPORT_MAX = 500
+MCP_TOOL_PROFILES = {FULL_PROFILE: MCP_TOOL_NAMES,
+                     NARROWEST_PROFILE: SPAWNER_TOOLS + (L2_REPORT_TOOL,)}
+
+
+def mcp_tool_profile(env=None) -> str:
+    """The tool profile this process serves: `l2` when its environment marks it
+    as running inside an L2 lane, the full set otherwise."""
+    source = os.environ if env is None else env
+    if str(source.get(ENV_AGENT_LAYER, "")).strip().upper() == "L2":
+        return NARROWEST_PROFILE
+    return FULL_PROFILE
+
+
+def tool_names_for(profile: str) -> tuple:
+    """The tool names `profile` registers. An unknown profile gets the
+    NARROWEST list: a typo in a lane config must not hand back the full menu."""
+    return MCP_TOOL_PROFILES.get(profile) or MCP_TOOL_PROFILES[NARROWEST_PROFILE]
+
+
+# The one tier an L2 lane may start a worker at (AO-L2-LAUNCH merge criterion 3).
+L2_SPAWN_TIER = 3
+
+
+def l2_spawn_refusal(run_tier: int, card: dict | None, client: str | None = None,
+                     models=(), env=None):
+    """D-665 (AO-L2-LAUNCH criteria 3 and b): the gate a spawn from profile `l2`
+    passes through; None when this server is not an L2's, or the spawn is a legal
+    L2 worker.
+
+    Two rules, both "what an L2 exists not to have":
+
+    * Claude (criterion b): an L2 lane runs free/credit only. The `claude` CLIENT
+      and any Claude MODEL PIN are refused whatever the tier, checked FIRST, so an
+      L2 cannot spend the Claude allowance even with a declared reason - the credit
+      budget is the L1's to apply, and cross-family review rides with it.
+    * Tier (criterion 3): an L2 coordinates - its shell is a closed read-only list
+      and its editor is denied - so the only thing it may start is a tier-3 worker
+      writing in its own clone. Below that is a session holding an editor and a
+      checkout of the main tree, and a `role: orchestrate` card is the L1's own
+      seat reached through the resolver instead of through `--tier` - both are an
+      L2 climbing out of its lane. The check reads the TIER THE REQUEST RESOLVES
+      TO, not the flag the caller typed, so a card that routes to tier 2 is refused
+      exactly as `--tier 2` is.
+
+    This is the minimal gate; the full ROLE-GATE (which role may spawn which) is a
+    later lane.
+    """
+    if mcp_tool_profile(env) != NARROWEST_PROFILE:
+        return None
+    res = agent.resolver
+    if client and res.is_claude_client(client):
+        return ("l2 lane: the %r client stays with the L1 - an L2 spawns free/"
+                "credit tiers only. Report to the L1 inbox and let the L1 run "
+                "Claude." % client)
+    for pin in models:
+        if res.claude_model_name(pin):
+            return ("l2 lane: pinning a Claude model (%s) is refused - an L2 runs "
+                    "free/credit only. Report to the L1 inbox and let the L1 run "
+                    "Claude." % pin)
+    role = (card or {}).get("role")
+    if int(run_tier) >= L2_SPAWN_TIER and role != "orchestrate":
+        return None
+    why = ("a role=orchestrate card is an L1's own seat"
+           if role == "orchestrate" else
+           "below tier %d is a session that holds its own editor and a checkout "
+           "of the main tree" % L2_SPAWN_TIER)
+    return ("l2 lane: an L2 spawns tier-%d workers only, this request is tier %d "
+            "and %s. Report the work to the L1 inbox and let the L1 start the "
+            "tier." % (L2_SPAWN_TIER, int(run_tier), why))
+
+
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 _OC_EXIT_HINT = {
     0: "ok",
@@ -189,6 +334,9 @@ def oc_start(lane: str) -> dict:
     """Start a lane through tools/oc_l1.py (render -> serve -> canary -> first prompt).
     Requires the lane password in this process's environment (AUTOOS_OCL1_PW);
     it is never read, printed or logged here."""
+    fence = lane_control_fence("oc_start")
+    if fence is not None:
+        return fence
     argv = _oc_l1_args(lane, "start")
     r = subprocess.run(argv, capture_output=True, text=True, timeout=420,
                        stdin=subprocess.DEVNULL, env=_oc_l1_env())
@@ -205,6 +353,9 @@ def oc_restart(lane: str) -> dict:
     pid recorded in ~/fleet/<lane>/state/, delete that state file; the lane's
     watcher then starts it fresh within ~2 minutes (never kill by process
     name). Passwords are not touched."""
+    fence = lane_control_fence("oc_restart")
+    if fence is not None:
+        return fence
     import glob as _glob
     if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
         raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
@@ -228,6 +379,152 @@ def oc_restart(lane: str) -> dict:
     return {"lane": lane, "action": "restarted",
             "killed_pids": killed, "removed_state": removed,
             "detail": "the lane's watcher starts it within ~2 minutes; verify with oc_status"}
+
+
+# --- L2 phase lanes (D-665 AO-L2-LAUNCH): l2_start / l2_status / l2_stop /
+# l2_inbox through tools/oc_l2.py, which resolves a phase into a lane and hands
+# the render-serve-canary-prompt pipeline to tools/oc_l1.py. The shape mirrors
+# the oc_* helpers above: an allowlisted environment, the server password
+# present by NAME only and never read here, and the CLI's own JSON as the
+# answer - this server renders no lane and kills no pid itself.
+
+_OC_L2_SCRIPT = os.path.join(TOOLS_DIR, "oc_l2.py")
+# What oc_l2.py reads. AUTOOS_OCL1_PW is already in the L1 allowlist; the rest
+# are the binary path, where the L2 reports to, the run dir whose inbox the
+# L2's own lines land in, and where the lane state lives.
+_OC_L2_ENV_KEYS = _OC_L1_ENV_KEYS + ("AUTOOS_OPENCODE_BIN", "AUTOOS_L1_INBOX",
+                                     "AUTOOS_RUN_DIR", "AUTOOS_OCL2_STATE_DIR",
+                                     "AUTOOS_OCL2_GUARD_DIR")
+# start pays for a canary model call; the others are one HTTP round trip plus a
+# kill wait.
+_L2_TIMEOUT_S = {"start": 420, "status": 90, "stop": 90, "inbox": 90}
+
+
+def _oc_l2_env() -> dict:
+    return {k: os.environ[k] for k in _OC_L2_ENV_KEYS if k in os.environ}
+
+
+def _oc_l2(sub: str, argv: list) -> dict:
+    """One oc_l2.py call. It prints exactly one JSON object - the verdict -
+    so the answer travels as data, not as text a caller has to re-parse."""
+    r = subprocess.run([sys.executable, _OC_L2_SCRIPT, sub] + list(argv),
+                       capture_output=True, text=True, timeout=_L2_TIMEOUT_S[sub],
+                       stdin=subprocess.DEVNULL, env=_oc_l2_env())
+    text = (r.stdout or "").strip()
+    try:
+        out = json.loads(text)
+    except ValueError:
+        out = {"ok": False,
+               "detail": ((text + " " + (r.stderr or "").strip()).strip()[-200:]
+                          or "oc_l2.py %s printed no JSON" % sub)}
+    if not isinstance(out, dict):
+        out = {"ok": False, "detail": "unexpected oc_l2.py output: %s" % text[:200]}
+    out.setdefault("exit_code", r.returncode)
+    return out
+
+
+def l2_start(repo: str, phase: str, brief_path: str,
+             combo: str = "l2-orchestrator") -> dict:
+    """Start the L2 lane for one phase: lane `l2-<repo>-<checkout-tag>-<phase>`, model = the
+    gateway combo, the autoos-agent spawner as its only MCP, permission.task
+    denied and the bash-guard in orchestrator role. The first prompt is the
+    brief's own text plus the fixed role footer."""
+    fence = lane_control_fence("l2_start")
+    if fence is not None:
+        return fence
+    return _oc_l2("start", ["--repo", str(repo), "--phase", str(phase),
+                            "--brief", str(brief_path), "--combo", str(combo)])
+
+
+def l2_status(lane: str) -> dict:
+    """live | silent | dead | absent for a phase lane, with its session id,
+    port and last canary result."""
+    return _oc_l2("status", ["--lane", str(lane)])
+
+
+def l2_stop(lane: str) -> dict:
+    """Stop a phase lane cleanly: the recorded PID's process group, then the
+    state file. An orphaned `serve` still holding the port would make the next
+    start's health poll answer for the wrong server (R-coord-10), so a stop
+    that cannot prove the tree dead reports orphan=true and keeps the state."""
+    fence = lane_control_fence("l2_stop")
+    if fence is not None:
+        return fence
+    return _oc_l2("stop", ["--lane", str(lane)])
+
+
+def l2_inbox(lane: str, text: str) -> dict:
+    """Hand a line of work to a running phase lane: append one timestamped
+    record to the lane's inbox and nudge its session with the launcher's own
+    prompt call. The line is kept even when the lane is not live; a lane whose
+    canary never denied is refused the nudge (refused=true, exit_code 2)."""
+    fence = lane_control_fence("l2_inbox")
+    if fence is not None:
+        return fence
+    return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
+
+
+def _l2_report_scrub(text) -> str:
+    """The body of a report forced to one printable line, capped: the report is a
+    single inbox record, so a newline a caller smuggled in would forge a second
+    one and any control character would confuse the reader that parses the stamp."""
+    kept = [ch for ch in str(text)
+            if ch == " " or (0x20 <= ord(ch) and ord(ch) != 0x7F)]
+    return "".join(kept).strip()[:L2_REPORT_MAX]
+
+
+def l2_report(text: str, kind: str = "REPORT", env=None, now=None) -> dict:
+    """Append the L2's own REPORT/DONE/BLOCKED line to the L1 inbox: one call,
+    one well-formed record - no longer a tier-3 spawn whose whole task was to
+    write a line (AO-L2-LAUNCH merge criterion b).
+
+    The lane is never an argument. It is read from this MCP's own environment
+    (`AUTOOS_L2_LANE`), fixed when the lane rendered, so a report cannot name a
+    lane that did not write it. Refused outside profile l2, on an empty body, an
+    unknown kind, or a missing lane/inbox - a report that would mis-attribute or
+    land nowhere is worse than no report. `env`/`now` are the test seams; the
+    server calls this with neither, so it reads the live environment and clock.
+    """
+    source = os.environ if env is None else env
+    if mcp_tool_profile(source) != NARROWEST_PROFILE:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "l2_report is an L2 tool: this server does not run "
+                          "inside an L2 lane (%s=L2)" % ENV_AGENT_LAYER}
+    kind = str(kind or "REPORT").strip().upper()
+    if kind not in L2_REPORT_KINDS:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "kind must be one of %s" % ", ".join(L2_REPORT_KINDS)}
+    body = _l2_report_scrub(text)
+    if not body:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "report text is empty"}
+    lane = str(source.get(ENV_L2_LANE, "")).strip()
+    if not lane:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "no lane in this MCP's environment (%s): an unattributed "
+                          "report is refused" % ENV_L2_LANE}
+    inbox = source.get(ENV_L1_INBOX)
+    if not inbox:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "no L1 inbox (%s): the report would land nowhere"
+                          % ENV_L1_INBOX}
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    line = "%s %s %s: %s\n" % (stamp, lane, kind, body)
+    parent = os.path.dirname(str(inbox))
+    try:
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        fd = os.open(str(inbox), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError as e:
+        return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
+                "detail": "cannot open the L1 inbox %s: %s" % (inbox, e)}
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+    return {"ok": True, "lane": lane, "kind": kind, "inbox": str(inbox),
+            "appended": line.rstrip("\n")}
 
 
 def kill_store_dir() -> str:
@@ -512,6 +809,19 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # D-665 (AO-L2-LAUNCH criteria 3 and b): the L2 gate. A spawn that resolves
+    # below tier 3 is not a worker an L2 may start, and a Claude client or a
+    # Claude model pin is a spend an L2 may not make. Checked here, at the one
+    # place the tier is known after routing (a flag, or whatever combo a card
+    # selected), so the caller's own `--tier` cannot talk its way past a card that
+    # routes to tier 2 - and a dry run is refused too, because a preview an agent
+    # would believe is the same lie as the launch. The pins travel to the ONE L2
+    # helper so the tier rule and the Claude rule cannot drift apart.
+    l2_refusal = l2_spawn_refusal(
+        run_tier, gate_card, client=client,
+        models=tuple(p for p in (req.get("model"), req.get("free_model")) if p))
+    if l2_refusal is not None:
+        raise ValueError(l2_refusal)
     # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
     # The CLI's own helper, so both entry points read one rule; a dry run only
     # previews it (the server's preflight IS a dry run), and every non-dry
@@ -1428,18 +1738,39 @@ def cancel(run_id: str) -> dict:
                      "kill_record": report.get("kill_record")}))
 
 
-def serve() -> None:
+def build_server(profile: str | None = None):
+    """The FastMCP app, registering the tools of `profile` (None: whatever this
+    process's environment names - see `mcp_tool_profile`).
+
+    Split out of `serve` so the tool set is checkable without running a server:
+    criterion 2 is about what an L2 lane can LIST, and a list kept beside the
+    registration is a list that drifts.
+    """
     from mcp.server.fastmcp import FastMCP
 
+    names = tool_names_for(mcp_tool_profile() if profile is None else profile)
     app = FastMCP("autoos-agent")
 
-    @app.tool(name="list_clients")
+    def _register(name):
+        """@app.tool for the profiles that list `name`.
+
+        A tool outside the profile is defined but never advertised, so calling
+        it is a protocol error rather than a refusal the model has to read -
+        and `lane_control_fence` still stands behind it, because the same
+        functions are reachable from the CLI."""
+        def deco(fn):
+            if name in names:
+                return app.tool(name=name)(fn)
+            return fn
+        return deco
+
+    @_register("list_clients")
     def _list_clients() -> dict:
         """Agent clients this host can spawn (headless, gateway, sub-agents, auth,
         installed), the task-card fields with defaults, and your depth budget."""
         return list_clients()
 
-    @app.tool(name="spawn")
+    @_register("spawn")
     def _spawn(task: str, client: str = "opencode", card: dict | None = None,
                tier: int | None = None, model: str | None = None,
                isolate: bool | None = None,
@@ -1477,6 +1808,15 @@ def serve() -> None:
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
         inert there; it only waives the privacy check on an explicit --model).
+
+        L2 SPAWN GATE (D-665, AO-L2-LAUNCH criterion 3): when this server's own
+        environment marks it as running inside an L2 lane (`AUTOOS_AGENT_LAYER=L2`
+        — the same marker that lists only the spawner's tools), a spawn is a
+        tier-3 worker only. Tier 1, tier 2 and any `role: orchestrate` card are
+        refused before a run dir exists, whatever the request typed: the gate
+        reads the tier the request RESOLVES to, and below tier 3 is a session that
+        holds its own editor, which is what an L2 exists not to have. An L2 that
+        needs one reports to the L1 inbox and the L1 starts the tier.
 
         claude_reason: this spawn's own Claude-budget declaration, for a `model`
         that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that
@@ -1518,18 +1858,18 @@ def serve() -> None:
                       "no_fallthrough": no_fallthrough,
                       "claude_reason": claude_reason})
 
-    @app.tool(name="status")
+    @_register("status")
     def _status(run_id: str | None = None) -> dict:
         """One run's state (an A2A name: submitted, working, completed, failed,
         canceled; the pre-A2A value in `detail`), or the 20 newest runs."""
         return status(run_id)
 
-    @app.tool(name="result")
+    @_register("result")
     def _result(run_id: str, max_chars: int = TAIL_CHARS) -> dict:
         """A run's state plus its output (the tail when longer than max_chars)."""
         return result(run_id, max_chars)
 
-    @app.tool(name="cancel")
+    @_register("cancel")
     def _cancel(run_id: str) -> dict:
         """Stop a working or input_required agent: it stops the systemd scope the
         worker was launched in (SIGTERM, then SIGKILL to every process in the
@@ -1541,7 +1881,7 @@ def serve() -> None:
         could not stop reports the state "cancel-failed", never "canceled"."""
         return cancel(run_id)
 
-    @app.tool(name="respond")
+    @_register("respond")
     def _respond(run_id: str, text: str) -> dict:
         """Answer a worker's pending question (spec 9 ask-back): a worker that
         runs tools/autoos-ask.py parks its run in input_required until this
@@ -1549,7 +1889,7 @@ def serve() -> None:
         and the run works on. Empty text is refused."""
         return respond(run_id, text)
 
-    @app.tool(name="route")
+    @_register("route")
     def _route(card: str | dict, brief: str = "", explain: bool = False) -> dict:
         """The resolver v2 route_plan for `card` (spec 6.1/6.2).
 
@@ -1561,13 +1901,13 @@ def serve() -> None:
         probes; no network, no key."""
         return route_plan(card, brief, explain)
 
-    @app.tool(name="list_agents")
+    @_register("list_agents")
     def _list_agents() -> dict:
         """The registry's clients (installed/signed-in/reason) and routes
         (class, legs with availability, retired), spec 6.2."""
         return list_agents()
 
-    @app.tool(name="ps")
+    @_register("ps")
     def _ps(include_ended: bool = False) -> dict:
         """Every spawned worker on this host (all worktrees and clones): id,
         state (running / died / exited rc=N), elapsed, client, model, lane,
@@ -1576,40 +1916,113 @@ def serve() -> None:
         window as `autoos-agent.py ps --all`)."""
         return ps(include_ended)
 
-    @app.tool(name="context")
+    @_register("context")
     def _context(transcript: str | None = None) -> dict:
         """This session's context fill: tokens, the model's cap and the
         percentage (spec 6.1/8.3) - the same data `autoos-agent.py context`
         prints."""
         return context_info(transcript)
 
-    @app.tool(name="oc_status")
+    @_register("oc_status")
     def _oc_status(lane: str) -> dict:
         """c2 (2026-10-06): one lane's status through tools/oc_l1.py - verdict
         live / silent / dead plus the exact next step for each. The lane
         password is never read, printed or logged; a missing password env
-        surfaces as exit_code 2 with the remediation in "outcome" (oc_start)."""
+        surfaces as exit_code 2 with the remediation in "outcome" (oc_start).
+        Reading a lane stays allowed inside an
+        L2 - the fence is on control."""
         return oc_status(lane)
 
-    @app.tool(name="oc_start")
+    @_register("oc_start")
     def _oc_start(lane: str) -> dict:
         """c2 (2026-10-06): start a lane through tools/oc_l1.py (render ->
         serve -> canary -> first prompt). Requires the lane password env
         (AUTOOS_OCL1_PW) to be set in this session's environment. Exit-code
         meanings travel in the answer's "outcome": 0 ok; 2 config/password;
         4 server not healthy; 5 UNATTENDED-REFUSED (canary not denied - fix
-        the guard, delete the state file, restart, supervise)."""
+        the guard, delete the state file, restart, supervise). 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return oc_start(lane)
 
-    @app.tool(name="oc_restart")
+    @_register("oc_restart")
     def _oc_restart(lane: str) -> dict:
         """c2 (2026-10-06): force-restart a lane the way the handoff card
         prescribes (kill the recorded pid, delete the state file; the watcher
         starts the lane within ~2 minutes). Never kills by process name and
-        never touches passwords. Verify afterwards with oc_status."""
+        never touches passwords. Verify afterwards with oc_status. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return oc_restart(lane)
 
-    @app.tool(name="heartbeat")
+    @_register("l2_start")
+    def _l2_start(repo: str, phase: str, brief_path: str,
+                  combo: str = "l2-orchestrator") -> dict:
+        """D-665 (AO-L2-LAUNCH): start the L2 lane for one phase and give it
+        its brief. Lane `l2-<repo>-<checkout-tag>-<phase>`; model = the gateway combo (its own
+        declared context, so no 128k clamp); MCP = the autoos-agent spawner
+        ONLY, and the spawner an L2 starts lists only its own tools; OpenCode
+        permission.task denied and the bash-guard plugin in its read-only `l2`
+        role, so the L2 coordinates and never edits code; first
+        prompt = the contents of brief_path plus the fixed footer (skill name,
+        spawn tier-3 through autoos-agent, report REPORT/DONE to the L1 inbox).
+        Needs AUTOOS_OCL1_PW (server password, by name only) and
+        AUTOOS_OPENCODE_BIN in this session's environment, and AUTOOS_L1_INBOX
+        or the lane reports nowhere. Refuses when the phase lane is already
+        running - send it work with l2_inbox instead. Answers lane, port,
+        session_id, pid, canary{denied,detail}; exit_code 5 is
+        UNATTENDED-REFUSED (canary not denied: l2_stop, fix the guard, start
+        again). 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
+        return l2_start(repo, phase, brief_path, combo)
+
+    @_register("l2_status")
+    def _l2_status(lane: str) -> dict:
+        """D-665: a phase lane's verdict - live / silent / dead / absent - plus
+        its session id, port, phase and last canary result.
+        Reading a lane stays allowed inside an
+        L2 - the fence is on control."""
+        return l2_status(lane)
+
+    @_register("l2_stop")
+    def _l2_stop(lane: str) -> dict:
+        """D-665: stop a phase lane cleanly (R-coord-10): kill the recorded
+        PID's process group, verify it died, then remove the state file. A PID
+        whose command line is not the lane's opencode is never killed; an
+        orphan reports stopped=false. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
+        return l2_stop(lane)
+
+    @_register("l2_inbox")
+    def _l2_inbox(lane: str, text: str) -> dict:
+        """D-665: give a running phase lane more work - append one timestamped
+        record to the lane's inbox and nudge its session with the launcher's
+        own prompt call. The append happens whether or not the nudge lands;
+        empty text is refused. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
+        return l2_inbox(lane, text)
+
+    @_register(L2_REPORT_TOOL)
+    def _l2_report(text: str, kind: str = "REPORT") -> dict:
+        """AO-L2-LAUNCH criterion b: the L2's own report line. Appends ONE
+        stamped record `<UTC> <lane> <kind>: <text>` to the L1 inbox
+        (AUTOOS_L1_INBOX), so a milestone no longer costs a tier-3 spawn whose
+        whole task was to write it. `kind` is REPORT, DONE or BLOCKED. The lane
+        is this server's own environment (AUTOOS_L2_LANE), NEVER an argument - a
+        report cannot name a lane that did not write it. The text is forced to a
+        single printable line and capped at 500 chars. Present only in profile l2.
+        """
+        return l2_report(text, kind)
+
+    @_register("heartbeat")
     def _heartbeat(inbox: str | None = None, transcript: str | None = None,
                    repos: list[str] | None = None, cap: int | None = None) -> dict:
         """Read-only heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07):
@@ -1619,7 +2032,12 @@ def serve() -> None:
         writes anything."""
         return heartbeat_info(inbox, transcript, repos, cap)
 
-    app.run()
+    return app
+
+
+def serve() -> None:
+    """Run the server on stdio with the profile this process's environment names."""
+    build_server().run()
 
 
 if __name__ == "__main__":

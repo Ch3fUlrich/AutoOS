@@ -19,10 +19,17 @@ repo-file shape):
   * "mcp": a FLAT map (NO "servers" level) of every server of the repo
     opencode.jsonc (which nests them under "servers"), enabled: true only
     for the lane's "mcp" list (default ["autoos-agent"]); an enabled name
-    missing from the repo file is a config error.
+    missing from the repo file is a config error. The enabled autoos-agent
+    entry gets its script path pinned ABSOLUTE, to the checkout that renders
+    this file - opencode starts a local MCP with cwd = the lane's directory, so
+    the repo's relative `tools/autoos_agent_mcp.py` resolves against the lane
+    repo and the server dies there (a lane outside AutoOS had no spawner at all).
   * "plugins": the configured plugin DIRECTORIES (key omitted when empty).
   * "permission": bash/edit/read plus autoos-agent_* allowed; an optional
-    lane "external_directory" list of path globs is rendered as allow entries
+    lane "permission" object holds extra entries that override the defaults
+    (an L2 lane renders oc_l2.L2_PERMISSIONS - every file-mutating key denied,
+    D-665 + Sonnet final REJECT 2026-10-08 finding 1); an optional lane
+    "external_directory" list of path globs is rendered as allow entries
     (lane c 2026-10-05: the outside-folder access moves from a hand-edited
     host overlay into the lane config).
   * "compaction" / "tool_output": lane c (2026-10-05) pins prune-on
@@ -38,6 +45,7 @@ repo-file shape):
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
@@ -61,6 +69,14 @@ def _registry_models():
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
 ENV_KEY = "AUTOOS_OMNIROUTE_KEY"
+# The same name oc_l1.ENV_AGENT_LAYER and oc_l1_serve export into the lane
+# child's environment; named here too because importing oc_l1 would close the
+# cycle oc_l1 -> render. tests/test_agent_mcp_tool_profile.py pins the three.
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# AO-L2-LAUNCH criterion b: the L2's report tool stamps this lane name, read
+# from the MCP's own environment. Duplicated for the same import-cycle reason as
+# ENV_AGENT_LAYER; the same suite pins it across the three sides.
+ENV_L2_LANE = "AUTOOS_L2_LANE"
 RENDERED_FILENAME = "opencode.json"
 PROVIDER_NPM = "@ai-sdk/openai-compatible"
 PROVIDER_NAME = "workstation gateway"
@@ -138,6 +154,51 @@ def _repo_servers(repo):
     return None
 
 
+# The MCP server this renderer's own checkout provides. Named by file, not by a
+# path literal, so the pin below matches the code that is actually running.
+AGENT_MCP_SCRIPT = "autoos_agent_mcp.py"
+
+
+def _relative_agent_script_token(token):
+    """Is this command token the MCP script given as a RELATIVE path?
+
+    The repo config spells it `tools/autoos_agent_mcp.py`. opencode starts a
+    local MCP with cwd = the lane's own directory, so a relative token resolves
+    against the lane repo, not against the checkout that provides the server: a
+    lane whose repo is a scratch dir outside AutoOS had the child exit at once
+    and opencode reported `mcp connect failed server=autoos-agent
+    status.error="Connection closed"` (measured 2026-10-08). An absolute token
+    is already pinned, and a token that is not the script is left alone.
+    """
+    if not isinstance(token, str) or not token:
+        return False
+    if os.path.isabs(token) or re.match(r"^[A-Za-z]:[\\/]", token):
+        return False
+    return token == AGENT_MCP_SCRIPT or token.endswith("/" + AGENT_MCP_SCRIPT)
+
+
+def _abs_agent_mcp_command(command):
+    """The autoos-agent command with its script path pinned to THIS checkout.
+
+    Returns (command, rewritten). Handles both shapes opencode accepts - the
+    token list (this repo's) and a single command string. A command that carries
+    no relative script token is returned untouched: it is either already absolute
+    or not this server's command, and rewriting it would be a guess.
+    """
+    script = str(Path(__file__).resolve().parent / AGENT_MCP_SCRIPT)
+    if isinstance(command, list):
+        out = [script if _relative_agent_script_token(tok) else tok
+               for tok in command]
+        return out, any(_relative_agent_script_token(tok) for tok in command)
+    if isinstance(command, str):
+        toks = shlex.split(command)
+        if not any(_relative_agent_script_token(t) for t in toks):
+            return command, False
+        return shlex.join([script if _relative_agent_script_token(t) else t
+                           for t in toks]), True
+    return command, False
+
+
 def render(lane, repo_config_path):
     """Write the scratch opencode config; return the output path."""
     if not repo_config_path.is_file():
@@ -163,11 +224,30 @@ def render(lane, repo_config_path):
         e = dict(entry) if isinstance(entry, dict) else {}
         e["enabled"] = sname in enabled
         if sname == "autoos-agent" and e["enabled"]:
+            # D3 (live check 2026-10-08): the script path is pinned to THIS
+            # checkout, because opencode starts the MCP with cwd = the lane's
+            # directory and the repo's relative `tools/autoos_agent_mcp.py`
+            # resolves against the lane repo - a scratch dir outside AutoOS has
+            # no such file, the child exits at once, and the lane runs with no
+            # spawner ("mcp connect failed ... Connection closed").
+            cmd, _rewritten = _abs_agent_mcp_command(e.get("command"))
+            if _rewritten:
+                e["command"] = cmd
             # Without AUTOOS_WORKERS_DIR the MCP tools run `git rev-parse` WITHOUT stdin=DEVNULL: under opencode's
             # stdio transport that git inherits the MCP pipe and the first tool call (ps) hangs (measured: 600 s).
             # A pinned dir skips that git call; default = the clone's own logs/workers.
             env = dict(e.get("environment") or {})
             env.setdefault("AUTOOS_WORKERS_DIR", str(lane.get("workers_dir") or Path(lane["cwd"]) / "logs" / "workers"))
+            # D-665 criterion 2: the spawner picks the tool profile it
+            # REGISTERS from this marker, and opencode starts the MCP as a child
+            # of its own - so the lane names it in the server's environment
+            # rather than trusting what the launching shell happened to export.
+            if lane.get("agent_layer"):
+                env[ENV_AGENT_LAYER] = str(lane["agent_layer"])
+                # The lane's own name, fixed here rather than passed as a tool
+                # argument: `l2_report` stamps the lane it came from, and only
+                # this render knows which lane that is.
+                env[ENV_L2_LANE] = str(lane["name"])
             e["environment"] = env
         mcp_out[sname] = e
 
@@ -255,6 +335,12 @@ def render(lane, repo_config_path):
                 % lane["name"]
             )
         cfg["permission"]["external_directory"] = {p: "allow" for p in ext}
+    # D-665 (AO-L2-LAUNCH): the lane's own permission entries win over the
+    # defaults - an L2 lane denies every file-mutating key and the spawn gate
+    # so it can only coordinate, and every change goes through the spawner.
+    overrides = lane.get("permission")
+    if overrides:
+        cfg["permission"].update(overrides)
     if lane["plugins"]:
         cfg["plugins"] = list(lane["plugins"])
 

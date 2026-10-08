@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -175,6 +176,113 @@ class PortDerivationTest(unittest.TestCase):
                 rc, _, _ = run_main(["render", "--name", "l1test", "--config", str(cfg)])
                 self.assertEqual(rc, 2, "serve_port=%r must be refused" % (bad,))
                 self.assertFalse((tmp / "scratch").exists())
+
+
+class PortFreeTest(unittest.TestCase):
+    """Fix 6: a derived port is a guess, and two lane names can guess the same
+    one. `start` must find that out by binding it BEFORE spawning, not by
+    watching the health poll time out on a port somebody else holds."""
+
+    def _listen(self, port):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", port))
+        srv.listen(1)
+        return srv
+
+    def test_a_live_listener_is_not_free_and_a_closed_one_is(self):
+        srv = self._listen(0)
+        port = srv.getsockname()[1]
+        try:
+            self.assertFalse(oc_l1.port_is_free(port))
+        finally:
+            srv.close()
+        self.assertTrue(oc_l1.port_is_free(port))
+
+    def test_the_walk_starts_at_the_given_port_and_stops_at_the_first_free(self):
+        seen = []
+
+        def probe(p, host="127.0.0.1"):
+            seen.append(p)
+            return p == 47203
+
+        self.assertEqual(oc_l1.next_free_port(47201, probe=probe), 47203)
+        self.assertEqual(seen, [47201, 47202, 47203])
+
+    def test_the_walk_wraps_the_range(self):
+        def probe(p, host="127.0.0.1"):
+            return p == oc_l1.PORT_MIN
+        self.assertEqual(oc_l1.next_free_port(oc_l1.PORT_MAX - 1, probe=probe),
+                         oc_l1.PORT_MIN)
+
+    def test_an_exhausted_range_is_refused_not_guessed(self):
+        with self.assertRaises(oc_l1.LaneError):
+            oc_l1.next_free_port(oc_l1.PORT_MIN,
+                                 probe=lambda p, host="127.0.0.1": False)
+
+    def test_the_real_probe_answers_for_a_port_in_the_lane_range(self):
+        # production takes this branch: a port of the range genuinely held by a
+        # listener must read as taken, and the walk must land on one that is not.
+        held = held_port = None
+        for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
+            if oc_l1.port_is_free(p):
+                held = self._listen(p)
+                held_port = p
+                break
+        if held is None:
+            self.skipTest("no free port in the lane range on this host")
+        try:
+            self.assertFalse(oc_l1.port_is_free(held_port))
+            chosen = oc_l1.next_free_port(held_port)
+            self.assertNotEqual(chosen, held_port)
+            self.assertTrue(oc_l1.PORT_MIN <= chosen <= oc_l1.PORT_MAX)
+            self.assertTrue(oc_l1.port_is_free(chosen))
+        finally:
+            held.close()
+
+
+class ChildEnvValidationTest(unittest.TestCase):
+    """Sonnet final REJECT 2026-10-08 finding 2: the lane child gets an
+    allowlist, and a lane that needs one more variable NAMES it in `child_env`.
+    The validator is what keeps that declaration from turning into a way to
+    smuggle a credential - or a value at all - into a lane config on disk, and
+    it is the production path: `start` spawns the RESOLVED lane, so a key
+    validation drops never reaches the child."""
+
+    def _resolved(self, **over):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            return oc_l1.validate_lane(make_lane(Path(td), **over), "l1test")
+
+    def test_child_env_names_survive_validation(self):
+        resolved = self._resolved(child_env=["OC_L1_FAKE_RECORD", "AUTOOS_TASK_DIR"])
+        self.assertEqual(resolved["child_env"], ["OC_L1_FAKE_RECORD", "AUTOOS_TASK_DIR"])
+        self.assertEqual(self._resolved()["child_env"], [],
+                         "a lane that declares nothing gets the allowlist only")
+
+    def test_agent_layer_survives_validation(self):
+        self.assertEqual(self._resolved(agent_layer="L2")["agent_layer"], "L2")
+        self.assertIsNone(self._resolved()["agent_layer"],
+                          "an unmarked lane is an L1 lane")
+
+    def test_a_bad_child_env_shape_is_refused(self):
+        for bad in ("OC_L1_FAKE_RECORD", ["HAS-DASH"], ["1STARTS_WITH_A_DIGIT"],
+                    ["SPAC ED"], [""], [42], ["a" * 200]):
+            with self.assertRaises(oc_l1.LaneError, msg="child_env=%r" % (bad,)):
+                self._resolved(child_env=bad)
+
+    def test_a_credential_shaped_child_env_name_is_refused(self):
+        for name in ("GH_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY",
+                     "AUTOOS_LITELLM_API_KEY", "OPENCODE_SERVER_PASSWORD",
+                     "AUTOOS_OCL1_TEST_PW", "MY_APIKEY"):
+            with self.assertRaises(oc_l1.LaneError) as cm:
+                self._resolved(child_env=[name])
+            self.assertIn(name, str(cm.exception),
+                          "the refusal must name the entry it refused")
+
+    def test_an_agent_layer_that_is_not_an_identifier_is_refused(self):
+        for bad in ("l2 lane", "L2; rm", "", "L2\nX: 1", 2):
+            with self.assertRaises(oc_l1.LaneError, msg="agent_layer=%r" % (bad,)):
+                self._resolved(agent_layer=bad)
 
 
 class DefaultConfigPathTest(unittest.TestCase):

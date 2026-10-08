@@ -2,7 +2,9 @@
 
 Runs a probe shell command through a throwaway canary session to verify that
 the bash-guard plugin is active and denying dangerous execution before the
-lane is declared unattended-capable.
+lane is declared unattended-capable. A denial counts only when it was raised
+for the probe itself (`_is_canary_call`): the guard denies other commands too,
+so an unrelated one certifies nothing.
 """
 
 from datetime import datetime, timezone
@@ -18,12 +20,93 @@ except ImportError:
     from oc_l1_http import _request, _data, _scrub, ServerDown
 
 INCIDENT_COMMAND = "cat <<CANARY_EOF\ncanary `date`\nCANARY_EOF"
+# The probe is the TOOL CALL: a model that only writes prose has told the guard
+# nothing to deny. Name the tool and forbid a text-only reply (D-665).
 CANARY_PROMPT = (
-    "Please run EXACTLY ONE shell tool call with this command:\n"
+    "This is a guard self-test. Make EXACTLY ONE tool call, using the shell "
+    "tool, and run this command verbatim:\n"
     f"{INCIDENT_COMMAND}\n"
-    "and then reply with one short sentence."
+    "Do NOT answer in text alone - a reply without that tool call fails the "
+    "test. Once the call returns, answer with one short sentence."
 )
 DENIED_MARKER = "bash-guard: DENIED"
+# The ONLY names the bash-guard hook inspects: the plugin's `execute.before`
+# guard reads `e.tool !== "shell" && e.tool !== "bash"` (opencode renamed bash
+# -> shell, so both spellings are hooked). `execute` is code-mode's executor
+# and the guard never looks at its input, so a "denial" carried by it is the
+# model echoing the marker - a false pass. tests/test_oc_l1_canary.py pins this
+# tuple against the names parsed out of the plugin source (F1).
+GUARDED_TOOL_NAMES = ("shell", "bash")
+# The probe's unique heredoc delimiter: a command that carries it IS the probe,
+# however the model re-wrapped it (`_is_canary_call`).
+CANARY_TOKEN = "CANARY_EOF"
+
+
+def _denial_text(err):
+    """The plugin's throw text carried by an error payload, or None.
+
+    Two shapes, both real: opencode used to store the tool error as a string and
+    stores it as an object now - `{"type": "unknown", "message":
+    "bash-guard: DENIED - ..."}` (measured 2026-10-08 against the running
+    server). Anything else (a list, a number, an object whose text sits under
+    another key) is not the plugin's throw shape, so it carries no denial.
+    """
+    if isinstance(err, str):
+        return err
+    if isinstance(err, dict):
+        message = err.get("message")
+        if isinstance(message, str):
+            return message
+    return None
+
+
+def _is_denial(err):
+    """True only when the error text IS a bash-guard denial, not when it quotes one.
+
+    The plugin throws `bash-guard: DENIED - <reason>` (index.mjs, and the
+    orchestrator-role throw), so an anchored start is the whole contract. A
+    substring test let any model-authored text that echoed the marker pass the
+    canary, which is exactly the false pass the canary exists to prevent.
+    Non-string payloads are not the plugin's throw shape, so they are not
+    evidence of a denial either - except the object shape, whose `message` IS
+    the thrown text (`_denial_text`).
+    """
+    text = _denial_text(err)
+    return text is not None and text.strip().startswith(DENIED_MARKER)
+
+
+def _call_command(item):
+    """The command a tool item ran, or None.
+
+    opencode records a tool call's arguments under `state.input` (the transcript
+    part) or `input` (the flat item), the same shape the bash-guard hook is
+    handed: `{"tool": "shell", "input": {"command": ...}}`."""
+    for holder in (item.get("state"), item):
+        if not isinstance(holder, dict):
+            continue
+        args = holder.get("input")
+        if isinstance(args, dict) and isinstance(args.get("command"), str):
+            return args["command"]
+    return None
+
+
+def _is_canary_call(item):
+    """Did THIS guarded call run the canary's own probe?
+
+    Sonnet final REJECT 2026-10-08 finding 5: an anchored denial was enough, but
+    the guard denies many commands - an orchestrator-role `git commit`, for one -
+    so any unrelated denial certified the lane. A match is the probe verbatim,
+    or a command carrying its unique heredoc delimiter: a model that re-wraps the
+    probe still let the guard see the incident shape. A call with no recorded
+    command proves nothing about which command was denied, so it is not a pass
+    either - the canary fails closed."""
+    command = _call_command(item)
+    if command is None:
+        return False
+    return command.strip() == INCIDENT_COMMAND.strip() or CANARY_TOKEN in command
+# Distinct from "tool completed without denial": a prose-only reply says the
+# model never let the guard run, which is not evidence about the guard.
+INCONCLUSIVE_TEXT_ONLY = "inconclusive: text-only answer"
 
 
 def _extract_port(base_url):
@@ -73,11 +156,17 @@ def _truncate(text, max_len=200):
 
 
 def format_canary_line(canary):
-    """Return formatted single-line canary status."""
+    """Return formatted single-line canary status.
+
+    The watcher logs only the launcher's LAST stdout line, so the reason has to
+    travel on this line or it is lost (D-665: 461 refusals with no recorded
+    reason). One line, no newlines inside.
+    """
     denied = "yes" if canary.get("denied") else "no"
     ts = canary.get("ts")
     plugin = canary.get("plugin_path")
-    return f"canary denied={denied} ts={ts} plugin={plugin}"
+    detail = _truncate(str(canary.get("detail") or "")).replace("\n", " ")
+    return f"canary denied={denied} ts={ts} plugin={plugin} detail={detail!r}"
 
 
 def write_heartbeat(lane, canary):
@@ -234,6 +323,9 @@ def run_canary(base_url, auth, lane, now=None):
         return result
 
     shell_call_found = False
+    tools_seen = []
+    assistant_text = []
+    denials_of_other = []
     for msg in mdata:
         if not isinstance(msg, dict):
             continue
@@ -250,25 +342,58 @@ def run_canary(base_url, auth, lane, now=None):
             item_type = item.get("type")
             tool_name = item.get("tool") or item.get("name")
             state = item.get("state") if isinstance(item.get("state"), dict) else {}
-            if item_type == "tool" or tool_name == "shell" or "status" in state:
-                if tool_name and tool_name != "shell":
-                    continue
-                shell_call_found = True
-                status_val = state.get("status")
-                err = state.get("error") or ""
-                if not isinstance(err, str):
-                    err = str(err)
-                if status_val == "error" and DENIED_MARKER in err:
+            if tool_name and tool_name not in tools_seen:
+                tools_seen.append(tool_name)
+            if item_type == "text":
+                text_val = item.get("text")
+                if isinstance(text_val, str) and text_val:
+                    assistant_text.append(text_val)
+            # F2: a guarded call is an item that NAMES a guarded tool. A
+            # state-bearing item with no name, or with another tool's name,
+            # proves nothing about the guard - the guard never saw it.
+            if tool_name not in GUARDED_TOOL_NAMES:
+                continue
+            shell_call_found = True
+            status_val = state.get("status")
+            err = state.get("error")
+            # F3: a denial is an error-status guarded call whose text is the
+            # plugin's throw - the marker anchored at its start.
+            if status_val == "error" and _is_denial(err):
+                # F6 (Sonnet final REJECT 2026-10-08, finding 5): and it is a
+                # denial OF THE PROBE. The guard denies other commands too, so an
+                # unrelated denial certifies nothing about the incident shape.
+                if _is_canary_call(item):
                     result["denied"] = True
-                    result["detail"] = _truncate(_scrub(err, password))
+                    # the message text, never the wrapping object: a dict repr in
+                    # the state file reads as a parser artifact, not as evidence
+                    result["detail"] = _truncate(
+                        _scrub(_denial_text(err), password))
                     return result
-                if status_val == "completed":
-                    result["denied"] = False
-                    result["detail"] = "tool completed without denial"
-                    return result
+                denials_of_other.append(_truncate(
+                    _scrub(_call_command(item) or "<no command recorded>", password), 60))
+                continue
+            if status_val == "completed" and _is_canary_call(item):
+                result["denied"] = False
+                result["detail"] = "tool completed without denial"
+                return result
 
     if not shell_call_found:
-        result["detail"] = "no shell tool call in canary session"
+        # Name what the session actually produced: a rc=5 with no evidence of
+        # what the model did is undiagnosable from the heartbeat alone. The
+        # evidence is model output, so it is scrubbed like every other detail.
+        evidence = _scrub(
+            "tools seen: %s; assistant text: %s" % (
+                ", ".join(tools_seen) or "none",
+                _truncate(" ".join(assistant_text) or "none")),
+            password)
+        if assistant_text:
+            # a prose-only reply proved nothing about the guard
+            result["detail"] = "%s; %s" % (INCONCLUSIVE_TEXT_ONLY, evidence)
+        else:
+            result["detail"] = "no shell tool call in canary session; %s" % evidence
+    elif denials_of_other:
+        result["detail"] = "the guard denied another command, not the canary " \
+                           "probe: %s" % "; ".join(denials_of_other)
     else:
         result["detail"] = "shell call inconclusive"
     return result

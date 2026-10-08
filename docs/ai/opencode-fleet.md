@@ -84,37 +84,82 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 - `opencode_bin` is the explicit path of the npm `opencode` binary. It is never looked up on PATH and never the desktop app's
   background service.
 - The server binds to 127.0.0.1 only (`--hostname 127.0.0.1`), on `serve_port` (default: a stable hash of the lane name in
-  47200-47299).
+  47200-47299). That number is a guess, so `start` binds it before spawning and, when a listener already holds it, walks forward to
+  the next free port in the range — deterministic, so a relaunch lands where the last run did. The port the server really took is
+  what the state file records, and status/stop/inbox all read that number.
 - `render` writes a scratch config under `scratch_dir`; the user's own opencode config is never touched. Only the MCP servers
   listed in the lane's `mcp` are enabled; every other server of the repo `opencode.jsonc` is disabled.
 - `plugins` lists plugin DIRECTORIES (each holding an `index.mjs`), for example the bash-guard plugin of the section above.
+  `start` refuses a lane whose `plugins` list is empty (exit 2, before the server spawns): with no plugin nothing can deny the
+  canary, so such a lane could only ever exit 5 (D-665). `render` alone still accepts an empty list.
 - The scratch file uses opencode's OWN config schema (singular `provider`, models keyed by the gateway model id, a flat `mcp` map,
   `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
 - The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
   tools run `git rev-parse` with an inherited stdin and, under opencode's stdio transport, the first `ps` call hangs.
+- Six optional keys exist for a lane that orchestrates instead of writes (D-665, used by `oc_l2.py`): `permission` (a map merged
+  OVER the rendered permission defaults, e.g. `{"task": "deny"}`; the reserved key `external_directory` is refused there because it
+  has its own lane list), `guard_role` (exported to the server child as `AUTOOS_GUARD_ROLE`), `inbox_file` (exported as
+  `AUTOOS_L1_INBOX`), `first_prompt_file` (posted verbatim as the pilot's first prompt instead of the handoff head), `agent_layer`
+  (exported as `AUTOOS_AGENT_LAYER` — the level the lane runs at, and what the MCP fence below reads) and `child_env` (the extra
+  environment NAMES a lane needs beyond the inherited set; any lane may set it). An L1 lane that sets none of them behaves exactly
+  as before.
 
 ### start, relaunch and the canary
 
 `start` renders the config, starts the server with scratch XDG directories (so no other tool's skills load), waits for health,
 creates the pilot session and writes the state file atomically (mode 0600 on POSIX). It then runs the bash-guard CANARY: a
 second throwaway session on the same server is asked to run a command that the guard must refuse (an unquoted heredoc with a
-backticked command). The result `{denied, ts, plugin_path, session_id}` is stored in the state file and merged into
-`heartbeat.json`. Only after a DENIED canary does `start` post the pilot's first prompt (the handoff head plus a hint line about
-MCP tools): a pilot that is not known to be guarded never runs.
+backticked command). The prompt demands EXACTLY ONE tool call and names the shell tool — the probe is the call, not a reply
+about it — and the canary recognises exactly the names the plugin hooks, `shell` and `bash` (opencode renamed `bash` to `shell`);
+`execute` is code mode's executor and the guard never inspects it, so a "denial" carried by `execute` is the model quoting the
+marker, not evidence about the guard. `tests/test_oc_l1_canary.py` pins the two sets so they cannot drift. The result
+`{denied, ts, plugin_path, session_id, detail}` is stored in the state file and merged into
+`heartbeat.json`; `detail` always says what the session did (the tool names seen, the first 200 chars of assistant text), so a
+refusal is diagnosable from the host heartbeat without re-running anything. Only after a DENIED canary does `start` post the
+pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilot that is not known to be guarded never runs.
 
-- Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended.
+- Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended. A denial is recognised by the marker
+  `bash-guard: DENIED` **at the start of the tool's error text** (whitespace aside), on a call to a guarded tool whose status is
+  `error` — a marker that merely appears inside the text, in an assistant reply, or on a completed call is not a denial. EVERY
+  denial path carries the marker — both `tools/hooks/bash_guard.py` and the plugin's own
+  orchestrator-role throw, which runs before the Python guard (D-665). Anything the launcher prints or logs about an HTTP failure
+  is scrubbed of the password, the base64 `Basic …` token and any `Authorization:` value.
 - Canary NOT denied (the command ran, no tool call happened, timeout, error): NO prompt is posted, the pilot session stays idle,
   the server stays up for supervised use, `start` prints `UNATTENDED-REFUSED` and exits 5. The plugin fails open on purpose, so
-  an unproven guard means no unattended run.
+  an unproven guard means no unattended run. A model that only answered in text is `inconclusive: text-only answer`, which is
+  exit 5 with a different `detail` — it is NOT evidence that the guard allowed anything.
 - A second `start` on a live session posts nothing new and prints the stored canary line; if that stored canary was not denied
   it prints `UNATTENDED-REFUSED` and exits 5 again (it never reports a refused start as live). A `start` that finds the server
   dead is a RELAUNCH: it starts a new server and runs the canary again, and `heartbeat.json` gets the new result.
-- The server child inherits the launcher's FULL environment (opencode, `uv` and the MCP servers need PATH, the profile
-  directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
-  shell that holds only what the pilot may see.
+- The server child's environment is an **allowlist**, not `dict(os.environ)` (D-665 fix 2): handing over the launcher's whole
+  environment put every credential the shell happened to export — a GitHub token, a provider key, a database password — in the
+  lane's `/proc/<pid>/environ`, readable by the lane, by the MCP server it starts and by every worker it spawns. `oc_l1` holds the
+  rule in one place: the names a session needs (`PATH`, `HOME`, locale, terminal, proxy and certificate variables, the `XDG_*`,
+  `GIT_*`, `NODE_*`, `PYTHON*`, `SSL_*`, `AUTOOS_*`, `SESSION_*` families, the Windows equivalents) minus every credential-shaped
+  name in them — a name ending in `_PW`/`_KEY`/`_TOKEN`/`_SECRET`/`_PASSWORD` or containing `PASSWORD`/`SECRET`/`TOKEN`/
+  `CREDENTIAL`/`APIKEY` stays with the launcher. Two credentials are exempt because the rendered config references them as
+  `{env:...}` and the lane has no other way to its model: `AUTOOS_OMNIROUTE_URL` and `AUTOOS_OMNIROUTE_KEY`. The server password
+  reaches the child under `OPENCODE_SERVER_PASSWORD` alone, and `AUTOOS_GUARD_ROLE`/`AUTOOS_L1_INBOX`/`AUTOOS_AGENT_LAYER` are set
+  from the LANE and never inherited. A lane that genuinely needs one more variable names it in `child_env`; a credential-shaped
+  name there is a validation error, and a value never belongs in a lane config. What was left behind is printed by NAME at spawn,
+  so a missing variable is diagnosable instead of silent.
+- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same four lane tools are on it, so
+  without a fence an L2 could start, stop or nudge lanes — relaunch its own supervisor, or switch off a phase it does not own. The
+  L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env AND in the MCP server's own rendered
+  env), and that one marker does two things. It picks the server's TOOL PROFILE: an L2 registers the spawner and its read-only
+  companions — `spawn`, `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — and lists no lane tool, no
+  `cancel`, no `respond` at all (an unknown profile falls back to this narrowest list, never to the full one). And it fences what
+  remains: `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they read `L2` back,
+  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-3
+  worker only (tier 1, tier 2 and any `role: orchestrate` card are refused before a run dir exists). `l2_status` and `oc_status`
+  stay open for a caller that can see them: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1 inbox.
+- The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied
+  at creation, so there is no window in which the log sits world-readable next to a child environment that carries the password:
+  the guard's fail-open notes are written there, and
+  a `DEVNULL` made "the plugin never loaded" indistinguishable from "the plugin allowed" (D-665).
 
-Exit codes of `start`: 0 started or already live, 2 config or validation error, 4 health timeout (the child is killed by its
-recorded PID), 5 canary not denied.
+Exit codes of `start`: 0 started or already live, 2 config or validation error (password env unset, empty `plugins`), 4 health
+timeout (the child is killed by its recorded PID), 5 canary not denied.
 
 ### status
 
@@ -126,3 +171,80 @@ failed or interrupted).
 
 - `configuration/oc-l1/autoos-oc-l1.service`: example systemd user unit that runs `start`.
 - `configuration/oc-l1/windows-task.md`: the Windows Scheduled Task equivalent.
+
+## oc_l2.py phase lanes (D-665)
+
+`tools/oc_l2.py` starts ONE OpenCode orchestrator (an "L2") per PHASE of a project and hands it a brief. It is a lane *producer*,
+not a second launcher: it resolves what an L2 lane is, writes that as an `oc_l1` lane config, and delegates the render, the health
+poll, the canary and the state file to `tools/oc_l1.py` — so a fix to the canary lands here for free.
+
+```bash
+python3 tools/oc_l2.py start  --repo PATH --phase NAME --brief PATH [--combo l2-orchestrator] [--inbox PATH]
+python3 tools/oc_l2.py status --lane l2-<repo>-<checkout-tag>-<phase>
+python3 tools/oc_l2.py stop   --lane l2-<repo>-<checkout-tag>-<phase>
+python3 tools/oc_l2.py inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
+```
+
+Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
+4 health timeout, 5 `UNATTENDED-REFUSED`. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
+`l2_stop`, `l2_inbox`), so an L1 coordinates phases without leaving its own session.
+
+The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
+
+- lane name `l2-<repo>-<checkout-tag>-<phase>`, where the checkout tag is six hex of the repo's absolute path — two projects whose
+  directories share a name are two lanes, while one project spelled two ways (`AutoOS CI`, `autoos-ci`) is still one lane;
+  model = the gateway combo (`l2-orchestrator` by default), with the context and output **from the
+  registry route's own `surfaces.omniroute`** so a 1M lane cannot be clamped to 128k;
+- `mcp: ["autoos-agent"]` — the spawner is the only enabled server: no editor, no filesystem MCP, no second spawner; and because the
+  lane renders `AUTOOS_AGENT_LAYER=L2` into that server's own environment, the spawner answers it with the L2 tool profile (above),
+  not with the full menu;
+- `permission` merged over the L1 defaults with every file-mutating and spawn key denied (`edit`, `write`, `patch`, `apply_patch`,
+  `task`, `subagent`; `read` and `bash` stay allowed), plus the bash-guard plugin with `guard_role: "l2"` — a role of its own, not
+  the orchestrator's scoped write: an L2's shell is a CLOSED READ-ONLY list (`git status|log|diff|show`, `ls`, `cat`, `rg`, `head`,
+  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document, no command substitution and no `$`
+  anywhere in the command (`$KEY`, `${KEY}`, `$((1))`, `$(cmd)`): a glued option value is not a path, so the operand rules never
+  saw one and `rg -r$AUTOOS_OMNIROUTE_KEY foo README.md` printed the gateway key through a read-only head (L2SECRETS fix 10); no
+  environment-assignment prefix and no `env`/`printenv`/`set`/`export`/`declare` head (the lane's own environment holds the server
+  password and the gateway keys); no flag that hands the read a program, a repository or a pager, tested inside a short bundle
+  (`rg -uz`) as well as spelled out; and no path operand the shell can move outside the checkout — absolute, `~`-led (glued into an
+  option value as much as standing alone), `..`-crossing, `//`-spaced, or containing a backtick or a glob character is refused as
+  `path outside repo`, and the secret files that sit
+  *inside* the repo (`.env*`, `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it. Anything else is denied with
+  `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
+  is a lane whose guard works;
+- the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 workers —
+  and only tier-3 — through the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox as a tier-3 spawn, since a read-only
+  shell cannot append), and the launcher's hint line.
+
+**Where the reports land.** The child env carries `AUTOOS_L1_INBOX` (lane key `inbox_file`), resolved from `--inbox` or that
+variable and refused when neither names one — a report that goes nowhere is a phase that silently never finishes. The L2 appends
+one timestamped line per milestone there, prefixed `REPORT`, and a final `DONE` (or `BLOCKED`) line; the repo convention is the L1
+session's own inbox, `$AUTOOS_RUN_DIR/inbox/l1.md` (`tools/autoos_inbox.py:inbox_path("l1")`, whose reader is what polls it). Work
+in the other direction is `inbox`: one record appended to the lane's own inbox — `$AUTOOS_RUN_DIR/inbox/<lane>.md` when a run dir
+is set, else `<lane dir>/inbox.md`, the path the append reports — and the live session nudged with the same
+`POST /api/session/{id}/prompt` the launcher uses for its first prompt. Only a session that proved itself guarded is woken: a lane
+whose recorded canary never denied, or that was never prompted, is refused (`refused: true`, exit 2) while the line stays in the
+inbox. The append happens whether or not the nudge lands, and the answer says which.
+
+State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), one directory per lane with the generated config
+(0600 — it names host paths), the scratch dirs, the composed prompt and the lane inbox. **Nothing is merged into
+`~/.config/autoos/oc-l1.json`, so the `autoos-oc-l1` watcher never restarts an L2 lane**: recovery is `l2_start` again, which is
+also why a `start` on a lane that is already live is refused rather than silently restarted.
+
+`stop` kills the recorded PID's process group (the child is its own session leader, so everything `opencode serve` forked dies
+with it) and removes the state file only after proving the PID gone — a zombie answers `kill(pid, 0)`, so death is read from
+`/proc/<pid>/stat` (R-coord-10: an orphan `serve` holding the port would make the next start's health poll answer for the wrong
+server). A PID whose argv holds no token that IS the lane's binary is never killed; the stop reports `stopped=false, orphan=true`
+and keeps the state file.
+
+A manual live check (real binary, real gateway, the host password env — the value never leaves the environment):
+
+```bash
+AUTOOS_OCL1_PW='<from the host secret store>' AUTOOS_OPENCODE_BIN="$(command -v opencode)" \
+AUTOOS_L1_INBOX="$AUTOOS_RUN_DIR/inbox/l1.md" \
+python3 tools/oc_l2.py start --repo /path/to/project --phase p1 --brief /path/to/brief.md
+python3 tools/oc_l2.py status --lane l2-project-p1 && python3 tools/oc_l2.py stop --lane l2-project-p1
+```
+
+`start` answering `canary.denied=true` with `exit_code: 0` is the proof the lane may run unattended; `exit_code: 5` means the
+guard did not deny, the brief was never posted, and the lane must be stopped and fixed, not supervised anyway.
