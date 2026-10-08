@@ -55,31 +55,30 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `groq-qwen3.8-27b` | free | 128k | groq `qwen/qwen3.8-27b` |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |
 | `hf-qwen3.8-27b` | free | 128k | ~~huggingface `Qwen/Qwen3.8-27B`~~ (unavailable) |
-| `opus-5-5` | frontier | 1M | antigravity `claude-opus-5-5-medium` |
-| `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
-| `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
-| `or-north-mini-code-free` | free | 256k | openrouter `cohere/north-mini-code:free` |
-| `ovh-gpt-oss-120b` | credit | 128k | ovhcloud `gpt-oss-120b` |
-| `ovh-qwen3-coder-30b` | credit | 128k | ovhcloud `Qwen3-Coder-30B-A3B-Instruct` |
-| `ovh-qwen3.8-27b` | credit | 128k | ovhcloud `Qwen3.8-27B` |
-| `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
-| `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
-| `spark-1.3-contributor` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
 | `l1-orchestrator` | cheap | 1M | gemini `gemini-3.8-flash` → antigravity `claude-sonnet-5-5-medium` → free_ai `google/gemini-3.8-flash` → vertex `gemini-3.8-flash` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` |
 | `l1-orchestrator-clean` | cheap | 1M | ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
 | `l1-orchestrator-free-only` | free | 1M | gemini `gemini-3.8-flash` |
 | `l1-orchestrator-paid` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` |
 | `l2-orchestrator` | frontier | 1M | antigravity `claude-sonnet-5-5-medium` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
-| `l2-worker` | mid | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.1-flash-lite`~~ (unavailable) |
+| `l2-researcher` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → free_ai `qwen7b` |
+| `l2-worker` | mid | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `deepseek-v4-flash`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-dsv4flash`~~ (unavailable) → ~~deepinfra `google/gemini-3.1-flash-lite`~~ (unavailable) |
 | `l2-worker-clean` | mid | 128k | ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
 | `l2-worker-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → ~~cerebras `gpt-oss-120b`~~ (unavailable) → ~~sambanova `gpt-oss-120b`~~ (unavailable) |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → ovhcloud `gpt-oss-120b` → ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → mistral `mistral-code-latest` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-glm52-744b`~~ (unavailable) → ~~deepinfra `google/gemini-3.7-flash`~~ (unavailable) |
+| `l3-driver` | cheap | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → openrouter `poolside/laguna-s-2.1:free` → free_ai `qwen7b` → ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → mistral `mistral-code-latest` → meta_api `muse-spark-1.3-contributor` → deepseek `deepseek-flash` → ~~samba `gpt-oss-120b`~~ (unavailable) → ~~cheaperinference `glm-5.2`~~ (unavailable) → ~~cheaperinference `kimi-k3`~~ (unavailable) → ~~samba `MiniMax-M3`~~ (unavailable) → ~~cerebras `qwen-3.8-27b`~~ (unavailable) → ~~cheaperinference `glm-4.5-air`~~ (unavailable) → ~~cheaperinference `minimax-m2.7`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) → ~~morph `morph-glm52-744b`~~ (unavailable) → ~~deepinfra `google/gemini-3.7-flash`~~ (unavailable) |
 | `l3-driver-clean` | cheap | 128k | ovhcloud `gpt-oss-120b` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` → deepseek `deepseek-flash` |
 | `l3-driver-free-only` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → groq `qwen/qwen3.8-27b` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → openrouter `poolside/laguna-s-2.1:free` → groq `openai/gpt-oss-20b` → openrouter `cohere/north-mini-code:free` → groq `openai/gpt-oss-120b` → free_ai `qwen7b` → ~~cerebras `qwen-3.8-27b`~~ (unavailable) |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
+| `opus-5-5` | frontier | 1M | antigravity `claude-opus-5-5-medium` |
+| `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
+| `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
+| `or-north-mini-code-free` | free | 256k | openrouter `cohere/north-mini-code:free` |
+| `ovh-gpt-oss-120b` | credit | 128k | ovhcloud `gpt-oss-120b` |
+| `ovh-qwen3.8-27b` | credit | 128k | ovhcloud `Qwen3.8-27B` |
+| `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
+| `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
+| `spark-1.3-contributor` | cheap | 1M | meta_api `muse-spark-1.3-contributor` → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
 | `t4-rag` | cheap | 128k | cohere `command-a-03-2025` → cohere `command-r-plus-08-2024` |
-| `l2-researcher` | free | 128k | ~~opencode_gateway `glm-5.3-flash`~~ (unavailable) → ainative `llama-4-maverick` → gemini `gemini-3.8-flash` → free_ai `qwen7b` |
 | `vertex-gemini-3.8-flash` | credit | 1M | vertex `gemini-3.8-flash` |
 <!-- AUTOOS-MANAGED-END models-doc -->
 
@@ -123,6 +122,10 @@ generated table above already shows it):
   the gateway. `deepseek/deepseek-flash` remains the paid fallback leg.
   ORQWEN-DEAD 2026-10-06: the `openrouter/qwen/qwen3.8-27b:free` slug was
   withdrawn upstream (live 404) and dropped from every band.
+  OVHCODER-DROP 2026-10-08: `ovh/Qwen3-Coder-30B-A3B-Instruct` is gone — OVH
+  withdrew the id (measured 17:34Z central: HTTP 404; probe D-657 had already
+  404'd both spellings). It left `l2-worker`/`l3-driver`'s legs, so OVHLEGS's
+  three credit legs are two here: `ovh/gpt-oss-120b` and `ovh/Qwen3.8-27B`.
 - **`l2-worker-free-only`**: the same free band as `l2-worker` with no
   credit or paid tail — zero spend by construction.
 - **`l2-orchestrator`**: for small-scope orchestration only; `l1-orchestrator`
@@ -136,7 +139,9 @@ generated table above already shows it):
   (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
   inserted after the free legs and before the paid legs. `deepseek/deepseek-flash`
   remains the paid fallback. Since L1-CLEAN (2026-10-05) the `-clean` twins also
-  carry the OVH credit legs plus vertex.
+  carry the OVH credit legs plus vertex. OVHCODER-DROP 2026-10-08 cut
+  `ovh/Qwen3-Coder-30B-A3B-Instruct` (upstream 404) — the same two OVH legs as
+  `l2-worker`.
 - **`l3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
   is keyed (paid) and deliberately stays out.
 - **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
@@ -313,7 +318,7 @@ gateway connection that serves provider ids directly: no combo, no fall-through,
 one leg — `vertex-3.8-flash` → `vertex/gemini-3.8-flash`, `vertex-3.7-flash` →
 `vertex/gemini-3.7-flash` and `vertex-3.6-flash` → `vertex/gemini-3.6-flash`, and
 the OVH AI Endpoints trial grant as `ovh-direct-gpt-oss-120b` /
-`ovh-direct-qwen3-coder-30b` / `ovh-direct-qwen3.8-27b` → the gateway's own
+`ovh-direct-qwen3.8-27b` → the gateway's own
 `ovh/*` spellings (OVH's `model_prefix`,
 so the registry reads them back as `ovhcloud/*` legs through
 `registry.registry_ref()`). They are named for trial credit and public work:

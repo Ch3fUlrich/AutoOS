@@ -3857,15 +3857,22 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self.assertFalse(leg.startswith(banned), (rid, leg))
 
-    def test_stale_ovh_coder_legs_are_marked_unavailable(self):
-        stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-        for rid in ("l2-worker", "l3-driver"):
-            route = self.reg["routes"][rid]
-            self.assertIn(stale, route["legs"], rid)
-            entry = route["unavailable_legs"][stale]
-            self.assertIs(entry["available"], False, rid)
-            self.assertIn("not in OVH AI Endpoints catalog 2026-10-01",
-                          entry["$comment"], rid)
+    def test_ovh_coder_leg_is_retired_not_merged(self):
+        # OVHCODER-DROP 2026-10-08 (replaces the L1-CLEAN 2026-10-01 pin that
+        # kept this leg declared-but-gated): OVH withdrew
+        # Qwen3-Coder-30B-A3B-Instruct upstream (measured 404), so a leg no
+        # provider serves stays in no route's legs and its single-leg route id
+        # retires, which is what makes apply prune the live combo (ORQWEN404
+        # precedent). The model row itself is kept for pricing history.
+        dead = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        for rid, route in self.reg["routes"].items():
+            self.assertNotIn(dead, route.get("legs") or [], rid)
+            self.assertNotIn(dead, route.get("unavailable_legs") or {}, rid)
+        self.assertNotIn("ovh-qwen3-coder-30b", self.reg["routes"])
+        self.assertIn("ovh-qwen3-coder-30b", registry.OMNIROUTE_RETIRED_IDS)
+        self.assertNotIn("ovh-qwen3-coder-30b", registry.IDE_MODEL_ORDER)
+        self.assertIn("OVHCODER-DROP",
+                      self.reg["models"]["Qwen3-Coder-30B-A3B-Instruct"]["$comment"])
 
 
 class ModelKeyCaseHygieneTests(unittest.TestCase):

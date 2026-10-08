@@ -1369,12 +1369,12 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
-        # L1-CLEAN (2026-10-01): the -clean twins no longer carry a gated leg
-        # (their trial-first legs are all servable), so the stale OVH coder leg
-        # kept in l2-worker's legs and marked unavailable_legs is the example.
+        # OVHCODER-DROP (2026-10-08) removed the stale OVH coder leg that was
+        # this test's example (the leg left l2-worker's legs with its upstream
+        # 404), so the strike-through is now pinned on the gated head leg.
         row = row_for(registry.render_models_doc(real_registry()), "l2-worker")
         self.assertIn(
-            "~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable)", row)
+            "~~opencode_gateway `glm-5.3-flash`~~ (unavailable)", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):

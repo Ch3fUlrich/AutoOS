@@ -401,18 +401,6 @@
       }
     },
     {
-      "id": "ovh-qwen3-coder-30b",
-      "name": "Qwen3-Coder-30B via OVH (credit)",
-      "context": 128000,
-      "output": 32768,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
       "id": "vertex-gemini-3.8-flash",
       "name": "Gemini-3.8-Flash via Vertex (credit)",
       "context": 1048576,
