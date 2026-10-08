@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://autoos.example/schemas/ai-registry.schema.json",
   "title": "AutoOS AI model registry",
-  "description": "Single hand-edited model file (docs/plans/2026-09-25-routing-v2-spec.md section 3, D11). The old catalog/config files and the one-shot converter tools/registry-convert.py were deleted in task A5e; this file is the only hand-edited source. Sections: providers, models, routes, clients, policy - exactly section 3.1's list. Measured values (probes, recalibrate) never write this file; they live in the git-ignored overlay logs/routing/measured.json.",
+  "description": "Single hand-edited model file (docs/plans/2026-09-25-routing-v2-spec.md section 3, D11). The old catalog/config files and the one-shot converter tools/registry-convert.py were deleted in task A5e; this file is the only hand-edited source. Sections: providers, models, routes, clients, policy - exactly section 3.1's list - plus host_admission (HOSTADMISSION, 2026-10-08), the spawner's own room on the host. Measured values (probes, recalibrate) never write this file; they live in the git-ignored overlay logs/routing/measured.json.",
   "type": "object",
   "required": ["version", "providers", "models", "routes", "clients", "policy"],
   "additionalProperties": false,
@@ -32,6 +32,22 @@
       "type": "object",
       "description": "One entry per agent CLI (spec 3.1): opencode, claude, qwen, gemini, codex, agy, qoder.",
       "additionalProperties": { "$ref": "#/$defs/client" }
+    },
+    "host_admission": {
+      "type": "object",
+      "description": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): how much room the spawner leaves on the host it runs on. Optional - an absent section takes the documented defaults (6 live workers, 6144 MB MemAvailable). Read by tools/autoos-agent.py host_admission_config(); a refused spawn exits 13.",
+      "additionalProperties": false,
+      "properties": {
+        "$comment": { "$ref": "#/$defs/comment" },
+        "max_live_workers": {
+          "type": "integer",
+          "description": "Live worker records (ps state 'running': a live pid) this host may hold while the spawner still admits. Equal is refused."
+        },
+        "mem_available_floor_mb": {
+          "type": "integer",
+          "description": "MemAvailable, in MB, a launch still wants. /proc/meminfo states it in kB; an unreadable /proc (Windows, no /proc) stands this half of the rule down rather than refusing every run."
+        }
+      }
     },
     "policy": { "$ref": "#/$defs/policy" }
   },
