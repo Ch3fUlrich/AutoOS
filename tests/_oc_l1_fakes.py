@@ -14,6 +14,9 @@ PW_ENV = "AUTOOS_OCL1_TEST_PW"
 PW_VALUE = "sk-TEST-SRV-PW-001"
 RECORD_ENV = "OC_L1_FAKE_RECORD"
 FAKE_SESSION_ID = "ses_fake42"
+# the fake lane is a guarded lane: `start` refuses an empty plugins list
+# (D-665), so the default must carry the bash-guard plugin directory.
+GUARD_PLUGIN = "/fake/plugins/bash-guard"
 HINT_EXPECTED = (
     "MCP tools are available only through the built-in execute tool "
     "(code mode): call execute with a short script that invokes the "
@@ -245,7 +248,9 @@ def make_lane(td, port):
         "mcp": ["autoos-agent"],
         "serve_port": port,  # the fake server's port (deliberate, tests only)
         "instructions": ["AGENTS.md", str(handoff)],
-        "plugins": [],
+        # A real lane carries the bash-guard plugin; `start` refuses one that
+        # does not (D-665), so the fake must look like the guarded default.
+        "plugins": [GUARD_PLUGIN],
         "scratch_dir": str(td / "scratch"),
         "state_file": str(td / "state" / "l1test.state.json"),
         "heartbeat_file": str(td / "scratch" / "heartbeat.json"),

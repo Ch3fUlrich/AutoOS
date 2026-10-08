@@ -6,6 +6,7 @@
     "All values below are placeholders. 'password_env' is the NAME of the environment variable holding the Basic auth password - never a value.",
     "Top-level keys are lane names; the 'name' field inside a lane must equal its key.",
     "Optional keys with defaults: serve_port (stable hash of the lane name, 47200-47299), instructions ([AGENTS.md, handoff]), mcp ([autoos-agent]), plugins ([]), state_file (<scratch_dir>/oc-l1-<name>.state.json), scratch_dir (<tempdir>/autoos-oc-l1/<name>), canary_timeout_s (120), heartbeat_file (<scratch_dir>/heartbeat.json), workers_dir (<cwd>/logs/workers, pinned as AUTOOS_WORKERS_DIR for the autoos-agent MCP).",
+    "'plugins' must list the bash-guard plugin DIRECTORY: an unguarded lane has no plugin to deny the canary, so 'start' refuses it with exit 2 before spawning anything (D-665).",
     "All paths (cwd, handoff, opencode_bin, scratch_dir, state_file, plugins, instructions, heartbeat_file) must be absolute paths on the host that runs the config - opencode_bin must point at the explicit npm opencode binary, never a PATH-lookup name, never the desktop 'service'."
   ],
   "l1-pilot": {
@@ -28,7 +29,9 @@
     ],
     "serve_port": 47250,
     "password_env": "AUTOOS_OCL1_PLACEHOLDER_PW",
-    "plugins": [],
+    "plugins": [
+      "/path/to/your/AutoOS/configuration/opencode/plugins/bash-guard"
+    ],
     "state_file": "/path/to/your/project/oc-l1-l1-pilot.state.json",
     "opencode_bin": "/path/to/opencode-binary",
     "scratch_dir": "/path/to/your/project/oc-l1-scratch",

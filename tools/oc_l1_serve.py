@@ -8,6 +8,9 @@ are never used here.
 start
   * Refuses to run unless the lane's password_env is set (exit 2; no
     process, no state file - never invent a password).
+  * Refuses a lane with an empty 'plugins' list (exit 2; no process, no
+    state file): the bash-guard plugin is what denies the canary, so an
+    unguarded lane can never pass and would refuse rc 5 forever (D-665).
   * Idempotent: if the state file names a live session (GET
     /api/session/{id} answers 200 and its outcome is not failed/
     interrupted), prints 'already live' and exits 0.
@@ -189,6 +192,20 @@ def cmd_start(lane, args):
             "oc_l1: error: start refused: environment variable %s is not "
             "set; set it - the password is never taken from the command "
             "line or config, and never invented" % lane["password_env"],
+            file=sys.stderr,
+        )
+        return 2
+
+    # D-665: a lane with no plugin runs no bash-guard, so its canary can never
+    # be denied. That is a config defect, not a canary result: refuse with rc 2
+    # before paying for a model call (an empty-plugin lane refused rc 5 on
+    # every watcher cycle forever).
+    if not lane.get("plugins"):
+        print(
+            "oc_l1: error: start refused: lane '%s' has an empty 'plugins' "
+            "list - the bash-guard plugin is what denies the canary, so an "
+            "unguarded lane can never pass; add the plugin path to the lane "
+            "config" % name,
             file=sys.stderr,
         )
         return 2

@@ -88,6 +88,8 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 - `render` writes a scratch config under `scratch_dir`; the user's own opencode config is never touched. Only the MCP servers
   listed in the lane's `mcp` are enabled; every other server of the repo `opencode.jsonc` is disabled.
 - `plugins` lists plugin DIRECTORIES (each holding an `index.mjs`), for example the bash-guard plugin of the section above.
+  `start` refuses a lane whose `plugins` list is empty (exit 2, before the server spawns): with no plugin nothing can deny the
+  canary, so such a lane could only ever exit 5 (D-665). `render` alone still accepts an empty list.
 - The scratch file uses opencode's OWN config schema (singular `provider`, models keyed by the gateway model id, a flat `mcp` map,
   `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
 - The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
@@ -113,8 +115,8 @@ MCP tools): a pilot that is not known to be guarded never runs.
   directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
   shell that holds only what the pilot may see.
 
-Exit codes of `start`: 0 started or already live, 2 config or validation error, 4 health timeout (the child is killed by its
-recorded PID), 5 canary not denied.
+Exit codes of `start`: 0 started or already live, 2 config or validation error (password env unset, empty `plugins`), 4 health
+timeout (the child is killed by its recorded PID), 5 canary not denied.
 
 ### status
 

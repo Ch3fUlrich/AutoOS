@@ -87,6 +87,21 @@ class StartTest(unittest.TestCase):
         self.assertFalse(Path(self.lane["state_file"]).is_file())
         self.assertEqual(self.srv.requests, [], "no request may be made")
 
+    # (1b) D-665 fix 3: a lane with no plugin carries no bash-guard, so its
+    #      canary can never be denied — refusing to start is the only honest
+    #      answer (before it, such a lane burned a real model call and exited 5
+    #      every cycle forever).
+    def test_start_without_plugins_refused_rc2_no_spawn(self):
+        self.lane["plugins"] = []
+        rc, out = self._start()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("plugins", out)
+        self.assertFalse(self.rec.is_file(), "no child may be spawned")
+        self.assertFalse(Path(self.lane["state_file"]).is_file())
+        self.assertEqual(self.srv.requests, [], "no request may be made")
+        self.assertNotIn("UNATTENDED-REFUSED", out,
+                         "a config defect is not a canary refusal (rc 5)")
+
     # (2) happy path
     def test_start_happy_path(self):
         rc, out = self._start()

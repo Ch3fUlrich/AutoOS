@@ -47,6 +47,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1_serve  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
+    GUARD_PLUGIN,
     PW_ENV,
     PW_VALUE,
     RECORD_ENV,
@@ -60,7 +61,6 @@ CANARY_SESSION_ID = "ses_canary99"
 # The incident shape: an UNQUOTED heredoc whose body contains a
 # backticked (harmless) command.
 INCIDENT = "cat <<CANARY_EOF\ncanary `date`\nCANARY_EOF"
-FAKE_PLUGIN = "/fake/plugin/path/bash-guard/index.mjs"
 
 
 def denied_items(tool_name):
@@ -206,7 +206,6 @@ class _Base(unittest.TestCase):
 class TestDenied(_Base):
     # (1)
     def test_denied_start_ok_state_heartbeat_prompt(self):
-        self.lane["plugins"] = [FAKE_PLUGIN]
         rc, out = self._start()
         self.assertEqual(rc, 0)
         self.assertIn("canary denied=yes", out)
@@ -233,7 +232,7 @@ class TestDenied(_Base):
         self.assertTrue(hb["canary"]["denied"])
         self.assertEqual(
             hb["canary"]["plugin_path"],
-            FAKE_PLUGIN)
+            GUARD_PLUGIN)
         self.assertTrue(_ts_is_utc_iso(hb["canary"]["ts"]),
                         "ts %r is not UTC ISO" % hb["canary"]["ts"])
         self.assertEqual(hb["state"], "started")
@@ -275,11 +274,7 @@ class TestNoTool(_Base):
 class TestToolNames(_Base):
     """D-665 fix 1: every shell-tool spelling counts, and a miss says why."""
 
-    def _guarded(self):
-        self.lane["plugins"] = [FAKE_PLUGIN]
-
     def test_tool_named_bash_denied(self):
-        self._guarded()
         self.srv.canary_items = denied_items("bash")
         rc, out = self._start()
         self.assertEqual(rc, 0)
@@ -287,14 +282,12 @@ class TestToolNames(_Base):
         self.assertTrue(self._state()["canary"]["denied"])
 
     def test_tool_named_execute_denied(self):
-        self._guarded()
         self.srv.canary_items = denied_items("execute")
         rc, out = self._start()
         self.assertEqual(rc, 0)
         self.assertTrue(self._state()["canary"]["denied"])
 
     def test_no_shell_call_detail_names_tools_and_text(self):
-        self._guarded()
         self.srv.canary_items = [{
             "type": "assistant",
             "content": [
