@@ -122,6 +122,10 @@ generated table above already shows it):
   the gateway. `deepseek/deepseek-flash` remains the paid fallback leg.
   ORQWEN-DEAD 2026-10-06: the `openrouter/qwen/qwen3.8-27b:free` slug was
   withdrawn upstream (live 404) and dropped from every band.
+  OVHCODER-DROP 2026-10-08: `ovh/Qwen3-Coder-30B-A3B-Instruct` is gone — OVH
+  withdrew the id (measured 17:34Z central: HTTP 404; probe D-657 had already
+  404'd both spellings). It left `l2-worker`/`l3-driver`'s legs, so OVHLEGS's
+  three credit legs are two here: `ovh/gpt-oss-120b` and `ovh/Qwen3.8-27B`.
 - **`l2-worker-free-only`**: the same free band as `l2-worker` with no
   credit or paid tail — zero spend by construction.
 - **`l2-orchestrator`**: for small-scope orchestration only; `l1-orchestrator`
@@ -135,7 +139,9 @@ generated table above already shows it):
   (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
   inserted after the free legs and before the paid legs. `deepseek/deepseek-flash`
   remains the paid fallback. Since L1-CLEAN (2026-10-05) the `-clean` twins also
-  carry the OVH credit legs plus vertex.
+  carry the OVH credit legs plus vertex. OVHCODER-DROP 2026-10-08 cut
+  `ovh/Qwen3-Coder-30B-A3B-Instruct` (upstream 404) — the same two OVH legs as
+  `l2-worker`.
 - **`l3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
   is keyed (paid) and deliberately stays out.
 - **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
@@ -312,7 +318,7 @@ gateway connection that serves provider ids directly: no combo, no fall-through,
 one leg — `vertex-3.8-flash` → `vertex/gemini-3.8-flash`, `vertex-3.7-flash` →
 `vertex/gemini-3.7-flash` and `vertex-3.6-flash` → `vertex/gemini-3.6-flash`, and
 the OVH AI Endpoints trial grant as `ovh-direct-gpt-oss-120b` /
-`ovh-direct-qwen3-coder-30b` / `ovh-direct-qwen3.8-27b` → the gateway's own
+`ovh-direct-qwen3.8-27b` → the gateway's own
 `ovh/*` spellings (OVH's `model_prefix`,
 so the registry reads them back as `ovhcloud/*` legs through
 `registry.registry_ref()`). They are named for trial credit and public work:

@@ -20157,8 +20157,9 @@ class HandEntryPricingTests(unittest.TestCase):
                                               source, cfg or self.cfg)
 
     def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
+        # OVHCODER-DROP 2026-10-08: ovh-direct-qwen3-coder-30b left the list
+        # with the model (OVH answers 404 for Qwen3-Coder-30B-A3B-Instruct).
         for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3-coder-30b",
                      "omniroute/ovh-direct-qwen3.8-27b"):
             self.assertIs(self.spends(name), False, name)
 
@@ -20557,7 +20558,6 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
 
     def test_sensitive_card_on_an_ovh_direct_hand_entry_is_refused(self):
         for name in ("omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3-coder-30b",
                      "omniroute/ovh-direct-qwen3.8-27b"):
             rc, out, err = self.run_cmd(name)
             self.assertEqual(rc, 2, name + out + err)

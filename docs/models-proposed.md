@@ -177,7 +177,9 @@ Live `combos.json` `"omitted"` today: `cheaperinference/glm-5.2`,
 Retired ids (pruned from the live store by `apply`): `tier1`, `tier1-clean`,
 `tier2`, `tier2-clean`, `tier3`, `tier3-clean`, `rag`, `tier1-paid`,
 `tier2-paid`, `tier3-paid`, `tier2-credit`, `tier3-credit`, `opus-4-6`,
-`or-qwen3.8-27b-free` (ORQWEN-DEAD 2026-10-06), plus the `t*` ids retired
+`or-qwen3.8-27b-free` (ORQWEN-DEAD 2026-10-06), `ovh-qwen3-coder-30b`
+(OVHCODER-DROP 2026-10-08, OVH withdrew the model upstream — live 404), plus
+the `t*` ids retired
 by the LAYERS 2026-10-07 rename (`t1-orchestrator`, `t1-orchestrator-clean`,
 `t1-orchestrator-free-only`, `t1-orchestrator-paid`, `t2-orchestrator`,
 `t2-worker`, `t2-worker-clean`, `t2-worker-free-only`, `t2-worker-paid`,
