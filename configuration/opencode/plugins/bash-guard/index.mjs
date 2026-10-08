@@ -931,6 +931,13 @@ function orchestratorDenialReason(command, depth = 0) {
 // - no backslash in any form: `\<newline>` is a line continuation to bash and a
 //   flattened escape space to the tokenizer, which is how `/etc/passwd` once
 //   reached the path rules as `" /etc/passwd"`
+// - no `$` in any form, in any word: the shell expands it before the head runs and
+//   a `$KEY` reads the lane's own environment (gateway key, server password).
+//   Glued into an option value it is not a path at all, so no operand rule ever
+//   saw it — `rg -r$AUTOOS_OMNIROUTE_KEY foo README.md` printed the key as the
+//   replacement string (fix 10). A single-quoted `$` is refused too: the tokenizer
+//   flattens quotes away, so nothing downstream can be proved on the quote
+//   context. `%` needs no rule; the shell does not expand it.
 // - a path operand is allowed only as a repo-relative path it cannot escape:
 //   absolute, `~`-led, `$`/backtick/glob-expanded, `..`-segmented or `//`-spaced
 //   is refused, and the secret files that live inside the repo (`.env*`,
@@ -1258,6 +1265,33 @@ function l2PathOperandReason(head, t, resolve) {
   return l2SymlinkOperandReason(head, t);
 }
 
+function l2ExpansionDenialReason(command) {
+  // Sonnet seat REJECT (L2SECRETS fix 10, 2026-10-08): the operand rules read a
+  // token as a PATH, so an expansion was refused only where a path was expected.
+  // A glued short-option value (`-r$KEY`, `-c$KEY`, `-n$KEY`, `-G$KEY`) is not a
+  // path to anything and walked past every check: `rg -r$AUTOOS_OMNIROUTE_KEY foo
+  // README.md` printed the gateway key as the replacement string on a read-only
+  // head. The key is in the child's own environment, so ANY `$` the shell expands
+  // is a read of it, in any word, under any head, whatever the flag means.
+  //
+  // The rule is lexical and covers the whole command: no `$` at all. A single-
+  // quoted `$` would be literal to bash, but the guard does not read quotes -
+  // tokenizeSegment flattens the word and the operand rules act on the flattened
+  // token, so nothing downstream could be proved safe on the quote context that
+  // no longer exists. A lane has no use for `$` (its paths, patterns and format
+  // strings are literals), so fail closed rather than re-derive the quoting.
+  const at = command.indexOf("$");
+  if (at === -1) return null;
+  // The word that carries it, so the lane reads which spelling was refused -
+  // `$KEY`, `${KEY}`, `$((1))`, `$(cmd)` - and not just that something was.
+  const word = command.slice(at).split(/[\s;|&<>]/)[0].slice(0, 40);
+  return `$ expansion in ${word}: the shell expands a "$" before the read-only ` +
+         "head runs - parameter, arithmetic and command substitution ($KEY, " +
+         "${KEY}, $((1)), $(cmd)) all carry the lane's own environment (the " +
+         "gateway key and the server password) into the arguments; an L2 names " +
+         "literal paths and patterns only";
+}
+
 function l2OptionOperandReason(head, t, next) {
   // Sonnet round-4 finding 3: the operand loop skipped every token that began
   // with "-", so the path rode in as an OPTION VALUE - `rg --file=/etc/passwd`,
@@ -1294,6 +1328,13 @@ function l2OptionOperandReason(head, t, next) {
   }
   if (value !== null && !value.startsWith("-")) {
     return l2PathOperandReason(head, value, false);
+  }
+  // Fix 10: a glued value is an operand too, whatever flag it hangs off -
+  // `head -n~/lane.key` and `rg -m~/x` put a home-directory path inside a token
+  // the loop only ever read as a flag. A bundle of short flags (`rg -iuz`) reads
+  // as a value and passes: none of these characters is a path spelling.
+  if (glued !== null && !glued.startsWith("-")) {
+    return l2PathOperandReason(head, glued, false);
   }
   return null;
 }
@@ -1377,6 +1418,11 @@ function l2ReadOnlyDenialReason(command) {
     return "a backslash in the command is a continuation, an escape or a quoting " +
            "trick; the guard reads a flattened form, so an L2 may not use one";
   }
+  // Before the segment loop, and before the head list: an expansion is a read of
+  // the lane's environment no matter which allowed name it is glued to, so no
+  // per-word rule can be the thing that decides it.
+  const expansionReason = l2ExpansionDenialReason(command);
+  if (expansionReason) return expansionReason;
   for (const target of redirectWriteTargets(command)) {
     return `output redirect to ${target} writes a file; an L2 may not write anywhere`;
   }

@@ -660,12 +660,17 @@ class TestL2ReadOnlyRole(unittest.TestCase):
 
     def test_paths_outside_the_lane_repo_denied(self):
         for cmd in ("cat /proc/./self/environ", "cat //proc//self//environ",
-                    "cat /proc/$$/environ", "cat /proc/se*", "cat /proc/*",
+                    "cat /proc/se*", "cat /proc/*",
                     "rg foo /proc/self", "cat ~/.claude.json",
                     "cat ~/.config/opencode/auth.json", "cat ../sibling/file",
-                    "cat docs/../../etc/passwd", "ls $HOME", "cat .config/../auth.json",
+                    "cat docs/../../etc/passwd", "cat .config/../auth.json",
                     "rg foo ~/", "git diff HEAD -- /etc/passwd"):
             self._l2_denied(cmd, "path outside repo")
+        # The `$$` and `$HOME` spellings of these reads are denied one rule
+        # earlier now: no `$` reaches an L2 command at all, so the path rule never
+        # sees an expansion to argue about (L2SECRETS fix 10).
+        self._l2_denied("cat /proc/$$/environ", "expansion")
+        self._l2_denied("ls $HOME", "expansion")
 
     def test_secret_files_inside_the_repo_still_denied(self):
         for cmd in ("cat .env", "cat config/.env.local", "cat keys/lane.key",
@@ -878,13 +883,44 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                 ("printenv AUTOOS_OMNIROUTE_KEY", "environment"),
                 ("env", "environment"),
                 ("cat /proc/self/environ", "live process entry"),
-                ("cat /proc/$PPID/environ", "path outside repo"),
+                ("cat /proc/$PPID/environ", "expansion"),
                 ("cat /proc/1234/environ", "live process entry"),
                 ("rg KEY /proc/self/environ", "live process entry"),
-                ("echo $AUTOOS_OMNIROUTE_KEY", "not on the read-only list"),
-                ("ls ${AUTOOS_OMNIROUTE_KEY}", "path outside repo"),
-                ("git log --format=$AUTOOS_OMNIROUTE_KEY", "path outside repo")):
+                ("echo $AUTOOS_OMNIROUTE_KEY", "expansion"),
+                ("ls ${AUTOOS_OMNIROUTE_KEY}", "expansion"),
+                ("git log --format=$AUTOOS_OMNIROUTE_KEY", "expansion")):
             self._l2_denied(cmd, why)
+
+    def test_l2_no_expansion_hides_in_a_glued_option_value(self):
+        # Sonnet seat REJECT (L2SECRETS fix 10, 2026-10-08): l2OptionOperandReason
+        # path-checked a glued short value (`-XVALUE`) only when the head was rg and
+        # the option was one of rg's file-opening flags, so every OTHER glued value
+        # went unexamined — and a `$` in one is the lane's own environment handed to
+        # a read-only command. `rg -r$AUTOOS_OMNIROUTE_KEY foo README.md` printed the
+        # key as a replacement string; `head -c$AUTOOS_OMNIROUTE_KEY README.md` made
+        # it a byte count. Neither token is a path, so the path rule never saw them.
+        # The rule is now lexical, not per-flag: no `$` survives in an L2 command.
+        for cmd in (
+                "rg -r$AUTOOS_OMNIROUTE_KEY foo README.md",
+                "rg -r${OPENCODE_SERVER_PASSWORD} foo README.md",
+                "head -c$AUTOOS_OMNIROUTE_KEY README.md",
+                "tail -n$AUTOOS_OMNIROUTE_KEY README.md",
+                "rg -m$AUTOOS_OMNIROUTE_KEY foo README.md",
+                "git log -G$AUTOOS_OMNIROUTE_KEY",
+                'rg -r"$AUTOOS_OMNIROUTE_KEY" foo README.md',
+                "rg --replace=$AUTOOS_OMNIROUTE_KEY foo README.md",
+                "rg -e$AUTOOS_OMNIROUTE_KEY README.md",
+                "rg -A$((1)) foo README.md"):
+            self._l2_denied(cmd, "expansion")
+        # `~` is expanded by the same shell, and a leading `~` reaches a home
+        # directory outside the checkout whatever flag it is glued to.
+        for cmd in ("head -n~/lane.key README.md", "rg -m~/x foo README.md"):
+            self._l2_denied(cmd, "path outside repo")
+        # The read-only list is unchanged: a flag with a plain glued value stays
+        # allowed, so the rule costs the lane nothing it was already permitted.
+        for cmd in ("head -n5 README.md", "tail -c20 README.md", "rg -m10 foo README.md",
+                    "rg -e foo README.md", "head -c-1 README.md", "git log -Gfoo"):
+            self._l2_allowed(cmd)
 
 
 if __name__ == "__main__":

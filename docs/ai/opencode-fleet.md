@@ -201,11 +201,14 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
 - `permission` merged over the L1 defaults with every file-mutating and spawn key denied (`edit`, `write`, `patch`, `apply_patch`,
   `task`, `subagent`; `read` and `bash` stay allowed), plus the bash-guard plugin with `guard_role: "l2"` — a role of its own, not
   the orchestrator's scoped write: an L2's shell is a CLOSED READ-ONLY list (`git status|log|diff|show`, `ls`, `cat`, `rg`, `head`,
-  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document and no command substitution; no
+  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document, no command substitution and no `$`
+  anywhere in the command (`$KEY`, `${KEY}`, `$((1))`, `$(cmd)`): a glued option value is not a path, so the operand rules never
+  saw one and `rg -r$AUTOOS_OMNIROUTE_KEY foo README.md` printed the gateway key through a read-only head (L2SECRETS fix 10); no
   environment-assignment prefix and no `env`/`printenv`/`set`/`export`/`declare` head (the lane's own environment holds the server
   password and the gateway keys); no flag that hands the read a program, a repository or a pager, tested inside a short bundle
-  (`rg -uz`) as well as spelled out; and no path operand the shell can move outside the checkout — absolute, `~`-led, `..`-crossing,
-  `//`-spaced, or containing a `$`, a backtick or a glob character is refused as `path outside repo`, and the secret files that sit
+  (`rg -uz`) as well as spelled out; and no path operand the shell can move outside the checkout — absolute, `~`-led (glued into an
+  option value as much as standing alone), `..`-crossing, `//`-spaced, or containing a backtick or a glob character is refused as
+  `path outside repo`, and the secret files that sit
   *inside* the repo (`.env*`, `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it. Anything else is denied with
   `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
   is a lane whose guard works;
