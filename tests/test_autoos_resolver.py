@@ -3012,22 +3012,50 @@ class FreeAiResolverTests(unittest.TestCase):
     def test_a_need_above_the_daily_cap_is_not_skipped_by_a_tpm_filter(self):
         # 30000 * 1.3 = 39000 > tpd 30000, but tpd is data-only today: the leg
         # stays because provider_tpm() reads only tpm and free_ai has none.
-        route = self.registry["routes"]["l3-driver-free-only"]
+        # D657-D2 (2026-10-08): the leg rides no chain (its D-657 tool call
+        # failed, so tool_calls stays unproven), which is pinned in
+        # test_free_ai_leg_rides_no_chain_after_d657. The filter under test here
+        # is a property of provider_tpm(), not of chain membership, so the route
+        # is supplied inline.
+        route = {"id": "freeai-tpm-probe", "class": "cheap",
+                 "strategy": "priority", "legs": ["free_ai/qwen7b"]}
         card = {"kind": "review", "privacy": "public"}
         legs, skipped, _ = r.usable_legs(
-            route, card, {"need_tokens": 30000}, self.state(),
-            self.registry, {})
+            route, card, {"need_tokens": 30000}, self.state(), self.registry, {})
         self.assertIn(("free_ai", "qwen7b"), legs)
         self.assertNotIn("free_ai/qwen7b", skipped)
 
+    def test_free_ai_leg_rides_no_chain_after_d657(self):
+        # D657-D2 (2026-10-08), probe rule "only legs with ack ok on >=1 gateway
+        # … others omitted until re-probe 200": free_ai's qwen7b row answers no
+        # tool call, so it left every chain. It stays a registered provider/model
+        # (its own rate-limit rows are still true) — nothing may route to it.
+        carriers = sorted(rid for rid, route in self.registry["routes"].items()
+                          if any(leg.startswith("free_ai/")
+                                 for leg in route.get("legs") or []))
+        self.assertEqual(carriers, [])
+
     def test_a_sensitive_card_removes_routes_carrying_free_ai(self):
+        # The rule FREEAI was written for: a free, may-train public pool may
+        # never serve a privacy=sensitive card. After D657-D2 no chain carries
+        # the leg, so the rule is asserted where it is still load-bearing — the
+        # route that names it — plus the chain-level fact that nothing does.
         card = {"kind": "review", "privacy": "sensitive"}
+        registry = json.loads(json.dumps(self.registry))
+        registry["routes"]["freeai-privacy-probe"] = {
+            "id": "freeai-privacy-probe", "class": "cheap",
+            "strategy": "priority", "legs": ["free_ai/qwen7b"]}
         survivors, removed = r.filter_routes(
-            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+            card, {"need_tokens": 1000}, self.state(), registry, {})
+        self.assertNotIn("freeai-privacy-probe", survivors)
+        self.assertIn("freeai-privacy-probe", removed)
+        self.assertIn("privacy: free_ai/qwen7b",
+                      " ".join(removed["freeai-privacy-probe"]))
+        # and today's L3 free band is refused for the same class of reason
+        # (every leg is a free pool — PRIV: "Free first, private never"):
         self.assertNotIn("l3-driver-free-only", survivors)
         self.assertIn("l3-driver-free-only", removed)
-        joined = " ".join(removed["l3-driver-free-only"])
-        self.assertIn("privacy: free_ai/qwen7b", joined)
+        self.assertIn("privacy:", " ".join(removed["l3-driver-free-only"]))
 
 
 class ReviewerSelectionTests(unittest.TestCase):
@@ -3779,8 +3807,12 @@ class ClaudeBudgetLegTests(unittest.TestCase):
         # CLAUDE55 2026-10-05 (operator): the opus-4-6 route (and its cc leg)
         # was renamed opus-5-5 with an antigravity Opus 5.5 leg, and the
         # l1-orchestrator free band gained the antigravity Sonnet 5.5 seat -
-        # so the registry now carries exactly those two antigravity legs
+        # so the registry now carried exactly those two antigravity legs
         # (cc/claude-opus-4-6 is gone with the renamed route).
+        # D657-D2 (2026-10-08): combo-v2 §8 ("agy never head") and the agy 429
+        # verdict took every Sonnet seat out of every chain, so one Opus 5.5
+        # declaration is all that is left — and it is itself gated unavailable,
+        # which is why no shipped chain reaches a Claude budget hold today.
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
@@ -3789,8 +3821,7 @@ class ClaudeBudgetLegTests(unittest.TestCase):
             for leg in route.get("legs") or []:
                 if r.is_claude_leg(leg, registry):
                     claude.add(leg)
-        self.assertEqual(claude, {"antigravity/claude-opus-5-5-medium",
-                                  "antigravity/claude-sonnet-5-5-medium"})
+        self.assertEqual(claude, {"antigravity/claude-opus-5-5-medium"})
 
     # --- the hold ----------------------------------------------------------
 
@@ -4179,6 +4210,24 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         registry["policy"]["claude_budget"].update(self.ON)
         return registry
 
+    def agy_servable(self, registry):
+        """A copy of `registry` with every antigravity leg un-gated.
+
+        D657-D2 (2026-10-08) gated the agy legs `available: false` — the D-657
+        probe answers HTTP 429 on both gateways and combo-v2 §8 keeps agy out of
+        position 1 — and availability drops a leg before the Claude budget is
+        ever consulted, so a budget test cannot read the shipped gate. The gate
+        itself is pinned by the route rows and by tests/test_registry.py; the
+        budget rule is what these tests prove, and it needs a servable leg.
+        """
+        import copy
+        out = copy.deepcopy(registry)
+        for route in out["routes"].values():
+            gated = route.get("unavailable_legs") or {}
+            for leg in [l for l in gated if l.startswith("antigravity/")]:
+                del gated[leg]
+        return out
+
     def legs(self, card_kind, route_id, env=None, registry=None):
         """usable_legs() for one shipped route. The cards here are non-agentic
         kinds, so no tool_calls overlay is consulted, and need_tokens stays
@@ -4229,12 +4278,13 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
         # antigravity legs) and 60191348 (B2-PRUNE: cc unavailable). CLAUDE55
         # 2026-10-05 (operator): the opus-4-6 route was renamed opus-5-5 with
-        # an antigravity Opus 5.5 leg and the provider is servable on shipped
-        # data again, so the hold is proven directly on the shipped catalog
-        # (built ON from a copy): a non-final card holds the Claude leg.
-        # l2-orchestrator still offers none (CACHEORCH kept it
-        # sensitive-capable with no Claude leg).
-        on = self.on_registry()
+        # an antigravity Opus 5.5 leg, so the hold is proven on the shipped
+        # catalog (built ON from a copy): a non-final card holds the Claude leg.
+        # D657-D2 (2026-10-08): agy is 429 on both gateways, so its legs are
+        # gated unavailable (see agy_servable) and l2-orchestrator carries no
+        # Claude leg at all any more — opus-5-5 is the one route that declares
+        # one, which the registry-level assertion below pins.
+        on = self.agy_servable(self.on_registry())
         _kept, skipped, _ = self.legs("implement", "opus-5-5", registry=on)
         held = [leg for leg, reasons in skipped.items()
                 if any(x.startswith("claude_budget:") for x in reasons)]
@@ -4244,29 +4294,31 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
                 [x for x in skipped[leg] if x.startswith("claude_budget:")],
                 ["claude_budget: %s held for finals" % leg],
                 "%s of %s" % (leg, "opus-5-5"))
-        # PRIVACY 2026-10-05 (operator): the sensitive-capable pin no longer
-        # keeps l2-orchestrator Claude-free - the route carries the antigravity
-        # sonnet 5-5 head again, so a non-final card holds it too.
-        _kept, skipped, _ = self.legs("implement", "l2-orchestrator",
-                                      registry=on)
-        held = [leg for leg, reasons in skipped.items()
-                if any(x.startswith("claude_budget:") for x in reasons)]
-        self.assertEqual(held, ["antigravity/claude-sonnet-5-5-medium"],
-                         "l2-orchestrator")
-        self.assertEqual(
-            [leg for leg in on["routes"]["l2-orchestrator"]["legs"]
-             if r.is_claude_leg(leg, on)],
-            ["antigravity/claude-sonnet-5-5-medium"])
+        # The chains that used to carry the sonnet seat name no Claude leg: the
+        # budget hold can only fire where a Claude leg is declared.
+        for route_id in ("l1-orchestrator", "l2-orchestrator", "l3-driver"):
+            self.assertEqual(
+                [leg for leg in on["routes"][route_id]["legs"]
+                 if r.is_claude_leg(leg, on)], [], route_id)
 
     def test_a_final_card_keeps_the_same_claude_legs_when_declared(self):
-        on = self.on_registry()
+        # D657-D2: run it un-gated (agy_servable) so "keeps" means the leg is
+        # actually in `kept` — with the shipped 429 gate the assertion would
+        # pass on an empty skipped list while the leg served nothing.
+        on = self.agy_servable(self.on_registry())
         for route_id in ("opus-5-5", "l2-orchestrator"):
-            _kept, skipped, _ = self.legs(
+            kept, skipped, _ = self.legs(
                 "final", route_id,
                 env={r.CLAUDE_FINAL_ENV: "L1-routing@deadbeef"}, registry=on)
             self.assertEqual([leg for leg, reasons in skipped.items()
                               if any(x.startswith("claude_budget:")
                                      for x in reasons)], [], route_id)
+            declared = [leg for leg in on["routes"][route_id]["legs"]
+                        if r.is_claude_leg(leg, on)]
+            kept_claude = [leg for leg in kept
+                           if r.is_claude_leg("%s/%s" % leg, on)]
+            self.assertEqual([("%s/%s" % leg) for leg in kept_claude],
+                             declared, route_id)
 
     def legs_of_card(self, card, route_id, env=None):
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
@@ -4285,7 +4337,9 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         # CLAUDEBUDGET-b item 1 still holds: the card's own `critical` field
         # is the self-grantable override the operator's D-102 answer removed;
         # the orchestrator, not the card, declares a critical path.
-        registry = self.on_registry()
+        # D657-D2: read un-gated (agy_servable) — availability would drop the
+        # leg before the budget gate is reached.
+        registry = self.agy_servable(self.on_registry())
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in registry["clients"]}
         kept, skipped, _ = r.usable_legs(
@@ -4301,14 +4355,15 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
 
     def test_the_orchestrator_env_holds_nothing_on_the_shipped_registry(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity leg from l2-orchestrator). CACHEORCH 2026-10-05 kept the
-        # route on caching providers; PRIVACY (same day) re-allowed the
-        # antigravity claude head, so with the orchestrator declaration set
-        # the sonnet leg is KEPT (not budget-held) alongside the caching legs.
-        # The same card, same route, with the declaration set by the spawner,
-        # under the ON budget (the shipped value is mode=normal, so the ON
-        # case is built from a copy).
-        on = self.on_registry()
+        # antigravity leg from l2-orchestrator). PRIVACY 2026-10-05 re-allowed
+        # the antigravity claude head, so with the orchestrator declaration set
+        # the sonnet leg was KEPT (not budget-held) alongside the caching legs.
+        # D657-D2 (2026-10-08): §8 and the agy 429 gate took that sonnet seat out
+        # of l2-orchestrator — the route's whole chain is now the free head plus
+        # the cached credit tail — so the same card is pinned against the route
+        # that still declares a Claude leg (opus-5-5), and l2-orchestrator is
+        # pinned to hold nothing because it names nothing.
+        on = self.agy_servable(self.on_registry())
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in on["clients"]}
         kept, skipped, _ = r.usable_legs(
@@ -4318,7 +4373,8 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
         self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
-        self.assertIn(("antigravity", "claude-sonnet-5-5-medium"), kept)
+        self.assertIn(("bazaarlink", "deepseek/deepseek-v4-flash-0731free:free"),
+                      kept)
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
@@ -4537,13 +4593,17 @@ class ComboFallthroughTests(unittest.TestCase):
                                 "%s: the fall-through stayed on %s"
                                 % (route_id, head.split("/", 1)[0]))
 
-    def test_two_consecutive_provider_failures_still_leave_a_third(self):
-        # CIGREEN: expectation moved by 06d0e714 (D-TORDER-2 ACCEPT:
-        # l1-orchestrator-free-only is deliberately a single-provider combo,
-        # so it has one prefix, not three, and two failures leave nothing).
-        # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
-        # by route id, not len(prefixes) == 1, and the exempt route pins its
-        # single leg/single prefix so the exemption goes stale loudly.
+    def test_provider_failures_fall_to_a_different_provider_or_fail_closed(self):
+        # The three-provider shape this test was written for (free pool + credit
+        # grant + paid overflow) is gone: D657-D2's chains are the free band the
+        # probes acked plus the priced leg they confirmed, so a chain may be two
+        # providers deep and no deeper by evidence. Depth is not what protects a
+        # run from a 429 — these three properties are, and each is pinned:
+        #   (i)  every non-exempt combo has at least two distinct providers;
+        #   (ii) no two consecutive legs share a provider (the brief's own chain
+        #        rule: a repeat spends the retry on the key that just failed);
+        #   (iii) when the whole provider set is down the walk answers nothing,
+        #        rather than re-picking a leg that already 429ed.
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             prefixes = []
@@ -4566,13 +4626,23 @@ class ComboFallthroughTests(unittest.TestCase):
             self.assertGreater(len(combo["models"]), 1,
                                 "%s: only the exempt single-provider route "
                                 "may render one leg" % route_id)
-            self.assertGreaterEqual(len(prefixes), 3,
-                                    "%s: %s has no third provider to fall to"
+            self.assertGreaterEqual(len(prefixes), 2,
+                                    "%s: %s has no second provider to fall to"
                                     % (route_id, combo["models"]))
-            statuses = {prefix: 429 for prefix in prefixes[:2]}
-            chosen = self.fake_priority_walk(combo["models"], statuses)
+            for first, second in zip(combo["models"], combo["models"][1:]):
+                self.assertNotEqual(first.split("/", 1)[0],
+                                    second.split("/", 1)[0],
+                                    "%s: %s then %s repeats one provider"
+                                    % (route_id, first, second))
+            head = prefixes[0]
+            chosen = self.fake_priority_walk(combo["models"], {head: 429})
             self.assertIsNotNone(chosen, route_id)
-            self.assertNotIn(chosen.split("/", 1)[0], statuses, route_id)
+            self.assertNotEqual(chosen.split("/", 1)[0], head, route_id)
+            self.assertIsNone(
+                self.fake_priority_walk(combo["models"],
+                                        {prefix: 429 for prefix in prefixes}),
+                "%s: a combo whose every provider is down must fail closed"
+                % route_id)
 
     def test_the_fall_through_lands_on_a_leg_an_agentic_card_can_use(self):
         # A combo that falls through to a leg whose tool_calls is unproven (or to
@@ -4612,11 +4682,13 @@ class ComboFallthroughTests(unittest.TestCase):
                 if tool_calls != "proven":
                     continue
                 if (self.reg["providers"][provider_id] or {}).get("tier") == "credit":
-                    try:
-                        if not (float(model.get("price_in")) > 0.0
-                                and float(model.get("price_out")) > 0.0):
-                            continue
-                    except (TypeError, ValueError):
+                    # The resolver's own priced-credit filter (FREEKEYS-1b as
+                    # amended by T1-CREDIT-FIX-6/D-220): the price is read
+                    # through the leg's provider, because gemini-3.8-flash is
+                    # free at AI-Studio and billed at Vertex on one model row.
+                    # Asking `usable_legs` to agree is what keeps this mirror
+                    # from drifting off the rule it restates.
+                    if not r.credit_leg_priced(model_id, self.reg, provider_id):
                         continue
                 if not r.route_leg_context_fits(leg, route, self.reg):
                     continue
@@ -4840,18 +4912,26 @@ class PaidLastResortTests(unittest.TestCase):
         # route/plan entry (l1-orchestrator). The tail property is derived
         # from the registry, not pinned by leg name: every paid-tier leg of
         # the route is listed after every non-paid leg.
+        # D657-D2 (2026-10-08): combo-v2 §8 took the paid meta muse and the paid
+        # deepseek legs out of every chain, so this route has no paid leg left to
+        # hold back — which is what the §8 ban *looks like* from the resolver's
+        # side, and is pinned as such. The paid-is-tail order over the combos
+        # that do carry one is the combo contract's rule (b) and is asserted in
+        # tests/test_combo_contract.py; the hold-back rule itself is pinned
+        # against fixtures above
+        # (test_implement_paid_first_healthy_free_chooses_free_and_names_paid_held_back).
         with (Path(__file__).resolve().parent.parent
               / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
             shipped = json.load(fh)
         route = shipped["routes"]["l1-orchestrator"]
-        paid_idx = [i for i, leg in enumerate(route["legs"])
-                    if r.leg_tier(leg, shipped) == "paid"]
-        non_paid_idx = [i for i, leg in enumerate(route["legs"])
-                        if r.leg_tier(leg, shipped) != "paid"]
-        self.assertTrue(paid_idx, "route has no paid leg to hold back")
-        self.assertTrue(non_paid_idx, "route has no non-paid leg to prefer")
-        self.assertLess(max(non_paid_idx), min(paid_idx),
-                        "paid legs are not the tail: %s" % (route["legs"],))
+        self.assertTrue(route["legs"], "l1-orchestrator must serve a card")
+        paid = [leg for leg in route["legs"]
+                if r.leg_tier(leg, shipped) in ("paid", "subscription")]
+        self.assertEqual(paid, [],
+                         "§8 keeps a paid leg out of every chain: %s" % route["legs"])
+        tiers = [r.leg_tier(leg, shipped) for leg in route["legs"]]
+        self.assertEqual(tiers, ["free", "credit"],
+                         "the chain is a free head and one priced tail: %s" % tiers)
         overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
                             for leg in route["legs"]}}
         legs, _skipped, _notes = r.usable_legs(
@@ -4861,6 +4941,7 @@ class PaidLastResortTests(unittest.TestCase):
         provider_id, model_id = legs[0]
         tier = r.leg_tier("%s/%s" % (provider_id, model_id), shipped)
         self.assertIn(tier, ("free", "trial", "credit"))
+        self.assertEqual(tier, "free", legs)
 
     def unknown_tier_fixture(self):
         providers = {"myst-p": {"id": "myst-p",
