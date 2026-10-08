@@ -10084,6 +10084,13 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None):
     cap, floor = host_admission_config(registry)
     live = live_worker_count(workers)
     free_mb = mem_available_mb(meminfo)
+    # HOSTADMISSION-FAILOPEN: `free_mb is None` means the host could not be
+    # measured (no /proc/meminfo: Windows, a container mounted without it, an
+    # unreadable path), and the memory half of the rule then stands down — it
+    # FAILS OPEN rather than refuse every run on a machine it cannot read. The
+    # live-worker half does not: `live >= cap` still binds, and it is the half
+    # that counts the slots claimed below it. A host that cannot say how much
+    # memory it has free can always say how many workers it is running.
     if live >= cap:
         return _admission_text(live, cap, free_mb, floor, "the live-worker cap")
     if free_mb is not None and free_mb < floor:

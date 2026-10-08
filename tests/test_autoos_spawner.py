@@ -21070,6 +21070,25 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIsNone(token)
         self.assertEqual(self.claims(), [])
 
+    def test_the_memory_half_fails_open_when_meminfo_cannot_be_read(self):
+        # DOCUMENTED FAIL-OPEN: no /proc/meminfo (Windows, a container mounted
+        # without it) means the memory half of the rule stands down rather than
+        # refusing every run on a machine it cannot measure. What still binds is
+        # the live-worker cap, because that count is of this host's own records.
+        agent = self.agent
+        unreadable = os.path.join(self.tmp, "no-such-meminfo")
+        self.assertIsNone(agent.mem_available_mb(unreadable))
+        kwargs = {"registry": self.registry(4, 6144), "workers": self.workers,
+                  "meminfo": unreadable}
+        self.live(3)
+        self.assertIsNone(agent.host_admission_refusal(**kwargs),
+                          "3 live of a cap of 4, memory unmeasurable: admit")
+        self.live(1, start=3)
+        r = agent.host_admission_refusal(**kwargs)
+        self.assertIsNotNone(r, "the cap still binds a host with no meminfo")
+        self.assertIn("the live-worker cap", r)
+        self.assertIn("MemAvailable unknown", r)
+
     # --- HOSTADMISSION-OFF (fix 2) ----------------------------------------
     # The escape and the gate were read in two different processes and the env
     # name was scrubbed between them: AUTOOS_ADMISSION_OFF=1 in the MCP server's
