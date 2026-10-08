@@ -289,7 +289,7 @@
       "trains_on_prompts": true
     },
     "command-a-03-2025": {
-      "$comment": "t4-rag head; tier-profiles.json calls its keys 'trial keys' - a temporary free trial, not a published free tier. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "t4-rag head; tier-profiles.json calls its keys 'trial keys' - a temporary free trial, not a published free tier. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). probe D-657 2026-10-08: tool_calls 'proven' - configuration/omniroute/probes/probe-d657-{central,workstation}.tsv answer ack 200 + one get_weather tool call ok on both gateways (was 'unproven', no probe on file)",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -302,12 +302,30 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven",
+      "tool_calls": "proven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
+    },
+    "command-a-plus-05-2026": {
+      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the probe-d657 leg cohere/command-a-plus-05-2026, which both gateways answered (ack 200, one get_weather tool call ok, 882/780 ms; cache cell false on both -> prompt_cache 'false'), but which the probe lane skipped because no models row existed for it. context_advertised 131072 / output_max 8192 / context_usable 65536 are the conservative SIBLING DEFAULT taken from models.command-a-03-2025, not a measurement of this id: spec combo-v2 §2 claims 'cohere command-a-plus (436k, trial)' from the single-source AA table, and §7 records why an unflagged figure from that table is not adopted, so the row promises only what a sibling of the same provider's tier already promises. Re-probe GET /v1/models context_length to raise it. Price 0.0 follows command-a-03-2025's 'vendor price not sourced' note - a trial key, not a published free tier, and do not use it for cost math.",
+      "context_advertised": 131072,
+      "context_usable": {
+        "source": "default",
+        "tokens": 65536
+      },
+      "effort_ladder": [],
+      "family": "cohere",
+      "id": "command-a-plus-05-2026",
+      "output_max": 8192,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "proven",
       "prompt_cache": "false",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "command-r-plus-08-2024": {
-      "$comment": "t4-rag overflow leg; same trial-key note as command-a-03-2025. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "t4-rag overflow leg; same trial-key note as command-a-03-2025. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups). probe D-657 2026-10-08: tool_calls 'proven' - configuration/omniroute/probes/probe-d657-{central,workstation}.tsv answer ack 200 + one get_weather tool call ok on both gateways (was 'unproven', no probe on file)",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -320,7 +338,7 @@
       "price_in": 0.0,
       "price_out": 0.0,
       "reasoning": false,
-      "tool_calls": "unproven",
+      "tool_calls": "proven",
       "prompt_cache": "false",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
@@ -1804,6 +1822,29 @@
       "prompt_cache": "true",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
+    "nvidia/nemotron-3-ultra-550b-a55b:free": {
+      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the leg probe-d657-central.tsv + probe-d657-workstation.tsv both answered (ack 200, one get_weather tool call ok, 4054/6313 ms; cache cell false on both gateways -> prompt_cache 'false'), which the probe lane could not write because no models row existed for it. context_advertised 1000000 / context_usable 500000 / output_max 32768 / effort_ladder / reasoning are REUSED from models.openrouter-nemotron-ultra - the same vendor model line whose own direct.model is this exact OpenRouter id - so they are sourced, not measured on this leg (D20: an unsourced number is never presented as a measurement). tier 'free' is a MODEL-level override of providers.openrouter.tier (paid), the same shape as the nemotron-3-super :free row, so the $0 :free id may sit in a *-free-only route. spec combo-v2 §2 flags 'OR nemotron-3-ultra :free [T: NVIDIA logs]': no data-policy source was read for that claim, so private_safe keeps reading providers.openrouter.trains_on_prompts (false) and this leg is treated as non-training until the claim is sourced.",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "nvidia",
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tier": "free",
+      "tool_calls": "proven",
+      "prompt_cache": "false",
+      "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
+    },
     "poolside/laguna-s-2.1:free": {
       "$comment": "FREEWIRE 2026-09-30 (free-probe evidence): openrouter/poolside/laguna-s-2.1:free answered ack 200 and one get_weather tool call ok (1961 ms); gateway /v1/models row context_length 262144, output 32768. tier 'free' is a MODEL-level override of providers.openrouter.tier (paid) so the $0 :free id can stay in a *-free-only route and is honestly priced. price_in/price_out 0.0. trains_on_prompts inherits providers.openrouter (false).",
       "context_advertised": 262144,
@@ -2794,6 +2835,13 @@
         "source": "briefs/common.md 'Claude budget' (operator 2026-09-26T16:4xZ); L0 ONE-ROUTER 2026-09-27T05:16Z (OmniRoute call_logs since 2026-09-26T16:30Z)"
       },
       {
+        "id": "allow-bazaarlink-ds-v4-flash-0731-free",
+        "match": "*deepseek-v4-flash-0731free*",
+        "allow": true,
+        "reason": "AO-DENYLEGS D2 (operator D-657, spec combo-v2 §7b/§8): this one DeepSeek spelling re-opens above deny-deepseek because it is the only $0 free DeepSeek copy the D-657 probe measured with a cache hit (prompt_cache true), and L0-L2 chains may now hold cached legs only. It is NOT the native paid DeepSeek API (deepseek/deepseek-flash stays denied) and NOT V4 Pro (deny-deepseek-pro is still first in this list, so no allow here can re-open the pro model). price_in/price_out 0 with no vendor price on file: bazaarlink's own balance, not autoos_usage's paid_spend, shows the real spend (see models.deepseek/deepseek-v4-flash-0731free:free.$comment).",
+        "source": "configuration/omniroute/probes/probe-d657-central.tsv + probe-d657-workstation.tsv 2026-10-08 (ack 200 + one get_weather tool call ok, cache cell true on 3 of the 4 rows); ordered by AO-DENYLEGS D2 2026-10-08 under operator D-657"
+      },
+      {
         "id": "deny-deepseek",
         "match": "*deepseek*",
         "allow": false,
@@ -3648,11 +3696,11 @@
       "tier": "credit",
       "credit_usd": 200,
       "trains_on_prompts": false,
-      "available": true,
+      "available": false,
       "monthly_cap_usd": 200,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
-      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%).",
+      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%). OVH-GATE 2026-10-08 (AO-DENYLEGS D2, operator D-657 'only legs that acked ok'): available false - probe-d657-central.tsv and probe-d657-workstation.tsv answer HTTP 404 'no Route matched' for all six ovhcloud/ and ovh/ spellings of Qwen3.8-27B, gpt-oss-120b and Qwen3-Coder-30B-A3B-Instruct, so no render may carry an OVH leg and the three ovh-* single combos fall to `omitted`. spec combo-v2 §1 records the same break ('OVH served 1,253 calls OK this week -> recent break, autoos-L1 checking'); a re-probe 200 restores this flag.",
       "privacy": {
         "trains_on_prompts": false,
         "evidence": [
