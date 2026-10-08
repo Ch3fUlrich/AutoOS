@@ -11,7 +11,8 @@
      (only those).
 
   B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
-  file configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json (full
+  file configuration/vertex-credentials-<gcp-project>-<keyid>.json (the real
+  project id and key id are placeholders here, this repository is public; full
   content is the credential, NOT a plain API key; git-ignored), not from
   api-keys.yml. Credential-store repair (two vertex/meta connections, one
   undecryptable 401) is L0's, not apply's.
