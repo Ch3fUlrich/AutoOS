@@ -24,8 +24,6 @@ _ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime.datetime(2026, 10, 1, 12, 0, tzinfo=datetime.timezone.utc)
 SINCE = datetime.datetime(2026, 9, 1, 0, 0, tzinfo=datetime.timezone.utc)
 
-VERTEX_PRICE = (1.5e-06, 7.5e-06)
-
 
 def _ok_guard(provider, cap=250.0):
     return {"provider": provider, "state": "ok", "spend_usd": 0.0,
@@ -77,11 +75,17 @@ class C1ShippedRegistryVertexPriced(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             cls.reg = json.load(fh)
+        # The figure is read from the row, never restated here: what these tests
+        # own is that `leg_price` and the price table return the provider's own
+        # scoped entry verbatim. The rate in force is pinned once, in
+        # `test_autoos_usage.ProviderSpellingCostTests` (LANE-PRICE-GAP).
+        entry = cls.reg["models"]["gemini-3.8-flash"]["provider_prices"]["vertex_ai"]
+        cls.shipped_price = (entry["price_in"], entry["price_out"])
 
-    def test_leg_price_vertex_uses_list_price(self):
+    def test_leg_price_vertex_reads_the_provider_row_not_the_free_model_level(self):
         self.assertEqual(
             regmod.leg_price("gemini-3.8-flash", "vertex_ai", self.reg),
-            VERTEX_PRICE)
+            self.shipped_price)
 
     def test_credit_leg_priced_vertex_true_free_false(self):
         self.assertTrue(
@@ -111,7 +115,7 @@ class C1ShippedRegistryVertexPriced(unittest.TestCase):
     def test_price_table_has_vertex_spelling_not_bare(self):
         prices = usage.prices_from_registry(self.reg)
         self.assertIn("vertex/gemini-3.8-flash", prices)
-        self.assertEqual(prices["vertex/gemini-3.8-flash"], VERTEX_PRICE)
+        self.assertEqual(prices["vertex/gemini-3.8-flash"], self.shipped_price)
         self.assertNotIn("gemini-3.8-flash", prices)
 
 

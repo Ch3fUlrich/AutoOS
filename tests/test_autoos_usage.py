@@ -578,6 +578,162 @@ class CostTests(UsageCliTests):
         self.assertAlmostEqual(rep["totals"]["cost_in"], 0.0001, places=12)
 
 
+class ProviderSpellingCostTests(UsageCliTests):
+    """LANE-PRICE-GAP (2026-10-08): the `--cost` report billed 13.8M Vertex
+    tokens at $0.0000 while `provider_prices.vertex_ai` carried the price.
+
+    `paid_spend` (the credit guard) threads the row's provider and the registry
+    into `price_for`; the report's own aggregation did not, so a bare model id
+    whose price exists only per-provider missed the table and read as free.
+    A gateway row also spells its provider `vertex` (the connection id) or
+    `ovh` (the model prefix), never the registry key the price is filed under,
+    so the lookup goes through tools/registry.py's one normaliser.
+    """
+
+    REG = {
+        "providers": {
+            "vertex_ai": {"id": "vertex_ai", "omniroute_id": "vertex", "tier": "credit",
+                          "credit_usd": 250.0, "monthly_cap_usd": 250.0,
+                          "monthly_warn_fraction": 0.8},
+            "ovhcloud": {"id": "ovhcloud", "omniroute_id": "ovhcloud",
+                         "model_prefix": "ovh", "tier": "credit",
+                         "credit_usd": 200.0, "monthly_cap_usd": 200.0,
+                         "monthly_warn_fraction": 0.8},
+            "google_ai_studio": {"id": "google_ai_studio", "omniroute_id": "gemini",
+                                 "tier": "free"},
+        },
+        "models": {
+            "gemini-3.8-flash": {
+                "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
+                "provider_prices": {"vertex_ai": {
+                    "price_in": 1e-06, "price_out": 3e-06,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+            "gpt-oss-120b": {
+                "id": "gpt-oss-120b", "price_in": 0.0, "price_out": 0.0,
+                "provider_prices": {"ovhcloud": {
+                    "price_in": 2e-07, "price_out": 4e-07,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+        },
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.registry = Path(self.tmp.name) / "ai-registry.json"
+        self.registry.write_text(json.dumps(self.REG), encoding="utf-8")
+
+    def cost_report(self, rows, extra=()):
+        argv = ["--since", "1h", "--by", "provider", "--registry", str(self.registry),
+                "--cost"] + list(extra)
+        return self.json_report(argv, FakeFetch({0: (200, rows)}))
+
+    def rows(self, provider, model, tin=1000, tout=500, age_min=1):
+        return fresh_rows(1, NOW - datetime.timedelta(minutes=age_min),
+                          model=model, provider=provider, tin=tin, tout=tout)
+
+    # --- the report, through the CLI --------------------------------------
+
+    def test_a_bare_model_under_the_gateway_provider_is_priced(self):
+        # The measured shape: provider `vertex`, model `gemini-3.8-flash`.
+        rep = self.cost_report(self.rows("vertex", "gemini-3.8-flash",
+                                        tin=1_000_000, tout=100_000))
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 1.0, places=6)
+        self.assertAlmostEqual(rep["totals"]["cost_out"], 0.3, places=6)
+        self.assertEqual(rep["cost"]["models_unpriced"], 0)
+
+    def test_a_model_under_its_gateway_prefix_is_priced(self):
+        rep = self.cost_report(self.rows("ovhcloud", "ovh/gpt-oss-120b",
+                                        tin=1_000_000, tout=0))
+        self.assertAlmostEqual(rep["totals"]["cost_in"], 0.2, places=6)
+        self.assertEqual(rep["cost"]["models_unpriced"], 0)
+
+    def test_the_provider_key_spelling_costs_the_same_as_the_gateway_one(self):
+        gateway = self.cost_report(self.rows("vertex", "gemini-3.8-flash"))
+        keyed = self.cost_report(self.rows("vertex_ai", "gemini-3.8-flash", age_min=2))
+        self.assertEqual(keyed["totals"]["cost_in"], gateway["totals"]["cost_in"])
+
+    def test_a_free_leg_never_borrows_the_paid_providers_price(self):
+        # The same model id, billed through AI-Studio, is the free leg: the
+        # model-level 0 price is not a price, so it stays an unpriced gap.
+        rep = self.cost_report(self.rows("gemini", "gemini-3.8-flash"))
+        self.assertEqual(rep["totals"]["cost_in"], 0.0)
+        self.assertEqual(rep["cost"]["models_unpriced"], 1)
+
+    def test_an_unknown_provider_stays_unpriced(self):
+        rep = self.cost_report(self.rows("ghost", "gemini-3.8-flash"))
+        self.assertEqual(rep["totals"]["cost_in"], 0.0)
+        self.assertEqual(rep["cost"]["models_unpriced"], 1)
+        self.assertEqual(rep["totals"]["tokens_in"], 1000)
+
+    # --- the pieces the report is built from -------------------------------
+
+    def test_the_price_table_carries_every_provider_spelling(self):
+        prices = usage.prices_from_registry(self.REG)
+        for key in ("vertex_ai/gemini-3.8-flash", "vertex/gemini-3.8-flash",
+                    "ovhcloud/gpt-oss-120b", "ovh/gpt-oss-120b"):
+            self.assertIn(key, prices, key)
+        # and never the bare id, which would price the free leg
+        self.assertNotIn("gemini-3.8-flash", prices)
+
+    def test_price_for_resolves_a_gateway_spelling_through_the_registry(self):
+        prices = usage.prices_from_registry(self.REG)
+        self.assertEqual(usage.price_for("gemini-3.8-flash", prices,
+                                        provider="vertex", registry=self.REG),
+                         (1e-06, 3e-06))
+        self.assertIsNone(usage.price_for("gemini-3.8-flash", prices,
+                                         provider="vertex"))
+
+    def test_the_shipped_registry_prices_a_vertex_row_by_gateway_id(self):
+        reg = usage.read_registry(ROOT / "catalog" / "ai-registry.json")
+        prices = usage.prices_from_registry(reg)
+        entry = reg["models"]["gemini-3.8-flash"]["provider_prices"]["vertex_ai"]
+        expected = (entry["price_in"], entry["price_out"])
+        for provider in ("vertex", "vertex_ai"):
+            self.assertEqual(usage.price_for("gemini-3.8-flash", prices,
+                                             provider=provider, registry=reg),
+                             expected, provider)
+
+    def test_the_shipped_registry_carries_the_intro_window_that_is_in_force(self):
+        # The registry has no dated-price mechanism (schema `provider_prices`
+        # forbids an extra key), so the rate on file must be the one in force
+        # and the future list price travels in the prose: the published Vertex
+        # rate for gemini-3.8-flash is $0.75 in / $3.75 out per 1M through
+        # 2026-12-31 (50 % credits back), $1.50 / $7.50 from 2027-01-01. Filing
+        # the 2027 list price as current bills every grant row at double.
+        reg = usage.read_registry(ROOT / "catalog" / "ai-registry.json")
+        entry = reg["models"]["gemini-3.8-flash"]["provider_prices"]["vertex_ai"]
+        self.assertEqual((entry["price_in"], entry["price_out"]),
+                         (7.5e-07, 3.75e-06))
+        self.assertIn("2026-12-31", entry["price_source"])
+        self.assertIn("2027-01-01", entry["price_source"])
+
+    def test_the_credit_guard_and_the_report_price_the_same_rows(self):
+        # One ledger, one price: the figure that gates the leg and the figure
+        # the report prints cannot disagree about a gateway-spelled provider.
+        since = NOW - datetime.timedelta(hours=1)
+        rows = self.rows("vertex", "gemini-3.8-flash", tin=1_000_000, tout=100_000)
+        guards = usage.credit_guards(self.REG, rows, since)
+        rep = self.cost_report(rows)
+        self.assertAlmostEqual(guards["vertex_ai"]["spend_usd"],
+                               rep["totals"]["cost_in"] + rep["totals"]["cost_out"],
+                               places=6)
+        self.assertEqual(guards["vertex_ai"]["models_unpriced"], 0)
+
+    def test_the_row_filter_reads_the_normalisers_own_row_for_that_provider(self):
+        # is_spend_row's namespace set and the price table's key set come from
+        # the same per-provider row (registry.provider_spellings_for), so one
+        # data edit moves both. A provider the registry does not carry answers
+        # to its own name only.
+        from registry import provider_alias_map
+        alias_map = provider_alias_map(self.REG)
+        for provider_id in self.REG["providers"]:
+            self.assertEqual(
+                usage._provider_spellings(provider_id, self.REG),
+                {spelling.lower() for spelling in alias_map[provider_id]},
+                provider_id)
+        self.assertEqual(usage._provider_spellings("whoever", self.REG), {"whoever"})
+        self.assertEqual(usage._provider_spellings("vertex_ai", None), {"vertex_ai"})
+
+
 class SpendTests(UsageCliTests):
     """DSGUARD: the paid-spend section — DeepSeek spend since a date, and the
     two WARN lines (20 USD of spend, 5 USD of remaining balance).

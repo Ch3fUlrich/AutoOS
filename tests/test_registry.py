@@ -4206,5 +4206,138 @@ class PromptCacheFieldTests(unittest.TestCase):
             self.assertNotIn(key, model["required"])
 
 
+class ProviderSpellingTests(unittest.TestCase):
+    """LANE-PRICE-GAP (2026-10-08): the ONE registry-derived provider-spelling
+    normaliser.
+
+    A call-log row names its provider with the gateway connection id (`vertex`,
+    `ovh`) while the registry keys the provider and its `provider_prices` entry
+    with the provider id (`vertex_ai`, `ovhcloud`). Every consumer that prices a
+    row has to cross that gap; a hand-written name list crossed it only for the
+    providers its author had measured (the Vertex and OVH rows priced $0 while
+    their price sat on file). These tests pin the data-derived spelling map
+    instead, in both directions.
+    """
+
+    def _reg(self):
+        return {
+            "providers": {
+                "vertex_ai": {"id": "vertex_ai", "omniroute_id": "vertex",
+                              "model_prefix": None, "tier": "credit"},
+                "ovhcloud": {"id": "ovhcloud", "omniroute_id": "ovhcloud",
+                             "model_prefix": "ovh", "tier": "credit"},
+                "morph": {"id": "morph", "omniroute_id": "morph",
+                          "model_prefix": "morph", "tier": "credit"},
+                "gemini": {"id": "gemini", "omniroute_id": "gemini",
+                           "aliases": ["ai-studio"], "tier": "free"},
+                "free_ai": {"id": "free_ai", "omniroute_id": "free-ai",
+                            "aliases": "second-alias", "tier": "free"},
+            },
+            "models": {
+                "gemini-3.8-flash": {
+                    "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
+                    "provider_prices": {
+                        "vertex_ai": {"price_in": 7.5e-07, "price_out": 3.75e-06,
+                                      "price_source": "test", "price_as_of": "2026-10-08"}}},
+                "gpt-oss-120b": {
+                    "id": "gpt-oss-120b", "price_in": 0.0, "price_out": 0.0,
+                    "provider_prices": {
+                        "ovhcloud": {"price_in": 1e-07, "price_out": 5e-07,
+                                     "price_source": "test", "price_as_of": "2026-10-08"}}},
+                "plain": {"id": "plain", "price_in": 1e-06, "price_out": 2e-06},
+            },
+        }
+
+    # --- forward: a provider id -> every namespace it answers to -------------
+
+    def test_the_alias_map_carries_the_key_and_every_declared_spelling(self):
+        alias_map = registry.provider_alias_map(self._reg())
+        self.assertEqual(alias_map["vertex_ai"], ["vertex_ai", "vertex"])
+        self.assertEqual(alias_map["ovhcloud"], ["ovhcloud", "ovh"])
+        self.assertEqual(alias_map["morph"], ["morph"])       # prefix == id: one entry
+        self.assertEqual(alias_map["gemini"], ["gemini", "ai-studio"])
+        # a bare string aliases value is a spelling too, not a skipped field
+        self.assertEqual(alias_map["free_ai"], ["free_ai", "free-ai", "second-alias"])
+
+    # --- reverse: a row's spelling -> the provider id -----------------------
+
+    def test_a_gateway_connection_id_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("vertex", reg), "vertex_ai")
+
+    def test_a_model_prefix_namespace_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("ovh", reg), "ovhcloud")
+
+    def test_a_declared_alias_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("ai-studio", reg), "gemini")
+
+    def test_the_provider_key_is_also_its_own_spelling(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("vertex_ai", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("morph", reg), "morph")
+
+    def test_a_spelling_that_is_a_provider_key_wins_over_another_alias(self):
+        # `twin` is somebody's gateway id AND a provider key: the key is the
+        # unambiguous reading, and a price must not be borrowed by a stranger.
+        reg = self._reg()
+        reg["providers"]["twin"] = {"id": "twin", "omniroute_id": "twin", "tier": "free"}
+        reg["providers"]["shadow"] = {"id": "shadow", "omniroute_id": "twin", "tier": "free"}
+        self.assertEqual(registry.provider_id_from_spelling("twin", reg), "twin")
+
+    def test_an_ambiguous_spelling_resolves_to_nothing_never_a_guess(self):
+        # Two providers claiming one gateway id: picking either would bill one
+        # grant with the other's price, so the spelling prices nothing.
+        reg = self._reg()
+        reg["providers"]["shadow"] = {"id": "shadow", "omniroute_id": "twin", "tier": "free"}
+        reg["providers"]["rival"] = {"id": "rival", "omniroute_id": "twin", "tier": "free"}
+        self.assertIsNone(registry.provider_id_from_spelling("twin", reg))
+        self.assertIsNotNone(registry.provider_id_from_spelling("shadow", reg))
+
+    def test_an_unknown_or_empty_spelling_resolves_to_nothing(self):
+        reg = self._reg()
+        for spelling in ("ghost", "", "   ", None, "vertexish"):
+            self.assertIsNone(registry.provider_id_from_spelling(spelling, reg), spelling)
+
+    def test_matching_is_case_insensitive_where_the_fold_is_unique(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling(" Vertex ", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("OVH", reg), "ovhcloud")
+
+    # --- the consumer half: leg_price reads a gateway spelling --------------
+
+    def test_leg_price_prices_a_bare_model_under_the_gateway_spelling(self):
+        reg = self._reg()
+        self.assertEqual(registry.leg_price("gemini-3.8-flash", "vertex", reg),
+                         (7.5e-07, 3.75e-06))
+        self.assertEqual(registry.leg_price("gpt-oss-120b", "ovh", reg), (1e-07, 5e-07))
+
+    def test_leg_price_keeps_the_model_level_price_for_an_unknown_provider(self):
+        # An unknown provider id must not borrow a stranger's provider_prices
+        # entry: the model-level row decides, exactly as before this change.
+        reg = self._reg()
+        self.assertIsNone(registry.leg_price("gemini-3.8-flash", "ghost", reg))
+        self.assertEqual(registry.leg_price("plain", "ghost", reg), (1e-06, 2e-06))
+
+    def test_the_committed_registry_resolves_its_measured_gateway_spellings(self):
+        # L1-measured 2026-10-08: 13.8M tokens billed under `vertex`, 0 cost.
+        reg = load_registry()
+        self.assertEqual(registry.provider_id_from_spelling("vertex", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("ovh", reg), "ovhcloud")
+        self.assertIsNotNone(registry.leg_price("gemini-3.8-flash", "vertex", reg))
+
+    def test_the_committed_registry_has_no_ambiguous_spelling(self):
+        # rule-1's shape for spellings: the reverse map resolving to nothing for
+        # a real gateway id would silently un-price a whole provider's rows.
+        reg = load_registry()
+        for provider_id, spellings in registry.provider_alias_map(reg).items():
+            for spelling in spellings:
+                self.assertEqual(
+                    registry.provider_id_from_spelling(spelling, reg), provider_id,
+                    "providers.%s spelling %r is ambiguous or shadowed" % (provider_id,
+                                                                            spelling))
+
+
 if __name__ == "__main__":
     unittest.main()
