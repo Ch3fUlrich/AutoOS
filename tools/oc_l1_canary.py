@@ -42,6 +42,24 @@ GUARDED_TOOL_NAMES = ("shell", "bash")
 CANARY_TOKEN = "CANARY_EOF"
 
 
+def _denial_text(err):
+    """The plugin's throw text carried by an error payload, or None.
+
+    Two shapes, both real: opencode used to store the tool error as a string and
+    stores it as an object now - `{"type": "unknown", "message":
+    "bash-guard: DENIED - ..."}` (measured 2026-10-08 against the running
+    server). Anything else (a list, a number, an object whose text sits under
+    another key) is not the plugin's throw shape, so it carries no denial.
+    """
+    if isinstance(err, str):
+        return err
+    if isinstance(err, dict):
+        message = err.get("message")
+        if isinstance(message, str):
+            return message
+    return None
+
+
 def _is_denial(err):
     """True only when the error text IS a bash-guard denial, not when it quotes one.
 
@@ -50,9 +68,11 @@ def _is_denial(err):
     substring test let any model-authored text that echoed the marker pass the
     canary, which is exactly the false pass the canary exists to prevent.
     Non-string payloads are not the plugin's throw shape, so they are not
-    evidence of a denial either.
+    evidence of a denial either - except the object shape, whose `message` IS
+    the thrown text (`_denial_text`).
     """
-    return isinstance(err, str) and err.strip().startswith(DENIED_MARKER)
+    text = _denial_text(err)
+    return text is not None and text.strip().startswith(DENIED_MARKER)
 
 
 def _call_command(item):
@@ -344,7 +364,10 @@ def run_canary(base_url, auth, lane, now=None):
                 # unrelated denial certifies nothing about the incident shape.
                 if _is_canary_call(item):
                     result["denied"] = True
-                    result["detail"] = _truncate(_scrub(err, password))
+                    # the message text, never the wrapping object: a dict repr in
+                    # the state file reads as a parser artifact, not as evidence
+                    result["detail"] = _truncate(
+                        _scrub(_denial_text(err), password))
                     return result
                 denials_of_other.append(_truncate(
                     _scrub(_call_command(item) or "<no command recorded>", password), 60))

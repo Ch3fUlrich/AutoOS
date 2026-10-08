@@ -58,6 +58,7 @@ import oc_l1_serve  # noqa: E402
 import oc_l1_canary  # noqa: E402
 import oc_l1_http  # noqa: E402
 from oc_l1_canary import (  # noqa: E402
+    DENIED_MARKER,
     GUARDED_TOOL_NAMES,
     INCONCLUSIVE_TEXT_ONLY,
 )
@@ -576,6 +577,85 @@ class TestDenialMarkerAnchor(_Base):
         self.assertFalse(oc_l1_canary._is_denial(""))
         self.assertFalse(oc_l1_canary._is_denial(None))
         self.assertFalse(oc_l1_canary._is_denial({"error": "bash-guard: DENIED"}))
+
+
+class TestDenialObjectShape(_Base):
+    """D1 (live check 2026-10-08): a real opencode error is an OBJECT, not a string.
+
+    The transcript item the current server writes is
+    `{"type": "tool", "name": "shell", "state": {"status": "error",
+    "input": {"command": ...}, "error": {"type": "unknown", "message":
+    "bash-guard: DENIED - l2 read-only: a here-document ..."}}}`. `_is_denial`
+    read only a string, so a genuine denial came back "shell call inconclusive"
+    and `start` refused a lane whose guard WAS working (rc 5). The anchor rule
+    does not change - it just applies to the object's `message`.
+    """
+
+    def _obj_item(self, message, status="error", name="shell", command=INCIDENT):
+        state = {"status": status, "error": {"type": "unknown", "message": message}}
+        if command is not None:
+            state["input"] = {"command": command}
+        return [{"type": "assistant", "content": [
+            {"type": "tool", "name": name, "state": state}]}]
+
+    def test_a_real_denial_in_the_object_shape_passes(self):
+        self.srv.canary_items = self._obj_item(
+            "bash-guard: DENIED - l2 read-only: a here-document is not auditable")
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self._state()["canary"]["denied"])
+
+    def test_the_detail_is_the_message_not_a_python_dict_repr(self):
+        self.srv.canary_items = self._obj_item(
+            "bash-guard: DENIED - l2 read-only: a here-document is not auditable")
+        rc, _ = self._start()
+        self.assertEqual(rc, 0)
+        detail = self._state()["canary"]["detail"]
+        self.assertTrue(detail.startswith(DENIED_MARKER),
+                        "the detail must be the plugin's throw, not str(dict): %r"
+                        % detail)
+
+    def test_marker_midway_in_the_message_is_not_a_denial(self):
+        self.srv.canary_items = self._obj_item(
+            "command failed; bash-guard: DENIED is what a guard would print")
+        rc, out = self._start()
+        self.assertEqual(rc, 5, out)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_a_messageless_error_object_is_not_a_denial(self):
+        self.srv.canary_items = self._obj_item(None)
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_denial_of_another_command_in_the_object_shape_is_not_a_pass(self):
+        self.srv.canary_items = self._obj_item(
+            "bash-guard: DENIED - l2 write is denied", command="git commit -m 'wip'")
+        rc, out = self._start()
+        self.assertEqual(rc, 5, out)
+        self.assertFalse(self._state()["canary"]["denied"])
+        self.assertIn("git commit", self._state()["canary"]["detail"])
+
+    def test_the_probe_command_is_read_from_the_live_item_shape(self):
+        item = self._obj_item("bash-guard: DENIED - x")[0]["content"][0]
+        self.assertTrue(oc_l1_canary._is_canary_call(item),
+                        "state.input.command is where this shape carries the command")
+
+    def test_the_helper_anchors_on_the_object_message(self):
+        self.assertTrue(oc_l1_canary._is_denial(
+            {"type": "unknown", "message": "bash-guard: DENIED - x"}))
+        self.assertTrue(oc_l1_canary._is_denial({"message": "  bash-guard: DENIED\n"}))
+        self.assertFalse(oc_l1_canary._is_denial(
+            {"type": "unknown", "message": "see: bash-guard: DENIED"}))
+        self.assertFalse(oc_l1_canary._is_denial({"type": "unknown"}))
+        self.assertFalse(oc_l1_canary._is_denial({"message": None}))
+        self.assertFalse(oc_l1_canary._is_denial({"message": 42}))
+        # only the plugin's own throw shape counts: the error text lives in
+        # `message`, so another key holding the marker is not evidence
+        self.assertFalse(oc_l1_canary._is_denial({"error": "bash-guard: DENIED"}))
+        self.assertFalse(oc_l1_canary._is_denial(
+            [{"type": "unknown", "message": "bash-guard: DENIED"}]))
+        self.assertFalse(oc_l1_canary._is_denial(42))
 
 
 class TestTimeout(_Base):
