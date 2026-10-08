@@ -2275,7 +2275,9 @@ EXIT_NO_OTHER_FAMILY = 12
 # from /proc/meminfo, both measured against catalog/ai-registry.json's
 # `host_admission` section. Distinct from 9 on purpose: 9 is "the provider said
 # no, wait and it may open", this is "the machine said no, and waiting on it is
-# the caller's decision, not a bounded sleep here".
+# the caller's decision, not a bounded sleep here". A child that exits 13 on its
+# own reads the same from the code alone, so stderr is what tells them apart: an
+# admission refusal always starts "host admission:".
 EXIT_HOST_ADMISSION = 13
 ADMISSION_MAX_LIVE_DEFAULT = 6
 ADMISSION_MEM_FLOOR_MB_DEFAULT = 6144
