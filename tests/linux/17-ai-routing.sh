@@ -2643,3 +2643,7 @@ if it "combo-contract gate passes (TORDER fail-closed)"; then
     out="$(python3 tools/combo-contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "combo-contract's D1 checks (f)-(i) unit tests pass (AO-DENYLEGS)"; then
+    out="$(python3 tests/test_combo_contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
