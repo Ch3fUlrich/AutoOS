@@ -39,7 +39,10 @@ start
     AUTOOS_AGENT_LAYER when the lane sets 'guard_role' / 'inbox_file' /
     'agent_layer', and drops each one otherwise - the guard's role, the inbox a
     lane reports to and the level the MCP fence reads are lane properties, never
-    inherited ones (D-665, REJECT finding 2). A lane needs a further variable: it
+    inherited ones (D-665, REJECT finding 2). It also carries the gateway base URL
+    default (oc_l1.DEFAULT_BASE_URL) when the launcher exports none: the rendered
+    config references the variable by NAME, and an empty one is `TypeError: Invalid
+    URL` in opencode's LLM.compile - a session that answers nothing (D2). A lane needs a further variable: it
     names it in 'child_env' (a NAME, validated; credential-shaped names are
     refused, because a value or a secret in a lane config is a leak).
   * Writes the state file {name, session_id, port, pid, started_utc}
@@ -294,6 +297,15 @@ def _child_env(lane, rendered, password):
               % (len(left_behind), names), file=sys.stderr)
     for var, sub in XDG_SUBDIRS:
         env[var] = str(scratch / sub)
+    # D2 (live check 2026-10-08): the rendered config references the gateway base
+    # URL BY NAME (`{env:AUTOOS_OMNIROUTE_URL}/v1`) and oc_l1's docstring promises
+    # the default is applied at start time - this is the only place it can be
+    # applied. A launcher that never exported the name handed the lane an EMPTY
+    # base URL, which is `TypeError: Invalid URL` in opencode's LLM.compile: the
+    # session answers nothing and the canary times out. The key gets no default -
+    # a lane with no key genuinely has no model, and an invented one reads as a
+    # working gateway.
+    env.setdefault(oc_l1.ENV_URL, oc_l1.DEFAULT_BASE_URL)
     env["OPENCODE_CONFIG"] = str(rendered)
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
     # D-665 (AO-L2-LAUNCH): the bash-guard role, the L1 inbox and the agent layer

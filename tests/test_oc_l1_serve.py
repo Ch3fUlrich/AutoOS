@@ -762,5 +762,47 @@ class TestScrubCredentialShapes(unittest.TestCase):
         self.assertIsInstance(oc_l1_http._scrub(None, ""), str)
 
 
+class TestChildEnvGatewayDefault(unittest.TestCase):
+    """D2 (live check 2026-10-08): the gateway base URL default is applied at start.
+
+    The rendered config references the variable by NAME (`{env:AUTOOS_OMNIROUTE_URL}/v1`)
+    and `oc_l1.py`'s docstring promises the default `http://127.0.0.1:20128` is applied
+    at start time. The child env was a pure allowlist filter over the launcher's own
+    environment, so a launcher that never exported the name handed the lane an EMPTY
+    base URL: opencode died in `LLM.compile` with `TypeError: Invalid URL` and the
+    session produced nothing (l2-canary serve log, run 19711e43).
+    """
+
+    def _env(self, parent, **lane_over):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_env_") as td:
+            lane = make_lane(Path(td), 47255)
+            lane.update(lane_over)
+            with mock.patch.dict(os.environ, parent, clear=True):
+                return oc_l1_serve._child_env(
+                    lane, Path(td) / "opencode.json", PW_VALUE)
+
+    def test_the_default_reaches_the_child_when_the_parent_lacks_it(self):
+        env = self._env({"PATH": os.environ.get("PATH", "")})
+        self.assertEqual(env.get("AUTOOS_OMNIROUTE_URL"),
+                         oc_l1.DEFAULT_BASE_URL,
+                         "a lane with no base URL cannot reach its model")
+
+    def test_an_explicit_parent_value_is_kept(self):
+        env = self._env({"AUTOOS_OMNIROUTE_URL": "http://gateway.invalid:9999"})
+        self.assertEqual(env["AUTOOS_OMNIROUTE_URL"],
+                         "http://gateway.invalid:9999")
+
+    def test_the_default_carries_no_v1_suffix(self):
+        # the render appends /v1 itself, so a default that carried it resolves twice
+        env = self._env({})
+        self.assertFalse(env["AUTOOS_OMNIROUTE_URL"].endswith("/v1"))
+
+    def test_the_key_is_not_invented(self):
+        # only the URL gets a default: a lane with no key has no model to call,
+        # and a fake key would read as a working gateway
+        env = self._env({})
+        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
+
+
 if __name__ == "__main__":
     unittest.main()
