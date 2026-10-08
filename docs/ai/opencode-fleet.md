@@ -100,14 +100,20 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 `start` renders the config, starts the server with scratch XDG directories (so no other tool's skills load), waits for health,
 creates the pilot session and writes the state file atomically (mode 0600 on POSIX). It then runs the bash-guard CANARY: a
 second throwaway session on the same server is asked to run a command that the guard must refuse (an unquoted heredoc with a
-backticked command). The result `{denied, ts, plugin_path, session_id}` is stored in the state file and merged into
-`heartbeat.json`. Only after a DENIED canary does `start` post the pilot's first prompt (the handoff head plus a hint line about
-MCP tools): a pilot that is not known to be guarded never runs.
+backticked command). The prompt demands EXACTLY ONE tool call and names the shell tool — the probe is the call, not a reply
+about it — and the canary recognises `shell`, `bash` and `execute`, because opencode renamed `bash` to `shell` and the plugin
+hooks both. The result `{denied, ts, plugin_path, session_id, detail}` is stored in the state file and merged into
+`heartbeat.json`; `detail` always says what the session did (the tool names seen, the first 200 chars of assistant text), so a
+refusal is diagnosable from the host heartbeat without re-running anything. Only after a DENIED canary does `start` post the
+pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilot that is not known to be guarded never runs.
 
-- Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended.
+- Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended. A denial is recognised by the marker
+  `bash-guard: DENIED`, which EVERY denial path carries — both `tools/hooks/bash_guard.py` and the plugin's own
+  orchestrator-role throw, which runs before the Python guard (D-665).
 - Canary NOT denied (the command ran, no tool call happened, timeout, error): NO prompt is posted, the pilot session stays idle,
   the server stays up for supervised use, `start` prints `UNATTENDED-REFUSED` and exits 5. The plugin fails open on purpose, so
-  an unproven guard means no unattended run.
+  an unproven guard means no unattended run. A model that only answered in text is `inconclusive: text-only answer`, which is
+  exit 5 with a different `detail` — it is NOT evidence that the guard allowed anything.
 - A second `start` on a live session posts nothing new and prints the stored canary line; if that stored canary was not denied
   it prints `UNATTENDED-REFUSED` and exits 5 again (it never reports a refused start as live). A `start` that finds the server
   dead is a RELAUNCH: it starts a new server and runs the canary again, and `heartbeat.json` gets the new result.

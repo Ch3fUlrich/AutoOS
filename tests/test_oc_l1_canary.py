@@ -25,6 +25,9 @@ Covered:
   9. D-665 fix 1: a denial carried by the `bash` or `execute` spelling counts
      (opencode renamed bash -> shell; the plugin hooks both), and a session with
      no shell call reports the tool names and assistant text it did see
+  10. D-665 fix 5: the prompt demands one tool call and names the shell tool,
+      and a prose-only reply reads as "inconclusive: text-only answer" —
+      never as the guard allowing the command (same exit code, other detail)
 """
 
 import contextlib
@@ -46,6 +49,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1_serve  # noqa: E402
+import oc_l1_canary  # noqa: E402
+from oc_l1_canary import (  # noqa: E402
+    INCONCLUSIVE_TEXT_ONLY,
+    SHELL_TOOL_NAMES,
+)
 from _oc_l1_fakes import (  # noqa: E402
     GUARD_PLUGIN,
     PW_ENV,
@@ -73,8 +81,8 @@ def denied_items(tool_name):
                 "tool": tool_name,
                 "state": {
                     "status": "error",
-                    "error": "bash-guard: DENIED: unquoted heredoc command "
-                             "substitution not permitted",
+                    "error": "bash-guard: DENIED - unquoted heredoc "
+                             "<<CANARY_EOF with a backtick",
                 },
             }
         ],
@@ -269,6 +277,63 @@ class TestNoTool(_Base):
         self.assertEqual(rc, 5)
         self.assertIn("UNATTENDED-REFUSED", out)
         self.assertFalse(self._state()["canary"]["denied"])
+
+    # (3b) D-665 fix 5: a model that only talked is NOT a guard that allowed.
+    #      Same exit code, different detail, so the next report can tell them
+    #      apart without re-running anything.
+    def test_text_only_answer_detail_is_inconclusive_not_allowed(self):
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        detail = self._state()["canary"]["detail"]
+        self.assertTrue(detail.startswith(INCONCLUSIVE_TEXT_ONLY),
+                        "detail %r must start %r" % (detail, INCONCLUSIVE_TEXT_ONLY))
+        self.assertNotIn("tool completed without denial", detail)
+
+    # (3c) the watcher records only the launcher's last stdout line, so the
+    #      reason must travel on the printed line as well as in the files.
+    def test_refusal_reason_is_on_the_printed_line(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 5)
+        self.assertIn(INCONCLUSIVE_TEXT_ONLY, out)
+
+    # (3d) an empty session is a different finding from a prose-only one
+    def test_empty_session_detail_is_not_the_text_only_one(self):
+        self.srv.canary_items = []
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        detail = self._state()["canary"]["detail"]
+        self.assertFalse(detail.startswith(INCONCLUSIVE_TEXT_ONLY), detail)
+        self.assertIn("no shell tool call in canary session", detail)
+        self.assertIn("tools seen: none", detail)
+
+
+class TestCanaryPrompt(_Base):
+    """D-665 fix 5: the prompt must ask for a tool call by name, not prose."""
+
+    def _prompt_text(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        prompts = [r for r in self.srv.requests
+                   if r["method"] == "POST"
+                   and CANARY_SESSION_ID in r["path"]
+                   and r["path"].endswith("/prompt")]
+        self.assertEqual(len(prompts), 1)
+        return prompts[0]["body"]["text"]
+
+    def test_prompt_names_the_shell_tool_and_one_call(self):
+        text = self._prompt_text()
+        self.assertIn(INCIDENT, text)
+        self.assertIn("shell tool", text,
+                      "the prompt must name the tool, not just 'a command'")
+        self.assertRegex(text.lower(), r"\b(exactly one|only one)\b")
+
+    def test_prompt_tool_name_is_a_name_the_canary_accepts(self):
+        # the prompt and the transcript parser must not drift apart: if the
+        # prompt asks for a tool the canary would not recognise, every run of
+        # that model reads as "no shell tool call".
+        text = self._prompt_text().lower()
+        self.assertTrue(any(name in text for name in SHELL_TOOL_NAMES),
+                        "prompt asks for no accepted tool name: %r" % text)
 
 
 class TestToolNames(_Base):

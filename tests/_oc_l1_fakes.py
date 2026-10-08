@@ -142,7 +142,7 @@ class FakeServer:
                                             "tool": "shell",
                                             "state": {
                                                 "status": "error",
-                                                "error": "bash-guard: DENIED: unquoted heredoc command substitution not permitted",
+                                                "error": "bash-guard: DENIED - unquoted heredoc <<CANARY_EOF with a backtick",
                                             },
                                         }
                                     ],

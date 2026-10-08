@@ -18,16 +18,23 @@ except ImportError:
     from oc_l1_http import _request, _data, _scrub, ServerDown
 
 INCIDENT_COMMAND = "cat <<CANARY_EOF\ncanary `date`\nCANARY_EOF"
+# The probe is the TOOL CALL: a model that only writes prose has told the guard
+# nothing to deny. Name the tool and forbid a text-only reply (D-665).
 CANARY_PROMPT = (
-    "Please run EXACTLY ONE shell tool call with this command:\n"
+    "This is a guard self-test. Make EXACTLY ONE tool call, using the shell "
+    "tool, and run this command verbatim:\n"
     f"{INCIDENT_COMMAND}\n"
-    "and then reply with one short sentence."
+    "Do NOT answer in text alone - a reply without that tool call fails the "
+    "test. Once the call returns, answer with one short sentence."
 )
 DENIED_MARKER = "bash-guard: DENIED"
 # opencode renamed bash -> shell (CHANGELOG KEYDENY3b rename map) and the plugin
 # hooks both spellings (index.mjs:899); code-mode exposes the same executor as
 # `execute`. Accepting only one name reads a real denial as "no shell call".
 SHELL_TOOL_NAMES = ("shell", "bash", "execute")
+# Distinct from "tool completed without denial": a prose-only reply says the
+# model never let the guard run, which is not evidence about the guard.
+INCONCLUSIVE_TEXT_ONLY = "inconclusive: text-only answer"
 
 
 def _extract_port(base_url):
@@ -77,11 +84,17 @@ def _truncate(text, max_len=200):
 
 
 def format_canary_line(canary):
-    """Return formatted single-line canary status."""
+    """Return formatted single-line canary status.
+
+    The watcher logs only the launcher's LAST stdout line, so the reason has to
+    travel on this line or it is lost (D-665: 461 refusals with no recorded
+    reason). One line, no newlines inside.
+    """
     denied = "yes" if canary.get("denied") else "no"
     ts = canary.get("ts")
     plugin = canary.get("plugin_path")
-    return f"canary denied={denied} ts={ts} plugin={plugin}"
+    detail = _truncate(str(canary.get("detail") or "")).replace("\n", " ")
+    return f"canary denied={denied} ts={ts} plugin={plugin} detail={detail!r}"
 
 
 def write_heartbeat(lane, canary):
@@ -281,11 +294,18 @@ def run_canary(base_url, auth, lane, now=None):
 
     if not shell_call_found:
         # Name what the session actually produced: a rc=5 with no evidence of
-        # what the model did is undiagnosable from the heartbeat alone.
-        result["detail"] = (
-            "no shell tool call in canary session; tools seen: %s; assistant text: %s"
-            % (", ".join(tools_seen) or "none",
-               _truncate(" ".join(assistant_text) or "none")))
+        # what the model did is undiagnosable from the heartbeat alone. The
+        # evidence is model output, so it is scrubbed like every other detail.
+        evidence = _scrub(
+            "tools seen: %s; assistant text: %s" % (
+                ", ".join(tools_seen) or "none",
+                _truncate(" ".join(assistant_text) or "none")),
+            password)
+        if assistant_text:
+            # a prose-only reply proved nothing about the guard
+            result["detail"] = "%s; %s" % (INCONCLUSIVE_TEXT_ONLY, evidence)
+        else:
+            result["detail"] = "no shell tool call in canary session; %s" % evidence
     else:
         result["detail"] = "shell call inconclusive"
     return result
