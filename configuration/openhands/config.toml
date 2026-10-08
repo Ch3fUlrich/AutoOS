@@ -81,17 +81,17 @@ temperature = 0.2
 # LiteLLM fallback proxy (:4000; the openai/ prefix is the transport
 # selector OpenHands requires - its litellm stack strips it before the call,
 # so the proxy receives the bare tier model_names below).
-[llm.litellm-t1-orchestrator]
+[llm.litellm-l1-orchestrator]
 model = "openai/l1-orchestrator"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.0
 
-[llm.litellm-t2-worker]
+[llm.litellm-l2-worker]
 model = "openai/l2-worker"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.1
 
-[llm.litellm-t3-driver]
+[llm.litellm-l3-driver]
 model = "openai/l3-driver"
 base_url = "http://127.0.0.1:4000/v1"
 temperature = 0.2

@@ -8700,7 +8700,7 @@ Test-Case 'openhands template routes tiers with no secrets' {
     # l1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
     # is omitted — a route with no servable leg — so apply prunes it and the
     # profile would point at a 404. The next assertion pins it staying gone.
-    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.l2-worker-clean]', '[llm.l3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-t1-orchestrator]', '[llm.litellm-t2-worker]', '[llm.litellm-t3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.l2-worker-clean]', '[llm.l3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-l1-orchestrator]', '[llm.litellm-l2-worker]', '[llm.litellm-l3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
     Assert-True ($toml -notmatch '\[llm\.l1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'

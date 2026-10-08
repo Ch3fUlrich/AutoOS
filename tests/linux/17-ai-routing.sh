@@ -2513,7 +2513,7 @@ if it "openhands template has tiers and no secrets"; then
     ok=1
     # l1-orchestrator-clean deliberately absent (PROVFIX3 finding 6 — its combo is
     # pruned, so the table would 404); the previous test asserts it stays gone.
-    for s in '\[llm\]' '\[llm.l1-orchestrator\]' '\[llm.l2-worker\]' '\[llm.l3-driver\]' '\[llm.l2-worker-clean\]' '\[llm.l3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-t1-orchestrator\]' '\[llm.litellm-t2-worker\]' '\[llm.litellm-t3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    for s in '\[llm\]' '\[llm.l1-orchestrator\]' '\[llm.l2-worker\]' '\[llm.l3-driver\]' '\[llm.l2-worker-clean\]' '\[llm.l3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-l1-orchestrator\]' '\[llm.litellm-l2-worker\]' '\[llm.litellm-l3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0

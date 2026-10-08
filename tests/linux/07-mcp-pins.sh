@@ -128,7 +128,7 @@ if surface != set((omni.get("models") or {}).keys()):
     problems.append("models:want=%s got=%s" % (",".join(sorted(surface)),
                                                ",".join(sorted((omni.get("models") or {}).keys()))))
 if "l2-worker" not in (lit.get("models") or {}):
-    problems.append("missing:lit-t2-worker")
+    problems.append("missing:lit-l2-worker")
 if "deepseek" in p:
     problems.append("resurrected:deepseek")
 # REVROUTE (S2) item 4, measured in L1-backlog: with META_API_KEY unset, a
