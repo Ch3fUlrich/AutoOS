@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sweep cheap t2 models through the OmniRoute combos (lane P1-sweep, 2026-09-30).
+"""Sweep cheap l2 models through the OmniRoute combos (lane P1-sweep, 2026-09-30).
 
 For each candidate leg, sends through the live gateway:
   (a) an ack chat ("Say OK", max_tokens 16);
@@ -218,6 +218,16 @@ def run_toolcall(leg, post):
 # served.
 # ---------------------------------------------------------------------------
 
+# LAYERS 2026-10-07: the t*-ids are retired, so the old t-prefix filter matched
+# no live combo and the combo half of the sweep silently ran zero tests.
+TIER_COMBO_PREFIXES = ("l1-", "l2-", "l3-")
+
+
+def is_tier_combo(name):
+    """A tier combo, or the one bare model route the sweep also re-checks."""
+    return name.startswith(TIER_COMBO_PREFIXES) or name == "deepseek-v4.1-flash"
+
+
 def combo_chat_body(combo_name, max_tokens=ACK_MAX_TOKENS):
     return {
         "model": combo_name,
@@ -297,7 +307,7 @@ def log_result(record):
 def main(argv=None) -> int:
     global SWEEP_LOG
     ap = argparse.ArgumentParser(
-        description="Sweep cheap t2 models through the OmniRoute combos.")
+        description="Sweep cheap l2 models through the OmniRoute combos.")
     ap.add_argument("--legs", action="append", default=[],
                     help="only these legs (repeatable); default: all candidates")
     ap.add_argument("--combos-only", action="store_true",
@@ -351,8 +361,7 @@ def main(argv=None) -> int:
             combos = json.load(fh)
         print("# combos to test:")
         for c in combos.get("combos", []):
-            if c["name"].startswith("t1-") or c["name"].startswith("t2-") or \
-               c["name"].startswith("t3-") or c["name"] == "deepseek-v4.1-flash":
+            if is_tier_combo(c["name"]):
                 print("  %s\tlegs=%s" % (c["name"], " -> ".join(c.get("models", []))))
         return 0
 
@@ -436,8 +445,7 @@ def main(argv=None) -> int:
         combos_data = json.load(fh)
 
     combo_names = [c["name"] for c in combos_data.get("combos", [])
-                   if c["name"].startswith("t1-") or c["name"].startswith("t2-") or
-                   c["name"].startswith("t3-") or c["name"] == "deepseek-v4.1-flash"]
+                   if is_tier_combo(c["name"])]
 
     print("\n# combo routing tests — %d combos, %s" % (len(combo_names), _now_iso()))
     print("# %-25s  %-7s  %-8s  %-30s  %s" %
