@@ -22,6 +22,9 @@ Covered:
      current_step
   8. the password value appears in no argv, state file, heartbeat.json
      or stdout
+  9. D-665 fix 1: a denial carried by the `bash` or `execute` spelling counts
+     (opencode renamed bash -> shell; the plugin hooks both), and a session with
+     no shell call reports the tool names and assistant text it did see
 """
 
 import contextlib
@@ -57,6 +60,25 @@ CANARY_SESSION_ID = "ses_canary99"
 # The incident shape: an UNQUOTED heredoc whose body contains a
 # backticked (harmless) command.
 INCIDENT = "cat <<CANARY_EOF\ncanary `date`\nCANARY_EOF"
+FAKE_PLUGIN = "/fake/plugin/path/bash-guard/index.mjs"
+
+
+def denied_items(tool_name):
+    """A canary transcript: one shell-tool item denied by the guard."""
+    return [{
+        "type": "assistant",
+        "content": [
+            {
+                "type": "tool",
+                "tool": tool_name,
+                "state": {
+                    "status": "error",
+                    "error": "bash-guard: DENIED: unquoted heredoc command "
+                             "substitution not permitted",
+                },
+            }
+        ],
+    }]
 
 
 def _terminate_pid(pid):
@@ -184,7 +206,7 @@ class _Base(unittest.TestCase):
 class TestDenied(_Base):
     # (1)
     def test_denied_start_ok_state_heartbeat_prompt(self):
-        self.lane["plugins"] = ["/fake/plugin/path/bash-guard/index.mjs"]
+        self.lane["plugins"] = [FAKE_PLUGIN]
         rc, out = self._start()
         self.assertEqual(rc, 0)
         self.assertIn("canary denied=yes", out)
@@ -211,7 +233,7 @@ class TestDenied(_Base):
         self.assertTrue(hb["canary"]["denied"])
         self.assertEqual(
             hb["canary"]["plugin_path"],
-            "/fake/plugin/path/bash-guard/index.mjs")
+            FAKE_PLUGIN)
         self.assertTrue(_ts_is_utc_iso(hb["canary"]["ts"]),
                         "ts %r is not UTC ISO" % hb["canary"]["ts"])
         self.assertEqual(hb["state"], "started")
@@ -248,6 +270,48 @@ class TestNoTool(_Base):
         self.assertEqual(rc, 5)
         self.assertIn("UNATTENDED-REFUSED", out)
         self.assertFalse(self._state()["canary"]["denied"])
+
+
+class TestToolNames(_Base):
+    """D-665 fix 1: every shell-tool spelling counts, and a miss says why."""
+
+    def _guarded(self):
+        self.lane["plugins"] = [FAKE_PLUGIN]
+
+    def test_tool_named_bash_denied(self):
+        self._guarded()
+        self.srv.canary_items = denied_items("bash")
+        rc, out = self._start()
+        self.assertEqual(rc, 0)
+        self.assertIn("canary denied=yes", out)
+        self.assertTrue(self._state()["canary"]["denied"])
+
+    def test_tool_named_execute_denied(self):
+        self._guarded()
+        self.srv.canary_items = denied_items("execute")
+        rc, out = self._start()
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._state()["canary"]["denied"])
+
+    def test_no_shell_call_detail_names_tools_and_text(self):
+        self._guarded()
+        self.srv.canary_items = [{
+            "type": "assistant",
+            "content": [
+                {"type": "text",
+                 "text": "I am not going to run that, it looks like a probe."},
+                {"type": "tool", "tool": "read",
+                 "state": {"status": "completed", "output": "AGENTS.md"}},
+            ],
+        }]
+        rc, out = self._start()
+        self.assertEqual(rc, 5)
+        detail = self._state()["canary"]["detail"]
+        self.assertIn("read", detail, "detail must name the tools seen")
+        self.assertIn("not going to run that", detail,
+                      "detail must quote the assistant text")
+        hb = self._heartbeat()
+        self.assertIn("read", hb["canary"]["detail"])
 
 
 class TestTimeout(_Base):

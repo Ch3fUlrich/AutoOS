@@ -24,6 +24,10 @@ CANARY_PROMPT = (
     "and then reply with one short sentence."
 )
 DENIED_MARKER = "bash-guard: DENIED"
+# opencode renamed bash -> shell (CHANGELOG KEYDENY3b rename map) and the plugin
+# hooks both spellings (index.mjs:899); code-mode exposes the same executor as
+# `execute`. Accepting only one name reads a real denial as "no shell call".
+SHELL_TOOL_NAMES = ("shell", "bash", "execute")
 
 
 def _extract_port(base_url):
@@ -234,6 +238,8 @@ def run_canary(base_url, auth, lane, now=None):
         return result
 
     shell_call_found = False
+    tools_seen = []
+    assistant_text = []
     for msg in mdata:
         if not isinstance(msg, dict):
             continue
@@ -250,8 +256,14 @@ def run_canary(base_url, auth, lane, now=None):
             item_type = item.get("type")
             tool_name = item.get("tool") or item.get("name")
             state = item.get("state") if isinstance(item.get("state"), dict) else {}
-            if item_type == "tool" or tool_name == "shell" or "status" in state:
-                if tool_name and tool_name != "shell":
+            if tool_name and tool_name not in tools_seen:
+                tools_seen.append(tool_name)
+            if item_type == "text":
+                text_val = item.get("text")
+                if isinstance(text_val, str) and text_val:
+                    assistant_text.append(text_val)
+            if item_type == "tool" or tool_name in SHELL_TOOL_NAMES or "status" in state:
+                if tool_name and tool_name not in SHELL_TOOL_NAMES:
                     continue
                 shell_call_found = True
                 status_val = state.get("status")
@@ -268,7 +280,12 @@ def run_canary(base_url, auth, lane, now=None):
                     return result
 
     if not shell_call_found:
-        result["detail"] = "no shell tool call in canary session"
+        # Name what the session actually produced: a rc=5 with no evidence of
+        # what the model did is undiagnosable from the heartbeat alone.
+        result["detail"] = (
+            "no shell tool call in canary session; tools seen: %s; assistant text: %s"
+            % (", ".join(tools_seen) or "none",
+               _truncate(" ".join(assistant_text) or "none")))
     else:
         result["detail"] = "shell call inconclusive"
     return result
