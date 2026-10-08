@@ -104,6 +104,14 @@ class FakeGateway:
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def do_GET(self):
+                raw = json.dumps({"data": [{"id": "l/x"}, {"id": "l/other"}]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -288,6 +296,21 @@ class LiveProbeTests(unittest.TestCase):
             gateway.stop()
             os.unlink(path)
         self.assertEqual([r["leg"] for r in self.records], ["l/x", "l/file"])
+
+    def test_list_uses_the_gateway_it_was_given(self):
+        """--gateway also moves the /v1/models read, not only the chat calls."""
+        gateway = FakeGateway()
+        url = gateway.start()
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(PROBE), "--gateway", url, "--list",
+                 "--filter", "l/"],
+                capture_output=True, text=True, timeout=60,
+                env=dict(os.environ, AUTOOS_OMNIROUTE_KEY=FAKE_KEY), cwd=str(ROOT))
+        finally:
+            gateway.stop()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), ["l/other", "l/x", "TOTAL 2"])
 
 
 if __name__ == "__main__":
