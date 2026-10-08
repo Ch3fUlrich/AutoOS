@@ -5,7 +5,11 @@ Tools: list_clients, spawn, status, result, cancel, respond, route,
 list_agents, context, heartbeat, ps, oc_status/oc_start/oc_restart (L1 lane
 lifecycle, c2), l2_start/l2_status/l2_stop/l2_inbox (L2 phase lanes, D-665)
 (spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01, R-handoff-07; respond: the
-spec 9 ask-back). spawn is
+spec 9 ask-back). Which of those a client can even LIST is a profile
+(MCP_TOOL_PROFILES): a server whose environment marks it as running inside an L2
+lane (`AUTOOS_AGENT_LAYER=L2`, rendered by oc_l1_render) registers the spawner's
+tools - spawn, status, result, ps, list_clients, route, context, heartbeat - and
+nothing else. spawn is
 asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
@@ -173,8 +177,45 @@ def lane_control_fence(tool: str) -> dict | None:
     return {"ok": False, "refused": True, "tool": tool,
             "detail": "refused: this MCP server runs inside an L2 lane (%s=L2), and "
                       "only the L1 that owns the lanes may start, stop or nudge one; "
-                      "read with l2_status/oc_status and report to the L1 inbox "
-                      "instead" % ENV_AGENT_LAYER}
+                      "an L2 works through the spawner (%s) and reports to the L1 "
+                      "inbox instead" % (ENV_AGENT_LAYER, ", ".join(SPAWNER_TOOLS))}
+
+
+# --- the tool profile (AO-L2-LAUNCH merge criterion 2) ----------------------
+#
+# `lane_control_fence` refuses the lane-control tools inside an L2, but a
+# refusal is still a menu entry: opencode shows an L2 every tool it is going to
+# be denied, and each one it reaches for is a turn spent reading a refusal. So
+# the same marker also picks the set the server REGISTERS, at registration time:
+# an L2's server lists the spawner and its read-only companions and nothing
+# else - no lane control, no `cancel` of someone else's run, no `respond` to a
+# question this lane did not ask.
+SPAWNER_TOOLS = ("spawn", "status", "result", "ps", "list_clients", "route",
+                 "context", "heartbeat")
+# Every tool `build_server` can register, in the order it registers them.
+MCP_TOOL_NAMES = ("list_clients", "spawn", "status", "result", "cancel",
+                  "respond", "route", "list_agents", "ps", "context",
+                  "oc_status", "oc_start", "oc_restart", "l2_start",
+                  "l2_status", "l2_stop", "l2_inbox", "heartbeat")
+FULL_PROFILE = "full"
+NARROWEST_PROFILE = "l2"
+MCP_TOOL_PROFILES = {FULL_PROFILE: MCP_TOOL_NAMES,
+                     NARROWEST_PROFILE: SPAWNER_TOOLS}
+
+
+def mcp_tool_profile(env=None) -> str:
+    """The tool profile this process serves: `l2` when its environment marks it
+    as running inside an L2 lane, the full set otherwise."""
+    source = os.environ if env is None else env
+    if str(source.get(ENV_AGENT_LAYER, "")).strip().upper() == "L2":
+        return NARROWEST_PROFILE
+    return FULL_PROFILE
+
+
+def tool_names_for(profile: str) -> tuple:
+    """The tool names `profile` registers. An unknown profile gets the
+    NARROWEST list: a typo in a lane config must not hand back the full menu."""
+    return MCP_TOOL_PROFILES.get(profile) or MCP_TOOL_PROFILES[NARROWEST_PROFILE]
 
 
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -1523,18 +1564,39 @@ def cancel(run_id: str) -> dict:
                      "kill_record": report.get("kill_record")}))
 
 
-def serve() -> None:
+def build_server(profile: str | None = None):
+    """The FastMCP app, registering the tools of `profile` (None: whatever this
+    process's environment names - see `mcp_tool_profile`).
+
+    Split out of `serve` so the tool set is checkable without running a server:
+    criterion 2 is about what an L2 lane can LIST, and a list kept beside the
+    registration is a list that drifts.
+    """
     from mcp.server.fastmcp import FastMCP
 
+    names = tool_names_for(mcp_tool_profile() if profile is None else profile)
     app = FastMCP("autoos-agent")
 
-    @app.tool(name="list_clients")
+    def _register(name):
+        """@app.tool for the profiles that list `name`.
+
+        A tool outside the profile is defined but never advertised, so calling
+        it is a protocol error rather than a refusal the model has to read -
+        and `lane_control_fence` still stands behind it, because the same
+        functions are reachable from the CLI."""
+        def deco(fn):
+            if name in names:
+                return app.tool(name=name)(fn)
+            return fn
+        return deco
+
+    @_register("list_clients")
     def _list_clients() -> dict:
         """Agent clients this host can spawn (headless, gateway, sub-agents, auth,
         installed), the task-card fields with defaults, and your depth budget."""
         return list_clients()
 
-    @app.tool(name="spawn")
+    @_register("spawn")
     def _spawn(task: str, client: str = "opencode", card: dict | None = None,
                tier: int | None = None, model: str | None = None,
                isolate: bool | None = None,
@@ -1613,18 +1675,18 @@ def serve() -> None:
                       "no_fallthrough": no_fallthrough,
                       "claude_reason": claude_reason})
 
-    @app.tool(name="status")
+    @_register("status")
     def _status(run_id: str | None = None) -> dict:
         """One run's state (an A2A name: submitted, working, completed, failed,
         canceled; the pre-A2A value in `detail`), or the 20 newest runs."""
         return status(run_id)
 
-    @app.tool(name="result")
+    @_register("result")
     def _result(run_id: str, max_chars: int = TAIL_CHARS) -> dict:
         """A run's state plus its output (the tail when longer than max_chars)."""
         return result(run_id, max_chars)
 
-    @app.tool(name="cancel")
+    @_register("cancel")
     def _cancel(run_id: str) -> dict:
         """Stop a working or input_required agent: it stops the systemd scope the
         worker was launched in (SIGTERM, then SIGKILL to every process in the
@@ -1636,7 +1698,7 @@ def serve() -> None:
         could not stop reports the state "cancel-failed", never "canceled"."""
         return cancel(run_id)
 
-    @app.tool(name="respond")
+    @_register("respond")
     def _respond(run_id: str, text: str) -> dict:
         """Answer a worker's pending question (spec 9 ask-back): a worker that
         runs tools/autoos-ask.py parks its run in input_required until this
@@ -1644,7 +1706,7 @@ def serve() -> None:
         and the run works on. Empty text is refused."""
         return respond(run_id, text)
 
-    @app.tool(name="route")
+    @_register("route")
     def _route(card: str | dict, brief: str = "", explain: bool = False) -> dict:
         """The resolver v2 route_plan for `card` (spec 6.1/6.2).
 
@@ -1656,13 +1718,13 @@ def serve() -> None:
         probes; no network, no key."""
         return route_plan(card, brief, explain)
 
-    @app.tool(name="list_agents")
+    @_register("list_agents")
     def _list_agents() -> dict:
         """The registry's clients (installed/signed-in/reason) and routes
         (class, legs with availability, retired), spec 6.2."""
         return list_agents()
 
-    @app.tool(name="ps")
+    @_register("ps")
     def _ps(include_ended: bool = False) -> dict:
         """Every spawned worker on this host (all worktrees and clones): id,
         state (running / died / exited rc=N), elapsed, client, model, lane,
@@ -1671,14 +1733,14 @@ def serve() -> None:
         window as `autoos-agent.py ps --all`)."""
         return ps(include_ended)
 
-    @app.tool(name="context")
+    @_register("context")
     def _context(transcript: str | None = None) -> dict:
         """This session's context fill: tokens, the model's cap and the
         percentage (spec 6.1/8.3) - the same data `autoos-agent.py context`
         prints."""
         return context_info(transcript)
 
-    @app.tool(name="oc_status")
+    @_register("oc_status")
     def _oc_status(lane: str) -> dict:
         """c2 (2026-10-06): one lane's status through tools/oc_l1.py - verdict
         live / silent / dead plus the exact next step for each. The lane
@@ -1688,7 +1750,7 @@ def serve() -> None:
         L2 - the fence is on control."""
         return oc_status(lane)
 
-    @app.tool(name="oc_start")
+    @_register("oc_start")
     def _oc_start(lane: str) -> dict:
         """c2 (2026-10-06): start a lane through tools/oc_l1.py (render ->
         serve -> canary -> first prompt). Requires the lane password env
@@ -1701,7 +1763,7 @@ def serve() -> None:
         the L1 inbox instead."""
         return oc_start(lane)
 
-    @app.tool(name="oc_restart")
+    @_register("oc_restart")
     def _oc_restart(lane: str) -> dict:
         """c2 (2026-10-06): force-restart a lane the way the handoff card
         prescribes (kill the recorded pid, delete the state file; the watcher
@@ -1712,14 +1774,15 @@ def serve() -> None:
         the L1 inbox instead."""
         return oc_restart(lane)
 
-    @app.tool(name="l2_start")
+    @_register("l2_start")
     def _l2_start(repo: str, phase: str, brief_path: str,
                   combo: str = "l2-orchestrator") -> dict:
         """D-665 (AO-L2-LAUNCH): start the L2 lane for one phase and give it
         its brief. Lane `l2-<repo>-<checkout-tag>-<phase>`; model = the gateway combo (its own
         declared context, so no 128k clamp); MCP = the autoos-agent spawner
-        ONLY; OpenCode permission.task denied and the bash-guard plugin in
-        orchestrator role, so the L2 coordinates and never edits code; first
+        ONLY, and the spawner an L2 starts lists only its own tools; OpenCode
+        permission.task denied and the bash-guard plugin in its read-only `l2`
+        role, so the L2 coordinates and never edits code; first
         prompt = the contents of brief_path plus the fixed footer (skill name,
         spawn tier-3 through autoos-agent, report REPORT/DONE to the L1 inbox).
         Needs AUTOOS_OCL1_PW (server password, by name only) and
@@ -1734,7 +1797,7 @@ def serve() -> None:
         the L1 inbox instead."""
         return l2_start(repo, phase, brief_path, combo)
 
-    @app.tool(name="l2_status")
+    @_register("l2_status")
     def _l2_status(lane: str) -> dict:
         """D-665: a phase lane's verdict - live / silent / dead / absent - plus
         its session id, port, phase and last canary result.
@@ -1742,7 +1805,7 @@ def serve() -> None:
         L2 - the fence is on control."""
         return l2_status(lane)
 
-    @app.tool(name="l2_stop")
+    @_register("l2_stop")
     def _l2_stop(lane: str) -> dict:
         """D-665: stop a phase lane cleanly (R-coord-10): kill the recorded
         PID's process group, verify it died, then remove the state file. A PID
@@ -1753,7 +1816,7 @@ def serve() -> None:
         the L1 inbox instead."""
         return l2_stop(lane)
 
-    @app.tool(name="l2_inbox")
+    @_register("l2_inbox")
     def _l2_inbox(lane: str, text: str) -> dict:
         """D-665: give a running phase lane more work - append one timestamped
         record to the lane's inbox and nudge its session with the launcher's
@@ -1764,7 +1827,7 @@ def serve() -> None:
         the L1 inbox instead."""
         return l2_inbox(lane, text)
 
-    @app.tool(name="heartbeat")
+    @_register("heartbeat")
     def _heartbeat(inbox: str | None = None, transcript: str | None = None,
                    repos: list[str] | None = None, cap: int | None = None) -> dict:
         """Read-only heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07):
@@ -1774,7 +1837,12 @@ def serve() -> None:
         writes anything."""
         return heartbeat_info(inbox, transcript, repos, cap)
 
-    app.run()
+    return app
+
+
+def serve() -> None:
+    """Run the server on stdio with the profile this process's environment names."""
+    build_server().run()
 
 
 if __name__ == "__main__":

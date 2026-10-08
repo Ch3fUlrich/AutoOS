@@ -64,6 +64,10 @@ def _registry_models():
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
 ENV_KEY = "AUTOOS_OMNIROUTE_KEY"
+# The same name oc_l1.ENV_AGENT_LAYER and oc_l1_serve export into the lane
+# child's environment; named here too because importing oc_l1 would close the
+# cycle oc_l1 -> render. tests/test_agent_mcp_tool_profile.py pins the three.
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
 RENDERED_FILENAME = "opencode.json"
 PROVIDER_NPM = "@ai-sdk/openai-compatible"
 PROVIDER_NAME = "workstation gateway"
@@ -171,6 +175,12 @@ def render(lane, repo_config_path):
             # A pinned dir skips that git call; default = the clone's own logs/workers.
             env = dict(e.get("environment") or {})
             env.setdefault("AUTOOS_WORKERS_DIR", str(lane.get("workers_dir") or Path(lane["cwd"]) / "logs" / "workers"))
+            # D-665 criterion 2: the spawner picks the tool profile it
+            # REGISTERS from this marker, and opencode starts the MCP as a child
+            # of its own - so the lane names it in the server's environment
+            # rather than trusting what the launching shell happened to export.
+            if lane.get("agent_layer"):
+                env[ENV_AGENT_LAYER] = str(lane["agent_layer"])
             e["environment"] = env
         mcp_out[sname] = e
 

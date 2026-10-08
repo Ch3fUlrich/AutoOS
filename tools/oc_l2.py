@@ -26,12 +26,15 @@ L2 to write its `REPORT` / `DONE` lines there. Work going the other way
 the path the append reports) and the live session nudged with the same POST
 /api/session/{id}/prompt the launcher uses for its first prompt.
 
-Steering stays with the L1 (REJECT finding 2): the same MCP server and the same
-lane tools answer at both levels, so the L2 lane marks its own level in its child
-env (`agent_layer: "L2"` -> `AUTOOS_AGENT_LAYER`) and `autoos_agent_mcp` refuses
-`l2_start` / `l2_stop` / `l2_inbox` / `oc_start` / `oc_restart` when it reads `L2`
-back - an L2 cannot relaunch its supervisor or switch off a neighbour's phase. It
-may still read (`l2_status`, `oc_status`) and spawn tier-3 workers.
+Steering stays with the L1 (REJECT finding 2, D-665 criteria 2/3): the same MCP
+server answers at both levels, so the L2 lane marks its own level in its child
+env AND in the spawner's own environment (`agent_layer: "L2"` ->
+`AUTOOS_AGENT_LAYER`, rendered into the MCP server's env by `oc_l1_render`). The
+server reads `L2` back and (a) registers only the spawner's tools - no
+`l2_*` / `oc_*` / `cancel` / `respond`, so an L2 never sees a menu it is going to
+be refused, (b) still refuses the lane-control calls at the function, so the
+shared code cannot be reached around the list, and (c) refuses a `spawn` that is
+not a tier-3 worker - an L2 that could start tier 1 owns a session that writes.
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`),
 one directory per lane holding the generated oc_l1 config (0600: it names host

@@ -235,6 +235,10 @@ class LaneTest(unittest.TestCase):
         # the spawner MCP still gets its workers dir pinned (the 600 s `ps` hang)
         self.assertEqual(cfg["mcp"]["autoos-agent"]["environment"]["AUTOOS_WORKERS_DIR"],
                          str(self.proj / "logs" / "workers"))
+        # AO-L2-LAUNCH merge criterion 2: the spawner an L2 starts is told which
+        # tool profile to register, in its own environment.
+        self.assertEqual(cfg["mcp"]["autoos-agent"]["environment"]["AUTOOS_AGENT_LAYER"],
+                         "L2")
 
     def test_guard_role_and_l1_inbox_reach_the_child(self):
         result, rc = self._start()
@@ -782,11 +786,14 @@ class McpToolTest(unittest.TestCase):
                 self.assertIs(out["refused"], True, fn.__name__)
                 self.assertIs(out["ok"], False, fn.__name__)
                 self.assertIn("L2", out["detail"], fn.__name__)
-                self.assertIn("l2_status", out["detail"],
+                self.assertIn("spawn", out["detail"],
                               "the refusal must say what an L2 may still do")
 
     def test_reading_a_lane_is_still_allowed_from_inside_an_l2(self):
-        # an L2 watching its own phase is ordinary work; the fence is on CONTROL
+        # the fence is on CONTROL, not on reading: this same code answers an L1,
+        # which must be able to read any lane. What an L2's own server does with
+        # a read tool is a separate question - criterion 2 hides it from the
+        # list entirely (tests/test_agent_mcp_tool_profile.py).
         with mock.patch.dict(os.environ, {self.mcp.ENV_AGENT_LAYER: "L2"}):
             out, seen = self._call(self.mcp.l2_status, "l2-proj-p1")
         self.assertEqual(seen["argv"][2:], ["status", "--lane", "l2-proj-p1"])
