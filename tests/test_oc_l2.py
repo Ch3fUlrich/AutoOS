@@ -307,6 +307,61 @@ class LaneTest(unittest.TestCase):
         self.assertEqual(rec["agent_layer"], "L2")
         self.assertEqual(oc_l2.read_config(self._lane_name())["agent_layer"], "L2")
 
+    def test_the_l2_child_env_carries_only_the_two_named_credentials(self):
+        """AO-L2-LAUNCH merge criterion e: the L2 is handed the gateway key and
+        nothing else that holds a credential.
+
+        The key MUST travel - opencode expands the rendered config's
+        `{env:AUTOOS_OMNIROUTE_KEY}` inside the child, so a lane without it cannot
+        answer at all. Everything else the allowlist keeps out is decided by the
+        NAME (`oc_l1.env_is_credential_name`), so the audit is a name audit on the
+        child's real environment: exactly two credential-shaped names may be in it,
+        the gateway key and the lane server's own password.
+        """
+        extra = {
+            oc_l1.ENV_KEY: "sk-NOT-A-REAL-VALUE-000",
+            oc_l1.ENV_URL: "http://gateway.invalid:9999",
+            # decoys, one per family the allowlist's prefixes would otherwise let
+            # through: GH_TOKEN and OMNIGRAPH_API_KEY sit under an allowed prefix
+            # and are still credentials, which is why the NAME check runs first.
+            "GH_TOKEN": "ghp_NOT_A_REAL_TOKEN",
+            "AWS_SECRET_ACCESS_KEY": "not-a-real-secret",
+            "LANE_DB_PASSWORD": "not-a-real-password",
+            "OMNIGRAPH_API_KEY": "not-a-real-key",
+            "OPENAI_APIKEY": "not-a-real-key",
+        }
+        saved = {k: os.environ.get(k) for k in extra}
+        for k, v in extra.items():
+            os.environ[k] = v
+
+        def restore():
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        self.addCleanup(restore)
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        wait_file(self.rec)
+        names = json.loads(self.rec.read_text(encoding="utf-8"))["env_names"]
+        self.assertEqual(
+            sorted(n for n in names if oc_l1.env_is_credential_name(n)),
+            sorted([oc_l1.ENV_KEY, "OPENCODE_SERVER_PASSWORD"]),
+            "an L2 that can read a second credential can leak a second credential")
+        # both allowed names are really there - the lane is useless without them
+        self.assertIn(oc_l1.ENV_KEY, names)
+        self.assertIn("OPENCODE_SERVER_PASSWORD", names)
+        # the URL is not a credential, but a lane with no base URL cannot reach one
+        self.assertIn(oc_l1.ENV_URL, names)
+        # the launcher's own password variable never travels under its own name,
+        # and no decoy does at all
+        self.assertNotIn(PW_ENV, names)
+        for decoy in ("GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "LANE_DB_PASSWORD",
+                      "OMNIGRAPH_API_KEY", "OPENAI_APIKEY"):
+            self.assertNotIn(decoy, names)
+
     def test_first_prompt_is_the_brief_plus_the_fixed_footer(self):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)

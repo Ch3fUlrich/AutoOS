@@ -797,6 +797,28 @@ class TestChildEnvGatewayDefault(unittest.TestCase):
         env = self._env({})
         self.assertFalse(env["AUTOOS_OMNIROUTE_URL"].endswith("/v1"))
 
+    def test_an_exported_empty_url_is_replaced_by_the_default(self):
+        # L2-SECRETS fix 1 (2026-10-08): `setdefault` answers only a MISSING name.
+        # A launcher that exported AUTOOS_OMNIROUTE_URL="" — a shell that sourced a
+        # template, a CI job that sets every var it mentions — kept the empty
+        # value, and the lane died exactly as the unset case did:
+        # `TypeError: Invalid URL` in opencode's LLM.compile.
+        env = self._env({"AUTOOS_OMNIROUTE_URL": ""})
+        self.assertEqual(env["AUTOOS_OMNIROUTE_URL"], oc_l1.DEFAULT_BASE_URL,
+                         "an empty base URL is as dead as no base URL")
+
+    def test_a_whitespace_only_url_is_replaced_by_the_default(self):
+        for blank in (" ", "  ", "\t"):
+            env = self._env({"AUTOOS_OMNIROUTE_URL": blank})
+            self.assertEqual(env["AUTOOS_OMNIROUTE_URL"], oc_l1.DEFAULT_BASE_URL,
+                             repr(blank))
+
+    def test_a_blank_export_still_lets_an_explicit_value_win(self):
+        # the rule is blank -> default, not unset -> default: a real override,
+        # including one that carries a port and no scheme-relative path, is kept
+        env = self._env({"AUTOOS_OMNIROUTE_URL": "http://gateway.invalid:9999/"})
+        self.assertEqual(env["AUTOOS_OMNIROUTE_URL"], "http://gateway.invalid:9999/")
+
     def test_the_key_is_not_invented(self):
         # only the URL gets a default: a lane with no key has no model to call,
         # and a fake key would read as a working gateway

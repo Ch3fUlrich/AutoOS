@@ -305,7 +305,15 @@ def _child_env(lane, rendered, password):
     # session answers nothing and the canary times out. The key gets no default -
     # a lane with no key genuinely has no model, and an invented one reads as a
     # working gateway.
-    env.setdefault(oc_l1.ENV_URL, oc_l1.DEFAULT_BASE_URL)
+    #
+    # L2-SECRETS fix 1 (2026-10-08): the rule is BLANK -> default, not unset ->
+    # default. `dict.setdefault` answers only a MISSING name, so a launcher that
+    # exported `AUTOOS_OMNIROUTE_URL=` (a shell that sourced a template, a CI job
+    # that declares every var it mentions) handed the lane the same empty base URL
+    # as one that never exported it -- the same `Invalid URL` death, and the same
+    # silent timeout. Whitespace alone is just as unreachable.
+    if not (env.get(oc_l1.ENV_URL) or "").strip():
+        env[oc_l1.ENV_URL] = oc_l1.DEFAULT_BASE_URL
     env["OPENCODE_CONFIG"] = str(rendered)
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
     # D-665 (AO-L2-LAUNCH): the bash-guard role, the L1 inbox and the agent layer

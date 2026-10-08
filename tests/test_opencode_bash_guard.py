@@ -859,6 +859,33 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                     "git log --no-color", "git show --format=%h"):
             self._l2_allowed(cmd)
 
+    # ------------------------------------------------------------------
+    # AO-L2-LAUNCH merge criterion e (L2-SECRETS, 2026-10-08): the L2 lane's
+    # environment CARRIES `AUTOOS_OMNIROUTE_KEY`, because opencode expands the
+    # rendered config's `{env:AUTOOS_OMNIROUTE_KEY}` inside the child and the lane
+    # has no other way to its model. Carrying it is only safe while the lane's own
+    # shell cannot READ it back: the launcher's allowlist picks which NAMES travel,
+    # this gate picks which READS the session may perform, and the key sits in the
+    # child's own environment either way — in `/proc/self/environ`, in `printenv`'s
+    # output, and in every expansion. An allowlist of names with a hole in the read
+    # list is a naming exercise, so each spelling that reaches the value is denied
+    # here and the reason names the rule, not just the rejection.
+    # ------------------------------------------------------------------
+
+    def test_l2_shell_cannot_read_the_gateway_key(self):
+        for cmd, why in (
+                ("printenv", "environment"),
+                ("printenv AUTOOS_OMNIROUTE_KEY", "environment"),
+                ("env", "environment"),
+                ("cat /proc/self/environ", "live process entry"),
+                ("cat /proc/$PPID/environ", "path outside repo"),
+                ("cat /proc/1234/environ", "live process entry"),
+                ("rg KEY /proc/self/environ", "live process entry"),
+                ("echo $AUTOOS_OMNIROUTE_KEY", "not on the read-only list"),
+                ("ls ${AUTOOS_OMNIROUTE_KEY}", "path outside repo"),
+                ("git log --format=$AUTOOS_OMNIROUTE_KEY", "path outside repo")):
+            self._l2_denied(cmd, why)
+
 
 if __name__ == "__main__":
     unittest.main()
