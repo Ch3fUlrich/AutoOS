@@ -20938,6 +20938,143 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, [], "a rejected spawn starts no runner")
         self.assertEqual(os.listdir(tmp), [], "a rejected spawn creates no run dir")
 
+    # --- HOSTADMISSION-RACE (fix 1) ---------------------------------------
+    # The gate used to be check-then-act: it counted the live workers, and the
+    # worker record — the thing the next count reads — landed minutes later,
+    # after the clone. N spawners that arrived at live=cap-1 each counted the
+    # others as absent and all N started. `host_admission_claim` now takes the
+    # count and the slot in one fcntl critical section, the same lock the free
+    # leg claims with, and the placeholder it writes is what the next spawner
+    # counts. `AUTOOS_ADMISSION_OFF` must be absent for these to mean anything:
+    # setUp pops it, and the claim honours it like the rule it gates.
+
+    def claims(self):
+        return sorted(n for n in os.listdir(self.workers)
+                      if n.endswith(self.agent.ADMISSION_RESERVATION_SUFFIX))
+
+    def test_N_simultaneous_gates_admit_exactly_one_at_the_last_slot(self):
+        # Real concurrency, no patched clock: cap 2, one live worker already
+        # running (live = cap-1), memory far above the floor, and 4 threads that
+        # all reach the gate at the same barrier. Before the claim there were two
+        # steps between the count and the record, so all 4 counted 1 and all 4
+        # started. Now exactly one is admitted and the other three are refused by
+        # the host, each of them told the same cap it ran out of.
+        agent = self.agent
+        registry, mem = self.registry(2, 6144), self.meminfo(8000)
+        self.live(1)
+        self.assertEqual(agent.live_worker_count(self.workers), 1)
+        n = 4
+        start = threading.Barrier(n)
+        results = []
+
+        def gate():
+            start.wait()
+            results.append(agent.host_admission_claim(registry=registry,
+                                                      workers=self.workers,
+                                                      meminfo=mem))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            threads = [threading.Thread(target=gate) for _ in range(n)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(len(results), n, results)
+        admitted = [r for r in results if r[0] is None]
+        refused = [r[0] for r in results if r[0] is not None]
+        self.assertEqual(len(admitted), 1, "one slot left, one spawner admitted")
+        self.assertEqual(len(refused), n - 1)
+        self.assertEqual(len(self.claims()), 1, self.claims())
+        for text in refused:
+            self.assertIn("the live-worker cap", text)
+            self.assertIn("2 live workers", text)
+            self.assertIn("cap 2", text)
+        # The claim is the record's stand-in: while it stands, the host is full.
+        self.assertEqual(agent.live_worker_count(self.workers), 2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.free_reservation_release(admitted[0][1])
+        self.assertEqual(self.claims(), [])
+        self.assertEqual(agent.live_worker_count(self.workers), 1)
+
+    def test_a_host_claim_is_never_a_ps_row(self):
+        # `ps` reads every *.json in the workers dir; the claim is not one, so a
+        # host slot that is spoken for is never listed as a worker that is not.
+        agent = self.agent
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNone(refusal)
+        self.assertEqual(agent.list_workers(self.workers), [])
+        self.assertEqual(len(self.claims()), 1, self.claims())
+        agent.free_reservation_release(token)
+
+    def test_a_claim_from_a_dead_spawner_does_not_hold_the_host_closed(self):
+        # A spawner killed between its claim and its record leaves a placeholder
+        # nobody can release. Trusting it would keep the host shut for a worker
+        # that never existed, so a dead pid is reaped on the way past, exactly as
+        # a dead free-leg placeholder is.
+        agent = self.agent
+        dead = self.dead_pid()
+        for i in range(3):
+            path = os.path.join(self.workers, "dead%d%s" % (i, agent.ADMISSION_RESERVATION_SUFFIX))
+            with io.open(path, "w", encoding="utf-8") as fh:
+                json.dump({"id": "dead%d" % i, "pid": dead, "pid_start": 1,
+                           "started": agent.utc_now_iso()}, fh)
+        junk = os.path.join(self.workers, "corrupt" + agent.ADMISSION_RESERVATION_SUFFIX)
+        with io.open(junk, "w", encoding="utf-8") as fh:
+            fh.write("{ not json")
+        self.assertEqual(agent.live_admission_reservations(self.workers), 0,
+                         "a stale or unreadable claim never counts")
+        self.assertEqual(self.claims(), [], "and it is reaped, not left to rot")
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNone(refusal)
+        agent.free_reservation_release(token)
+
+    def test_a_refused_gate_claims_nothing(self):
+        # A refusal must leave no trace: the whole cost of a run the host said no
+        # to is the exit code, not a placeholder that then refuses the next run.
+        agent = self.agent
+        self.live(2)
+        with contextlib.redirect_stderr(io.StringIO()):
+            refusal, token = agent.host_admission_claim(
+                registry=self.registry(2, 6144), workers=self.workers,
+                meminfo=self.meminfo(8000))
+        self.assertIsNotNone(refusal)
+        self.assertIsNone(token)
+        self.assertEqual(self.claims(), [])
+
+    def test_cmd_run_hands_its_host_claim_to_the_worker_record(self):
+        # The claim is only a stand-in for the record. A run that leaves one
+        # behind after its record exists would count as two live workers for the
+        # rest of its life, and a host of cap 2 would admit one run, not two.
+        agent = self.agent
+        started = []
+        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
+                                          "AUTOOS_STATE_DIR": self.tmp,
+                                          "AUTOOS_MEMINFO_PATH": self.meminfo(8000)}), \
+                mock.patch.object(agent, "build_plan", return_value=self.plan()), \
+                mock.patch.object(agent, "run_client",
+                                  lambda *a, **k: started.append(1) or agent.ClientExit(0)), \
+                mock.patch.object(agent, "gateway_up", return_value=True), \
+                mock.patch.object(agent, "client_key", return_value="sk-test-key"), \
+                mock.patch.object(agent.clients, "signin_state",
+                                  lambda client, env=None: (None, "")), \
+                mock.patch("shutil.which", return_value="/usr/bin/opencode"):
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                rc = agent.cmd_run(self.args(False), {})
+        self.assertEqual(rc, 0)
+        self.assertEqual(started, [1])
+        self.assertEqual(self.claims(), [], "the claim became the record")
+        rows = agent.list_workers(self.workers, include_ended=True)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(agent.live_worker_count(self.workers), 0,
+                         "the run is over: the host is empty again")
+
 
 if __name__ == "__main__":
     unittest.main()
