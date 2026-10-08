@@ -1257,10 +1257,18 @@ def render_omniroute(registry: dict) -> dict:
             "models": [gateway_ref(leg, registry) for leg in legs],
         })
 
+    # AO-DENYLEGS D2 / operator D-657: the ids tools/combo-contract.py judges with
+    # its (f)-(i) gates are registry data (policy.d657_combos), projected here so
+    # combos.json stays a pure render. An absent/empty policy list renders an empty
+    # list, which is what keeps the opt-in per-combo (no implicit "all").
+    policy = registry.get("policy")
+    d657 = (policy.get("d657_combos") if isinstance(policy, dict) else None) or []
+
     return {
         "$comment": OMNIROUTE_GENERATED_COMMENT,
         "retired": list(OMNIROUTE_RETIRED_IDS),
         "omitted": omitted,
+        "d657_combos": list(d657),
         "combos": combos,
     }
 
@@ -1575,8 +1583,15 @@ IDE_MODEL_ORDER = (
     "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
     "l1-orchestrator-free-only",
     "l2-worker", "l2-worker-clean", "l2-worker-paid", "l2-worker-free-only",
-    "l2-orchestrator",
+    "l2-orchestrator", "l2-orchestrator-clean",
     "l3-driver", "l3-driver-clean", "l3-driver-paid", "l3-driver-free-only",
+    # D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the SS2 layer twins and the SS3
+    # review lenses named by operator D-657. Listed here because render_ide()
+    # requires this constant to name every route id.
+    "l3-implementer", "l3-implementer-clean",
+    "l3-researcher", "l3-researcher-clean",
+    "l3-review-diff", "l3-review-tests", "l3-review-codebase",
+    "l3-review-transcript",
     "spark-1.3-contributor",
     "opus-5-5",
     "t4-rag",
