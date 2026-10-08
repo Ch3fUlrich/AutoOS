@@ -2744,39 +2744,42 @@ class MistralPlanLimitsTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_the_clean_twins_keep_the_native_deepseek_leg(self):
-        # L1-CLEAN (2026-10-01): the trial credits now lead both -clean twins
-        # and the native DeepSeek leg is the last paid fallback - still live.
+    def test_the_clean_twins_keep_no_paid_deepseek_tail(self):
+        # L1-CLEAN (2026-10-01) kept the native DeepSeek leg live as the last paid
+        # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
+        # chain, so the -clean twins are now the single probe-acked, private-safe
+        # leg -- and it is live, which is what the route-liveness invariant needs.
         for route_id in ("l2-worker-clean", "l3-driver-clean"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
-                             "deepseek/deepseek-flash", route_id)
-            self.assertEqual(
-                registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
-                [], route_id)
+            self.assertEqual(self.reg["routes"][route_id]["legs"],
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertTrue(live_legs(self.reg, route_id), route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(self.reg, route_id), route_id)
 
     def test_t3_driver_heads_with_the_free_band(self):
         # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
         # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
         # agentic combo, and a 429 on the head falls through the combo, so the
-        # head must be a grant, not the operator's money. MISTRALFIX's measurement
-        # still stands and still decides WHICH paid leg is first:
-        # mistral/mistral-code-latest answers 200 at 125 rpm (625k tpm) while
-        # mistral-small-latest is dead at 0 rpm, so it stays the first PAID leg -
-        # now behind the free band instead of ahead of it.
+        # head must be a grant, not the operator's money.
+        # D657-D2 (2026-10-08) kept the rule and changed who qualifies: the
+        # judge admits only a leg the D-657 probe saw answer, so the expiring
+        # grants that used to head the band (opencode_gateway glm-5.3-flash,
+        # ainative llama-4-maverick -- kimi/glm off under SS8 -- and the AI-Studio
+        # gemini leg, 401/402 on both gateways) are out, and the free band starts
+        # at the bazaarlink $0 copy. No paid leg rides the chain at all, so the
+        # "first PAID leg" question this test used to answer has no subject.
         legs = self.reg["routes"]["l3-driver"]["legs"]
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
-        # TORDER 2026-10-01: gemini restored head (operator reversal, GEMRESTORE
-        # + TASK2); nebius removed. SCWREMOVAL 2026-10-06: scaleway gone too.
-        # GLM55/AINATIVE 2026-10-05 (operator): the expiring grants lead the
-        # band ahead of gemini - oc/glm-5.3-flash (1M, OpenCode-served) then
-        # ainative/llama-4-maverick (FREEKEYS-proven tool calls).
-        self.assertEqual(legs[0], "opencode_gateway/glm-5.3-flash")
-        self.assertEqual(legs[1], "ainative/llama-4-maverick")
-        self.assertEqual(legs[2], "gemini/gemini-3.8-flash")
+        self.assertEqual(legs[0],
+                         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free")
+        self.assertEqual(legs[1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertNotIn("opencode_gateway/glm-5.3-flash", legs)
+        self.assertNotIn("ainative/llama-4-maverick", legs)
+        self.assertNotIn("gemini/gemini-3.8-flash", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
-        paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
-        self.assertEqual(paid[0], "mistral/mistral-code-latest")
+        self.assertNotIn("mistral/mistral-code-latest", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
 
     # -- the invariant ------------------------------------------------------
 
@@ -2851,16 +2854,16 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertFalse(safe, route_id)
             self.assertEqual(reason, "model trains on prompts", route_id)
 
-    def test_the_clean_twins_keep_a_live_native_deepseek_fallback(self):
-        # L1-CLEAN (2026-10-01): both twins now lead with the trial credits and
-        # keep the native DeepSeek leg live as the last fallback - the twins
-        # still serve, which is what the route-liveness invariant needs.
+    def test_the_clean_twins_still_live_without_the_deepseek_tail(self):
+        # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
+        # twins. They still serve -- one leg each, the probe-acked private-safe
+        # vertex row -- which is what the route-liveness invariant needs.
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertIn("deepseek/deepseek-flash", live_legs(reg, route_id),
-                          route_id)
-            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
-                             "deepseek/deepseek-flash", route_id)
+            self.assertEqual(live_legs(reg, route_id),
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(reg, route_id), route_id)
 
     # -- the registered tested alternative ----------------------------------
 
@@ -2905,11 +2908,13 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_t3_driver_has_exactly_one_mistral_code_leg(self):
-        # mistral-code-latest is l3-driver's head already; the swap must not
-        # duplicate it into the body of the same route.
+    def test_t3_driver_has_no_mistral_code_leg(self):
+        # SS8 (D657-D2 2026-10-08) leaves no paid mistral leg in a chain; the
+        # "exactly one, never duplicated" pin becomes an absence pin, which a
+        # duplicate would still fail.
         legs = self.reg["routes"]["l3-driver"]["legs"]
-        self.assertEqual(legs.count("mistral/mistral-code-latest"), 1)
+        self.assertEqual(legs.count("mistral/mistral-code-latest"), 0)
+        self.assertEqual(legs.count("mistral/codestral-latest"), 0)
 
     def test_real_registry_passes_check_after_the_swap(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -3694,6 +3699,16 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
     refuses any attempt to pin it. The measured rows stay, because the probe
     result is a fact worth keeping and a later operator decision may lift the
     rule — nothing routes there until then.
+
+    D657-D2 (2026-10-08) IS that later decision, and it lifted exactly the clause
+    the paragraph above hedged: operator D-657 (spec combo-v2 §7b/§8) bans the
+    PAID DeepSeek tails and admits the $0 free copy whose cache the D-657 probe
+    measured, so `bazaarlink/deepseek/deepseek-v4-flash-0731free:free` heads the
+    chains and policy carries `allow-bazaarlink-ds-v4-flash-0731-free` one slot
+    ahead of `deny-deepseek`. What the decision still owns, and what is pinned
+    here: the 0731 grant is V4 weights, never spelled as or folded into the
+    pinned V4.1 group; V4 Pro stays denied by the first rule in the list; and the
+    paid native `deepseek/deepseek-flash` leg rides no chain.
     """
 
     LEG = "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
@@ -3707,26 +3722,53 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
         self.assertEqual(self.reg["models"][model_id]["tool_calls"], "proven")
         self.assertEqual(self.reg["providers"]["bazaarlink"]["tier"], "free")
 
-    def test_no_combo_carries_the_leg(self):
-        for route_id, route in self.reg["routes"].items():
-            self.assertNotIn(self.LEG, route.get("legs") or [], route_id)
-        rendered = registry.render_omniroute(self.reg)
-        for combo in rendered["combos"]:
-            self.assertFalse([m for m in combo["models"]
-                              if "v4-flash-0731free" in m], combo["name"])
+    def test_the_leg_is_never_a_v41_spelling(self):
+        # The 0731 grant is V4 weights. D657-D2 admits it to the chains, so the
+        # guard that survives is that it never poses as, or joins, the pinned
+        # V4.1 group: its own model row names no V4.1 snapshot, and no rendered
+        # combo carries it beside one.
+        model_id = registry.resolve_leg(self.LEG, self.reg)[1]
+        self.assertNotIn("v4.1", model_id, model_id)
+        self.assertNotIn("v4.1", self.reg["models"][model_id].get("serves", ""))
+        for combo in registry.render_omniroute(self.reg)["combos"]:
+            carried = [m for m in combo["models"] if "0731free" in m]
+            v41 = [m for m in combo["models"] if "v4.1" in m]
+            self.assertFalse(carried and v41, combo["name"])
 
-    def test_the_blanket_deepseek_deny_governs_it(self):
-        self.assertTrue(registry.leg_denied(self.LEG, self.reg))
+    def test_the_named_allow_reopens_only_the_0731_spelling(self):
+        # Was "the blanket deny governs it" (no allow rule existed). D657-D2 added
+        # one allow, named to a single model id, ordered BEFORE deny-deepseek;
+        # every other DeepSeek spelling still falls through the blanket deny, and
+        # V4 Pro stays behind the first rule in the list.
         rules = self.reg["policy"]["leg_rules"]
-        self.assertFalse([r for r in rules if r["id"] == "allow-bazaarlink-deepseek-flash-free"])
+        ids = [r["id"] for r in rules]
+        allow = next(r for r in rules
+                     if r["id"] == "allow-bazaarlink-ds-v4-flash-0731-free")
+        self.assertEqual(allow["match"], "*deepseek-v4-flash-0731free*")
+        self.assertLess(ids.index(allow["id"]), ids.index("deny-deepseek"),
+                        "a leg_rule is only as strong as its position")
+        self.assertLess(ids.index("deny-deepseek-pro"), ids.index(allow["id"]),
+                        "the pro denial is first on purpose, ahead of any allow")
+        self.assertFalse(registry.leg_denied(self.LEG, self.reg))
+        for other in ("openrouter/deepseek/deepseek-v4-flash",
+                      "cheaperinference/deepseek-v4-flash",
+                      "ollama-cloud/deepseek-v4-flash",
+                      "deepseek/deepseek-v4-pro"):
+            self.assertTrue(registry.leg_denied(other, self.reg), other)
 
-    def test_the_pinned_group_stays_a_single_model_group(self):
+    def test_the_pinned_group_renders_nothing_and_stays_single(self):
         # deepseek-v4.1-flash is pinned per model on purpose (mapping doc Open
-        # choice 11): its job is weights fidelity, not redundancy, so it renders
-        # the native V4.1 leg alone and every leg of it is V4.1.
+        # choice 11): its job is weights fidelity, not redundancy. SS8 (D657-D2
+        # 2026-10-08) gated both of its legs, so it ships no combo at all -- which
+        # is the same guarantee in the other direction: it can never be diluted by
+        # a non-V4.1 leg, because it renders no legs.
         rendered = registry.render_omniroute(self.reg)
-        combo = next(c for c in rendered["combos"] if c["name"] == "deepseek-v4.1-flash")
-        self.assertEqual(len(combo["models"]), 1, combo["models"])
+        names = {c["name"] for c in rendered["combos"]}
+        self.assertNotIn("deepseek-v4.1-flash", names)
+        self.assertIn("deepseek-v4.1-flash", rendered["omitted"])
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
+                                  self.reg), [])
         # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
         # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
 
