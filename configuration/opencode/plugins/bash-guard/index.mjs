@@ -896,6 +896,9 @@ export default {
   id: "bash-guard",
   async setup(ctx) {
     await ctx.tool.hook("execute.before", async (e) => {
+      // The canary recognises a denial only on the names guarded here; adding
+      // or dropping one must be mirrored in tools/oc_l1_canary.py
+      // (GUARDED_TOOL_NAMES). tests/test_oc_l1_canary.py pins the two sets.
       if (!e || (e.tool !== "shell" && e.tool !== "bash")) {
         return;
       }

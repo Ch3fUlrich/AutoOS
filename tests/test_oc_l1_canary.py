@@ -22,9 +22,14 @@ Covered:
      current_step
   8. the password value appears in no argv, state file, heartbeat.json,
      stdout or the child's stderr log
-  9. D-665 fix 1: a denial carried by the `bash` or `execute` spelling counts
-     (opencode renamed bash -> shell; the plugin hooks both), and a session with
-     no shell call reports the tool names and assistant text it did see
+  9. F1: a denial counts only on a name the bash-guard hook inspects. The
+     canary's accepted set is pinned equal to the plugin's (`shell`, `bash`);
+     `execute` is code-mode's executor, unguarded, so its "denial" must NOT
+     pass. A session with no guarded call reports the tool names and assistant
+     text it did see
+  11. F2: an item with no tool name is never a guarded call, whatever its state
+  12. F3: a denial is an error that STARTS with the marker, on a guarded tool
+      call in error state — echoed marker text never passes
   10. D-665 fix 5: the prompt demands one tool call and names the shell tool,
       and a prose-only reply reads as "inconclusive: text-only answer" —
       never as the guard allowing the command (same exit code, other detail)
@@ -35,6 +40,7 @@ import ctypes
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import shutil
@@ -51,8 +57,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 import oc_l1_serve  # noqa: E402
 import oc_l1_canary  # noqa: E402
 from oc_l1_canary import (  # noqa: E402
+    GUARDED_TOOL_NAMES,
     INCONCLUSIVE_TEXT_ONLY,
-    SHELL_TOOL_NAMES,
 )
 from _oc_l1_fakes import (  # noqa: E402
     GUARD_PLUGIN,
@@ -66,9 +72,17 @@ from _oc_l1_fakes import (  # noqa: E402
 )
 
 CANARY_SESSION_ID = "ses_canary99"
-# The incident shape: an UNQUOTED heredoc whose body contains a
+PLUGIN_SRC = (ROOT / "configuration" / "opencode" / "plugins"
+              / "bash-guard" / "index.mjs")
+# the incident shape: an UNQUOTED heredoc whose body contains a
 # backticked (harmless) command.
 INCIDENT = "cat <<CANARY_EOF\ncanary `date`\nCANARY_EOF"
+
+
+def plugin_guarded_tool_names():
+    """The tool names the bash-guard hook actually inspects."""
+    src = PLUGIN_SRC.read_text(encoding="utf-8")
+    return sorted(set(re.findall(r'\be\.tool\s*!==\s*"([A-Za-z_]+)"', src)))
 
 
 def denied_items(tool_name):
@@ -332,12 +346,12 @@ class TestCanaryPrompt(_Base):
         # prompt asks for a tool the canary would not recognise, every run of
         # that model reads as "no shell tool call".
         text = self._prompt_text().lower()
-        self.assertTrue(any(name in text for name in SHELL_TOOL_NAMES),
+        self.assertTrue(any(name in text for name in GUARDED_TOOL_NAMES),
                         "prompt asks for no accepted tool name: %r" % text)
 
 
 class TestToolNames(_Base):
-    """D-665 fix 1: every shell-tool spelling counts, and a miss says why."""
+    """F1: only the names the guard hooks are accepted, and a miss says why."""
 
     def test_tool_named_bash_denied(self):
         self.srv.canary_items = denied_items("bash")
@@ -346,11 +360,17 @@ class TestToolNames(_Base):
         self.assertIn("canary denied=yes", out)
         self.assertTrue(self._state()["canary"]["denied"])
 
-    def test_tool_named_execute_denied(self):
+    # (F1) `execute` is code-mode's executor, NOT a name the bash-guard hook
+    #      inspects: a denial carried by it would be a model echoing the marker,
+    #      so accepting it lets an unguarded tool false-pass the canary.
+    def test_tool_named_execute_is_not_guarded(self):
         self.srv.canary_items = denied_items("execute")
         rc, out = self._start()
-        self.assertEqual(rc, 0)
-        self.assertTrue(self._state()["canary"]["denied"])
+        self.assertEqual(rc, 5)
+        self.assertIn("canary denied=no", out)
+        self.assertFalse(self._state()["canary"]["denied"])
+        self.assertIn("execute", self._state()["canary"]["detail"],
+                      "the missed name must be reported")
 
     def test_no_shell_call_detail_names_tools_and_text(self):
         self.srv.canary_items = [{
@@ -370,6 +390,37 @@ class TestToolNames(_Base):
                       "detail must quote the assistant text")
         hb = self._heartbeat()
         self.assertIn("read", hb["canary"]["detail"])
+
+
+class TestGuardedToolNamesPin(unittest.TestCase):
+    """F1: the canary's accepted set and the plugin's guarded set are one list.
+
+    The plugin is JS and the canary is python, so neither imports the other —
+    this test is the enforcement: the two sides may never drift, in either
+    direction.
+    """
+
+    def test_canary_accepts_exactly_the_names_the_guard_guards(self):
+        self.assertEqual(sorted(GUARDED_TOOL_NAMES),
+                         plugin_guarded_tool_names(),
+                         "canary tool set != bash-guard hook set")
+
+    def test_execute_is_not_in_the_guarded_set(self):
+        self.assertNotIn("execute", GUARDED_TOOL_NAMES)
+
+    def test_the_plugin_pattern_extracts_the_hook_names(self):
+        # the pin must not read an empty set and pass vacuously
+        self.assertEqual(plugin_guarded_tool_names(), ["bash", "shell"])
+
+
+class TestOneToolNameList(unittest.TestCase):
+    """F1: the canary holds exactly one accepted-tool-name list."""
+
+    def test_the_parser_uses_the_shared_list_and_no_aliases(self):
+        src = (ROOT / "tools" / "oc_l1_canary.py").read_text(encoding="utf-8")
+        self.assertNotIn("SHELL_TOOL_NAMES", src)
+        self.assertEqual(src.count("GUARDED_TOOL_NAMES ="), 1)
+        self.assertIn("tool_name not in GUARDED_TOOL_NAMES", src)
 
 
 class TestTimeout(_Base):

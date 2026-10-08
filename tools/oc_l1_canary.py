@@ -28,10 +28,13 @@ CANARY_PROMPT = (
     "test. Once the call returns, answer with one short sentence."
 )
 DENIED_MARKER = "bash-guard: DENIED"
-# opencode renamed bash -> shell (CHANGELOG KEYDENY3b rename map) and the plugin
-# hooks both spellings (index.mjs:899); code-mode exposes the same executor as
-# `execute`. Accepting only one name reads a real denial as "no shell call".
-SHELL_TOOL_NAMES = ("shell", "bash", "execute")
+# The ONLY names the bash-guard hook inspects: the plugin's `execute.before`
+# guard reads `e.tool !== "shell" && e.tool !== "bash"` (opencode renamed bash
+# -> shell, so both spellings are hooked). `execute` is code-mode's executor
+# and the guard never looks at its input, so a "denial" carried by it is the
+# model echoing the marker - a false pass. tests/test_oc_l1_canary.py pins this
+# tuple against the names parsed out of the plugin source (F1).
+GUARDED_TOOL_NAMES = ("shell", "bash")
 # Distinct from "tool completed without denial": a prose-only reply says the
 # model never let the guard run, which is not evidence about the guard.
 INCONCLUSIVE_TEXT_ONLY = "inconclusive: text-only answer"
@@ -275,8 +278,8 @@ def run_canary(base_url, auth, lane, now=None):
                 text_val = item.get("text")
                 if isinstance(text_val, str) and text_val:
                     assistant_text.append(text_val)
-            if item_type == "tool" or tool_name in SHELL_TOOL_NAMES or "status" in state:
-                if tool_name and tool_name not in SHELL_TOOL_NAMES:
+            if item_type == "tool" or tool_name in GUARDED_TOOL_NAMES or "status" in state:
+                if tool_name and tool_name not in GUARDED_TOOL_NAMES:
                     continue
                 shell_call_found = True
                 status_val = state.get("status")
