@@ -70,19 +70,44 @@ def _is_alive(pid):
 
 
 class NameTest(unittest.TestCase):
-    def test_lane_name_is_l2_repo_phase(self):
-        self.assertEqual(oc_l2.lane_name("/srv/checkouts/AutoOS", "AO-DEADROWS"),
-                         "l2-autoos-ao-deadrows")
-        # the same project spelled two ways is one lane
+    def _tag(self, repo):
+        """The expected 6-hex identity: the digest of the same path the name is
+        built from, computed here rather than called through the module so the
+        test pins the SHAPE, not a re-run of the implementation."""
+        import hashlib
+        digest = hashlib.sha256(
+            oc_l2.slug(os.path.abspath(str(repo))).encode("utf-8")).hexdigest()
+        return digest[:6]
+
+    def test_lane_name_is_l2_repo_hash_phase(self):
+        repo = "/srv/checkouts/AutoOS"
+        self.assertEqual(oc_l2.lane_name(repo, "AO-DEADROWS"),
+                         "l2-autoos-%s-ao-deadrows" % self._tag(repo))
+
+    def test_the_name_separates_two_checkouts_of_the_same_repo_name(self):
+        # finding 7: two worktrees of two different projects can share a
+        # directory name; a lane per phase is one lane per CHECKOUT, or the
+        # second project's start silently joins the first project's session.
+        a = oc_l2.lane_name("/home/u/one/autoos", "p1")
+        b = oc_l2.lane_name("/home/u/two/autoos", "p1")
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith("l2-autoos-"), a)
+        self.assertTrue(b.startswith("l2-autoos-"), b)
+
+    def test_the_same_project_spelled_two_ways_is_one_lane(self):
         self.assertEqual(oc_l2.lane_name("/a/autoos-ci", "p1"),
                          oc_l2.lane_name("/a/AutoOS CI", "p1"))
+        self.assertEqual(oc_l2.lane_name("./autoos", "p1"),
+                         oc_l2.lane_name(os.path.abspath("autoos"), "p1"))
 
     def test_lane_name_stays_within_the_lane_shape(self):
-        # the repo part gives way; the phase never does, because one lane per
-        # phase is the unit that has to stay distinct
+        # the repo part gives way; the phase and the identity tag never do,
+        # because one lane per phase per checkout is the unit that has to stay
+        # distinct
         name = oc_l2.lane_name("a" * 40, "phase-one")
         self.assertRegex(name, r"^[a-z0-9][a-z0-9-]{0,31}$")
         self.assertTrue(name.endswith("-phase-one"), name)
+        self.assertIn("-%s-" % self._tag("a" * 40), name)
         self.assertLessEqual(len(name), 32)
         with self.assertRaises(oc_l2.L2Error):
             oc_l2.lane_name("AutoOS", "x" * 40)
@@ -324,6 +349,37 @@ class LaneTest(unittest.TestCase):
             oc_l2.cmd_stop(result["lane"])
         finally:
             bad.stop()
+
+    def test_already_running_names_an_unverified_lane_as_one(self):
+        # finding 7: a duplicate start of an rc5 lane used to be told "it is
+        # already running, send it work with l2_inbox" - but that lane has no
+        # running phase: its pilot was never prompted and the inbox refuses the
+        # nudge. The message says what the lane is and what clears it.
+        bad = FakeServer(PW_VALUE, canary_mode="allowed")
+        bad.start()
+        mock.patch.object(oc_l1, "PORT_MIN", 1024).start()
+        mock.patch.object(oc_l1, "PORT_MAX", 65535).start()
+        try:
+            result, rc = self._start(port=bad.port)
+            self.assertEqual(rc, 5)
+            with self.assertRaises(oc_l2.L2Error) as cm:
+                self._start(port=bad.port)
+            msg = str(cm.exception)
+            self.assertIn(result["lane"], msg)
+            self.assertIn("canary", msg)
+            self.assertNotIn("send it work with l2_inbox", msg)
+            self.assertIn("l2_stop", msg)
+            oc_l2.cmd_stop(result["lane"])
+        finally:
+            bad.stop()
+
+    def test_already_running_of_a_guarded_lane_points_at_the_inbox(self):
+        _, rc = self._start()
+        self.assertEqual(rc, 0)
+        with self.assertRaises(oc_l2.L2Error) as cm:
+            self._start()
+        self.assertIn("already running", str(cm.exception))
+        self.assertIn("l2_inbox", str(cm.exception))
 
     # (3) stop: the whole child tree goes, the state file goes, no orphan serve
     def test_stop_kills_the_child_tree(self):

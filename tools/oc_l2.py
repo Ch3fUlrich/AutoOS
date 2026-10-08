@@ -38,9 +38,9 @@ missing one is exit 2 with the remediation, never an invented value.
 
 Subcommands (each prints one JSON object on stdout):
   start  --repo PATH --phase NAME --brief PATH [--combo l2-orchestrator]
-  status --lane l2-<repo>-<phase>
-  stop   --lane l2-<repo>-<phase>
-  inbox  --lane l2-<repo>-<phase> --text LINE
+  status --lane l2-<repo>-<checkout-tag>-<phase>
+  stop   --lane l2-<repo>-<checkout-tag>-<phase>
+  inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
 
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
 already running, a missing binary or password env) - 4 server not healthy -
@@ -49,6 +49,7 @@ already running, a missing binary or password env) - 4 server not healthy -
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -146,22 +147,38 @@ def slug(text):
     return out.strip("-")
 
 
+def repo_tag(repo):
+    """Six hex digits of the checkout's absolute, slugified path.
+
+    The basename alone is not an identity (Sonnet final REJECT, finding 7): two
+    worktrees of two projects are both called `autoos`, and the second project's
+    `start` would join the first project's running lane instead of starting its
+    own. Slugifying before hashing keeps the property the name already had -
+    `/a/AutoOS CI` and `/a/autoos-ci` are one project, so one lane - while
+    separating the paths that are genuinely different."""
+    digest = hashlib.sha256(
+        slug(os.path.abspath(str(repo))).encode("utf-8")).hexdigest()
+    return digest[:6]
+
+
 def lane_name(repo, phase):
-    """`l2-<repo>-<phase>`, truncated to the 32-char lane shape. The phase
-    wins over the repo when they cannot both fit: one lane per phase is the
-    unit that must stay distinct."""
+    """`l2-<repo>-<checkout-tag>-<phase>`, truncated to the 32-char lane shape.
+    The repo basename gives way when they cannot all fit: the phase and the
+    checkout tag are what keeps two lanes distinct, the basename is the part a
+    human can read off the directory anyway."""
     rslug, pslug = slug(Path(repo).name), slug(phase)
+    tag = repo_tag(repo)
     if not rslug or not pslug:
         raise L2Error("repo and phase must each yield a [a-z0-9-] name "
                       "(got repo=%r phase=%r)" % (repo, phase))
-    name = "%s%s-%s" % (LANE_PREFIX, rslug, pslug)
+    tail = "-%s-%s" % (tag, pslug)
+    name = "%s%s%s" % (LANE_PREFIX, rslug, tail)
     if len(name) > LANE_MAX:
-        room = LANE_MAX - len(LANE_PREFIX) - len(pslug) - 1
-        if room < 4:
+        keep = len(rslug) - (len(name) - LANE_MAX)
+        if keep < 1:
             raise L2Error("phase '%s' is too long to fit a %d-char lane name"
                           % (pslug, LANE_MAX))
-        name = "%s%s-%s" % (LANE_PREFIX, rslug[:room], pslug)
-        name = name.rstrip("-")
+        name = "%s%s%s" % (LANE_PREFIX, rslug[:keep].rstrip("-"), tail)
     if not re.match(r"^[a-z0-9][a-z0-9-]{0,%d}$" % (LANE_MAX - 1), name):
         raise L2Error("lane name '%s' does not match [a-z0-9][a-z0-9-]{0,31}" % name)
     return name
@@ -616,11 +633,17 @@ def cmd_inbox(name, text):
 
 
 def _already_running(name, lane):
+    """The live lane's facts, or None. The two flags are what the duplicate-start
+    message is built on: a server answering for a session is not the same thing
+    as a lane running a phase."""
     state = live_session(lane)
     if state is None:
         return None
+    canary = state.get("canary") if isinstance(state.get("canary"), dict) else {}
     return {"lane": name, "session_id": state.get("session_id"),
-            "port": state.get("port"), "pid": state.get("pid")}
+            "port": state.get("port"), "pid": state.get("pid"),
+            "canary_denied": canary.get("denied") is True,
+            "prompted": state.get("prompted") is True}
 
 
 def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
@@ -646,9 +669,17 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
                       port=port, model=model)
     running = _already_running(name, lane)
     if running:
-        raise L2Error("lane '%s' is already running (session %s on port %s, pid %s) "
-                      "- send it work with l2_inbox, or l2_stop it first"
-                      % (name, running["session_id"], running["port"], running["pid"]))
+        if running["canary_denied"] and running["prompted"]:
+            raise L2Error("lane '%s' is already running (session %s on port %s, pid %s) "
+                          "- send it work with l2_inbox, or l2_stop it first"
+                          % (name, running["session_id"], running["port"],
+                             running["pid"]))
+        raise L2Error("lane '%s' has a server on port %s (pid %s, session %s) that is "
+                      "not a running phase: it never cleared its canary (denied=%s, "
+                      "prompted=%s), so its pilot sits idle and unguarded and l2_inbox "
+                      "refuses to wake it - l2_stop '%s' first, then start again"
+                      % (name, running["port"], running["pid"], running["session_id"],
+                         running["canary_denied"], running["prompted"], name))
 
     scratch = Path(lane["scratch_dir"])
     scratch.mkdir(parents=True, exist_ok=True)

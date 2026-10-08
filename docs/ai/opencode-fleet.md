@@ -157,9 +157,9 @@ poll, the canary and the state file to `tools/oc_l1.py` — so a fix to the cana
 
 ```bash
 python3 tools/oc_l2.py start  --repo PATH --phase NAME --brief PATH [--combo l2-orchestrator] [--inbox PATH]
-python3 tools/oc_l2.py status --lane l2-<repo>-<phase>
-python3 tools/oc_l2.py stop   --lane l2-<repo>-<phase>
-python3 tools/oc_l2.py inbox  --lane l2-<repo>-<phase> --text LINE
+python3 tools/oc_l2.py status --lane l2-<repo>-<checkout-tag>-<phase>
+python3 tools/oc_l2.py stop   --lane l2-<repo>-<checkout-tag>-<phase>
+python3 tools/oc_l2.py inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
 ```
 
 Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
@@ -168,10 +168,14 @@ Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
 
-- lane name `l2-<repo>-<phase>`; model = the gateway combo (`l2-orchestrator` by default), with the context and output **from the
+- lane name `l2-<repo>-<checkout-tag>-<phase>`, where the checkout tag is six hex of the repo's absolute path — two projects whose
+  directories share a name are two lanes, while one project spelled two ways (`AutoOS CI`, `autoos-ci`) is still one lane;
+  model = the gateway combo (`l2-orchestrator` by default), with the context and output **from the
   registry route's own `surfaces.omniroute`** so a 1M lane cannot be clamped to 128k;
 - `mcp: ["autoos-agent"]` — the spawner is the only enabled server: no editor, no filesystem MCP, no second spawner;
-- `permission: {"task": "deny"}` merged over the L1 defaults, plus the bash-guard plugin with `guard_role: "orchestrator"`;
+- `permission` merged over the L1 defaults with every file-mutating and spawn key denied (`edit`, `write`, `patch`, `apply_patch`,
+  `task`, `subagent`; `read` and `bash` stay allowed, `bash` fenced by the guard), plus the bash-guard plugin with
+  `guard_role: "orchestrator"`;
 - the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 through
   the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox), and the launcher's hint line.
 
@@ -181,8 +185,9 @@ one timestamped line per milestone there, prefixed `REPORT`, and a final `DONE` 
 session's own inbox, `$AUTOOS_RUN_DIR/inbox/l1.md` (`tools/autoos_inbox.py:inbox_path("l1")`, whose reader is what polls it). Work
 in the other direction is `inbox`: one record appended to the lane's own inbox — `$AUTOOS_RUN_DIR/inbox/<lane>.md` when a run dir
 is set, else `<lane dir>/inbox.md`, the path the append reports — and the live session nudged with the same
-`POST /api/session/{id}/prompt` the launcher uses for its first prompt. The append happens whether or not the nudge lands, and the
-answer says which.
+`POST /api/session/{id}/prompt` the launcher uses for its first prompt. Only a session that proved itself guarded is woken: a lane
+whose recorded canary never denied, or that was never prompted, is refused (`refused: true`, exit 2) while the line stays in the
+inbox. The append happens whether or not the nudge lands, and the answer says which.
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), one directory per lane with the generated config
 (0600 — it names host paths), the scratch dirs, the composed prompt and the lane inbox. **Nothing is merged into

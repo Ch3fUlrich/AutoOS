@@ -276,7 +276,7 @@ def _oc_l2(sub: str, argv: list) -> dict:
 
 def l2_start(repo: str, phase: str, brief_path: str,
              combo: str = "l2-orchestrator") -> dict:
-    """Start the L2 lane for one phase: lane `l2-<repo>-<phase>`, model = the
+    """Start the L2 lane for one phase: lane `l2-<repo>-<checkout-tag>-<phase>`, model = the
     gateway combo, the autoos-agent spawner as its only MCP, permission.task
     denied and the bash-guard in orchestrator role. The first prompt is the
     brief's own text plus the fixed role footer."""
@@ -1661,7 +1661,7 @@ def serve() -> None:
     def _l2_start(repo: str, phase: str, brief_path: str,
                   combo: str = "l2-orchestrator") -> dict:
         """D-665 (AO-L2-LAUNCH): start the L2 lane for one phase and give it
-        its brief. Lane `l2-<repo>-<phase>`; model = the gateway combo (its own
+        its brief. Lane `l2-<repo>-<checkout-tag>-<phase>`; model = the gateway combo (its own
         declared context, so no 128k clamp); MCP = the autoos-agent spawner
         ONLY; OpenCode permission.task denied and the bash-guard plugin in
         orchestrator role, so the L2 coordinates and never edits code; first
