@@ -31,9 +31,11 @@ FAKE_PY = """import json, os, sys
 rec = os.environ["%s"]
 names = [k for k in ("OPENCODE_CONFIG", "OPENCODE_SERVER_PASSWORD",
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-    "XDG_CACHE_HOME") if k in os.environ]
+    "XDG_CACHE_HOME", "AUTOOS_GUARD_ROLE", "AUTOOS_L1_INBOX") if k in os.environ]
 with open(rec, "w", encoding="utf-8") as f:
-    json.dump({"argv": sys.argv[1:], "env_names": names, "pid": os.getpid()}, f)
+    json.dump({"argv": sys.argv[1:], "env_names": names, "pid": os.getpid(),
+               "guard_role": os.environ.get("AUTOOS_GUARD_ROLE"),
+               "l1_inbox": os.environ.get("AUTOOS_L1_INBOX")}, f)
 sys.stderr.write("%s\\n")
 sys.stderr.flush()
 import time

@@ -217,6 +217,56 @@ class StartTest(unittest.TestCase):
         self.assertTrue(body.startswith(first),
                         "the earlier stderr must not be truncated away")
 
+    # (3e) D-665 (AO-L2-LAUNCH): the guard role and the L1 inbox are LANE
+    #      properties. The child gets them from the lane - and never from the
+    #      shell that happened to export them.
+    def test_guard_role_and_inbox_reach_the_child_env(self):
+        self.lane["guard_role"] = "orchestrator"
+        self.lane["inbox_file"] = str(self.td / "inbox" / "l1-pilot.md")
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        self.assertEqual(rec["guard_role"], "orchestrator")
+        self.assertEqual(rec["l1_inbox"], self.lane["inbox_file"])
+
+    def test_guard_role_is_not_inherited_from_the_shell(self):
+        os.environ["AUTOOS_GUARD_ROLE"] = "orchestrator"
+        os.environ["AUTOOS_L1_INBOX"] = "/some/other/inbox.md"
+        try:
+            rc, out = self._start()
+            self.assertEqual(rc, 0, out)
+            wait_file(self.rec)
+            rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        finally:
+            os.environ.pop("AUTOOS_GUARD_ROLE", None)
+            os.environ.pop("AUTOOS_L1_INBOX", None)
+        self.assertIsNone(rec["guard_role"],
+                          "an unguarded lane inherited the orchestrator role")
+        self.assertIsNone(rec["l1_inbox"])
+
+    # (3f) the lane's own first-prompt file is posted verbatim (no handoff head)
+    def test_first_prompt_file_is_posted_verbatim(self):
+        pf = self.td / "first-prompt.md"
+        pf.write_text("BRIEF BODY\n\nFOOTER LINE\n", encoding="utf-8")
+        self.lane["first_prompt_file"] = str(pf)
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        prompts = [r for r in self.srv.requests
+                   if r["method"] == "POST" and r["path"].endswith("/prompt")]
+        pilot = [r for r in prompts if FAKE_SESSION_ID in r["path"]]
+        self.assertEqual(len(pilot), 1)
+        self.assertEqual(pilot[0]["body"]["text"], "BRIEF BODY\n\nFOOTER LINE\n")
+        self.assertNotIn("relaunched from the handoff", pilot[0]["body"]["text"])
+
+    def test_missing_first_prompt_file_refused_before_spawn(self):
+        self.lane["first_prompt_file"] = str(self.td / "gone.md")
+        rc, out = self._start()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("first_prompt_file", out)
+        self.assertFalse(self.rec.is_file(), "no child may be spawned")
+        self.assertEqual(self.srv.requests, [])
+
     # (4) second start is idempotent
     def test_start_idempotent(self):
         rc1, _ = self._start()

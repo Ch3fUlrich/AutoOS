@@ -28,8 +28,13 @@ start
     every 0.5 s for health_timeout_s (raw lane key, default 30); on
     failure kills the child by its recorded PID and exits 4.
   * POST /api/session {title, location.directory, model{providerID,
-    id}}, then POST /api/session/{id}/prompt with the relaunch line,
-    the first 40 lines of the handoff, and the MCP hint line verbatim.
+    id}}, then POST /api/session/{id}/prompt. The prompt body is the lane's
+    'first_prompt_file' read verbatim when set (D-665: an L2 phase brief is
+    composed by tools/oc_l2.py), else the relaunch line, the first 40 lines
+    of the handoff, and the MCP hint line verbatim.
+  * The child environment carries AUTOOS_GUARD_ROLE / AUTOOS_L1_INBOX when
+    the lane sets 'guard_role' / 'inbox_file', and drops both otherwise -
+    the guard's role is a lane property, never an inherited one.
   * Writes the state file {name, session_id, port, pid, started_utc}
     atomically (temp file + os.replace, mode 0600 on POSIX), prints
     'started <name> session <id> port <port> pid <pid>' and exits 0,
@@ -195,6 +200,16 @@ def _spawn(lane, rendered, password):
         env[var] = str(scratch / sub)
     env["OPENCODE_CONFIG"] = str(rendered)
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
+    # D-665 (AO-L2-LAUNCH): the bash-guard role and the L1 inbox are lane
+    # properties, not host properties - so each is set from the lane and
+    # removed otherwise. An L1 lane must never gain the orchestrator rules
+    # because some unrelated shell happened to export the variable.
+    for _var, _key in ((oc_l1.ENV_GUARD_ROLE, "guard_role"),
+                       (oc_l1.ENV_L1_INBOX, "inbox_file")):
+        if lane.get(_key):
+            env[_var] = lane[_key]
+        else:
+            env.pop(_var, None)
     argv = [lane["opencode_bin"], "serve", "--hostname", HOST,
             "--port", str(lane["serve_port"])]
     err_log = _child_stderr_log(scratch)
@@ -246,15 +261,29 @@ def _create_session(port, password, lane):
     return sid
 
 
-def _post_first_prompt(port, password, sid, lane):
-    text = (
+def _first_prompt_text(lane):
+    """The pilot's first prompt: the lane's own file verbatim when it names
+    one (D-665: an L2 phase brief + footer is composed by tools/oc_l2.py, and
+    the 40-line handoff head is the wrong body for it), else the relaunch
+    head of the handoff."""
+    path = lane.get("first_prompt_file")
+    if path:
+        p = Path(path)
+        if not p.is_file():
+            raise oc_l1.LaneError("first_prompt_file not found: %s" % path)
+        return p.read_text(encoding="utf-8", errors="replace")
+    return (
         "You are %s, relaunched from the handoff. Read %s first, then "
         "continue.\n\n%s\n\n%s"
         % (lane["name"], lane["handoff"], _handoff_head(lane["handoff"]),
            HINT_LINE)
     )
+
+
+def _post_first_prompt(port, password, sid, lane):
     status, _ = _request(port, "POST", "/api/session/%s/prompt" % sid,
-                         body={"text": text}, password=password)
+                         body={"text": _first_prompt_text(lane)},
+                         password=password)
     if status != 200:
         raise oc_l1.LaneError("first prompt failed: HTTP %d" % status)
 
@@ -285,6 +314,14 @@ def cmd_start(lane, args):
             "config" % name,
             file=sys.stderr,
         )
+        return 2
+
+    # A named first-prompt file that does not exist is a config defect too:
+    # refuse before spawning, not after the canary has been paid for (D-665).
+    fpf = lane.get("first_prompt_file")
+    if fpf and not Path(fpf).is_file():
+        print("oc_l1: error: start refused: lane '%s' names a first_prompt_file "
+              "that does not exist: %s" % (name, fpf), file=sys.stderr)
         return 2
 
     # Idempotence: a state file naming a live session wins over starting.

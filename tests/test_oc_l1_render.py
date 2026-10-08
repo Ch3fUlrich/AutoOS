@@ -159,6 +159,23 @@ class RenderShapeTest(unittest.TestCase):
         cfg, _ = render(self.tmp)
         self.assertEqual(cfg["permission"], {"bash": "allow", "edit": "allow", "read": "allow", "autoos-agent_*": "allow"})
 
+    def test_lane_permission_overrides_beat_the_defaults(self):
+        # D-665 (AO-L2-LAUNCH): an L2 lane renders task: deny - it may not
+        # launch a nested agent session, every worker goes through the spawner.
+        cfg, _ = render(self.tmp, permission={"task": "deny", "webfetch": "deny"})
+        self.assertEqual(cfg["permission"]["task"], "deny")
+        self.assertEqual(cfg["permission"]["webfetch"], "deny")
+        self.assertEqual(cfg["permission"]["bash"], "allow")
+
+    def test_bad_permission_override_refused(self):
+        for bad in ({"task": "no"}, {"task": True}, "task", {"external_directory": "deny"},
+                    {"TASK": "deny"}):
+            lane = make_lane(self.tmp, permission=bad)
+            cfg = write_cfg(self.tmp, lane)
+            rc, _, err = run_main(["render", "--name", "l1test", "--config", str(cfg)])
+            self.assertEqual(rc, 2, "permission=%r must be refused" % (bad,))
+            self.assertIn("permission", err)
+
     def test_plugins_key_is_plural_and_omitted_when_empty(self):
         cfg, _ = render(self.tmp)
         self.assertEqual(cfg["plugins"], [str(self.tmp / "plugins" / "placeholder-guard.js")])

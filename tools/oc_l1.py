@@ -49,6 +49,14 @@ PORT_MIN = 47200
 PORT_MAX = 47299
 NOT_IMPLEMENTED = "not implemented in step A1"
 _IDENT_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
+# Lane keys D-665 (AO-L2-LAUNCH): the rendered permission block and the two
+# child-env vars an orchestrator lane needs are config, so they are validated
+# here rather than passed through unvalidated into a model's runtime.
+_ROLE_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
+_PERMISSION_KEY_RE = re.compile(r"[a-z][a-z0-9_*]*\Z")
+PERMISSION_EFFECTS = ("allow", "deny", "ask")
+ENV_GUARD_ROLE = "AUTOOS_GUARD_ROLE"
+ENV_L1_INBOX = "AUTOOS_L1_INBOX"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -205,6 +213,52 @@ def validate_lane(lane, name):
     if tout is not None and (not isinstance(tout, (int, float)) or tout <= 0):
         raise LaneError("lane '%s': 'canary_timeout_s' must be positive" % name)
 
+    def need_abs(key):
+        v = lane.get(key)
+        if v is None:
+            return None
+        if not isinstance(v, str) or not v or not os.path.isabs(v):
+            raise LaneError("lane '%s': '%s' must be an absolute path" % (name, key))
+        return v
+
+    def need_permission_overrides():
+        raw = lane.get("permission")
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise LaneError(
+                "lane '%s': 'permission' must be an object of opencode permission "
+                "keys to %s" % (name, ", ".join(PERMISSION_EFFECTS))
+            )
+        out = {}
+        for key, effect in raw.items():
+            if key == "external_directory":
+                raise LaneError(
+                    "lane '%s': 'permission.external_directory' is rendered from the "
+                    "lane's own 'external_directory' list, not here" % name
+                )
+            if not isinstance(key, str) or not _PERMISSION_KEY_RE.match(key):
+                raise LaneError(
+                    "lane '%s': permission key '%s' must be a lower-case opencode "
+                    "permission name" % (name, key)
+                )
+            if effect not in PERMISSION_EFFECTS:
+                raise LaneError(
+                    "lane '%s': permission '%s' must be one of %s"
+                    % (name, key, ", ".join(PERMISSION_EFFECTS))
+                )
+            out[key] = effect
+        return out or None
+
+    guard_role = lane.get("guard_role")
+    if guard_role is not None and (
+        not isinstance(guard_role, str) or not _ROLE_RE.match(guard_role)
+    ):
+        raise LaneError(
+            "lane '%s': 'guard_role' must be a lower-case role name (the bash-guard "
+            "plugin knows 'orchestrator')" % name
+        )
+
     return {
         "name": name,
         "cwd": cwd,
@@ -226,6 +280,13 @@ def validate_lane(lane, name):
         # there); absent by default - the host overlay stays authoritative
         # for the live lanes.
         "external_directory": lane.get("external_directory"),
+        # D-665 (AO-L2-LAUNCH): the three seams an L2 lane needs - extra
+        # permission entries (task: deny), the guard's role, and where the
+        # lane reports to. All optional; an L1 lane renders exactly as before.
+        "permission": need_permission_overrides(),
+        "guard_role": guard_role,
+        "inbox_file": need_abs("inbox_file"),
+        "first_prompt_file": need_abs("first_prompt_file"),
     }
 
 
