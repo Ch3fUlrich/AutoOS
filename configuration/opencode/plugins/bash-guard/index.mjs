@@ -922,7 +922,15 @@ function orchestratorDenialReason(command, depth = 0) {
 //   feeds or runs something the list never approved (this is also what keeps
 //   the canary's own probe denied under the new role)
 // - every segment of a pipe is audited, so `ls | tee f` is refused as `tee`
-// - a wrapper (sudo, timeout, env ...) is skipped, not obeyed
+// - a wrapper (sudo, timeout, env ...) is skipped, not obeyed - and a head that
+//   is only a wrapper (`env`, `printenv`, `set`, `export`, `declare`) is refused
+//   rather than skipped past, because the wrapper IS the read
+// - a path operand is allowed only as a repo-relative path it cannot escape:
+//   absolute, `~`-led, `$`/backtick/glob-expanded, `..`-segmented or `//`-spaced
+//   is refused, and the secret files that live inside the repo (`.env*`,
+//   `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it
+// - a flag that hands the read a program, a repository or a pager is refused,
+//   inside a short bundle (`rg -uz`) as much as spelled out
 //
 // Anything else is denied, fail closed.
 // ---------------------------------------------------------------------------
@@ -964,11 +972,42 @@ const L2_RG_DENY = new Set([
 ]);
 const L2_PROC_RE = /(^|\/)proc\/(self|thread-self|[0-9]+|\*)\//;
 
+// Sonnet round-3 REJECT: `skipLeading` skips the `env` WRAPPER on purpose, so a
+// bare `env` — no wrapped command at all, just a dump of the environment it was
+// launched with — walked past it and had no head to audit. The lane's environment
+// carries the server password and the gateway keys. These are the names whose
+// whole job is to read or set that environment; they are denied wherever
+// `skipLeading` left them, prefix or head.
+const L2_ENV_DUMP_HEADS = new Set(["env", "printenv", "set", "export", "declare"]);
+
+function splitOptionDeny(deny) {
+  // A short flag hides inside a bundle (`rg -uz` is `rg -u -z`), so an exact
+  // token match on "-z" never saw it. Split the deny list by spelling and let
+  // the caller test a bundle character by character.
+  const long = new Set();
+  const short = new Set();
+  for (const d of deny) {
+    if (d.startsWith("--")) long.add(d.slice(2));
+    else if (d.startsWith("-")) short.add(d.slice(1));
+  }
+  return { long, short };
+}
+
 function l2OptionDenial(tokens, deny, label) {
+  const { long, short } = splitOptionDeny(deny);
   for (const t of tokens) {
-    const bare = t.split("=")[0];
-    if (deny.has(bare)) {
-      return `${label} ${t} hands the read-only command a program, a repository or a pager to run`;
+    if (t.startsWith("--")) {
+      if (long.has(t.slice(2).split("=")[0])) {
+        return `${label} ${t} hands the read-only command a program, a repository or a pager to run`;
+      }
+      continue;
+    }
+    if (t.length > 1 && t.startsWith("-")) {
+      for (const ch of t.slice(1)) {
+        if (short.has(ch)) {
+          return `${label} ${t} (bundle flag -${ch}) hands the read-only command a program, a repository or a pager to run`;
+        }
+      }
     }
   }
   return null;
@@ -981,6 +1020,51 @@ function l2ProcDenial(tokens, head) {
       return `${head} ${t} reads a live process entry - the lane's own environment (` +
              "server password, gateway keys) is readable there";
     }
+  }
+  return null;
+}
+
+function l2SecretOperandReason(head, t) {
+  // Repo-relative is not the same as safe: the secrets a lane must never read
+  // sit inside the repo, git-ignored, exactly where the work happens.
+  const base = baseName(t);
+  const secret = base.startsWith(".env") || base.endsWith(".key") || base.endsWith(".pem")
+    || base === "api-keys.yml" || (/credentials/.test(base) && base.endsWith(".json"));
+  if (!secret) return null;
+  return `${head} ${t} reads a secret file - an L2 needs none of the lane's credentials; ` +
+         "only the .example templates are safe to open";
+}
+
+function l2PathOutsideRepoReason(head, t) {
+  // An allow rule, not a spelling list: naming /proc/self/environ left
+  // /proc/./self/environ, //proc//self//environ, /proc/$$/environ, a globbed
+  // /proc, ~/.claude.json and ~/.config/opencode/auth.json all readable. A path
+  // an L2 may read is one the shell cannot move outside the checkout: relative,
+  // no expansion (a `$`, a backtick, a glob, a leading `~`), no `..` segment and
+  // no `//` (which makes a doubled separator read as a single one).
+  // Consequence: the absolute path is denied whatever it points at, and a glob
+  // character is denied even in a search pattern - fail closed both times.
+  const why = t.startsWith("/") ? "it is absolute"
+    : t.startsWith("~") ? "a leading ~ expands outside the checkout"
+    : t.includes("//") ? "a doubled separator hides a segment from the check"
+    : t.split("/").includes("..") ? "a .. segment leaves the checkout"
+    : /[$`]/.test(t) ? "the shell expands it"
+    : /[*?[\]{}]/.test(t) ? "a glob expands it"
+    : null;
+  if (!why) return null;
+  return `${head} ${t}: path outside repo - ${why}; an L2 reads repo-relative ` +
+         "paths inside its own lane checkout only";
+}
+
+function l2OperandReason(head, args) {
+  const procReason = l2ProcDenial(args, head);
+  if (procReason) return procReason;
+  for (const t of args) {
+    if (t.startsWith("-")) continue;
+    const secret = l2SecretOperandReason(head, t);
+    if (secret) return secret;
+    const outside = l2PathOutsideRepoReason(head, t);
+    if (outside) return outside;
   }
   return null;
 }
@@ -1042,6 +1126,15 @@ function l2ReadOnlyDenialReason(command) {
   for (const seg of collectSegments(command)) {
     const words = tokenizeSegment(seg);
     const idx = skipLeading(words, 0);
+    // The wrapper skip leaves a bare `env` with no head to audit, and that head
+    // is a dump of the lane's own environment: check the tokens `skipLeading`
+    // walked past, and the head it stopped on.
+    for (let k = 0; k < words.length && k <= idx; k++) {
+      if (L2_ENV_DUMP_HEADS.has(baseName(words[k]))) {
+        return `the ${words[k]} command reads or sets the lane's own environment (` +
+               "server password, gateway keys); an L2 may not dump it";
+      }
+    }
     // A VAR=value prefix is the payload, not a wrapper: GIT_PAGER, GIT_DIR and
     // GIT_CONFIG_ENV reach git's config knobs with no git flag at all, so an
     // assignment that `skipLeading` walked past must never become a pass.
@@ -1072,6 +1165,9 @@ function l2ReadOnlyDenialReason(command) {
       if (out) return `git ${g.sub} ${out} writes a file; an L2 may not write anywhere`;
       const restReason = l2OptionDenial(g.rest, L2_GIT_REST_DENY, `git ${g.sub}`);
       if (restReason) return restReason;
+      // A pathspec is a path even when it wears a revision's spelling.
+      const gOperand = l2OperandReason("git", g.rest);
+      if (gOperand) return gOperand;
       continue;
     }
     if (!L2_READ_HEADS.has(head)) {
@@ -1082,8 +1178,8 @@ function l2ReadOnlyDenialReason(command) {
       const rgReason = l2OptionDenial(args, L2_RG_DENY, "rg");
       if (rgReason) return rgReason;
     }
-    const procReason = l2ProcDenial(args, head);
-    if (procReason) return procReason;
+    const operandReason = l2OperandReason(head, args);
+    if (operandReason) return operandReason;
   }
   return null;
 }
