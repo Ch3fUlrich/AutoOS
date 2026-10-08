@@ -1751,9 +1751,20 @@ def _child_env_passed(name: str) -> bool:
     is named here rather than left to a wholesale ``dict(os.environ)``, so the
     fence stays the only channel a child env is built through. A client worker
     never gets it — ``worker_env`` strips the namespace on its way out.
+
+    HOSTADMISSION-OFF (lane AO-ADMISSION fix 2) is the second name in that
+    exception, for the same reason and with the same shape: ``AUTOOS_ADMISSION_OFF``
+    is read by whichever process evaluates the gate, so a value the MCP server
+    honours MUST reach the runner that evaluates it again or the two answer the
+    same question differently — the server answers "spawned" and the runner exits
+    13. Forwarding it to our own CLI (named here, copied in ``spawner_child_env``)
+    is the whole fix, and it stops there: ``worker_env``'s allowlist does not name
+    it, so a client worker never inherits the escape and cannot turn the host's
+    gate off for its own nested spawns. One behaviour: the escape means what it
+    says in every process that starts a worker, and in no process that is one.
     """
-    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS or
-            name == resolver.CLAUDE_CRITICAL_ENV)
+    return (_plan_env_passed(name) or name in WORKER_ENV_AUTOOS
+            or name in (resolver.CLAUDE_CRITICAL_ENV, ADMISSION_OFF_ENV))
 
 
 def spawner_child_env(base: dict | None = None, extra: dict | None = None,
@@ -1792,6 +1803,13 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None,
     # else in it is let back in.
     if src.get(resolver.CLAUDE_CRITICAL_ENV):
         env[resolver.CLAUDE_CRITICAL_ENV] = src[resolver.CLAUDE_CRITICAL_ENV]
+    # HOSTADMISSION-OFF: same rule, same one name, for the reason in
+    # `_child_env_passed` — the escape is read by the process that evaluates the
+    # gate, and the runner evaluates it, so the server's answer and the runner's
+    # exit code must come from the same environment. `worker_env` above never
+    # lets it through to a client worker: this copy is for our own CLI only.
+    if src.get(ADMISSION_OFF_ENV) == "1":
+        env[ADMISSION_OFF_ENV] = src[ADMISSION_OFF_ENV]
     for n, v in (extra or {}).items():
         if _worker_env_denied(n):
             print("autoos-agent: refused child env %s: secret-shaped name"

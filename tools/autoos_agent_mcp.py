@@ -743,6 +743,15 @@ def spawn(req: dict) -> dict:
     # before deciding where to run it). So the one gate that speaks for the machine
     # is applied before the run dir exists, and the caller gets state "rejected"
     # with the CLI's own text instead of a runner that dies on rc 13.
+    # HOSTADMISSION-OFF (fix 2): this reads THIS process's environment, and the
+    # process that answers with an exit code is the runner. `AUTOOS_ADMISSION_OFF`
+    # used to be scrubbed on the way down, which split the answer: admitted here,
+    # refused there, and the caller read "spawned" for a run that exited 13. It is
+    # forwarded to our own CLI child now (autoos-agent.`spawner_child_env`), so
+    # one environment decides both halves; the scrub still stops at the CLI, so a
+    # client worker cannot inherit the escape. A refusal this early is the only
+    # thing that can read as "rejected" from an admission: the claim of the slot
+    # is the runner's (`host_admission_claim`), not this server's.
     admission = agent.host_admission_refusal()
     if admission is not None:
         return _refused(admission)
@@ -1217,6 +1226,15 @@ def _state(path: str) -> dict:
             state, detail = "canceled", "cancelled"
         elif ex.get("rc") == 0:
             state, detail = "completed", "done"
+        elif ex.get("rc") == agent.EXIT_HOST_ADMISSION:
+            # HOSTADMISSION-OFF (lane AO-ADMISSION fix 2): the host refused this
+            # run after this server had already said yes — the machine filled in
+            # the gap between the pre-check and the runner's own gate. It is a
+            # refusal, the same answer `spawn()` gives when it is the one that
+            # sees an empty host, so it is named "rejected" here and not "failed":
+            # nothing ran, nothing was lost, and a caller that retries must retry
+            # against the host's room, not against a bug.
+            state, detail = "rejected", "host-admission"
         else:
             state, detail = "failed", "failed"
     elif not job.get("pid"):

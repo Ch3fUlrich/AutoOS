@@ -20938,6 +20938,29 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, [], "a rejected spawn starts no runner")
         self.assertEqual(os.listdir(tmp), [], "a rejected spawn creates no run dir")
 
+    def test_a_runner_refused_on_admission_reads_as_rejected_not_failed(self):
+        # HOSTADMISSION-OFF: the pre-check and the runner's own gate are two
+        # reads of one machine, and the machine may fill between them. When it
+        # does, the run exits 13 having started nothing — a refusal the caller
+        # can only act on if `status` says so. A "failed" here reads as a bug in
+        # the run, and there was no run.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        run_id = "20261008-135433-admission-reject-abc123"
+        path = os.path.join(tmp, "agents", run_id)
+        os.makedirs(path)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            mcp_server._write_json(os.path.join(path, "job.json"),
+                                   {"id": run_id, "request": {}, "task": "t",
+                                    "argv": [], "cwd": str(ROOT), "route": {},
+                                    "started": time.time()})
+            mcp_server._write_exit(path, {"rc": self.agent.EXIT_HOST_ADMISSION,
+                                          "ended": time.time()})
+            st = mcp_server.status(run_id)
+        self.assertEqual(st["state"], "rejected", st)
+        self.assertEqual(st["detail"], "host-admission")
+        self.assertEqual(st["rc"], self.agent.EXIT_HOST_ADMISSION)
+
     # --- HOSTADMISSION-RACE (fix 1) ---------------------------------------
     # The gate used to be check-then-act: it counted the live workers, and the
     # worker record — the thing the next count reads — landed minutes later,
@@ -21047,6 +21070,13 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIsNone(token)
         self.assertEqual(self.claims(), [])
 
+    # --- HOSTADMISSION-OFF (fix 2) ----------------------------------------
+    # The escape and the gate were read in two different processes and the env
+    # name was scrubbed between them: AUTOOS_ADMISSION_OFF=1 in the MCP server's
+    # environment answered "spawned" there while the runner, which never saw it,
+    # exited 13. One decision now — the name reaches our own CLI child, and stops
+    # there.
+
     def test_cmd_run_hands_its_host_claim_to_the_worker_record(self):
         # The claim is only a stand-in for the record. A run that leaves one
         # behind after its record exists would count as two live workers for the
@@ -21074,6 +21104,22 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(len(rows), 1, rows)
         self.assertEqual(agent.live_worker_count(self.workers), 0,
                          "the run is over: the host is empty again")
+
+    def test_admission_off_reaches_the_cli_child_and_stops_there(self):
+        agent = self.agent
+        src = {"AUTOOS_ADMISSION_OFF": "1", "PATH": os.environ.get("PATH", ""),
+               "HOME": self.tmp}
+        cli = agent.spawner_child_env(base=src)
+        self.assertEqual(cli.get("AUTOOS_ADMISSION_OFF"), "1",
+                         "the runner evaluates the gate: it must see the escape")
+        self.assertTrue(agent._child_env_passed("AUTOOS_ADMISSION_OFF"))
+        # ...and it is not a token, so a caller can still hand it down; but it is
+        # not on the WORKER allowlist, so the client the run launches never gets
+        # it: a worker cannot turn the host's gate off for its own spawns.
+        worker = agent.worker_env({"env": {"AUTOOS_ADMISSION_OFF": "1"},
+                                   "cwd": self.tmp}, None, base=src)
+        self.assertNotIn("AUTOOS_ADMISSION_OFF", worker,
+                         "a client worker never inherits the escape")
 
 
 if __name__ == "__main__":
