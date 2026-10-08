@@ -242,8 +242,9 @@ class LegBanTests(unittest.TestCase):
 
 
 class StrictGateTests(unittest.TestCase):
-    """(f)-(i) judge the combos a reviewer opted in, so main stays green until
-    D2 re-chains them."""
+    """(f)-(i) judge only the combos a reviewer opted in by name. D1 shipped the
+    gate with an empty list; D2 re-chained the layers and listed them, so the
+    shipped file must judge its own list and pass both modes."""
 
     def test_an_absent_list_judges_nothing(self):
         self.assertFalse(cc.d657_run_for("l1-orchestrator", {}, False))
@@ -265,34 +266,43 @@ class StrictGateTests(unittest.TestCase):
                                          {"d657_combos": "l1-orchestrator"},
                                          False))
 
-    def test_the_committed_combos_json_has_not_opted_in_yet(self):
-        """D1 changes no combo chain: until D2 lists an id, the shipped gate
-        stays rc 0 on the shipped file."""
+    def test_the_committed_combos_json_opted_its_chains_in(self):
+        """D2 listed the re-chained ids: the gate judges exactly that list, and
+        every id in it names a combo that is really shipped."""
         doc = json.loads(COMBOS_PATH.read_text(encoding="utf-8"))
         judged = [c["name"] for c in doc.get("combos", [])
                   if cc.d657_run_for(c["name"], doc, False)]
-        self.assertEqual(judged, [])
+        self.assertEqual(sorted(judged), sorted(doc["d657_combos"]))
+        self.assertGreater(len(judged), 0)
+        shipped = [c["name"] for c in doc.get("combos", [])]
+        for combo_id in doc["d657_combos"]:
+            self.assertIn(combo_id, shipped, combo_id)
 
-    def test_the_script_passes_by_default_and_reports_under_strict(self):
+    def test_the_script_passes_by_default_and_judges_under_strict(self):
+        doc = json.loads(COMBOS_PATH.read_text(encoding="utf-8"))
         default = subprocess.run([sys.executable, str(ROOT / "tools" /
                                                      "combo-contract.py")],
                                  cwd=str(ROOT), capture_output=True, text=True,
                                  timeout=180)
         self.assertEqual(default.returncode, 0, default.stdout + default.stderr)
-        self.assertIn("judged 0 of", default.stdout)
+        match = re.search(r"judged (\d+) of (\d+) combos", default.stdout)
+        self.assertIsNotNone(match, default.stdout[-500:])
+        self.assertEqual(int(match.group(1)), len(doc["d657_combos"]))
+        self.assertEqual(int(match.group(2)), len(doc["combos"]))
         strict = subprocess.run([sys.executable, str(ROOT / "tools" /
                                                      "combo-contract.py"),
                                  "--strict-d657"],
                                 cwd=str(ROOT), capture_output=True, text=True,
                                 timeout=180)
-        self.assertEqual(strict.returncode, 1, strict.stdout[-2000:])
+        self.assertEqual(strict.returncode, 0, strict.stdout[-2000:])
         # --strict-d657 judges every combo, whatever the file's count is today.
         match = re.search(r"judged (\d+) of (\d+) combos", strict.stdout)
         self.assertIsNotNone(match, strict.stdout[-500:])
         self.assertGreater(int(match.group(1)), 0)
         self.assertEqual(match.group(1), match.group(2))
-        for tag in (": (f)", ": (g)", ": (h)", ": (i)"):
-            self.assertIn(tag, strict.stdout, tag)
+        # The four gates ran and named themselves; the verdict line says so.
+        self.assertIn("d657 (f)-(i) judged", strict.stdout)
+        self.assertIn("contract PASS", strict.stdout)
 
 
 if __name__ == "__main__":
