@@ -2089,9 +2089,13 @@ class McpStdioTests(unittest.TestCase):
             names = {t["name"] for t in replies[2]["result"]["tools"]}
             # c2 2026-10-06: the lane lifecycle tools (oc_status/oc_start/
             # oc_restart) join the set.
+            # D-665 2026-10-08 (AO-L2-LAUNCH): the L2 phase-lane tools
+            # (l2_start/l2_status/l2_stop/l2_inbox) join it (R-orch-11: a new
+            # tool is only reachable if the pin says so).
             self.assertEqual(names, {"list_clients", "spawn", "status", "result", "cancel",
                                      "respond", "route", "list_agents", "context", "heartbeat",
-                                     "ps", "oc_status", "oc_start", "oc_restart"})
+                                     "ps", "oc_status", "oc_start", "oc_restart",
+                                     "l2_start", "l2_status", "l2_stop", "l2_inbox"})
             spawned = json.loads(replies[3]["result"]["content"][0]["text"])
             self.assertEqual(spawned["route"]["combo"], "l3-driver")
             run_dir = os.path.join(tmp, "agents", spawned["id"])

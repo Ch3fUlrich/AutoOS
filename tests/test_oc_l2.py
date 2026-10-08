@@ -403,5 +403,86 @@ class LaneTest(unittest.TestCase):
             self.assertTrue(payload.get("detail") or payload.get("error"), payload)
 
 
+class McpToolTest(unittest.TestCase):
+    """tools/autoos_agent_mcp.py's four wrappers: they hand the lane over as
+    ARGV, give the child only the allowlisted environment, and return the
+    CLI's JSON as the answer - the server itself renders no lane."""
+
+    def setUp(self):
+        import autoos_agent_mcp as mcp
+        self.mcp = mcp
+
+    def _call(self, fn, *args, **env):
+        seen = {}
+
+        class Res:
+            returncode = 0
+            stdout = json.dumps({"lane": "l2-proj-p1", "exit_code": 0})
+            stderr = ""
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            seen["kw"] = kw
+            return Res()
+
+        saved = {k: os.environ.get(k) for k in env}
+        for k, v in env.items():
+            os.environ[k] = v
+        try:
+            with mock.patch.object(self.mcp.subprocess, "run", fake_run):
+                out = fn(*args)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        return out, seen
+
+    def test_l2_start_argv_and_allowlisted_env(self):
+        out, seen = self._call(self.mcp.l2_start, "/srv/proj", "p1", "/srv/brief.md",
+                               **{"AUTOOS_OCL1_PW": "sk-NOT-A-REAL-VALUE-000"})
+        self.assertEqual(out["lane"], "l2-proj-p1")
+        self.assertEqual(seen["argv"][2:], ["start", "--repo", "/srv/proj",
+                                            "--phase", "p1", "--brief", "/srv/brief.md",
+                                            "--combo", "l2-orchestrator"])
+        self.assertEqual(seen["argv"][1], os.path.join(self.mcp.TOOLS_DIR, "oc_l2.py"))
+        self.assertIs(seen["kw"]["stdin"], subprocess.DEVNULL)
+        env = seen["kw"]["env"]
+        self.assertEqual(env["AUTOOS_OCL1_PW"], "sk-NOT-A-REAL-VALUE-000")
+        # an allowlist, not the caller's whole environment
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
+        self.assertEqual(seen["kw"]["timeout"], self.mcp._L2_TIMEOUT_S["start"])
+
+    def test_the_other_three_tools_pass_the_lane(self):
+        for fn, args, expected in (
+                (self.mcp.l2_status, ("l2-proj-p1",), ["status", "--lane", "l2-proj-p1"]),
+                (self.mcp.l2_stop, ("l2-proj-p1",), ["stop", "--lane", "l2-proj-p1"]),
+                (self.mcp.l2_inbox, ("l2-proj-p1", "take it"),
+                 ["inbox", "--lane", "l2-proj-p1", "--text", "take it"])):
+            _, seen = self._call(fn, *args)
+            self.assertEqual(seen["argv"][2:], expected)
+            self.assertEqual(seen["kw"]["timeout"],
+                             self.mcp._L2_TIMEOUT_S[expected[0]])
+
+    def test_a_launcher_that_prints_nothing_still_answers(self):
+        class Res:
+            returncode = 1
+            stdout = ""
+            stderr = "Traceback: boom"
+
+        with mock.patch.object(self.mcp.subprocess, "run", lambda *a, **k: Res()):
+            out = self.mcp.l2_status("l2-proj-p1")
+        self.assertIs(out["ok"], False)
+        self.assertEqual(out["exit_code"], 1)
+        self.assertIn("boom", out["detail"])
+
+    def test_the_password_value_never_travels_in_argv(self):
+        _, seen = self._call(self.mcp.l2_inbox, "l2-proj-p1", "work",
+                             **{"AUTOOS_OCL1_PW": "sk-NOT-A-REAL-VALUE-000"})
+        self.assertNotIn("sk-NOT-A-REAL-VALUE-000", " ".join(seen["argv"]))
+
+
 if __name__ == "__main__":
     unittest.main()

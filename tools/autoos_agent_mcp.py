@@ -2,8 +2,10 @@
 """MCP server (stdio) over tools/autoos-agent.py: spawn agents from any MCP client.
 
 Tools: list_clients, spawn, status, result, cancel, respond, route,
-list_agents, context, heartbeat (spec 6.2; heartbeat: R-heartbeat-02/03,
-R-pause-01, R-handoff-07; respond: the spec 9 ask-back). spawn is
+list_agents, context, heartbeat, ps, oc_status/oc_start/oc_restart (L1 lane
+lifecycle, c2), l2_start/l2_status/l2_stop/l2_inbox (L2 phase lanes, D-665)
+(spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01, R-handoff-07; respond: the
+spec 9 ask-back). spawn is
 asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
@@ -228,6 +230,79 @@ def oc_restart(lane: str) -> dict:
     return {"lane": lane, "action": "restarted",
             "killed_pids": killed, "removed_state": removed,
             "detail": "the lane's watcher starts it within ~2 minutes; verify with oc_status"}
+
+
+# --- L2 phase lanes (D-665 AO-L2-LAUNCH): l2_start / l2_status / l2_stop /
+# l2_inbox through tools/oc_l2.py, which resolves a phase into a lane and hands
+# the render-serve-canary-prompt pipeline to tools/oc_l1.py. The shape mirrors
+# the oc_* helpers above: an allowlisted environment, the server password
+# present by NAME only and never read here, and the CLI's own JSON as the
+# answer - this server renders no lane and kills no pid itself.
+
+_OC_L2_SCRIPT = os.path.join(TOOLS_DIR, "oc_l2.py")
+# What oc_l2.py reads. AUTOOS_OCL1_PW is already in the L1 allowlist; the rest
+# are the binary path, where the L2 reports to, the run dir whose inbox the
+# L2's own lines land in, and where the lane state lives.
+_OC_L2_ENV_KEYS = _OC_L1_ENV_KEYS + ("AUTOOS_OPENCODE_BIN", "AUTOOS_L1_INBOX",
+                                     "AUTOOS_RUN_DIR", "AUTOOS_OCL2_STATE_DIR",
+                                     "AUTOOS_OCL2_GUARD_DIR")
+# start pays for a canary model call; the others are one HTTP round trip plus a
+# kill wait.
+_L2_TIMEOUT_S = {"start": 420, "status": 90, "stop": 90, "inbox": 90}
+
+
+def _oc_l2_env() -> dict:
+    return {k: os.environ[k] for k in _OC_L2_ENV_KEYS if k in os.environ}
+
+
+def _oc_l2(sub: str, argv: list) -> dict:
+    """One oc_l2.py call. It prints exactly one JSON object - the verdict -
+    so the answer travels as data, not as text a caller has to re-parse."""
+    r = subprocess.run([sys.executable, _OC_L2_SCRIPT, sub] + list(argv),
+                       capture_output=True, text=True, timeout=_L2_TIMEOUT_S[sub],
+                       stdin=subprocess.DEVNULL, env=_oc_l2_env())
+    text = (r.stdout or "").strip()
+    try:
+        out = json.loads(text)
+    except ValueError:
+        out = {"ok": False,
+               "detail": ((text + " " + (r.stderr or "").strip()).strip()[-200:]
+                          or "oc_l2.py %s printed no JSON" % sub)}
+    if not isinstance(out, dict):
+        out = {"ok": False, "detail": "unexpected oc_l2.py output: %s" % text[:200]}
+    out.setdefault("exit_code", r.returncode)
+    return out
+
+
+def l2_start(repo: str, phase: str, brief_path: str,
+             combo: str = "l2-orchestrator") -> dict:
+    """Start the L2 lane for one phase: lane `l2-<repo>-<phase>`, model = the
+    gateway combo, the autoos-agent spawner as its only MCP, permission.task
+    denied and the bash-guard in orchestrator role. The first prompt is the
+    brief's own text plus the fixed role footer."""
+    return _oc_l2("start", ["--repo", str(repo), "--phase", str(phase),
+                            "--brief", str(brief_path), "--combo", str(combo)])
+
+
+def l2_status(lane: str) -> dict:
+    """live | silent | dead | absent for a phase lane, with its session id,
+    port and last canary result."""
+    return _oc_l2("status", ["--lane", str(lane)])
+
+
+def l2_stop(lane: str) -> dict:
+    """Stop a phase lane cleanly: the recorded PID's process group, then the
+    state file. An orphaned `serve` still holding the port would make the next
+    start's health poll answer for the wrong server (R-coord-10), so a stop
+    that cannot prove the tree dead reports orphan=true and keeps the state."""
+    return _oc_l2("stop", ["--lane", str(lane)])
+
+
+def l2_inbox(lane: str, text: str) -> dict:
+    """Hand a line of work to a running phase lane: append one timestamped
+    record to the lane's inbox and nudge its session with the launcher's own
+    prompt call. The line is kept even when the lane is not live."""
+    return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
 
 
 def kill_store_dir() -> str:
@@ -1580,6 +1655,47 @@ def serve() -> None:
         starts the lane within ~2 minutes). Never kills by process name and
         never touches passwords. Verify afterwards with oc_status."""
         return oc_restart(lane)
+
+    @app.tool(name="l2_start")
+    def _l2_start(repo: str, phase: str, brief_path: str,
+                  combo: str = "l2-orchestrator") -> dict:
+        """D-665 (AO-L2-LAUNCH): start the L2 lane for one phase and give it
+        its brief. Lane `l2-<repo>-<phase>`; model = the gateway combo (its own
+        declared context, so no 128k clamp); MCP = the autoos-agent spawner
+        ONLY; OpenCode permission.task denied and the bash-guard plugin in
+        orchestrator role, so the L2 coordinates and never edits code; first
+        prompt = the contents of brief_path plus the fixed footer (skill name,
+        spawn tier-3 through autoos-agent, report REPORT/DONE to the L1 inbox).
+        Needs AUTOOS_OCL1_PW (server password, by name only) and
+        AUTOOS_OPENCODE_BIN in this session's environment, and AUTOOS_L1_INBOX
+        or the lane reports nowhere. Refuses when the phase lane is already
+        running - send it work with l2_inbox instead. Answers lane, port,
+        session_id, pid, canary{denied,detail}; exit_code 5 is
+        UNATTENDED-REFUSED (canary not denied: l2_stop, fix the guard, start
+        again)."""
+        return l2_start(repo, phase, brief_path, combo)
+
+    @app.tool(name="l2_status")
+    def _l2_status(lane: str) -> dict:
+        """D-665: a phase lane's verdict - live / silent / dead / absent - plus
+        its session id, port, phase and last canary result."""
+        return l2_status(lane)
+
+    @app.tool(name="l2_stop")
+    def _l2_stop(lane: str) -> dict:
+        """D-665: stop a phase lane cleanly (R-coord-10): kill the recorded
+        PID's process group, verify it died, then remove the state file. A PID
+        whose command line is not the lane's opencode is never killed; an
+        orphan reports stopped=false."""
+        return l2_stop(lane)
+
+    @app.tool(name="l2_inbox")
+    def _l2_inbox(lane: str, text: str) -> dict:
+        """D-665: give a running phase lane more work - append one timestamped
+        record to the lane's inbox and nudge its session with the launcher's
+        own prompt call. The append happens whether or not the nudge lands;
+        empty text is refused."""
+        return l2_inbox(lane, text)
 
     @app.tool(name="heartbeat")
     def _heartbeat(inbox: str | None = None, transcript: str | None = None,
