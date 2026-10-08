@@ -25,6 +25,7 @@ import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
     FAKE_SESSION_ID,
+    FAKE_STDERR_NOTE,
     HINT_EXPECTED,
     PW_ENV,
     PW_VALUE,
@@ -35,6 +36,16 @@ from _oc_l1_fakes import (  # noqa: E402
     wait_file,
     write_cfg,
 )
+
+
+def wait_log_text(path, needle, seconds=5):
+    """Wait until the child's stderr note reaches the log (the write is async)."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if path.is_file() and needle in path.read_text(encoding="utf-8", errors="replace"):
+            return True
+        time.sleep(0.1)
+    return False
 
 
 class StartTest(unittest.TestCase):
@@ -168,6 +179,33 @@ class StartTest(unittest.TestCase):
                      "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
                      "XDG_CACHE_HOME"):
             self.assertIn(name, rec["env_names"], "child env missing %s" % name)
+
+    # (3b) D-665 fix 4: the plugin's fail-open notes go to the child's stderr,
+    #      which used to be DEVNULL — a guard that never loaded was invisible.
+    def test_child_stderr_lands_in_scratch_opencode_log(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        log = Path(self.lane["scratch_dir"]) / "opencode.log"
+        self.assertTrue(log.is_file(), "the child stderr log must exist")
+        self.assertTrue(wait_log_text(log, FAKE_STDERR_NOTE),
+                        "the child's stderr must be captured, not DEVNULL")
+
+    # (3c) a relaunch appends: the previous cycle's notes are the evidence
+    def test_child_stderr_log_survives_a_relaunch(self):
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        log = Path(self.lane["scratch_dir"]) / "opencode.log"
+        self.assertTrue(wait_log_text(log, FAKE_STDERR_NOTE))
+        first = log.read_text(encoding="utf-8")
+        os.remove(self.lane["state_file"])  # the watcher's rc!=0 path deletes it
+        rc2, out2 = self._start()
+        self.assertEqual(rc2, 0, out2)
+        both = FAKE_STDERR_NOTE + "\n" + FAKE_STDERR_NOTE
+        self.assertTrue(wait_log_text(log, both),
+                        "the second start must append its own stderr line")
+        body = log.read_text(encoding="utf-8")
+        self.assertTrue(body.startswith(first),
+                        "the earlier stderr must not be truncated away")
 
     # (4) second start is idempotent
     def test_start_idempotent(self):

@@ -17,6 +17,9 @@ FAKE_SESSION_ID = "ses_fake42"
 # the fake lane is a guarded lane: `start` refuses an empty plugins list
 # (D-665), so the default must carry the bash-guard plugin directory.
 GUARD_PLUGIN = "/fake/plugins/bash-guard"
+# the fake binary writes this to ITS stderr, the way the real opencode child
+# writes the plugin's fail-open notes there (D-665 fix 4: nothing may swallow it)
+FAKE_STDERR_NOTE = "fake-opencode: child stderr note"
 HINT_EXPECTED = (
     "MCP tools are available only through the built-in execute tool "
     "(code mode): call execute with a short script that invokes the "
@@ -31,9 +34,11 @@ names = [k for k in ("OPENCODE_CONFIG", "OPENCODE_SERVER_PASSWORD",
     "XDG_CACHE_HOME") if k in os.environ]
 with open(rec, "w", encoding="utf-8") as f:
     json.dump({"argv": sys.argv[1:], "env_names": names, "pid": os.getpid()}, f)
+sys.stderr.write("%s\\n")
+sys.stderr.flush()
 import time
 time.sleep(300)
-""" % RECORD_ENV
+""" % (RECORD_ENV, FAKE_STDERR_NOTE)
 
 
 def make_fake_bin(td, fake_py, python_exe):

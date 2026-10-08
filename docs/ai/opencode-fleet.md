@@ -114,6 +114,8 @@ MCP tools): a pilot that is not known to be guarded never runs.
 - The server child inherits the launcher's FULL environment (opencode, `uv` and the MCP servers need PATH, the profile
   directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
   shell that holds only what the pilot may see.
+- The child's stderr is appended to `<scratch_dir>/opencode.log` (mode 0600): the guard's fail-open notes are written there, and
+  a `DEVNULL` made "the plugin never loaded" indistinguishable from "the plugin allowed" (D-665).
 
 Exit codes of `start`: 0 started or already live, 2 config or validation error (password env unset, empty `plugins`), 4 health
 timeout (the child is killed by its recorded PID), 5 canary not denied.

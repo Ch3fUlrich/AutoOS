@@ -20,8 +20,8 @@ Covered:
      ts newer
   7. heartbeat merge keeps the pilot's `turn`, resets state and
      current_step
-  8. the password value appears in no argv, state file, heartbeat.json
-     or stdout
+  8. the password value appears in no argv, state file, heartbeat.json,
+     stdout or the child's stderr log
   9. D-665 fix 1: a denial carried by the `bash` or `execute` spelling counts
      (opencode renamed bash -> shell; the plugin hooks both), and a session with
      no shell call reports the tool names and assistant text it did see
@@ -392,6 +392,17 @@ class TestNoLeak(_Base):
         for where, blob in (("argv", argv), ("state file", state_text),
                             ("heartbeat.json", hb_text), ("stdout", out)):
             self.assertNotIn(PW_VALUE, blob, "password leaked in %s" % where)
+
+    # (8b) D-665 fix 4 added a new file the launcher opens for the child: the
+    #      child env carries the password, so nothing of the launcher's may
+    #      reach that log either.
+    def test_password_not_in_child_stderr_log(self):
+        rc, _ = self._start()
+        self.assertEqual(rc, 0)
+        log = Path(self.lane["scratch_dir"]) / "opencode.log"
+        self.assertTrue(log.is_file(), "the child stderr log must exist")
+        self.assertNotIn(PW_VALUE,
+                         log.read_text(encoding="utf-8", errors="replace"))
 
 
 if __name__ == "__main__":

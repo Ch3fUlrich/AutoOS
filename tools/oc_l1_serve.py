@@ -19,7 +19,9 @@ start
     the lane cwd and a CHILD environment that isolates XDG_* under
     scratch_dir and sets OPENCODE_CONFIG plus OPENCODE_SERVER_PASSWORD
     (child env only - never on the command line, never written to a
-    file, never printed).
+    file, never printed). The child's stderr is appended to
+    <scratch_dir>/opencode.log so the plugin's fail-open notes are
+    visible after the fact (D-665).
   * Polls GET /api/session/active with Basic auth (user 'opencode')
     every 0.5 s for health_timeout_s (raw lane key, default 30); on
     failure kills the child by its recorded PID and exits 4.
@@ -115,6 +117,25 @@ def _kill_pid(pid):
         pass
 
 
+def _child_stderr_log(scratch):
+    """Open <scratch>/opencode.log for the child's stderr; None on any failure.
+
+    The bash-guard plugin writes its fail-open notes to the child's stderr;
+    DEVNULL made an un-loaded guard invisible (D-665). Losing the log must
+    never lose the lane, so this opens best-effort and the caller falls back.
+    """
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+        fh = open(scratch / "opencode.log", "ab")
+    except OSError:
+        return None
+    try:
+        os.chmod(fh.fileno(), 0o600)  # child env vars are in this file's neighbourhood
+    except OSError:
+        pass
+    return fh
+
+
 def _spawn(lane, rendered, password):
     """Start the explicit opencode binary; child env isolated in scratch."""
     scratch = Path(lane["scratch_dir"])
@@ -127,17 +148,24 @@ def _spawn(lane, rendered, password):
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
     argv = [lane["opencode_bin"], "serve", "--hostname", HOST,
             "--port", str(lane["serve_port"])]
+    err_log = _child_stderr_log(scratch)
     kwargs = {
         "cwd": lane["cwd"],
         "env": env,
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": err_log if err_log is not None else subprocess.DEVNULL,
     }
     if os.name != "nt":
         kwargs["start_new_session"] = True
     else:
         kwargs["creationflags"] = CREATE_NO_WINDOW
-    return subprocess.Popen(argv, **kwargs)
+    try:
+        proc = subprocess.Popen(argv, **kwargs)
+    finally:
+        # the child holds its own inherited descriptor; the parent must not
+        if err_log is not None:
+            err_log.close()
+    return proc
 
 
 # --- start ----------------------------------------------------------------------
