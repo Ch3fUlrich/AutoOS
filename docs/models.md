@@ -66,11 +66,11 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → vertex `gemini-3.8-flash` |
+| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` |
 | `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
 | `l3-driver-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
-| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → vertex `gemini-3.8-flash` |
+| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
 | `l3-implementer-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
 | `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
 | `l3-researcher-clean` | cheap | 1M | vertex `gemini-3.8-flash` |
@@ -84,7 +84,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `or-north-mini-code-free` | free | 256k | openrouter `cohere/north-mini-code:free` |
 | `ovh-gpt-oss-120b` | credit | 128k | ~~ovhcloud `gpt-oss-120b`~~ (unavailable) |
 | `ovh-qwen3-coder-30b` | credit | 128k | ~~ovhcloud `Qwen3-Coder-30B-A3B-Instruct`~~ (unavailable) |
-| `ovh-qwen3.8-27b` | credit | 128k | ~~ovhcloud `Qwen3.8-27B`~~ (unavailable) |
+| `ovh-qwen3.8-27b` | credit | 128k | ovhcloud `Qwen3.8-27B` |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | ~~meta_api `muse-spark-1.3-contributor`~~ (unavailable) → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |

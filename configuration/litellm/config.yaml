@@ -129,6 +129,10 @@ model_list:
     litellm_params:
       model: cohere/command-a-plus-05-2026
       api_key: os.environ/COHERE_API_KEY
+  - model_name: l3-driver
+    litellm_params:
+      model: ovhcloud/Qwen3.5-397B-A17B
+      api_key: os.environ/OVHCLOUD_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver
 
@@ -214,6 +218,10 @@ model_list:
     litellm_params:
       model: cohere/command-a-plus-05-2026
       api_key: os.environ/COHERE_API_KEY
+  - model_name: l3-implementer
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-implementer
 
@@ -373,6 +381,16 @@ model_list:
   # AUTOOS-MANAGED-END or-north-mini-code-free
 
   # TORDER 2026-10-01: pinned single-provider credit tiers (ovh x3 + vertex)
+  # OVH-REPROBE 2026-10-08: providers.ovhcloud is available again, so
+  # ovh-qwen3.8-27b is a managed tier once more (it carries a LiteLLM transport
+  # and key). The other two OVH seats stay gated — ovh-gpt-oss-120b unpriced,
+  # ovh-qwen3-coder-30b retired — so an all-gated route renders no block at all.
+  # AUTOOS-MANAGED-START ovh-qwen3.8-27b
+  - model_name: ovh-qwen3.8-27b
+    litellm_params:
+      model: ovhcloud/Qwen3.8-27B
+      api_key: os.environ/OVHCLOUD_API_KEY
+  # AUTOOS-MANAGED-END ovh-qwen3.8-27b
 
 
 

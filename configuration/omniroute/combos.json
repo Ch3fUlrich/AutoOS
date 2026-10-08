@@ -189,7 +189,6 @@
     "opus-5-5",
     "ovh-gpt-oss-120b",
     "ovh-qwen3-coder-30b",
-    "ovh-qwen3.8-27b",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "spark-1.3-contributor"
@@ -326,6 +325,7 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
+        "ovh/Qwen3.5-397B-A17B",
         "vertex/gemini-3.8-flash"
       ]
     },
@@ -367,6 +367,7 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
+        "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash"
       ]
     },
@@ -446,6 +447,14 @@
       "context": "256k",
       "models": [
         "openrouter/cohere/north-mini-code:free"
+      ]
+    },
+    {
+      "name": "ovh-qwen3.8-27b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/Qwen3.8-27B"
       ]
     },
     {

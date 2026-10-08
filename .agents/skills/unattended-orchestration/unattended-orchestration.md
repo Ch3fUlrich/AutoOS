@@ -17,7 +17,7 @@ exactly one child per level:
 
 - `l1-orchestrator` (`mode: all`, model `omniroute/l1-orchestrator`): deny
   `subagent *`, allow `subagent l2-worker`.
-- `l2-worker` (`mode: subagent`, model `omniroute/l2-worker`): deny
+- `l2-worker` (`mode: subagent`, model `omniroute/l2-orchestrator`): deny
   `subagent *`, allow `subagent t3-reviewer`.
 - `t3-reviewer` (`mode: subagent`, model `omniroute/l3-driver`): deny
   `subagent *` (no allow rule — leaf).
@@ -43,7 +43,7 @@ measured live against opencode 2.0.16 (2026-09-24):
 3. **Children keep their model; the entry agent does not.** A subagent
    spawned through the subagent tool runs on its own agent's model, so depth
    and model stay paired: l1-orchestrator on `omniroute/l1-orchestrator`,
-   l2-worker on `omniroute/l2-worker`, t3-reviewer on `omniroute/l3-driver`.
+   l2-worker on `omniroute/l2-orchestrator`, t3-reviewer on `omniroute/l3-driver`.
    Ask for a `-clean` twin when the task is sensitive (same depth, no-training
    legs). But `opencode run --agent l2-worker` runs on the top-level default
    (`omniroute/l1-orchestrator`) unless `--model` is passed too - use

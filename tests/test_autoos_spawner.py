@@ -9169,6 +9169,98 @@ class ReviewerSpawnabilityTests(unittest.TestCase):
         self.assertEqual(note, "reviewer-model: opencode opencode/deepseek-v4.1-flash")
 
 
+class TierSeatContextTests(unittest.TestCase):
+    """AO-DENYLEGS item 4 (2026-10-08, spec combo-v2 §8 "spawner TIERS ctx
+    follows (L2 >= 600k)"): the seat a tier-2 run lands in must be able to take
+    at least 600k of context.
+
+    `TIERS` maps a tier to an agent name and the agent's `model` line is what
+    bounds the child's context, so this reads the shipped `opencode.jsonc` and
+    the shipped registry, like ReviewerSpawnabilityTests reads a reviewer. The
+    number is the registry's own clamp for the seat's route --
+    `route_context_cap`, the smallest advertised window among its servable legs
+    -- and NOT combos.json's display label: a label is a promise, the clamp is
+    what the gateway accepts, and `l2-worker` is exactly the route where they
+    disagree (it renders the 128k clamp and must keep it, since combo-contract
+    rule (d) pins the t2/t3 routes to "128k"; its legs cap at 262144). So the
+    floor is met by moving the SEAT onto a route the contract does not clamp,
+    not by raising the worker combo.
+    """
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    L2_MIN_CTX = 600000  # the operator's number, combo-contract T1_MIN_WINDOW
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(os.path.join(self.REPO, "opencode.jsonc"))
+        with io.open(os.path.join(self.REPO, "catalog", "ai-registry.json"),
+                     encoding="utf-8") as fh:
+            self.registry = json.load(fh)
+
+    def seat(self, tier):
+        """(model id, route id) the shipped config starts a tier on."""
+        model = self.cfg["agents"][self.agent.TIERS[tier]]["model"]
+        return model, model.partition("/")[2]
+
+    def cap_of(self, route_id):
+        return registry_tool.route_context_cap(self.registry["routes"][route_id],
+                                               self.registry)
+
+    def clamped_routes(self):
+        """The routes combo-contract rule (d) pins to the 128k label. Loaded by
+        path -- the tool's own file name carries a hyphen."""
+        spec = importlib.util.spec_from_file_location("autoos_combo_contract_for_seats",
+                                                      TOOLS / "combo-contract.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.T2T3_ROUTES
+
+    def test_the_tier_2_seat_serves_at_least_600k(self):
+        model, route = self.seat(2)
+        self.assertTrue(model.startswith("omniroute/"),
+                        "the tier-2 seat names no gateway route: %r" % model)
+        self.assertIn(model, self.agent.declared_models(self.cfg),
+                      "run tools/sync-ide-models.py: the tier-2 seat must be "
+                      "declared for opencode to start it")
+        self.assertEqual(self.agent.resolve_model(self.cfg, 2, False, None), model)
+        cap = self.cap_of(route)
+        self.assertIsNotNone(cap, "route %s records no servable leg window" % route)
+        self.assertGreaterEqual(
+            cap, self.L2_MIN_CTX,
+            "spec combo-v2 §8: the L2 seat takes %s context, below the 600k "
+            "floor" % cap)
+
+    def test_a_clean_run_of_the_tier_2_seat_keeps_the_floor(self):
+        # --clean re-spells the seat route with the -clean suffix; the privacy
+        # twin has to answer at the same context or the floor is only met by
+        # runs that do not care about privacy.
+        _model, route = self.seat(2)
+        clean = "omniroute/%s-clean" % route
+        self.assertIn(clean, self.agent.declared_models(self.cfg),
+                      "the -clean twin of the tier-2 seat is not declared")
+        self.assertEqual(self.agent.resolve_model(self.cfg, 2, True, None), clean)
+        self.assertGreaterEqual(self.cap_of(route + "-clean"), self.L2_MIN_CTX)
+
+    def test_the_tier_2_seat_is_not_a_route_the_contract_clamps(self):
+        # Why the seat moved instead of the combo: rule (d) pins the t2/t3
+        # routes to the 128k label, so a seat naming one can never serve 600k.
+        _model, route = self.seat(2)
+        self.assertNotIn(route, self.clamped_routes(),
+                         "%s is pinned to the 128k clamp -- the L2 seat cannot "
+                         "meet the 600k floor from it" % route)
+
+    def test_the_128k_worker_route_still_falls_short(self):
+        """The control: the reading above bites. `l2-worker` is the route the
+        seat used to name, and it does not reach the floor -- so this class
+        fails if the seat is ever moved back."""
+        self.assertLess(self.cap_of("l2-worker"), self.L2_MIN_CTX)
+
+    def test_the_tier_1_seat_meets_the_same_floor(self):
+        model, route = self.seat(1)
+        self.assertEqual(self.agent.resolve_model(self.cfg, 1, False, None), model)
+        self.assertGreaterEqual(self.cap_of(route), self.L2_MIN_CTX)
+
+
 CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                      "reviewer=omniroute/muse verdict=PASS")
 # REVGATE2F (operator 2026-09-30): a ready record needs TWO cross-family seats

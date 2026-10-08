@@ -59,7 +59,7 @@ max_output_tokens = 32768
 model = "openai/l3-driver"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.2
-max_input_tokens = 131072
+max_input_tokens = 128000
 max_output_tokens = 16384
 
 # Sensitive data: swap tier ids for the -clean combos (no prompt training).

@@ -2247,17 +2247,21 @@ class GatewayOrderTests(unittest.TestCase):
         # off", samba and cheaperinference are unavailable providers, combo-v2 §8
         # bans paid DeepSeek, and cerebras answers no probe row. What still has to
         # hold is the same fact gate (b) reads, one leg tighter: the whole free
-        # band comes first, the chain ends on its single priced leg.
+        # band comes first, the chain ends on the priced tail. OVH-REPROBE
+        # 2026-10-08 (AO-DENYLEGS open item 1) widens that tail to two credit
+        # legs — the re-probed OVH grant sits in the band's trial position and
+        # the vertex leg the D-657 probes confirmed still closes the chain.
         registry = self.registry()
         legs = self._legs(registry, "l3-driver")
         tiers = [cc.leg_tier(registry, leg) for leg in legs]
         free = [i for i, t in enumerate(tiers) if t == "free"]
         priced = [i for i, t in enumerate(tiers) if t != "free"]
         self.assertTrue(free, legs)
-        self.assertEqual([legs[i] for i in priced], ["vertex/gemini-3.8-flash"],
-                         "l3-driver must keep exactly one priced tail leg, and it "
-                         "must be the leg the D-657 probes confirmed")
-        self.assertEqual(priced, [len(legs) - 1],
+        self.assertEqual([legs[i] for i in priced],
+                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash"],
+                         "l3-driver must keep exactly two credit legs, the OVH "
+                         "grant ahead of the probe-confirmed vertex tail")
+        self.assertEqual(priced[-1], len(legs) - 1,
                          "%s: a priced leg anywhere but last breaks the "
                          "trial->free->credits->paid order" % tiers)
         self.assertLess(max(free), min(priced),

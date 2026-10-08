@@ -132,7 +132,7 @@
     {
       "id": "omniroute-l3-driver",
       "model": "openai/l3-driver",
-      "max_input_tokens": 131072,
+      "max_input_tokens": 128000,
       "max_output_tokens": 16384,
       "reasoning": false
     },
@@ -212,7 +212,7 @@
       "id": "litellm-l3-driver",
       "gateway": "litellm",
       "model": "openai/l3-driver",
-      "max_input_tokens": 131072,
+      "max_input_tokens": 128000,
       "max_output_tokens": 16384,
       "reasoning": false
     },

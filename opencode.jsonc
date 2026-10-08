@@ -121,7 +121,21 @@
     "l2-worker": {
       "description": "Smart worker: owns one track, reconciles reviews. May launch t3-reviewer only.",
       "mode": "subagent",
-      "model": "omniroute/l2-worker",
+      // DENYLEGS-CTX (2026-10-08, spec combo-v2 §8 "spawner TIERS ctx follows
+      // (L2 >= 600k)"): this seat is what a `--tier 2` run actually starts, so it
+      // has to serve >= 600k. It no longer names the `l2-worker` route: that route
+      // renders combo-contract rule (d)'s 128k clamp (pinned — and its servable legs
+      // cap at 262144 anyway, so raising the declaration would be a lie the gateway
+      // would bounce). It names `l2-orchestrator`, the L2 orchestration route the
+      // contract does not clamp: legs bazaarlink deepseek + vertex gemini, both
+      // 1M-advertised, clamp 1048576. `--clean` follows the same route to its
+      // -clean twin (vertex only, 1M). Pinned by TierSeatContextTests.
+      // Scope of the fix, said plainly: a CARD-driven run takes its model from the
+      // resolver's combo (`resolve_model(..., override or "omniroute/" + combo)`), so an
+      // implement card still lands on `l2-worker`'s clamped route; moving the L2 *band*
+      // of the routing table needs an `l2-orchestrator-free-only` route that does not
+      // exist, and is the AO-LENS-REVIEW wiring. This line is the seat, not the table.
+      "model": "omniroute/l2-orchestrator",
       "permissions": [
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" },
@@ -603,7 +617,7 @@
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "l3-driver-clean": {
           "modelID": "l3-driver-clean",
@@ -623,7 +637,7 @@
         "l3-implementer": {
           "modelID": "l3-implementer",
           "name": "L3 · l3-implementer · 128k",
-          "limit": { "context": 131072, "output": 8192 }
+          "limit": { "context": 128000, "output": 8192 }
         },
         "l3-implementer-clean": {
           "modelID": "l3-implementer-clean",
@@ -715,6 +729,11 @@
           "name": "Qwen3.8-27B via Groq (free)",
           "limit": { "context": 131072, "output": 16384 }
         },
+        "ovh-qwen3.8-27b": {
+          "modelID": "ovh-qwen3.8-27b",
+          "name": "Qwen3.8-27B via OVH (credit)",
+          "limit": { "context": 128000, "output": 32768 }
+        },
         "vertex-gemini-3.8-flash": {
           "modelID": "vertex-gemini-3.8-flash",
           "name": "Gemini-3.8-Flash via Vertex (credit)",
@@ -786,7 +805,7 @@
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
-          "limit": { "context": 131072, "output": 16384 }
+          "limit": { "context": 128000, "output": 16384 }
         },
         "l3-driver-paid": {
           "modelID": "l3-driver-paid",

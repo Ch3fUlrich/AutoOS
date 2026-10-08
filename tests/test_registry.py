@@ -3699,21 +3699,37 @@ class ComboCrossProviderTests(unittest.TestCase):
         band AFTER all free legs and BEFORE paid (not last; deepseek is last),
         servable (not gated). Only UNPRICED credit legs (morph/deepinfra tails,
         price 0 = no price on file) are documented tail fallbacks: gated with
-        available:false so neither resolver nor render spends the grant."""
-        for route_id, route in self.reg["routes"].items():
-            legs = route.get("legs") or []
-            gated = route.get("unavailable_legs") or {}
-            for leg in legs:
-                if leg_tier(self.reg, leg) != "credit":
-                    continue
-                if leg not in gated:
-                    # servable credits band (priced ovh Qwen x2 + measured
-                    # vertex/ovh-gpt-oss grants): must sit after free, before paid
-                    continue
-                # gated tail (morph/deepinfra unpriced): must carry price note
-                entry = gated.get(leg)
-                self.assertIs(entry.get("available"), False, route_id)
-                self.assertIn("price", (entry.get("$comment") or "").lower(), leg)
+        available:false so neither resolver nor render spends the grant.
+
+        OVH-REPROBE 2026-10-08 adds a second, honest gate reason: a credit leg
+        whose id the WITHDREW upstream (providers.ovhcloud is live again while
+        ovhcloud/Qwen3-Coder-30B-A3B-Instruct 404s, so the provider-level gate no
+        longer covers it). A gate must therefore name a reason, not one reason —
+        the price note still pins every leg that is gated for money."""
+        reasons = ("price", "does not exist", "withdraw", "retire")
+
+        def problems(reg):
+            found = []
+            for route_id, route in reg["routes"].items():
+                gated = route.get("unavailable_legs") or {}
+                for leg in route.get("legs") or []:
+                    if leg_tier(reg, leg) != "credit" or leg not in gated:
+                        continue
+                    entry = gated[leg]
+                    note = (entry.get("$comment") or "").lower()
+                    if entry.get("available") is not False:
+                        found.append((route_id, leg, "gate does not say available:false"))
+                    elif not any(reason in note for reason in reasons):
+                        found.append((route_id, leg, "gate names no reason"))
+            return found
+
+        self.assertEqual(problems(self.reg), [])
+        # the scan bites: a gate whose prose loses its reason is a defect
+        mutated = copy.deepcopy(self.reg)
+        for route in mutated["routes"].values():
+            for entry in (route.get("unavailable_legs") or {}).values():
+                entry["$comment"] = "gated"
+        self.assertTrue(problems(mutated), "an unreasoned credit gate passed")
 
     def test_no_new_free_leg_enters_a_clean_route(self):
         # Rule 3: these providers' trains_on_prompts is null (unverified), which
@@ -3968,7 +3984,14 @@ class CleanTierRouteTests(unittest.TestCase):
     is 429 and agy is never a head, and spec SS8 bans a paid deepseek leg. What
     survives both rules is the vertex credit, so a clean chain today is that one
     leg - which is why the tail pin below asserts the *absence* of the banned
-    legs rather than a band the probes never confirmed."""
+    legs rather than a band the probes never confirmed.
+    OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) is the re-probe that rule
+    asked for and reopens the OVH half of it: gpt-oss-120b, Qwen3.8-27B and
+    Qwen3.5-397B-A17B answer 200 again, so the provider is available and OVH
+    rides - as an L3 leg only (OVH documents no prompt caching, so no l0-/l1-/l2-
+    chain may carry it and no -clean chain does), in the credit band's trial
+    position ahead of the vertex tail, never consecutive with another OVH leg.
+    The clean chains this class owns are unchanged: the vertex credit leg alone."""
 
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
@@ -3990,9 +4013,11 @@ class CleanTierRouteTests(unittest.TestCase):
                 self._leg(leg)
 
     def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
-        # D657-D2: the two ovhcloud trial legs 401/404 out of every chain (probe
-        # ack fail on both gateways), so the vertex credit leads and closes. A
-        # clean route may never fall back onto a leg that trains on prompts.
+        # D657-D2: the ovhcloud legs 404'd out of every chain (probe ack fail on
+        # both gateways), so the vertex credit leads and closes. OVH-REPROBE
+        # 2026-10-08 brought them back one layer up: an OVH leg rides L3 chains
+        # only, never a -clean or l0-/l1-/l2- chain (no documented cache). A clean
+        # route may never fall back onto a leg that trains on prompts.
         for rid in self.SENSITIVE:
             legs = self.reg["routes"][rid]["legs"]
             self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
@@ -4044,25 +4069,181 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self.assertFalse(leg.startswith(banned), (rid, leg))
 
-    def test_the_404_ovh_legs_ride_no_chain_after_d657(self):
+    def test_ovh_legs_ride_l3_chains_only_after_the_reprobe(self):
         """L2-CLEAN kept ovhcloud/Qwen3-Coder-30B-A3B-Instruct in l2-worker and
         l3-driver as an available:false gate ("not in OVH AI Endpoints catalog
-        2026-10-01"). D657-D2 deletes the gate with the leg it gated: probe-d657
-        records ack fail / HTTP 404 on BOTH gateways for all three ovhcloud
-        spellings, and the D-657 rule omits a leg until a re-probe returns 200,
-        so no chain carries an OVH leg and no chain carries a gate for one. The
-        three pinned single-provider credit combos keep their own legs - they are
-        an operator-facing seat, not a fallback, and the report names them."""
+        2026-10-01"); D657-D2 deleted the gate with the leg it gated after
+        probe-d657 404'd all three ovhcloud spellings on both gateways.
+
+        OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief) is the
+        re-probe that rule asked for: gpt-oss-120b, Qwen3.8-27B and
+        Qwen3.5-397B-A17B answer 200 again, so providers.ovhcloud is available
+        and OVH rides again — with the three bounds the brief draws:
+
+          (1) L3 legs ONLY. OVH documents no prompt caching, and spec SS2 keeps
+              the cache lever on L0-L2, so no l0-/l1-/l2- chain may carry it
+              (combo-contract rule (f) fails one there anyway).
+          (2) the credit band's TRIAL position — the last leg before the vertex
+              credit tail, after every free leg, so rule (b) holds and a 429 on
+              the grant falls through to the paid-for leg rather than opening
+              the chain with it.
+          (3) never consecutive with another OVH leg — one rate-limit domain per
+              step (rule (g)), which is also why only ONE OVH id rides each L3
+              chain: the second priced id takes the other chain.
+
+        Qwen3-Coder-30B stays retired (OVHCODER-DROP: OVH withdrew the id, a
+        completion 404s "does not exist"); with the provider live again the
+        provider-level gate no longer covers it, so it is gated per-leg in its
+        own seat route. ovh-gpt-oss-120b re-probed 200 but is UNPRICED, so rule
+        (h) keeps it out of every chain — same per-leg gate, and the price gap
+        is filed in logs/briefs/denylegs-gaps.md."""
+        self.assertIs(self.reg["providers"]["ovhcloud"].get("available"), True)
         stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-        chains = {rid: route for rid, route in self.reg["routes"].items()
-                  if rid.startswith(("l1-", "l2-", "l3-", "t"))}
-        for rid, route in chains.items():
-            self.assertNotIn(stale, route.get("legs") or [], rid)
-            self.assertNotIn(stale, route.get("unavailable_legs") or {}, rid)
-            for leg in route.get("legs") or []:
-                self.assertFalse(leg.startswith("ovhcloud/"), (rid, leg))
-        self.assertIn(stale,
-                      self.reg["routes"]["ovh-qwen3-coder-30b"]["legs"])
+        unpriced = "ovhcloud/gpt-oss-120b"
+        priced = ("ovhcloud/Qwen3.8-27B", "ovhcloud/Qwen3.5-397B-A17B")
+        routes = self.reg["routes"]
+
+        for rid, route in routes.items():
+            legs = route.get("legs") or []
+            # (1) no orchestrator layer carries an OVH leg, and no retired or
+            # unpriced id rides a chain (an operator-facing `ovh-*` seat route
+            # may still declare one, gated, so apply prunes the live combo).
+            if rid.startswith(("l0-", "l1-", "l2-")):
+                for leg in legs:
+                    self.assertFalse(leg.startswith("ovhcloud/"), (rid, leg))
+            if rid.startswith(("l0-", "l1-", "l2-", "l3-", "t")):
+                self.assertNotIn(stale, legs, rid)
+                self.assertNotIn(unpriced, legs, rid)
+
+            # (3) one OVH leg per step, anywhere.
+            for i in range(1, len(legs)):
+                self.assertFalse(legs[i].startswith("ovhcloud/")
+                                 and legs[i - 1].startswith("ovhcloud/"),
+                                 (rid, legs[i - 1], legs[i]))
+
+        # (2) the two priced ids, one per L3 chain, in the trial position.
+        for rid in ("l3-driver", "l3-implementer"):
+            legs = routes[rid]["legs"]
+            carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
+            self.assertEqual(len(carried), 1, (rid, carried))
+            self.assertIn(carried[0], priced, rid)
+            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
+        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
+                            routes["l3-implementer"]["legs"][-2],
+                            "both L3 chains carry the same OVH id: one grant, "
+                            "not two seats")
+
+        # every -clean route stays off the grant, cached-tail or not.
+        for rid, route in routes.items():
+            if rid.endswith("-clean"):
+                for leg in route.get("legs") or []:
+                    self.assertFalse(leg.startswith("ovhcloud/"), rid)
+
+        # the retired and the unpriced id keep their own operator-facing seat,
+        # gated per leg so nothing renders them.
+        self.assertIn(stale, routes["ovh-qwen3-coder-30b"]["legs"])
+        self.assertIs(routes["ovh-qwen3-coder-30b"]["unavailable_legs"][stale]
+                      ["available"], False)
+        self.assertIn(unpriced, routes["ovh-gpt-oss-120b"]["legs"])
+        gate = routes["ovh-gpt-oss-120b"]["unavailable_legs"][unpriced]
+        self.assertIs(gate["available"], False)
+        self.assertIn("price", (gate.get("$comment") or "").lower())
+        # and the seat whose leg is priced and live declares a servable leg
+        self.assertIn("ovhcloud/Qwen3.8-27B", routes["ovh-qwen3.8-27b"]["legs"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-qwen3.8-27b"], self.reg),
+                         ["ovhcloud/Qwen3.8-27B"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-gpt-oss-120b"], self.reg),
+                         [])
+
+
+class ReviewLensRouteTests(unittest.TestCase):
+    """SS3 (combo-v2, 2026-10-08) stacks four review lenses - diff, tests-run,
+    codebase, transcript - and D-657 (SS8 lane AO-DENYLEGS) chains them as
+    `l3-review-*` routes, one combo per lens. Open item 2 (2026-10-08) is the
+    audit of that set: the three lenses a gateway can serve are combos, and the
+    fourth is a declared route that renders nothing, because the bar SS3 draws
+    for it (intelligence index >= 44) is only met by legs SS7b/SS8 took out of
+    the gateway. A legless route is the honest shape (like the `*-paid` ones:
+    `legs: []`, no combo rendered, nothing orphaned); a sub-44 leg in its place
+    would be the defect - a transcript review by a model that cannot hold a
+    transcript is the failure the lens exists to catch.
+
+    So the transcript lens is carried by the spawner's own client, exactly as
+    SS7b (b) says: a `policy.reviewers` row naming the qoder client's
+    Qwen3.8-Max, no gateway leg, marked paid because Max spends Qoder credit.
+    That row is what makes the lens reachable to the resolver, so it is pinned
+    here together with the route that documents it."""
+
+    LENSES = ("l3-review-diff", "l3-review-tests", "l3-review-codebase",
+              "l3-review-transcript")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _route(self, rid):
+        route = self.reg["routes"].get(rid)
+        self.assertIsInstance(route, dict, "%s is not a declared route" % rid)
+        return route
+
+    def test_every_lens_of_the_spec_is_a_route(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            self.assertEqual(route["id"], rid, rid)
+            self.assertEqual(route["class"], "cheap", rid)
+            surface = route["surfaces"]["omniroute"]
+            self.assertIn("context_declared", surface, rid)
+            self.assertIn(rid, surface["display_name"], rid)
+
+    def test_the_three_servable_lenses_chain_probe_passed_legs(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            if rid == "l3-review-transcript":
+                continue
+            legs = route.get("legs") or []
+            self.assertTrue(legs, "%s declares a lens but no leg" % rid)
+            for leg in legs:
+                provider_id, model_id = registry.resolve_leg(leg, self.reg)
+                self.assertIn(model_id, self.reg["models"], leg)
+                # SS7b: a spawner-client leg never rides a gateway combo.
+                self.assertNotEqual(provider_id, "qoder_ai", (rid, leg))
+            self.assertFalse([leg for leg in legs if leg.startswith("ovhcloud/")],
+                             "%s: OVH documents no cache and 128k-clamps a 1M lens"
+                             % rid)
+
+    def test_the_transcript_lens_is_legless_and_says_why(self):
+        route = self._route("l3-review-transcript")
+        self.assertEqual(route.get("legs"), [],
+                         "a gateway leg now meets SS3's II >= 44 bar - re-chain "
+                         "the lens and give it legs")
+        self.assertEqual(list(route.get("unavailable_legs") or {}), [],
+                         "a legless lens carries no gate either")
+        note = route["$comment"]
+        for phrase in ("SS3", "44", "qoder", "legless"):
+            self.assertIn(phrase, note, note[:120])
+
+    def test_the_transcript_carrier_is_a_qoder_client_row_on_the_reviewer_list(self):
+        rows = [entry for entry in self.reg["policy"]["reviewers"]
+                if entry["client"] == "qoder"
+                and "max" in entry["model"].lower()]
+        self.assertTrue(rows, "SS7b(b): the transcript lens' carrier is the qoder "
+                              "client leg - policy.reviewers names no Qwen3.8-Max row")
+        entry = rows[0]
+        self.assertEqual(entry["family"], "qwen", entry["model"])
+        self.assertIs(entry["paid"], True,
+                      "Qwen3.8-Max spends Qoder credit (tools/autoos_clients.py)"
+                      ", so the last-resort pass is where it belongs")
+        self.assertNotIn("leg", entry,
+                         "a qoder row with a gateway leg would put a spawner-only "
+                         "client back into the combos (SS7b)")
+
+    def test_haiku_stays_the_tail_of_the_reviewer_list(self):
+        # SS8/REVROUTE's order: the free families first, the paid last-resorts
+        # after them, Claude Haiku at the very tail as the first-pass fallback.
+        # The transcript carrier joins the paid band, which must not push Haiku up.
+        reviewers = self.reg["policy"]["reviewers"]
+        self.assertEqual(reviewers[-1]["family"], "anthropic",
+                         "Haiku must stay the tail of the preference list")
 
 
 class ModelKeyCaseHygieneTests(unittest.TestCase):

@@ -170,7 +170,7 @@
     {
       "id": "l3-driver",
       "name": "L3 · l3-driver · 128k",
-      "context": 131072,
+      "context": 128000,
       "output": 16384,
       "surfaces": {
         "omniroute": [
@@ -236,7 +236,7 @@
     {
       "id": "l3-implementer",
       "name": "L3 · l3-implementer · 128k",
-      "context": 131072,
+      "context": 128000,
       "output": 8192,
       "surfaces": {
         "omniroute": [
@@ -436,6 +436,18 @@
       "name": "Qwen3.8-27B via Groq (free)",
       "context": 131072,
       "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "ovh-qwen3.8-27b",
+      "name": "Qwen3.8-27B via OVH (credit)",
+      "context": 128000,
+      "output": 32768,
       "surfaces": {
         "omniroute": [
           "opencode",
