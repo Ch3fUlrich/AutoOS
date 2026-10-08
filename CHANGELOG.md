@@ -24,10 +24,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   prevent (the full ROLE-GATE is a later lane). Tests: `tests/test_opencode_bash_guard.py` (+16, the `l2` role, the canary under it,
   no leakage into `orchestrator`), `tests/test_oc_l2.py` (the rendered role, the dispatch site in the plugin, the marker in the MCP
   env), new `tests/test_agent_mcp_tool_profile.py` (21: profile selection, the registered tool set per profile, the renderer marking
-  the server it starts, the spawn tier gate); the brief's verify set is 291 green and the wider lane set 1791, with one failure this
-  diff does not reach: `test_a_real_spawn_runs_in_its_scope` skips when run alone on this host (no user manager, so
-  `scope_supported()` is false), trips only when `tests.test_autoos_spawner` runs as a module — on this host and at the lane tip
-  before these three commits alike — and none of the three gates touches the scope path.
+  the server it starts, the spawn tier gate); the brief's verify set is 387 green (291 for the four named suites, plus the profile,
+  lane, render, serve and canary suites) and the wider lane set 1791 with one failure this diff does not reach:
+  `test_a_real_spawn_runs_in_its_scope` skips when its own class runs alone (`scope_supported()` is false — no user manager on this
+  host), and it only trips in full-module order, where an earlier SCOPECLI test calls `scope_supported(force=True)` under a synthetic
+  bus environment and the module-wide cache then claims a scope the fresh child process cannot create.
   Docs: `docs/ai/opencode-fleet.md` (the layer fence, the rendered L2 lane), `tools/oc_l2.py`, `tools/autoos_agent_mcp.py`.
 - L2LAUNCH-REJECT (2026-10-08, lane AO-L2-LAUNCH, Sonnet final REJECT of the D-665 launch work): seven findings, one commit and one
   failing-first test each. **(F1, HIGH)** `permission.task: deny` alone left the renderer's `edit: allow` standing, so an L2 — whose
