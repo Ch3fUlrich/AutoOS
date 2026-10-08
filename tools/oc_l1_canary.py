@@ -278,22 +278,24 @@ def run_canary(base_url, auth, lane, now=None):
                 text_val = item.get("text")
                 if isinstance(text_val, str) and text_val:
                     assistant_text.append(text_val)
-            if item_type == "tool" or tool_name in GUARDED_TOOL_NAMES or "status" in state:
-                if tool_name and tool_name not in GUARDED_TOOL_NAMES:
-                    continue
-                shell_call_found = True
-                status_val = state.get("status")
-                err = state.get("error") or ""
-                if not isinstance(err, str):
-                    err = str(err)
-                if status_val == "error" and DENIED_MARKER in err:
-                    result["denied"] = True
-                    result["detail"] = _truncate(_scrub(err, password))
-                    return result
-                if status_val == "completed":
-                    result["denied"] = False
-                    result["detail"] = "tool completed without denial"
-                    return result
+            # F2: a guarded call is an item that NAMES a guarded tool. A
+            # state-bearing item with no name, or with another tool's name,
+            # proves nothing about the guard - the guard never saw it.
+            if tool_name not in GUARDED_TOOL_NAMES:
+                continue
+            shell_call_found = True
+            status_val = state.get("status")
+            err = state.get("error") or ""
+            if not isinstance(err, str):
+                err = str(err)
+            if status_val == "error" and DENIED_MARKER in err:
+                result["denied"] = True
+                result["detail"] = _truncate(_scrub(err, password))
+                return result
+            if status_val == "completed":
+                result["denied"] = False
+                result["detail"] = "tool completed without denial"
+                return result
 
     if not shell_call_found:
         # Name what the session actually produced: a rc=5 with no evidence of

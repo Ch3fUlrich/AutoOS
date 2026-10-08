@@ -423,6 +423,58 @@ class TestOneToolNameList(unittest.TestCase):
         self.assertIn("tool_name not in GUARDED_TOOL_NAMES", src)
 
 
+class TestUnnamedGuardedCall(_Base):
+    """F2: a guarded call is an item that NAMES its tool.
+
+    `"status" in state` alone read any state-bearing item as a shell call, so a
+    transcript with no tool name at all could reach either terminal verdict.
+    """
+
+    def _only(self, item):
+        return [{"type": "assistant", "content": [item]}]
+
+    def test_unnamed_error_item_is_not_a_shell_call(self):
+        self.srv.canary_items = self._only({
+            "type": "tool",
+            "state": {"status": "error",
+                      "error": "bash-guard: DENIED - unquoted heredoc"},
+        })
+        rc, out = self._start()
+        self.assertEqual(rc, 5)
+        self.assertIn("canary denied=no", out)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_unnamed_completed_item_is_not_read_as_allowed(self):
+        self.srv.canary_items = self._only({
+            "type": "tool",
+            "state": {"status": "completed", "output": "canary"},
+        })
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        detail = self._state()["canary"]["detail"]
+        self.assertIn("no shell tool call in canary session", detail)
+        self.assertNotIn("tool completed without denial", detail)
+
+    def test_message_level_tool_item_without_a_name_is_not_a_shell_call(self):
+        # the `msg["type"] == "tool"` candidate path: a bare tool message with
+        # state but no name proves nothing about the guard
+        self.srv.canary_items = [{
+            "type": "tool",
+            "state": {"status": "error",
+                      "error": "bash-guard: DENIED - unquoted heredoc"},
+        }]
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_a_nameless_item_still_leaves_the_inconclusive_verdict(self):
+        self.srv.canary_items = self._only({"type": "tool",
+                                            "state": {"status": "error"}})
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertIn("no shell tool call", self._state()["canary"]["detail"])
+
+
 class TestTimeout(_Base):
     mode = "timeout"
 
