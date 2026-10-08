@@ -101,15 +101,20 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 creates the pilot session and writes the state file atomically (mode 0600 on POSIX). It then runs the bash-guard CANARY: a
 second throwaway session on the same server is asked to run a command that the guard must refuse (an unquoted heredoc with a
 backticked command). The prompt demands EXACTLY ONE tool call and names the shell tool — the probe is the call, not a reply
-about it — and the canary recognises `shell`, `bash` and `execute`, because opencode renamed `bash` to `shell` and the plugin
-hooks both. The result `{denied, ts, plugin_path, session_id, detail}` is stored in the state file and merged into
+about it — and the canary recognises exactly the names the plugin hooks, `shell` and `bash` (opencode renamed `bash` to `shell`);
+`execute` is code mode's executor and the guard never inspects it, so a "denial" carried by `execute` is the model quoting the
+marker, not evidence about the guard. `tests/test_oc_l1_canary.py` pins the two sets so they cannot drift. The result
+`{denied, ts, plugin_path, session_id, detail}` is stored in the state file and merged into
 `heartbeat.json`; `detail` always says what the session did (the tool names seen, the first 200 chars of assistant text), so a
 refusal is diagnosable from the host heartbeat without re-running anything. Only after a DENIED canary does `start` post the
 pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilot that is not known to be guarded never runs.
 
 - Canary DENIED: the first prompt is posted, exit 0, the L1 may run unattended. A denial is recognised by the marker
-  `bash-guard: DENIED`, which EVERY denial path carries — both `tools/hooks/bash_guard.py` and the plugin's own
-  orchestrator-role throw, which runs before the Python guard (D-665).
+  `bash-guard: DENIED` **at the start of the tool's error text** (whitespace aside), on a call to a guarded tool whose status is
+  `error` — a marker that merely appears inside the text, in an assistant reply, or on a completed call is not a denial. EVERY
+  denial path carries the marker — both `tools/hooks/bash_guard.py` and the plugin's own
+  orchestrator-role throw, which runs before the Python guard (D-665). Anything the launcher prints or logs about an HTTP failure
+  is scrubbed of the password, the base64 `Basic …` token and any `Authorization:` value.
 - Canary NOT denied (the command ran, no tool call happened, timeout, error): NO prompt is posted, the pilot session stays idle,
   the server stays up for supervised use, `start` prints `UNATTENDED-REFUSED` and exits 5. The plugin fails open on purpose, so
   an unproven guard means no unattended run. A model that only answered in text is `inconclusive: text-only answer`, which is
@@ -120,7 +125,9 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
 - The server child inherits the launcher's FULL environment (opencode, `uv` and the MCP servers need PATH, the profile
   directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
   shell that holds only what the pilot may see.
-- The child's stderr is appended to `<scratch_dir>/opencode.log` (mode 0600): the guard's fail-open notes are written there, and
+- The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied
+  at creation, so there is no window in which the log sits world-readable next to a child environment that carries the password:
+  the guard's fail-open notes are written there, and
   a `DEVNULL` made "the plugin never loaded" indistinguishable from "the plugin allowed" (D-665).
 
 Exit codes of `start`: 0 started or already live, 2 config or validation error (password env unset, empty `plugins`), 4 health
