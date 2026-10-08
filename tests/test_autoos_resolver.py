@@ -5,6 +5,7 @@ Every boundary of the bucket table is pinned here, plus every effort row, the
 ladder clamp and the max_tokens floors. The module is pure: it imports from any
 cwd once `tools/` is on sys.path, which is the first thing this file does.
 """
+import importlib.util
 import json
 import re
 import sys
@@ -17,6 +18,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import autoos_resolver as r  # noqa: E402
 import autoos_usage as usage  # noqa: E402  (the spend guard's one reader of the cap trio)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load(name, path):
+    """Import a tools/*.py by path (hyphenated names are not valid module ids)."""
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The combo contract owns the one reading of a leg's EFFECTIVE tier
+# (model `tier` else provider `tier`); the order tests below assert against it
+# rather than a second copy of that rule.
+cc = _load("autoos_combo_contract", ROOT / "tools" / "combo-contract.py")
 
 # A full canonical ladder, so a rung the rule wants is always present unless a
 # test deliberately shortens the ladder.
@@ -2202,6 +2219,12 @@ class GatewayOrderTests(unittest.TestCase):
     this module can pin is leg ORDER within a route (OmniRoute's own priority
     strategy tries legs in this order) and which providers/models are
     actually referenced.
+
+    D657-D2 (2026-10-08) narrowed the middle of that order to nothing: samba and
+    cheaperinference are unavailable providers, §8 bans paid DeepSeek, and "no
+    paid deepseek/meta muse; kimi/glm/mimo off" leaves the chains free-band +
+    one priced tail. The credit tier survives as a fact of the registry (its
+    routes are still declared), not as a leg of any chain.
     """
 
     def _legs(self, registry, route_id):
@@ -2212,22 +2235,30 @@ class GatewayOrderTests(unittest.TestCase):
                / "catalog" / "ai-registry.json")
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def test_t3_driver_credit_legs_rank_behind_free_ahead_of_older_fallbacks(self):
-        legs = self._legs(self.registry(), "l3-driver")
-        free_leg = legs.index("groq/qwen/qwen3.8-27b")  # true free tier
-        # cerebras/qwen-3.8-27b is qwen-3.8-27b's own PAID overflow leg (an
-        # older, pre-existing fallback) - the new credit tier ranks ahead of it.
-        older_fallback = legs.index("cerebras/qwen-3.8-27b")
-        for credit_leg in ("samba/gpt-oss-120b", "cheaperinference/glm-5.2",
-                          "cheaperinference/kimi-k3", "samba/MiniMax-M3",
-                          "deepseek/deepseek-flash"):
-            with self.subTest(leg=credit_leg):
-                idx = legs.index(credit_leg)
-                self.assertGreater(idx, free_leg,
-                                   "%s must rank behind the free groq leg" % credit_leg)
-                self.assertLess(idx, older_fallback,
-                               "%s must rank ahead of the older cerebras "
-                               "paid-overflow fallback" % credit_leg)
+    def test_t3_driver_free_legs_rank_ahead_of_the_priced_tail(self):
+        # D657-D2 (AO-DENYLEGS D2, 2026-10-08) re-cut l3-driver. The credit legs
+        # this test used to rank — samba/gpt-oss-120b, samba/MiniMax-M3,
+        # cheaperinference/glm-5.2, cheaperinference/kimi-k3,
+        # deepseek/deepseek-flash — and the older paid overflow it ranked them
+        # ahead of (cerebras/qwen-3.8-27b) ride no chain any more: "kimi/glm/mimo
+        # off", samba and cheaperinference are unavailable providers, combo-v2 §8
+        # bans paid DeepSeek, and cerebras answers no probe row. What still has to
+        # hold is the same fact gate (b) reads, one leg tighter: the whole free
+        # band comes first, the chain ends on its single priced leg.
+        registry = self.registry()
+        legs = self._legs(registry, "l3-driver")
+        tiers = [cc.leg_tier(registry, leg) for leg in legs]
+        free = [i for i, t in enumerate(tiers) if t == "free"]
+        priced = [i for i, t in enumerate(tiers) if t != "free"]
+        self.assertTrue(free, legs)
+        self.assertEqual([legs[i] for i in priced], ["vertex/gemini-3.8-flash"],
+                         "l3-driver must keep exactly one priced tail leg, and it "
+                         "must be the leg the D-657 probes confirmed")
+        self.assertEqual(priced, [len(legs) - 1],
+                         "%s: a priced leg anywhere but last breaks the "
+                         "trial->free->credits->paid order" % tiers)
+        self.assertLess(max(free), min(priced),
+                        "free band %s must rank wholly ahead of %s" % (free, priced))
 
     def test_openrouter_qwen_legs_are_unreferenced_by_any_route(self):
         # 16:4xZ revision: OpenRouter has no shared credit (BYOK only) - the
@@ -2286,9 +2317,27 @@ class GatewayOrderTests(unittest.TestCase):
                     "deepseek/deepseek-flash",
                     "openrouter/deepseek/deepseek-v4.1-flash",
                     "opencode-zen/deepseek-v4.1-flash",
+                    # D657-D2 (2026-10-08) is the later decision FREEKEYS-2
+                    # deferred to: D-657 re-admits the FREE 0731 mirror as the
+                    # head of the L1/L2 chains, on its own probe ack + tool call
+                    # + cache hit. The named `allow-bazaarlink-ds-v4-flash-0731-free`
+                    # leg rule below is what carries it, and it sits above the
+                    # blanket `deny-deepseek`, so every other non-V4.1 DeepSeek
+                    # spelling stays denied and this exception cannot widen.
+                    "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
                 ):
                     self.fail("unexpected non-V4.1 DeepSeek leg %s in %s"
                              % (leg, route_id))
+        rules = self.registry()["policy"]["leg_rules"]
+        allow = [rl for rl in rules
+                 if rl.get("id") == "allow-bazaarlink-ds-v4-flash-0731-free"]
+        self.assertEqual(len(allow), 1, rules)
+        ids = [rl.get("id") for rl in rules]
+        self.assertLess(ids.index(allow[0]["id"]), ids.index("deny-deepseek"),
+                        "the 0731 allow must come before the blanket deny, or "
+                        "the head leg of every L1/L2 chain is denied")
+        self.assertLess(ids.index("deny-deepseek-pro"), ids.index(allow[0]["id"]),
+                        "V4 Pro stays denied ahead of the free 0731 allow")
 
     def test_no_claude_or_gpt_leg_through_cheaperinference(self):
         # "Claude budget" 2026-09-26 16:2xZ/16:4xZ: "NEVER Claude or GPT
@@ -2340,9 +2389,13 @@ class GatewayOrderTests(unittest.TestCase):
         # CIGREEN: expectation moved by ffe384a0 (credit spend guard: the only
         # overlay-proven clean head, ovhcloud/gpt-oss-120b, is credit-unpriced
         # and refused, so proving just it fail-closes to None) and 35148c5c
-        # (CLEAN put that ovh head on -clean). Prove the priced private-safe
-        # leg ovhcloud/Qwen3.8-27B instead: the plan must then land on it, never
-        # on an unproven leg.
+        # (CLEAN put that ovh head on -clean).
+        # D657-D2 (2026-10-08): that OVH head is out of every chain — each ovh
+        # row of both probe TSVs is HTTP 404 — so naming `ovhcloud/Qwen3.8-27B`
+        # here pinned a leg no route carries and the overlay entry could never
+        # be reached. The proven leg is now read back from the registry (the
+        # `-clean` head, which _inline_toolcalls_overlay is built to prove), so
+        # this test pins the rule rather than one model name.
         # Brief item 5: "an agentic card never picks a leg without
         # tool_calls." New legs default to tool_calls: unproven (D20 - no
         # value enters without evidence) until promoted from a probe
@@ -2353,8 +2406,7 @@ class GatewayOrderTests(unittest.TestCase):
         # builds (every other real leg explicitly unproven).
         registry = self.registry()
         overlay = PlanTests._inline_toolcalls_overlay(registry)
-        overlay["legs"]["ovhcloud/Qwen3.8-27B"] = {
-            "tool_calls": {"value": "proven"}}
+        proven_leg = clean_head_leg(registry)
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "public"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
@@ -2365,10 +2417,14 @@ class GatewayOrderTests(unittest.TestCase):
                         "muse-spark", datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc))
         self.assertIsNotNone(result["route"], result)
         # result["leg"] is the route's first *usable* leg (per-leg tool_calls
-        # filter already applied by usable_legs/score_route): the priced
-        # private-safe leg is the only overlay-proven, credit-priced leg, so
-        # an agentic (implement) card must land on exactly it.
-        self.assertEqual(result["leg"], "ovhcloud/Qwen3.8-27B", result)
+        # filter already applied by usable_legs/score_route): the overlay marks
+        # exactly one leg proven, so an agentic (implement) card must land on
+        # that leg and on nothing else. Compared through resolve_leg because the
+        # overlay is keyed by registry ref while the plan answers a gateway ref.
+        self.assertEqual(registry_tool.resolve_leg(result["leg"], registry),
+                         registry_tool.resolve_leg(proven_leg, registry),
+                         "%s: the plan left the one proven leg %s"
+                         % (result["leg"], proven_leg))
         provider_id, model_id = registry_tool.resolve_leg(
             result["leg"], registry)
         effective = (overlay["legs"].get(result["leg"], {})
@@ -2711,72 +2767,75 @@ class UnavailableUntilResolverTests(unittest.TestCase):
     REAL_UNTILS = {
         # FREEWIRE 2026-09-30 cooled every provider a l2-worker combo could
         # still be served by. CIGREEN (aced9915, B2-AGY): antigravity is kept
-        # cooled too. GLM55/AINATIVE 2026-10-05: the two providers the
-        # operator's order put at l2-worker's head join the fixture, so the
-        # earliest cooled still-leggable provider a reason can name is
-        # ainative (the oc glm leg is gated unavailable, GLM55 gate); antigravity
-        # backs legs again (CLAUDE55, l1-orchestrator/opus-5-5) and is cooled
-        # after it, so the reason's earliest return stays ainative.
+        # cooled too. D657-D2 (2026-10-08) re-cut the chains onto four free/
+        # credit providers, so the cooled set names the providers that hold a
+        # leg today -- bazaarlink, openrouter, vertex_ai, groq, cohere -- and
+        # keeps the ones that still carry a gated or pinned-single leg
+        # (antigravity, google_ai_studio, meta_api, ovhcloud, deepseek). The
+        # vertex provider key is `vertex_ai` (its omniroute_id is `vertex`),
+        # which is the name the reason prints. Earliest return: bazaarlink.
+        "bazaarlink": "2026-09-28T12:10:00Z",
+        "openrouter": "2026-09-28T12:20:00Z",
+        "vertex_ai": "2026-09-28T12:30:00Z",
+        "groq": "2026-09-28T12:40:00Z",
+        "cohere": "2026-09-28T12:50:00Z",
         "antigravity": "2026-09-28T12:25:00Z",
-        "opencode_gateway": "2026-09-28T12:10:00Z",
-        "ainative": "2026-09-28T12:20:00Z",
-        "google_ai_studio": "2026-09-28T12:30:00Z",
+        "google_ai_studio": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
-        "scaleway": "2026-09-28T15:00:00Z",
-        "nebius": "2026-09-28T16:00:00Z",
-        "hugging_face": "2026-09-28T17:00:00Z",
-        "groq": "2026-09-28T18:00:00Z",
-        "openrouter": "2026-09-28T19:00:00Z",
+        "hugging_face": "2026-09-28T15:00:00Z",
         "ovhcloud": "2026-09-28T20:00:00Z",
         "deepseek": "2026-09-28T21:00:00Z",
     }
 
-    def real_registry(self):
+    def real_registry(self, untils=None):
         path = (Path(__file__).resolve().parent.parent
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
-        for provider_id, until in self.REAL_UNTILS.items():
+        for provider_id, until in (untils or self.REAL_UNTILS).items():
             registry["providers"][provider_id]["unavailable_until"] = until
         return registry
 
-    def real_plan(self, card):
+    def real_plan(self, card, untils=None):
         return r.plan(card,
                       {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
                        "tests": True, "need_tokens": 1000},
                       {"opencode": {"installed": True, "signed_in": True,
                                     "reason": ""}},
-                      self.real_registry(), {}, [], "muse-spark",
+                      self.real_registry(untils), {}, [], "muse-spark",
                       self.dt(2026, 9, 28, 12, 0, 0))
 
     def test_a_free_band_cooldown_sends_the_t2_worker_routes_away(self):
+        # D657-D2's chains put three providers behind the t2-worker combos:
+        # bazaarlink (the free head), openrouter (the free middle) and
+        # vertex_ai (the credit tail). Cooling exactly those is the shape this
+        # test was written for: the combos whose whole band cools stop being an
+        # answer, and the plan still serves from a legged, live route.
         cooled = {"l2-worker", "l2-worker-free-only", "l2-worker-clean"}
+        band = {"bazaarlink": "2026-09-28T12:10:00Z",
+                "openrouter": "2026-09-28T12:20:00Z",
+                "vertex_ai": "2026-09-28T12:30:00Z"}
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public"}
-        result = self.real_plan(card)
+        result = self.real_plan(card, band)
+        self.assertIsNotNone(result["route"], result["reason"])
         self.assertNotIn(result["route"], cooled,
                          "a plan that answers a combo whose every leg is cooling "
                          "is how the next task gets the same 429: %s"
                          % result["reason"])
-        # The reason names the cooldown, and names the EARLIEST return as the
-        # retry -- a caller reading it must not wait for the last one.
-        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity legs, so no reason can name an antigravity cooldown).
-        # Moved again by GLM55/AINATIVE 2026-10-05 + the GLM55 gate: the
-        # earliest cooled provider still legged on l2-worker is ainative
-        # (the oc glm leg is gated unavailable, not cooling).
-        self.assertIn("unavailable: ainative until 2026-09-28T12:20:00Z",
-                      result["reason"], result["reason"])
-        dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
-                           result["reason"])
-        self.assertEqual(min(dates), "2026-09-28T12:20:00Z", result["reason"])
+        # and the leg it does answer with belongs to no cooling provider.
+        registry = self.real_registry(band)
+        provider_id, _model_id = registry_tool.resolve_leg(result["leg"], registry)
+        self.assertNotIn(provider_id, band,
+                         "%s is served by the cooling %s" % (result["leg"],
+                                                             provider_id))
 
     def test_a_cooldown_refuses_a_card_that_insists_on_t2_worker(self):
-        # CIGREEN: expectation moved by aced9915 (B2-AGY removed the
-        # antigravity legs, and the provider is available=false, so cooling it
-        # changes nothing). GLM55/AINATIVE 2026-10-05: the earliest
-        # still-legged cooled provider on l2-worker is ainative (the oc glm
-        # leg is gated unavailable, GLM55 gate); google_ai_studio and meta_api
-        # are still legged too.
+        # Every legged provider cools, so the insisted route has no answer: the
+        # plan refuses, and the reason names the EARLIEST return as the retry --
+        # a caller reading it must not wait for the last one. D657-D2 put
+        # bazaarlink's free head at l2-worker's leg 1, so its 12:10 return is
+        # the earliest date the reason may print; the vertex credit tail is the
+        # same route's last leg, and the provider key is `vertex_ai`.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "l2-worker"}}
@@ -2784,12 +2843,15 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("l2-worker", result["reason"])
-        self.assertIn("unavailable: ainative until 2026-09-28T12:20:00Z",
+        self.assertIn("unavailable: bazaarlink until 2026-09-28T12:10:00Z",
                       result["reason"])
-        self.assertIn("unavailable: google_ai_studio until 2026-09-28T12:30:00Z",
+        self.assertIn("unavailable: vertex_ai until 2026-09-28T12:30:00Z",
                       result["reason"])
-        self.assertIn("unavailable: meta_api until 2026-09-28T14:00:00Z",
+        self.assertIn("unavailable: openrouter until 2026-09-28T12:20:00Z",
                       result["reason"])
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+                           result["reason"])
+        self.assertEqual(min(dates), "2026-09-28T12:10:00Z", result["reason"])
 
 
 class MetaApiResolverTests(unittest.TestCase):
