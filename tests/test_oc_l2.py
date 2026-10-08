@@ -30,6 +30,7 @@ import autoos_inbox  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
     FAKE_PY,
     FAKE_SESSION_ID,
+    FAKE_STDERR_NOTE,
     HINT_EXPECTED,
     PW_ENV,
     PW_VALUE,
@@ -52,6 +53,33 @@ _PARENT_WITH_CHILD = (
     "open(sys.argv[1], 'w').write(str(kid.pid)); "
     "time.sleep(120)"
 )
+
+# The environment name the forking fake writes its grandchild's PID to. Like the
+# record path, the launcher's child env is an allowlist, so a lane that wants the
+# fake to report a child must declare this name.
+CHILD_FILE_ENV = "OC_L1_FAKE_CHILD_FILE"
+# AO-L2-LAUNCH criterion b: a fake `opencode serve` that FORKS a grandchild which
+# IGNORES SIGTERM. The recorded PID is a session/group leader (the launcher spawns
+# it with start_new_session), so a stop that only SIGTERMs the group kills the
+# leader but NOT this grandchild - the tree survives unless the stop escalates a
+# SIGKILL to the whole group. The grandchild is deliberately stubborn precisely so
+# the test fails if the stop signals a lone PID instead of the group.
+_FORK_SERVE_PY = """import json, os, sys, subprocess, time
+rec = os.environ["%s"]
+with open(rec, "w", encoding="utf-8") as f:
+    json.dump({"argv": sys.argv[1:], "env_names": sorted(os.environ),
+               "pid": os.getpid(),
+               "guard_role": os.environ.get("AUTOOS_GUARD_ROLE"),
+               "l1_inbox": os.environ.get("AUTOOS_L1_INBOX"),
+               "agent_layer": os.environ.get("AUTOOS_AGENT_LAYER")}, f)
+sys.stderr.write("%s\\n"); sys.stderr.flush()
+kid = subprocess.Popen([sys.executable, "-c",
+    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    "time.sleep(300)"])
+with open(os.environ["%s"], "w", encoding="utf-8") as f:
+    f.write(str(kid.pid))
+time.sleep(300)
+""" % (RECORD_ENV, FAKE_STDERR_NOTE, CHILD_FILE_ENV)
 
 
 def _is_alive(pid):
@@ -441,6 +469,62 @@ class LaneTest(unittest.TestCase):
         # a stop of a stopped lane is a no-op, not an error
         out2 = oc_l2.cmd_stop(result["lane"])
         self.assertTrue(out2["stopped"])
+
+    @unittest.skipIf(os.name == "nt", "process groups")
+    def test_stop_kills_a_forked_grandchild_that_ignores_sigterm(self):
+        # AO-L2-LAUNCH criterion b: the recorded PID is a group leader, but the
+        # lane's child tree outlives it if the stop only signals the leader or
+        # only SIGTERMs the group. This fake forks a grandchild that IGNORES
+        # SIGTERM, so the group survives TERM - only a SIGKILL to the whole
+        # process group brings it down. A stop that must "leave no process in the
+        # group" has to escalate to the group, not the lone PID.
+        self.bin_ = make_fake_bin(self.td, self.td / "fake_fork.py", sys.executable)
+        (self.td / "fake_fork.py").write_text(_FORK_SERVE_PY, encoding="utf-8")
+        child_file = self.td / "child_pid.txt"
+        self._envs[CHILD_FILE_ENV] = os.environ.get(CHILD_FILE_ENV)
+        os.environ[CHILD_FILE_ENV] = str(child_file)
+        result, rc = self._start(opencode_bin=self.bin_,
+                                 child_env=[RECORD_ENV, CHILD_FILE_ENV])
+        self.assertEqual(rc, 0, result)
+        pid = result["pid"]
+        self.addCleanup(self._hard_kill_group, pid)
+
+        wait_file(child_file, seconds=10)
+        kid = int(child_file.read_text(encoding="utf-8").strip())
+        self.addCleanup(self._hard_kill_pid, kid)
+        # the grandchild is genuinely a MEMBER of the recorded lane's process
+        # group - otherwise a group kill could not be expected to reach it
+        self.assertEqual(oc_l2._pgid(pid), pid,
+                         "the recorded pid is not a group leader (start_new_session)")
+        self.assertEqual(oc_l2._pgid(kid), pid,
+                         "the fake's child is not in the lane's process group")
+        self.assertTrue(pid_alive(kid), "grandchild never came up")
+
+        out = oc_l2.cmd_stop(result["lane"])
+        self.assertTrue(out["stopped"], out)
+        self.assertFalse(pid_alive(pid), "the lane server survived stop")
+        # the whole point: a stubborn grandchild the leader cannot drag down with
+        # a TERM alone is killed by the group SIGKILL, and the stop says so
+        self.assertTrue(self._wait_until_gone(kid),
+                        "criterion b: l2_stop left a process in the group")
+
+    def _wait_until_gone(self, pid, seconds=6.0):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and pid_alive(pid):
+            time.sleep(0.1)
+        return not pid_alive(pid)
+
+    def _hard_kill_group(self, pgid):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    def _hard_kill_pid(self, pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
 
     def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset"):
         """A lane whose state file names a PID stop must not accept.

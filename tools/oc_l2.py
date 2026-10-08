@@ -552,7 +552,8 @@ def cmd_stop(name):
         # group is the tree: whatever `opencode serve` forks dies with it.
         # Anywhere else the process belongs to whoever started it - possibly
         # this very caller - and only the recorded PID may be signalled.
-        if _pgid(pid) == pid:
+        group_leader = _pgid(pid) == pid
+        if group_leader:
             try:
                 os.killpg(pid, signal.SIGTERM)
                 out["killed_pids"].append(pid)
@@ -565,18 +566,28 @@ def cmd_stop(name):
             except (ProcessLookupError, PermissionError, OSError):
                 pass
             out["killed_pids"].append(pid)
-    if not _wait_gone(pid, _KILL_WAIT_S) and os.name != "nt":
-        if _pgid(pid) == pid:
+        if group_leader:
+            # AO-L2-LAUNCH criterion b: the group is the whole tree, and a
+            # grandchild that IGNORES SIGTERM outlives both it and the leader.
+            # The lone recorded PID dying is therefore no proof the lane is gone:
+            # after the graceful window, SIGKILL the ENTIRE group regardless of
+            # whether the leader already died. The group's id equals the leader's
+            # (now-dead) PID and the group still exists while any member does, so
+            # killpg keeps reaching the survivors. A stop that signals only the
+            # leader would leave that stubborn child running - the exact orphan
+            # R-coord-10 forbids.
+            _wait_gone(pid, _KILL_WAIT_S)
             try:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
-        else:
+            _wait_gone(pid, _KILL_HARD_WAIT_S)
+        elif not _wait_gone(pid, _KILL_WAIT_S):
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass
-        _wait_gone(pid, _KILL_HARD_WAIT_S)
+            _wait_gone(pid, _KILL_HARD_WAIT_S)
     if not _pid_gone(pid):
         out.update(stopped=False, orphan=True,
                    detail="pid %d is still alive after SIGKILL to its process group; "
