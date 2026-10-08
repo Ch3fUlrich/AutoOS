@@ -1906,11 +1906,18 @@ class ReviewerPolicyTests(unittest.TestCase):
     different-family rule (an author is never reviewed by its own family) is
     checkable without a vendor table in the resolver.
 
-    The operator's fixed order: the PAID Meta Muse contributor first (a
-    different family from every free author, and it is what the paid API was
-    bought for), the other free families next, Claude Haiku last and only as a
-    first-pass fallback. Sonnet stays the high-risk closer and is deliberately
-    absent -- it is not on a preference list, it closes.
+    The operator's fixed order (REVROUTE, 2026-09-27): the PAID Meta Muse
+    contributor first, the other free families next, Claude Haiku last and only
+    as a first-pass fallback. Sonnet stays the high-risk closer and is
+    deliberately absent -- it is not on a preference list, it closes.
+
+    D657-D2 (AO-DENYLEGS D2, 2026-10-08) cut the head: §8 keeps the paid Muse
+    leg out and probe-d657 never acked it, so `omniroute/spark-1.3-contributor`
+    renders no combo and the first entry the walk reaches would always be
+    refused. The list now leads free, which is also what `reviewer_for`'s
+    two-pass walk does with it (every non-paid entry in list order first, the
+    paid ones only as last resort -- pinned in tests/test_autoos_resolver.py),
+    and Haiku stays at the tail.
     """
 
     @classmethod
@@ -1938,12 +1945,24 @@ class ReviewerPolicyTests(unittest.TestCase):
                           "reviewers[%d] client %r is not a registry client"
                           % (index, entry["client"]))
 
-    def test_the_paid_muse_reviewer_leads(self):
+    def test_the_head_reviewer_is_a_free_row_that_can_close(self):
+        # D657-D2 replaced `test_the_paid_muse_reviewer_leads`: §8 keeps the paid
+        # Muse leg out and probe-d657 never acked it, so the head the walk reaches
+        # first was a row every card refused. The cost rule it carried stands --
+        # the preferred reviewer is a free one, and it is a real reviewer rather
+        # than a first pass, because it is where a review lands when nothing else
+        # rules it out.
         first = self.reviewers[0]
-        self.assertEqual(first["family"], "meta")
-        self.assertIs(first["paid"], True)
-        self.assertEqual(first["client"], "opencode")
-        self.assertIn("spark-1.3-contributor", first["model"])
+        self.assertIs(first["paid"], False, first["model"])
+        self.assertIsNot(first.get("first_pass_only"), True, first["model"])
+
+    def test_the_meta_seat_is_free_only(self):
+        # D657-D2 §8: "muse only free ids". Meta keeps a cross-family reviewer
+        # seat -- the paid contributor head is gone, the free grant is not.
+        meta = [e for e in self.reviewers if e["family"] == "meta"]
+        self.assertTrue(meta, "the meta family lost its reviewer seat")
+        for entry in meta:
+            self.assertIs(entry["paid"], False, entry["model"])
 
     def test_haiku_is_a_first_pass_only_fallback(self):
         haiku = [e for e in self.reviewers if e["family"] == "anthropic"]
@@ -2054,11 +2073,18 @@ class ReviewerPolicyTests(unittest.TestCase):
             self.assertIn(model_id, self.reg["models"], leg)
             self.assertIn(provider_id, self.reg["providers"], leg)
 
-    def test_the_list_is_ordered_paid_first_then_free(self):
-        # The operator's cost preference made visible: pay for the different
-        # family, fall back to free, and never let Haiku close.
-        self.assertIs(self.reviewers[0]["paid"], True)
-        self.assertEqual(self.reviewers[-1]["family"], "anthropic")
+    def test_the_list_ends_with_the_paid_fallback_that_closes_nothing(self):
+        # The old pin read "the list is ordered paid first, then free". D657-D2
+        # removed the paid head, and the cost preference it encoded lives in
+        # `reviewer_for` anyway (every non-paid entry in list order, then the
+        # paid ones as last resort -- pinned in tests/test_autoos_resolver.py).
+        # What the data still owes the operator's order is the tail: Haiku last,
+        # paid, and never the one who signs.
+        last = self.reviewers[-1]
+        self.assertEqual(last["family"], "anthropic")
+        self.assertIs(last["paid"], True)
+        self.assertIs(last["first_pass_only"], True)
+        self.assertEqual(self.reviewers.count(last), 1)
 
     def test_real_registry_passes_the_reviewers_check(self):
         self.assertEqual(registry.check_registry(self.reg), [])
