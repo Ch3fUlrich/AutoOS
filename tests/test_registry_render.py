@@ -699,6 +699,47 @@ class IdeRenderMatchesTodayTests(unittest.TestCase):
         self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "zed", "openhands"]})
 
 
+class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
+    """NOLEGS-OFFER (2026-10-08, fix-ci-round2): a route with `legs: []` is in no
+    combo - render_omniroute() names a legless route in neither `combos` nor
+    `omitted` - so catalog/ide-models.json must not hand it to a client through
+    the gateway, which is the picker naming a combo that cannot resolve.
+    tools/audit-router.py --offline calls that DRIFT, and it was: SS8 emptied
+    `l1-orchestrator-paid` and the §3 transcript lens was born legless, both
+    keeping their gateway membership. Pinned on the renderer, not only on the
+    audit, so the next legless route cannot re-open the same hole."""
+
+    def by_id(self, registry_doc=None):
+        rendered = registry.render_ide(registry_doc or real_registry())
+        return {m["id"]: m for m in rendered["models"]}
+
+    def test_a_legless_route_loses_gateway_membership_and_keeps_litellm(self):
+        # LiteLLM addresses the paid escalation chain by hand (its group lives in
+        # config.yaml, not in a combo), so the route is offered there and nowhere
+        # else - the shape l2-worker-paid and l3-driver-paid already have.
+        paid = self.by_id()["l1-orchestrator-paid"]
+        self.assertEqual(paid["surfaces"], {"litellm": ["opencode", "zed"]}, paid)
+
+    def test_a_route_no_gateway_offers_gets_no_entry(self):
+        ids = [m["id"] for m in self.by_id().values()]
+        self.assertNotIn("l3-review-transcript", ids,
+                         "SS3's lens is carried by policy.reviewers (the qoder "
+                         "client), not by a combo - so no client may pick it")
+
+    def test_a_leg_earns_the_gateway_membership_back(self):
+        # The control: the rule reads `legs`, not the route id. Give the lens a
+        # served leg and it is offered through the gateway again.
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["l3-review-transcript"]["legs"] = ["vertex/gemini-3.8-flash"]
+        self.assertIn("omniroute", self.by_id(reg)["l3-review-transcript"]["surfaces"])
+
+    def test_the_dynamic_bootstraps_are_exempt(self):
+        # auto/* resolve inside OmniRoute with no combo - the audit's exemption,
+        # and swallowing them here would drop the picker's own default model.
+        for route_id in ("auto", "auto/smart", "auto/cheap"):
+            self.assertIn("omniroute", self.by_id()[route_id]["surfaces"], route_id)
+
+
 class IdeRenderDeterminismTests(unittest.TestCase):
     """A second render changes nothing (spec 11: idempotence)."""
 

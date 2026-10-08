@@ -1728,6 +1728,9 @@ def render_ide(registry: dict) -> dict:
     render_omniroute() above, there is no legs-non-empty filter here: mapping doc
     section 3, "every ide-models id gets a route even when combos.json has no
     matching combo" (the LiteLLM-only *-paid routes, the dynamic auto* routes).
+    Two routes get no entry: one that declares legs and serves none (OR1d), and
+    one a gateway offers to no client at all - a legless route is never given
+    omniroute membership, because it renders no combo (NOLEGS-OFFER).
     Each entry's id/name/context/output/reasoning_effort come from the first
     gateway present in IDE_GATEWAYS priority order among
     `routes.<id>.surfaces.<gateway>` (a dict carrying "clients" - excludes a
@@ -1768,8 +1771,9 @@ def render_ide(registry: dict) -> dict:
             # OR1d: a route that declares legs but can serve none through
             # either gateway is offered by no declaration - the same rule
             # render_omniroute() applies to combos.json. A deliberately
-            # legless route (legs: []) is NOT dropped: it never promised a
-            # gateway leg.
+            # legless route (legs: []) is not dropped here: it never promised a
+            # gateway leg. It does lose its gateway *membership* - see
+            # NOLEGS-OFFER below.
             continue
         surfaces = route.get("surfaces")
         surfaces = surfaces if isinstance(surfaces, dict) else {}
@@ -1780,6 +1784,21 @@ def render_ide(registry: dict) -> dict:
         if not gateways:
             raise ValueError(
                 "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
+        # NOLEGS-OFFER (2026-10-08, fix-ci-round2): a legless route is in no
+        # combo - render_omniroute() gives `legs: []` no combo at all - so its
+        # omniroute membership would advertise a picker entry the gateway cannot
+        # resolve, which is what tools/audit-router.py --offline calls DRIFT
+        # (l1-orchestrator-paid after SS8 emptied it, l3-review-transcript born
+        # legless). The surface block stays in the registry as the route's own
+        # record of its window and name; it grants no client membership. The
+        # auto/* bootstraps keep theirs - OmniRoute resolves them itself with no
+        # combo, and the audit exempts them by the same test.
+        if not (route.get("legs") or []) and not route_id.startswith("auto"):
+            gateways.pop("omniroute", None)
+            if not gateways:
+                # Offered through no gateway at all: like the OR1d route above,
+                # it gets no entry rather than a row nothing can serve.
+                continue
         canonical = gateways[next(gw for gw in IDE_GATEWAYS if gw in gateways)]
 
         # The ladder and the default effort describe the leg that will ANSWER.

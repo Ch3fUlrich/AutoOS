@@ -564,11 +564,6 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
-        "l1-orchestrator-paid": {
-          "modelID": "l1-orchestrator-paid",
-          "name": "L1 · l1-orchestrator-paid · 1M",
-          "limit": { "context": 1000000, "output": 32768 }
-        },
         "l1-orchestrator-free-only": {
           "modelID": "l1-orchestrator-free-only",
           "name": "L1 · l1-orchestrator-free-only · 1M",
@@ -678,11 +673,6 @@
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
-        },
-        "l3-review-transcript": {
-          "modelID": "l3-review-transcript",
-          "name": "L3 · l3-review-transcript · 1M",
-          "limit": { "context": 1000000, "output": 16384 }
         },
         "t4-rag": {
           "modelID": "t4-rag",

@@ -43,10 +43,6 @@
       "context": 1000000,
       "output": 32768,
       "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ],
         "litellm": [
           "opencode",
           "zed"
@@ -325,18 +321,6 @@
         "medium",
         "high"
       ],
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
-      "id": "l3-review-transcript",
-      "name": "L3 · l3-review-transcript · 1M",
-      "context": 1000000,
-      "output": 16384,
       "surfaces": {
         "omniroute": [
           "opencode",
