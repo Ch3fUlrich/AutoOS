@@ -54,6 +54,13 @@ for _p in (str(REPO_ROOT / "tools"), str(REPO_ROOT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# The one provider-spelling normaliser (LANE-PRICE-GAP, 2026-10-08): a call-log
+# row names its provider by the gateway connection id (`vertex`) or the model
+# namespace (`ovh`), while the registry files its price under the provider id
+# (`vertex_ai`, `ovhcloud`). Read from the registry's own fields, so a renamed
+# connection needs no code edit here.
+from registry import provider_id_from_spelling  # noqa: E402
+
 EXIT_OK = 0
 EXIT_BAD_INPUT = 2
 EXIT_RUN_FLAG = 10
@@ -218,6 +225,30 @@ def _price_float(obj, key="per_token"):
     return v if math.isfinite(v) and v > 0 else 0.0
 
 
+def registry_price_row(reg_entry, provider, registry):
+    """The dict the registry branch prices one row from.
+
+    A model id served at two prices at once (T1-CREDIT-FIX-6, D-220) keeps its
+    free-provider price on the model-level row and files the paid provider's
+    rate under `models.<id>.provider_prices.<provider_id>` -- keyed by the
+    registry id. LANE-PRICE-GAP (2026-10-08): the row names the gateway
+    connection id (`vertex`) or its model namespace (`ovh`), so the key is
+    resolved through the registry's own fields before the lookup; a spelling
+    that resolves to nothing keeps the model-level row rather than borrowing
+    another provider's price. Whatever row is chosen still has to state a
+    complete rate before this branch bills it -- the gate's fallback policy is
+    `get_price`'s, unchanged."""
+    if not isinstance(reg_entry, dict):
+        return None
+    provider_id = provider_id_from_spelling(provider, registry) if provider else None
+    scoped = reg_entry.get("provider_prices")
+    if isinstance(scoped, dict) and provider_id:
+        entry = scoped.get(provider_id)
+        if isinstance(entry, dict):
+            return entry
+    return reg_entry
+
+
 def get_price(model, provider=None, table=None):
     if table is None:
         table = load_price_table()
@@ -239,11 +270,11 @@ def get_price(model, provider=None, table=None):
     prov = normalize_provider_alias(inferred_prov)
 
     # 1. Registry check: prefer complete prices (in, out, cache_read > 0)
-    reg_models = (table.get("registry") or {}).get("models") or {}
+    registry = table.get("registry") or {}
+    reg_models = registry.get("models") or {}
     reg_entry = reg_models.get(bare_model) or reg_models.get(raw_model)
     if isinstance(reg_entry, dict):
-        scoped = (reg_entry.get("provider_prices") or {}).get(inferred_prov or prov)
-        active = scoped if isinstance(scoped, dict) else reg_entry
+        active = registry_price_row(reg_entry, inferred_prov or prov, registry)
         p_in = _price_float(active, "price_in")
         p_out = _price_float(active, "price_out")
         p_cache = _price_float(active, "price_cache_read") or _price_float(active, "price_cached_in")

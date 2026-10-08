@@ -9,6 +9,7 @@ has no priced Flash model at all.
 
 Run with: python tests/test_run_budget_prices.py
 """
+import copy
 import json
 import sys
 import tempfile
@@ -90,6 +91,97 @@ class TestVertexSpellingsPriced(unittest.TestCase):
             self.assertEqual(pr["price_out"], 3.75e-06, model)
             self.assertEqual(pr["price_cache_read"], 1.875e-07, model)
             self.assertTrue(pr["unverified"], model)
+
+
+class TestRegistryScopedProviderSpelling(unittest.TestCase):
+    """(a2) LANE-PRICE-GAP (2026-10-08): the registry half of `get_price` keyed
+    `models.<id>.provider_prices` by the spelling the row carried.
+
+    A call-log row names the provider `vertex` (the gateway connection id) or
+    `ovh` (the model prefix) while the price is filed under the registry id
+    (`vertex_ai`, `ovhcloud`). The scoped lookup therefore missed and the row
+    fell to the model-level row -- which for a two-price model id is the FREE
+    provider's 0, i.e. no price at all. The lookup now goes through the one
+    registry-derived normaliser tools/registry.py owns, the same one
+    `autoos_usage` prices with.
+
+    The gate's fallback policy is deliberately untouched: `configuration/
+    google-prices.json` still answers what the registry cannot state, in the
+    same order and with the same rates
+    (test_the_prices_file_fallback_is_unchanged).
+    """
+
+    REG = {
+        "providers": {
+            "vertex_ai": {"id": "vertex_ai", "omniroute_id": "vertex", "tier": "credit"},
+            "ovhcloud": {"id": "ovhcloud", "omniroute_id": "ovhcloud",
+                         "model_prefix": "ovh", "tier": "credit"},
+            "google_ai_studio": {"id": "google_ai_studio", "omniroute_id": "gemini",
+                                 "tier": "free"},
+        },
+        "models": {
+            "gemini-3.8-flash": {
+                "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
+                "price_cache_read": 0.0,
+                "provider_prices": {"vertex_ai": {
+                    "price_in": 1e-06, "price_out": 3e-06, "price_cache_read": 1e-07,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+            "gpt-oss-120b": {
+                "id": "gpt-oss-120b", "price_in": 0.0, "price_out": 0.0,
+                "price_cache_read": 0.0,
+                "provider_prices": {"ovhcloud": {
+                    "price_in": 2e-07, "price_out": 4e-07, "price_cache_read": 2e-08,
+                    "price_source": "unit-test", "price_as_of": "2026-10-08"}}},
+        },
+    }
+
+    def _table(self):
+        return {"fallback": {}, "registry": copy.deepcopy(self.REG)}
+
+    def test_the_gateway_connection_id_finds_the_provider_key_price(self):
+        pr = rb.get_price("gemini-3.8-flash", "vertex", self._table())
+        self.assertEqual(pr["source"], "registry")
+        self.assertEqual((pr["price_in"], pr["price_out"], pr["price_cache_read"]),
+                         (1e-06, 3e-06, 1e-07))
+
+    def test_the_provider_key_spelling_costs_the_same_as_the_gateway_one(self):
+        for spelling in ("vertex", "vertex_ai", "VERTEX"):
+            pr = rb.get_price("gemini-3.8-flash", spelling, self._table())
+            self.assertEqual(pr["source"], "registry", spelling)
+            self.assertEqual(pr["price_in"], 1e-06, spelling)
+
+    def test_the_model_prefix_namespace_finds_its_provider_key_price(self):
+        pr = rb.get_price("gpt-oss-120b", "ovh", self._table())
+        self.assertEqual(pr["source"], "registry", pr)
+        self.assertEqual(pr["price_in"], 2e-07)
+
+    def test_an_unknown_provider_never_borrows_another_providers_price(self):
+        # The model-level row is the free leg's 0: an unresolvable provider reads
+        # as unpriced, not as vertex_ai's money.
+        pr = rb.get_price("gemini-3.8-flash", "ghost", self._table())
+        self.assertEqual(pr["source"], "unpriced", pr)
+        self.assertEqual(pr["price_in"], 0.0)
+
+    def test_a_row_billed_under_the_gateway_id_is_priced_end_to_end(self):
+        rows = [_row("gemini-3.8-flash", "vertex", 1_000_000, 100_000, 200_000)]
+        res = rb.evaluate_run(rows, prices=self._table())
+        # 800_000 uncached * 1e-06 + 200_000 cached * 1e-07 + 100_000 out * 3e-06
+        # = 0.8 + 0.02 + 0.3 = 1.12
+        self.assertAlmostEqual(res["est_usd"], 1.12, places=6)
+        self.assertEqual(res["unpriced_models"], [])
+
+    def test_the_prices_file_fallback_is_unchanged(self):
+        # A registry row that cannot state a cache rate still loses to the
+        # prices file, in the same order as before: the gate's fallback policy
+        # is not this change's business.
+        table = {"fallback": {"models": {"gemini-3.8-flash": {"providers":
+                 _provider_block(0.75, 3.75, 0.1875)}}},
+                 "registry": copy.deepcopy(self.REG)}
+        del table["registry"]["models"]["gemini-3.8-flash"]["provider_prices"][
+            "vertex_ai"]["price_cache_read"]
+        pr = rb.get_price("gemini-3.8-flash", "vertex", table)
+        self.assertEqual(pr["source"], "google-prices.json", pr)
+        self.assertEqual(pr["price_in"], 7.5e-07)
 
 
 class TestHighestFlashRateWins(unittest.TestCase):
