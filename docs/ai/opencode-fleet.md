@@ -153,7 +153,13 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
   because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-2
   or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller passed), while tier 1 and
   any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was a dead end: tier 3 is the
-  review-only seat and refuses an implement card, so an L2 could never start a writer (found live by AO-L2-PRODTEST).
+  review-only seat and refuses an implement card, so an L2 could never start a writer (found live by AO-L2-PRODTEST). A spawn that
+  passes that fence is stamped `AUTOOS_AGENT_LAYER=L3` — the child's layer is decided by the spawner, from the spawner's own
+  environment, never inherited and never a plan entry or a caller's `extra`, because a child that chooses its own mark chooses its
+  own fence — and a server that reads `L3` back registers the L2 menu WITHOUT `spawn` (profile `l3`) and refuses a `spawn` call
+  made anyway: a leaf never spawns (skill rule `R-worker-06`). Both rules are read again by the CLI's `run` — the same helper, so a
+  lane's own shell cannot get a warmer answer than its own server gave — and either refusal exits `14` (`EXIT_LAYER_FENCE`), which
+  is a report upward, not a flag to fix and retry. An L1's worker carries no mark at all and keeps the menu it always had.
   `l2_status` and `oc_status`
   stay open for a caller that can see them: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1 inbox.
 - The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied

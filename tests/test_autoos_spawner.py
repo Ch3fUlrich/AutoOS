@@ -11985,6 +11985,177 @@ class WorkerEnvAllowlistTests(_EnvScrubBase):
                          "both the first launch and the fallthrough re-run must scrub")
 
 
+class AgentLayerFenceTests(unittest.TestCase):
+    """L2SPAWN-TIER fix 1 (Sonnet final REJECT 2026-10-08): the layer marker a
+    spawn hands down, and the two gates that read it back.
+
+    `WORKER_ENV_AUTOOS` never named `AUTOOS_AGENT_LAYER`, so a tier-2 child
+    spawned for an L2 lane inherited *no* mark: its own autoos-agent MCP answered
+    the FULL profile, `l2_spawn_refusal` returned None outside profile l2, and with
+    the default depth budget of 2 (`autoos_clients.DEFAULT_MAX_DEPTH`) the
+    grandchild tier 1 — the L1's own seat — fitted under the lane. Two things fix
+    it, and both belong to the spawner, not to the child:
+
+    * the child is stamped a LEAF (`L3`), by the spawner, from the spawner's own
+      environment — never inherited verbatim and never whatever a caller or a plan
+      asked for, because that is the child choosing its own fence;
+    * a leaf never spawns at all (skill rule R-worker-06): the MCP refuses the
+      spawn and the CLI `run` refuses it with its own exit code.
+
+    Our own CLI child is the one exception to the stamp: it carries the lane's own
+    marker verbatim (the same shape as `AUTOOS_ADMISSION_OFF`), because it is the
+    process that has to *do* the stamping, and it must re-read the gate the server
+    already read or the two answer the same spawn differently.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    LAYER = "AUTOOS_AGENT_LAYER"
+    BASE = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester",
+            "SHELL": "/bin/bash", "AUTOOS_STATE_DIR": "/tmp/state"}
+
+    def child_env(self, spawner_layer=None, plan_env=None):
+        base = dict(self.BASE)
+        if spawner_layer is not None:
+            base[self.LAYER] = spawner_layer
+        return self.agent.worker_env({"cwd": "/tmp/sandbox",
+                                      "env": dict(plan_env or {})},
+                                     None, base=base)
+
+    def cli_child_env(self, spawner_layer=None, extra=None):
+        base = dict(self.BASE)
+        if spawner_layer is not None:
+            base[self.LAYER] = spawner_layer
+        return self.agent.spawner_child_env(base=base, extra=dict(extra or {}))
+
+    def test_the_layer_name_is_on_the_worker_env_allowlist(self):
+        # named in the allowlist, so the fence reaches a worker by the same one
+        # channel every other AUTOOS_* state reaches it on.
+        self.assertIn(self.LAYER, self.agent.WORKER_ENV_AUTOOS)
+        self.assertEqual(self.agent.ENV_AGENT_LAYER, self.LAYER)
+
+    def test_an_l2_spawn_stamps_its_child_as_a_leaf(self):
+        env = self.child_env("L2")
+        self.assertEqual(env.get(self.LAYER), self.agent.AGENT_LAYER_LEAF, env)
+
+    def test_the_stamp_is_l3_and_not_a_relabel_of_the_caller(self):
+        self.assertEqual(self.agent.child_agent_layer({"AUTOOS_AGENT_LAYER": "L2"}),
+                         self.agent.AGENT_LAYER_LEAF)
+        self.assertEqual(self.agent.child_agent_layer({"x": "1"}), "")
+
+    def test_a_spawn_from_an_unmarked_or_l1_session_stamps_nothing(self):
+        # an L1's worker is an ordinary worker: it keeps its own depth budget and
+        # its own MCP profile, and nothing marks it a leaf.
+        for layer in (None, "", "L1", "orchestrator"):
+            env = self.child_env(layer)
+            self.assertNotIn(self.LAYER, env, "%s → %r" % (layer, env.get(self.LAYER)))
+
+    def test_a_caller_cannot_downgrade_the_child_layer(self):
+        # the stamp is applied after the allowlist copy AND after the plan merge,
+        # so neither an inherited value nor a plan entry names the child's layer.
+        self.assertEqual(self.child_env("L2", {"AUTOOS_AGENT_LAYER": "L1"}).get(self.LAYER),
+                         self.agent.AGENT_LAYER_LEAF)
+        self.assertEqual(self.child_env("L2", {"AUTOOS_AGENT_LAYER": ""}).get(self.LAYER),
+                         self.agent.AGENT_LAYER_LEAF)
+        self.assertNotIn(self.LAYER, self.child_env(None, {"AUTOOS_AGENT_LAYER": "L2"}))
+
+    def test_the_marker_is_read_stripped_and_case_folded(self):
+        for spelling in (" l2 ", "L2", "l2", "\tL2"):
+            env = self.child_env(spelling)
+            self.assertEqual(env.get(self.LAYER), self.agent.AGENT_LAYER_LEAF, spelling)
+
+    def test_our_own_cli_child_carries_the_lanes_marker_verbatim(self):
+        # Not the stamp: the CLI is the process that stamps, so it re-reads the
+        # lane's own mark — otherwise an L2's spawn would hand its CLI a leaf
+        # marker and refuse the very spawn the server just allowed.
+        self.assertEqual(self.cli_child_env("L2").get(self.LAYER), "L2")
+        self.assertEqual(self.cli_child_env("L3").get(self.LAYER), "L3")
+        self.assertNotIn(self.LAYER, self.cli_child_env(None))
+
+    def test_an_extra_cannot_relabel_the_cli_child(self):
+        # `extra` is a caller's dictionary, so it is cleared before the marker is
+        # copied, not after: an L2's server cannot be talked into an L1 child.
+        self.assertEqual(self.cli_child_env("L2", {"AUTOOS_AGENT_LAYER": "L1"}).get(self.LAYER),
+                         "L2")
+        self.assertEqual(self.cli_child_env(None, {"AUTOOS_AGENT_LAYER": "L2"}).get(self.LAYER),
+                         None)
+
+    def test_the_leaf_refusal_reads_the_marker_and_nothing_else(self):
+        self.assertIsNotNone(self.agent.leaf_spawn_refusal({"AUTOOS_AGENT_LAYER": "L3"}))
+        self.assertIsNotNone(self.agent.leaf_spawn_refusal({"AUTOOS_AGENT_LAYER": " l3 "}))
+        for env in ({}, {"AUTOOS_AGENT_LAYER": "L2"}, {"AUTOOS_AGENT_LAYER": "L1"}):
+            self.assertIsNone(self.agent.leaf_spawn_refusal(env), env)
+
+    def test_the_l2_gate_covers_the_tiers_it_was_written_for(self):
+        # finding 2: `int(tier) >= 2` was an open-ended interval, so tier 4 and
+        # tier 99 passed as workers. The allowed set is the two spawned tiers.
+        l2 = {"AUTOOS_AGENT_LAYER": "L2"}
+        self.assertIsNone(self.agent.l2_spawn_refusal(2, None, env=l2))
+        self.assertIsNone(self.agent.l2_spawn_refusal(3, None, env=l2))
+        for bad in (1, 4, 5, 99, 0):
+            self.assertIsNotNone(self.agent.l2_spawn_refusal(bad, None, env=l2), bad)
+        # and the whole gate stays shut to a process no lane marked
+        self.assertIsNone(self.agent.l2_spawn_refusal(1, None, env={}))
+
+    def _run_cli(self, argv, **layer_env):
+        base = dict(os.environ)
+        base.pop(self.LAYER, None)
+        base["AUTOOS_ADMISSION_OFF"] = "1"
+        base.update(layer_env)
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, base, clear=True), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            rc = self.agent.main(argv)
+        return rc, err.getvalue()
+
+    def test_a_leaf_running_the_cli_is_refused_with_its_own_exit_code(self):
+        # The path the MCP profile hides but the CLI cannot assume: a leaf that
+        # reaches for `tools/autoos-agent.py run` from its own shell.
+        rc, err = self._run_cli(["run", "--tier", "2", "--isolate", "--dry-run", "t"],
+                               **{self.LAYER: "L3"})
+        self.assertEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+        self.assertEqual(rc, 14, "the code is documented in the CLI header")
+        self.assertIn("leaf", err.lower(), err)
+        self.assertIn("R-worker-06", err, err)
+
+    def test_an_l2_running_the_cli_cannot_reach_tier_1(self):
+        # The last-mile gate is the server's own rule, so a lane's bash gets the
+        # same answer as its MCP — and the same exit code.
+        rc, err = self._run_cli(["run", "--tier", "1", "--dry-run", "t"],
+                               **{self.LAYER: "L2"})
+        self.assertEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+        self.assertIn("l2", err.lower(), err)
+
+    def test_a_legal_l2_spawn_still_plans(self):
+        # The gate must refuse nothing the lane was built to ask for: tier 2 is
+        # allowed, so the run gets past the fence and on to the normal plan path
+        # (whatever it exits, it does not exit on the fence).
+        rc, err = self._run_cli(["run", "--tier", "2", "--isolate", "--dry-run", "t"],
+                                **{self.LAYER: "L2"})
+        self.assertNotEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+        self.assertNotIn("leaf", err.lower(), err)
+
+    def test_the_cli_gate_reads_the_tier_the_card_routes_to(self):
+        # Drift guard, and the reason the CLI reads `route["tier"]` after
+        # build_plan instead of its own flags: a `role=implement` card and the
+        # `--tier 2` the MCP let through are the same seat only if both read
+        # `_tier_for_route`. A card an L2 may start must not die at the last mile.
+        rc, err = self._run_cli(["run", "--isolate", "--dry-run",
+                                 "--card", "role=implement,complexity=standard", "t"],
+                                **{self.LAYER: "L2"})
+        self.assertNotEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+        rc, err = self._run_cli(["run", "--isolate", "--dry-run",
+                                 "--card", "role=orchestrate,ctx=1m", "t"],
+                                **{self.LAYER: "L2"})
+        self.assertEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+
+    def test_an_unmarked_run_is_untouched_by_the_fence(self):
+        rc, err = self._run_cli(["run", "--tier", "2", "--isolate", "--dry-run", "t"])
+        self.assertNotEqual(rc, self.agent.EXIT_LAYER_FENCE, err)
+
+
 class GitGlobalConfigFenceTests(unittest.TestCase):
     """FF1c item 1 (D-106): the numbered config channels *cancel* two settings,
     they do not stop git **reading** a global config file. Inheriting HOME and

@@ -36,7 +36,10 @@ server reads `L2` back and (a) registers only the spawner's tools - no
 be refused, (b) still refuses the lane-control calls at the function, so the
 shared code cannot be reached around the list, and (c) refuses a `spawn` that is
 not a tier-2 or tier-3 worker in its own clone - an L2 that could start tier 1
-owns the L1's own seat.
+owns the L1's own seat. Each worker the lane does start is stamped
+`AUTOOS_AGENT_LAYER=L3` by the spawner (never by the caller), so it runs profile
+`l3`, which has no `spawn` tool at all, and its CLI refuses any run with exit
+code 14: the lane's depth budget ends with its own children.
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`),
 one directory per lane holding the generated oc_l1 config (0600: it names host
@@ -135,7 +138,9 @@ ROLE_LINES = (
     "for an L2 are workers: a tier-2 writer (`role: implement`) or a tier-3 "
     "reviewer (`read_only`, or a review card), each forced into its own isolated "
     "clone - tier 1 and a `role: orchestrate` card are refused before a run "
-    "starts. "
+    "starts, and each worker you start is marked a LEAF (L3), which never spawns "
+    "of its own: work you did not ask for is yours to report, not a child's to "
+    "start. "
     "Spawn the work that way (writer, then a cross-family reviewer), judge "
     "their reports, and report upward.",
     "Report upward with the `l2_report` tool on the `autoos-agent` MCP - never a "

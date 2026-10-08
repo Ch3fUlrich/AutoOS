@@ -43,6 +43,7 @@ TOOLS = ROOT / "tools"
 sys.path.insert(0, str(TOOLS))
 
 import autoos_agent_mcp as mcp_server  # noqa: E402
+import autoos_clients as clients  # noqa: E402
 import oc_l1_render  # noqa: E402
 
 _HAVE_MCP = True
@@ -83,12 +84,32 @@ class ProfileSelectionTest(unittest.TestCase):
         # still means the same lane
         self.assertEqual(self._profile(**{mcp_server.ENV_AGENT_LAYER: " l2 "}), "l2")
 
+    def test_the_l3_marker_selects_the_leaf_profile(self):
+        # L2SPAWN-TIER fix 1 (Sonnet final REJECT 2026-10-08): a spawn made from
+        # profile l2 stamps its child `AUTOOS_AGENT_LAYER=L3`. Reading L3 as
+        # "not L2, so the full menu" handed that tier-2 child every spawner tool
+        # back, and with the default depth budget of 2 a grandchild tier 1 fits.
+        self.assertEqual(self._profile(**{mcp_server.ENV_AGENT_LAYER: "L3"}),
+                         mcp_server.LEAF_PROFILE)
+        self.assertEqual(self._profile(**{mcp_server.ENV_AGENT_LAYER: " l3 "}),
+                         mcp_server.LEAF_PROFILE)
+
     def test_any_other_layer_or_none_is_the_full_profile(self):
         self.assertEqual(self._profile(), mcp_server.FULL_PROFILE)
-        for value in ("L1", "L3", "worker", ""):
+        for value in ("L1", "worker", ""):
             self.assertEqual(
                 self._profile(**{mcp_server.ENV_AGENT_LAYER: value}),
                 mcp_server.FULL_PROFILE, value)
+
+    def test_the_leaf_profile_is_the_l2_menu_minus_the_spawner_it_cannot_use(self):
+        # R-worker-06: a leaf never spawns. `l2_report` goes with `spawn` because
+        # reporting upward is the L2 lane's contract, not a worker's, and the
+        # read-only companions stay (a leaf still polls its own run).
+        leaf = set(mcp_server.MCP_TOOL_PROFILES[mcp_server.LEAF_PROFILE])
+        self.assertEqual(leaf, set(mcp_server.MCP_TOOL_PROFILES["l2"])
+                         - {"spawn", mcp_server.L2_REPORT_TOOL})
+        self.assertNotIn("spawn", leaf)
+        self.assertTrue({"status", "result", "context", "heartbeat"} <= leaf)
 
     def test_the_l2_profile_tool_set_is_the_spawner_plus_its_own_report_tool(self):
         # Pin, verbatim: criterion 2's eight spawner tools and no others, plus
@@ -169,6 +190,15 @@ class ToolRegistrationTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {mcp_server.ENV_AGENT_LAYER: "L2"}):
             seen = registered_tool_names(None)
         self.assertEqual(seen, set(mcp_server.MCP_TOOL_PROFILES["l2"]))
+
+    def test_an_l3_environment_serves_the_leaf_profile(self):
+        # The marker is the only input, so the profile a leaf gets is chosen by
+        # the environment its spawner stamped — never by anything the leaf can
+        # pass as an argument.
+        with mock.patch.dict(os.environ, {mcp_server.ENV_AGENT_LAYER: "L3"}):
+            seen = registered_tool_names(None)
+        self.assertEqual(seen, set(mcp_server.MCP_TOOL_PROFILES[mcp_server.LEAF_PROFILE]))
+        self.assertNotIn("spawn", seen, "a leaf must not even see the tool it may not use")
 
     # Each advertised tool is a thin wrapper over one module function, and the
     # CLI calls those directly - hiding a tool must not have moved its
@@ -618,6 +648,120 @@ class L2SpawnTierGateTest(unittest.TestCase):
         self.assertEqual(out["state"], "rejected", out)
         self.assertIn("tier 1", out["error"], out)
         self.assertNotIn("id", out, "a refused spawn must not name a run")
+
+    def test_a_tier_above_three_is_refused_and_not_renormalised(self):
+        # finding 2: `int(run_tier) >= 2` let tier 4 and tier 99 through the L2
+        # gate as if they were workers. The allowed set is the two spawned tiers,
+        # spelled out; an out-of-range tier is refused here rather than reaching
+        # the CLI's argparse and coming back as an unlabelled rc 2.
+        for bad in (4, 99, "4", "99"):
+            msg = self._refused({"task": "t", "tier": bad}, "tier")
+            self.assertIn(str(bad), msg, msg)
+
+    def test_a_padded_tier_is_normalised_and_allowed(self):
+        # A JSON caller that sends " 2" means tier 2; the gate reads the integer,
+        # so it is the same allowed spawn and the argv carries the clean value.
+        argv, _ = self._allowed({"task": "t", "tier": " 2"})
+        self.assertEqual(argv[argv.index("--tier") + 1], "2")
+
+    def test_an_orchestrate_role_is_refused_whatever_how_it_is_spelled(self):
+        # finding 3: the role was compared exactly, so "Orchestrate" was a
+        # different string from "orchestrate" and an L2 could name the L1's own
+        # seat in a different case. A card that the router itself refuses (an
+        # unknown role value) is a refusal too, but this is the gate's own
+        # normalisation, not the router's validation, and it is what the helper
+        # owes before select_combo ever sees the card.
+        l2 = {mcp_server.ENV_AGENT_LAYER: "L2"}
+        for role in ("Orchestrate", "ORCHESTRATE", " orchestrate", "\torchestrate"):
+            self.assertIsNotNone(mcp_server.l2_spawn_refusal(2, {"role": role}, env=l2),
+                                 role)
+            self.assertIsNotNone(mcp_server.l2_spawn_refusal(3, {"role": role}, env=l2),
+                                 role)
+        # and a legal role in any casing stays legal
+        self.assertIsNone(mcp_server.l2_spawn_refusal(2, {"role": "implement"}, env=l2))
+
+    def test_a_spawn_past_the_depth_budget_is_refused_not_started(self):
+        # Existing rule, pinned here because a leaf chain is exactly what the
+        # budget is for: an L2 at depth 2 of 2 cannot start a third leg.
+        with self.assertRaises(clients.DepthError):
+            self._argv({"task": "t", "tier": 2},
+                       AUTOOS_AGENT_LAYER="L2", AUTOOS_AGENT_DEPTH="2",
+                       AUTOOS_AGENT_MAX_DEPTH="2")
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_LAYER": "L2",
+                                          "AUTOOS_AGENT_MCP_DRY_RUN": "1",
+                                          "AUTOOS_ADMISSION_OFF": "1",
+                                          "AUTOOS_AGENT_DEPTH": "2",
+                                          "AUTOOS_AGENT_MAX_DEPTH": "2"}):
+            out = mcp_server.spawn({"task": "t", "tier": 2, "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected", out)
+        self.assertIn("depth", out["error"], out)
+
+
+class LeafSpawnGateTest(unittest.TestCase):
+    """finding 1's other half: the child an L2 spawns is a LEAF, and a leaf never
+    spawns at all (skill rule R-worker-06).
+
+    Hiding `spawn` from the leaf's menu is not enough on its own — the same module
+    functions are reachable from the CLI, and a lane config that typos the profile
+    still ends up here. So `build_argv` refuses a spawn made under L3 whatever the
+    tier, whatever the card and even for a dry run, and the refusal says LEAF and
+    names the rule rather than reading like a broken router.
+    """
+
+    def _argv(self, req, layer="L3"):
+        with mock.patch.dict(os.environ, {mcp_server.ENV_AGENT_LAYER: layer,
+                                          "AUTOOS_ADMISSION_OFF": "1"}):
+            return mcp_server.build_argv(dict(req, cwd=str(ROOT)),
+                                         "20261008-000000-l3gate-abcdef")
+
+    def _refused(self, req):
+        with self.assertRaises(ValueError) as cm:
+            self._argv(req)
+        msg = str(cm.exception)
+        self.assertIn("leaf", msg.lower(), msg)
+        self.assertIn("L3", msg, msg)
+        return msg
+
+    def test_a_leaf_spawn_is_refused_at_every_shape(self):
+        for req in ({"task": "t", "tier": 2},
+                    {"task": "t", "tier": 3, "read_only": True},
+                    {"task": "t"},
+                    {"task": "t", "card": {"role": "review", "complexity": "trivial"}},
+                    {"task": "t", "tier": 2, "dry_run": True}):
+            self._refused(req)
+
+    def test_the_leaf_refusal_names_the_rule_and_the_next_step(self):
+        msg = self._refused({"task": "t", "tier": 2})
+        self.assertIn("R-worker-06", msg, msg)
+        self.assertIn("report", msg.lower(), msg)
+
+    def test_spawn_answers_the_leaf_refusal_without_starting_anything(self):
+        with mock.patch.dict(os.environ, {mcp_server.ENV_AGENT_LAYER: "L3",
+                                          "AUTOOS_AGENT_MCP_DRY_RUN": "1",
+                                          "AUTOOS_ADMISSION_OFF": "1"}):
+            out = mcp_server.spawn({"task": "t", "tier": 2, "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected", out)
+        self.assertIn("leaf", out["error"], out)
+        self.assertNotIn("id", out, "a refused spawn must not name a run")
+
+    def test_an_unmarked_or_l2_or_l1_spawn_is_not_refused_as_a_leaf(self):
+        # The fence keys on the marker only: an L1's own session (nothing marked)
+        # and an L2's lane (marked L2) both still reach the gates above, and a
+        # leaf mark is neither of them.
+        argv, _ = self._argv({"task": "t", "tier": 2}, layer="")
+        self.assertIn("--tier", argv)
+        argv, _ = self._argv({"task": "t", "tier": 2}, layer="L2")
+        self.assertIn("--tier", argv)
+        argv, _ = self._argv({"task": "t", "tier": 2}, layer="L1")
+        self.assertIn("--tier", argv)
+
+    def test_a_leaf_cannot_talk_past_the_fence_by_reselling_its_marker(self):
+        # The marker is read stripped and case-folded, so there is no spelling of
+        # L3 that the gate fails to recognise and that a leaf could pass as "I am
+        # not a leaf".
+        for layer in ("l3", " L3 ", "L3", "\tl3"):
+            self.assertEqual(mcp_server.mcp_tool_profile({mcp_server.ENV_AGENT_LAYER: layer}),
+                             mcp_server.LEAF_PROFILE, layer)
 
 
 @unittest.skipUnless(_HAVE_MCP, "mcp package not installed")

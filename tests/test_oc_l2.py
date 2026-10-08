@@ -957,6 +957,22 @@ class McpToolTest(unittest.TestCase):
         _, seen = self._call(self.mcp.oc_start, "l1-pilot")
         self.assertEqual(seen["argv"][2:], ["start", "--name", "l1-pilot"])
 
+    def test_lane_control_is_refused_from_inside_a_leaf_too(self):
+        # L2SPAWN-TIER fix 1: a leaf (the L2's own spawned child, marked L3) owns
+        # no lane and spawns nothing, so it may not steer one either. The fence
+        # keys on "is this process marked", not on the one spelling L2.
+        def boom(*a, **k):
+            raise AssertionError("a refused tool must run no subprocess: %r" % (a,))
+
+        with mock.patch.object(self.mcp.subprocess, "run", boom), \
+                mock.patch.dict(os.environ, {self.mcp.ENV_AGENT_LAYER: "L3"}):
+            for fn, args in ((self.mcp.l2_stop, ("l2-proj-p1",)),
+                             (self.mcp.oc_start, ("l1-pilot",)),
+                             (self.mcp.l2_inbox, ("l2-proj-p1", "work"))):
+                out = fn(*args)
+                self.assertIs(out["refused"], True, fn.__name__)
+                self.assertIn("L3", out["detail"], fn.__name__)
+
 
 if __name__ == "__main__":
     unittest.main()
