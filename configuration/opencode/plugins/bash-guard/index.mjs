@@ -922,15 +922,29 @@ function orchestratorDenialReason(command, depth = 0) {
 //   feeds or runs something the list never approved (this is also what keeps
 //   the canary's own probe denied under the new role)
 // - every segment of a pipe is audited, so `ls | tee f` is refused as `tee`
-// - a wrapper (sudo, timeout, env ...) is skipped, not obeyed - and a head that
-//   is only a wrapper (`env`, `printenv`, `set`, `export`, `declare`) is refused
-//   rather than skipped past, because the wrapper IS the read
+// - the head is a bare allow-listed WORD: `/tmp/evil/cat` and `./cat` are
+//   whatever the lane wrote there, so a head with a separator in it is refused
+// - no wrapper either (sudo, doas, su, env, exec, command, nice, timeout, time,
+//   stdbuf, nohup): `sudo cat` is a second user's `cat`, and a head that is only
+//   a wrapper (`env`, `printenv`, `set`, `export`, `declare`) is a dump of the
+//   lane's own environment - both refused, not skipped past
+// - no backslash in any form: `\<newline>` is a line continuation to bash and a
+//   flattened escape space to the tokenizer, which is how `/etc/passwd` once
+//   reached the path rules as `" /etc/passwd"`
 // - a path operand is allowed only as a repo-relative path it cannot escape:
 //   absolute, `~`-led, `$`/backtick/glob-expanded, `..`-segmented or `//`-spaced
 //   is refused, and the secret files that live inside the repo (`.env*`,
-//   `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it
-// - a flag that hands the read a program, a repository or a pager is refused,
-//   inside a short bundle (`rg -uz`) as much as spelled out
+//   `*.key`, `*.pem`, `.p12/.pfx`, `api-keys.yml`, `*credentials*`, `auth.json`,
+//   `.netrc`, `.npmrc`, `.pypirc`, `id_*` keys, anything under `.ssh/`, `.aws/`)
+//   with it. Each path a token carries is checked - whole, stripped, and per
+//   `:` and `/` segment, so `git show HEAD:.env` is read as `.env` - and an
+//   operand that RESOLVES outside the checkout (a symlink) is refused too, as is
+//   one the resolver cannot answer
+// - an option's value is an operand: `--opt=path` is checked whatever option it
+//   hangs off, and a value-taking option whose job is to open a file
+//   (`rg --file/--ignore-file/-f/--path-separator`) is refused outright
+// - a flag that hands the read a program, a repository, a pager or a symlink
+//   walk is refused, inside a short bundle (`rg -uz`) as much as spelled out
 //
 // Anything else is denied, fail closed.
 // ---------------------------------------------------------------------------
@@ -968,9 +982,30 @@ const L2_GIT_REST_DENY = new Set([
   "--ext-diff", "--textconv", "--no-index", "-x", "-a",
 ]);
 const L2_RG_DENY = new Set([
-  "--pre", "--pre-glob", "--hostname-bin", "--search-zip", "-z",
+  "--pre", "--pre-glob", "--hostname-bin", "--search-zip", "-z", "--follow", "-L",
 ]);
 const L2_PROC_RE = /(^|\/)proc\/(self|thread-self|[0-9]+|\*)\//;
+
+// Sonnet round-4 REJECT finding 3: a value-taking option is how a read command
+// opens a file the operand list never saw. `--file` / `--ignore-file` / `-f`
+// hand rg a PATTERN FILE (so a path, whatever it is named), `--path-separator`
+// changes how every following path is read, and `--pre*` is on the list too so
+// the deny does not depend on the flag-bundle check running first.
+const L2_RG_PATH_OPTS = new Set([
+  "file", "ignore-file", "pre", "pre-glob", "path-separator",
+]);
+const L2_RG_PATH_SHORTS = new Set(["f"]);
+
+// Sonnet round-4 REJECT finding 7: `skipLeading` is shared with the orchestrator
+// role, where a wrapper must be skipped so `sudo rm /` is still audited as `rm`.
+// An L2 has no such rule to preserve - its list is of HEADS, and a wrapper is a
+// different process around the read (`sudo cat` is root's `cat`, `time ls` is a
+// shell builtin wearing a name). The lane needs none of them, so the tokens the
+// skip walked past are audited as heads of their own.
+const L2_WRAPPER_HEADS = new Set([
+  "sudo", "doas", "su", "env", "exec", "command", "nice", "timeout", "time",
+  "stdbuf", "nohup",
+]);
 
 // Sonnet round-3 REJECT: `skipLeading` skips the `env` WRAPPER on purpose, so a
 // bare `env` — no wrapped command at all, just a dump of the environment it was
@@ -995,17 +1030,19 @@ function splitOptionDeny(deny) {
 
 function l2OptionDenial(tokens, deny, label) {
   const { long, short } = splitOptionDeny(deny);
+  const why = "hands the read-only command a program, a repository, a pager or a " +
+              "symlink walk to run";
   for (const t of tokens) {
     if (t.startsWith("--")) {
       if (long.has(t.slice(2).split("=")[0])) {
-        return `${label} ${t} hands the read-only command a program, a repository or a pager to run`;
+        return `${label} ${t} ${why}`;
       }
       continue;
     }
     if (t.length > 1 && t.startsWith("-")) {
       for (const ch of t.slice(1)) {
         if (short.has(ch)) {
-          return `${label} ${t} (bundle flag -${ch}) hands the read-only command a program, a repository or a pager to run`;
+          return `${label} ${t} (bundle flag -${ch}) ${why}`;
         }
       }
     }
@@ -1024,12 +1061,31 @@ function l2ProcDenial(tokens, head) {
   return null;
 }
 
+// Sonnet round-4 REJECT finding 5: the secret list was five patterns long and
+// case-sensitive, so `.NETRC`, `id_ed25519`, `.aws/credentials`, `auth.json`,
+// `.git-credentials`, `.npmrc`, `.pypirc`, `secrets.yaml`, `x.p12` and
+// `srv.PEM` were all readable. Every name below is matched case-insensitively;
+// `.ssh` and `.aws` match as a PATH SEGMENT, because what an L2 must not open is
+// the directory's contents under any file name.
+const L2_SECRET_PREFIXES = [".env", "id_rsa", "id_ed25519", "id_ecdsa"];
+const L2_SECRET_SUFFIXES = [".key", ".pem", ".p12", ".pfx"];
+const L2_SECRET_NAMES = new Set([
+  "api-keys.yml", "credentials", "auth.json", ".git-credentials", ".npmrc",
+  ".pypirc", ".netrc",
+]);
+const L2_SECRET_DIRS = new Set([".ssh", ".aws"]);
+
 function l2SecretOperandReason(head, t) {
   // Repo-relative is not the same as safe: the secrets a lane must never read
   // sit inside the repo, git-ignored, exactly where the work happens.
-  const base = baseName(t);
-  const secret = base.startsWith(".env") || base.endsWith(".key") || base.endsWith(".pem")
-    || base === "api-keys.yml" || (/credentials/.test(base) && base.endsWith(".json"));
+  const lower = t.toLowerCase();
+  const base = baseName(lower);
+  const secret = L2_SECRET_PREFIXES.some((p) => base.startsWith(p))
+    || L2_SECRET_SUFFIXES.some((s) => base.endsWith(s))
+    || L2_SECRET_NAMES.has(base)
+    || /^secrets\.ya?ml$/.test(base)
+    || (base.includes("credentials") && base.endsWith(".json"))
+    || lower.split("/").some((seg) => L2_SECRET_DIRS.has(seg));
   if (!secret) return null;
   return `${head} ${t} reads a secret file - an L2 needs none of the lane's credentials; ` +
          "only the .example templates are safe to open";
@@ -1056,15 +1112,148 @@ function l2PathOutsideRepoReason(head, t) {
          "paths inside its own lane checkout only";
 }
 
+function l2OperandCandidates(t) {
+  // Sonnet round-4 findings 1 and 4: the path a token carries is not always the
+  // whole token. `HEAD:.env` is git's rev:path spec, `dir/.env/x` hides the file
+  // in a middle segment, and the flattened line continuation handed the checks a
+  // word whose path began after a space. Each spelling is checked, so an escape
+  // has to be found by every rule at once rather than by the one that reads the
+  // token as written.
+  const out = [];
+  const add = (part) => {
+    if (typeof part !== "string") return;
+    const v = part.trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  add(t);
+  for (const piece of t.split(":")) add(piece);
+  for (const piece of t.split("/")) add(piece);
+  return out;
+}
+
+let l2CheckoutRootCache = null;
+
+function l2CheckoutRoot() {
+  // The lane's working directory IS its checkout - an L2 reads repo-relative
+  // paths inside it and nothing else. realpath, so a checkout reached through a
+  // symlinked mount is compared on the same footing as its operands. Resolved
+  // once: a `git rev-parse --show-toplevel` would put a subprocess, whose own
+  // read of the repository the guard cannot audit, on the security path.
+  if (l2CheckoutRootCache === null) {
+    let root = path.resolve(process.cwd());
+    try {
+      root = fs.realpathSync(root);
+    } catch (_) {
+      root = path.resolve(process.cwd());
+    }
+    l2CheckoutRootCache = root;
+  }
+  return l2CheckoutRootCache;
+}
+
+function l2SymlinkOperandReason(head, t) {
+  // Sonnet round-4 finding 6: a repo-relative NAME is not a repo-relative FILE.
+  // `escape -> /etc/shadow` sits inside the checkout, passes every spelling rule
+  // above, and reads the shadow file. Anything the resolver cannot answer is
+  // refused too - a loop or a denied directory is not a pass.
+  let abs;
+  try {
+    abs = path.resolve(process.cwd(), t);
+  } catch (_) {
+    return `${head} ${t}: the guard cannot resolve the operand and fails closed`;
+  }
+  let real;
+  try {
+    real = fs.realpathSync(abs);
+  } catch (err) {
+    const code = err && err.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    return `${head} ${t}: the guard cannot resolve the operand (${code || "error"}) ` +
+           "and fails closed";
+  }
+  const root = l2CheckoutRoot();
+  if (root === "/") {
+    // A lane whose working directory is the filesystem root has no checkout to
+    // stay inside, so there is nothing here to prove the read is scoped.
+    return `${head} ${t}: ${real} cannot be proved inside the lane checkout - the working ` +
+           "directory is the filesystem root; a symlink may not carry a read the list " +
+           "never approved";
+  }
+  const prefix = root.endsWith("/") ? root : root + "/";
+  if (real === root || real.startsWith(prefix)) return null;
+  return `${head} ${t}: ${real} is outside the lane checkout - a symlink may not carry ` +
+         "a read the list never approved";
+}
+
+function l2PathOperandReason(head, t, resolve) {
+  const candidates = l2OperandCandidates(t);
+  for (const cand of candidates) {
+    const outside = l2PathOutsideRepoReason(head, cand);
+    if (outside) return outside;
+  }
+  for (const cand of candidates) {
+    const secret = l2SecretOperandReason(head, cand);
+    if (secret) return secret;
+  }
+  // An option's value is not the file the command opens under that name, so the
+  // resolver runs on operands only.
+  if (resolve === false) return null;
+  return l2SymlinkOperandReason(head, t);
+}
+
+function l2OptionOperandReason(head, t, next) {
+  // Sonnet round-4 finding 3: the operand loop skipped every token that began
+  // with "-", so the path rode in as an OPTION VALUE - `rg --file=/etc/passwd`,
+  // `rg --ignore-file=/etc/shadow`, `rg -f/etc/passwd`. A `=` value is
+  // path-checked whatever option it hangs off; a value-taking option that names
+  // a file for this head is refused even when its value reads as harmless.
+  let name = null;
+  let value = null;
+  let shortCh = null;
+  let glued = null;
+  if (t.startsWith("--")) {
+    const eq = t.indexOf("=");
+    name = eq === -1 ? t.slice(2) : t.slice(2, eq);
+    value = eq === -1 ? null : t.slice(eq + 1);
+  } else {
+    shortCh = t.length > 1 ? t[1] : null;
+    if (t[2] === "=") {
+      value = t.slice(3);
+    } else if (t.length > 2) {
+      glued = t.slice(2);
+    }
+  }
+  const takesPath = head === "rg"
+    && ((name !== null && L2_RG_PATH_OPTS.has(name))
+        || (shortCh !== null && L2_RG_PATH_SHORTS.has(shortCh)));
+  if (takesPath) {
+    const v = value !== null ? value : (glued !== null ? glued : (next === undefined ? null : next));
+    if (v !== null && !v.startsWith("-")) {
+      const reason = l2PathOperandReason(head, v, false);
+      if (reason) return reason;
+    }
+    return `${head} ${t} reads a path the guard cannot scope; an L2 may not hand a ` +
+           "read-only command an option whose job is to open a file";
+  }
+  if (value !== null && !value.startsWith("-")) {
+    return l2PathOperandReason(head, value, false);
+  }
+  return null;
+}
+
 function l2OperandReason(head, args) {
   const procReason = l2ProcDenial(args, head);
   if (procReason) return procReason;
-  for (const t of args) {
-    if (t.startsWith("-")) continue;
-    const secret = l2SecretOperandReason(head, t);
-    if (secret) return secret;
-    const outside = l2PathOutsideRepoReason(head, t);
-    if (outside) return outside;
+  for (let k = 0; k < args.length; k++) {
+    const t = args[k];
+    if (t === "-" || t === "--") continue;
+    if (t.startsWith("-")) {
+      const optReason = l2OptionOperandReason(head, t, args[k + 1]);
+      if (optReason) return optReason;
+      continue;
+    }
+    const reason = l2PathOperandReason(head, t, true);
+    if (reason) return reason;
   }
   return null;
 }
@@ -1118,6 +1307,19 @@ function stdinOrSubstitutionReason(command) {
 }
 
 function l2ReadOnlyDenialReason(command) {
+  // Sonnet round-4 REJECT finding 1 (BLOCKER): `\<newline>` is a line
+  // continuation to bash, but collectSegments flattens the newline to a space and
+  // leaves the backslash, so tokenizeSegment read `\ ` as an escaped space glued
+  // to the next word - `cat \<NL>/etc/passwd` reached the leading-"/" test as the
+  // word " /etc/passwd" and was allowed. A backslash also hides a separator, a
+  // quote or a glob from the segment split, and the flattened form is what gets
+  // checked, not the bytes the shell runs. An L2 has no use for one: every
+  // backslash is refused, fail closed (the leading-space half of the hole is
+  // closed separately, in l2OperandCandidates).
+  if (command.includes("\\")) {
+    return "a backslash in the command is a continuation, an escape or a quoting " +
+           "trick; the guard reads a flattened form, so an L2 may not use one";
+  }
   for (const target of redirectWriteTargets(command)) {
     return `output redirect to ${target} writes a file; an L2 may not write anywhere`;
   }
@@ -1143,8 +1345,29 @@ function l2ReadOnlyDenialReason(command) {
         return `the environment assignment ${words[k]} sets what the read-only command runs; an L2 may not configure its own tools`;
       }
     }
+    // Sonnet round-4 REJECT finding 7: a wrapper is not a pass-through here. The
+    // skip exists for the orchestrator role, whose rule is a write TARGET; this
+    // role's rule is a closed list of HEADS, and `sudo cat` is a second user's
+    // `cat`. Audited up to and including the head, so a bare `sudo` (which the
+    // skip leaves with no head at all) is refused too.
+    for (let k = 0; k < words.length && k <= idx; k++) {
+      const wrapped = baseName(words[k]);
+      if (L2_WRAPPER_HEADS.has(wrapped)) {
+        return `${wrapped} is a wrapper around the read - an L2 runs the read-only ` +
+               `heads bare (${L2_LIST_TEXT}); not: ${seg}`;
+      }
+    }
     if (idx >= words.length) continue;
-    const head = baseName(words[idx]);
+    // Sonnet round-4 REJECT finding 2: baseName() proved only that the LAST
+    // word looked like `cat`. /tmp/evil/cat and ./cat are whatever the lane
+    // wrote there, so the head has to be the bare name, spelled with no
+    // separator at all.
+    const rawHead = words[idx];
+    if (rawHead.includes("/")) {
+      return `${rawHead} is not a bare command name; an L2 runs the read-only heads by ` +
+             `name (${L2_LIST_TEXT}), never a path to a binary`;
+    }
+    const head = baseName(rawHead);
     if (head === "git") {
       const args = words.slice(idx + 1);
       const g = gitSubcommand(args);

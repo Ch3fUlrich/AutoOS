@@ -68,7 +68,8 @@ try {
 """
 
 
-def run_plugin(event, env_overrides=None, plugin_path=None, timeout=20, keep_location=False):
+def run_plugin(event, env_overrides=None, plugin_path=None, timeout=20, keep_location=False,
+               cwd=None):
     if not NODE_BIN:
         raise unittest.SkipTest("node is not installed")
 
@@ -106,6 +107,7 @@ def run_plugin(event, env_overrides=None, plugin_path=None, timeout=20, keep_loc
             text=True,
             env=env,
             timeout=timeout,
+            cwd=cwd,
         )
         elapsed = time.time() - t0
 
@@ -455,10 +457,13 @@ class TestL2ReadOnlyRole(unittest.TestCase):
         self._l2_allowed("git log --oneline | head -20")
         self._l2_allowed("ls -la | wc -l")
 
-    def test_allow_list_wrapper_of_read_only_head(self):
-        # `timeout 5 ls` is still just `ls`; the wrapper is skipped, the head
-        # is what the list applies to.
-        self._l2_allowed("timeout 5 ls")
+    def test_wrapper_head_denied_even_around_a_read_only_head(self):
+        # Sonnet round-4 finding 7: `timeout 5 ls` is still `ls` to the
+        # orchestrator role, whose rule is a write TARGET. The L2 rule is a
+        # closed list of HEADS, and a wrapper is a different process around the
+        # read - `sudo cat` is root's `cat`. An L2 has no use for one.
+        self._l2_denied("timeout 5 ls", "wrapper")
+        self._l2_denied("nice ls", "wrapper")
 
     # (2) everything else is refused
     def test_redirect_denied_even_into_the_pilot_dir(self):
@@ -593,8 +598,7 @@ class TestL2ReadOnlyRole(unittest.TestCase):
             self._l2_denied(cmd, "rg")
 
     def test_rg_plain_search_kept(self):
-        for cmd in ("rg foo", "rg --ignore-file .gitignore pattern .",
-                    "rg -i --hidden TODO ."):
+        for cmd in ("rg foo", "rg -i --hidden TODO ."):
             self._l2_allowed(cmd)
 
     def test_proc_per_process_reads_denied(self):
@@ -622,9 +626,12 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                     "git log; FOO=1 ls", "export FOO=1"):
             self._l2_denied(cmd)
 
-    def test_wrapper_of_read_only_head_without_assignment_still_kept(self):
-        self._l2_allowed("timeout 5 ls")
-        self._l2_allowed("nice ls")
+    def test_wrapper_of_read_only_head_denied_whatever_it_wraps(self):
+        # Sonnet round-4 finding 7: the wrapper skip that the orchestrator role
+        # needs (so `sudo rm /` is audited as `rm`) is what let `sudo cat` read
+        # as `cat` here. The L2 list is of bare heads.
+        self._l2_denied("timeout 5 ls", "wrapper")
+        self._l2_denied("nice ls", "wrapper")
 
     # ------------------------------------------------------------------
     # Sonnet round-3 REJECT (criterion b, again): three holes left.
@@ -674,6 +681,127 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                     "head -3 AGENTS.md", "wc -l CHANGELOG.md", "tail -n 5 README.md",
                     "cat .gitignore", "ls -la ./docs"):
             self._l2_allowed(cmd)
+
+    # ------------------------------------------------------------------
+    # Sonnet round-4 REJECT (2026-10-08), findings 1-7. Every one of them is
+    # the same shape: a token the closed list read as a name on the list, while
+    # the bytes the shell actually acted on were something else.
+    #
+    # (1) BLOCKER  `cat \<newline>/etc/passwd` — a line continuation to bash.
+    #     collectSegments flattens the newline to a space (index 268) and leaves
+    #     the backslash in place, so tokenizeSegment (index 408) reads `\ ` as an
+    #     ESCAPED SPACE and glues it to the next word: the guard audited the word
+    #     " /etc/passwd", whose leading space walked past the leading-"/" test at
+    #     index 1047. The lane's `.env` is the same trick.
+    # (2) HIGH     head was baseName(words[idx]) (index 1147), so ANY binary
+    #     wearing an allow-listed name was that name: /tmp/evil/cat, ./cat.
+    # (3) MED      l2OperandReason skipped every token starting with "-" (index
+    #     1062), so the path rode in as an option's VALUE: rg --file=/etc/passwd,
+    #     rg --ignore-file=/etc/shadow.
+    # (4) MED      the secret rule matched the WHOLE token (index 1031), so git's
+    #     rev:path spelling hid it: git show HEAD:.env, git show :.env.
+    # (5) MED      the secret list was five patterns long and case-sensitive.
+    # (6) LOW      a repo-relative NAME is not a repo-relative FILE: a symlink
+    #     inside the checkout reads outside it, and rg -L resolves the link
+    #     itself.
+    # (7) LOW      a wrapper was skipped, not audited: `sudo cat` is a second
+    #     user's `cat`, and an L2 needs no wrapper at all.
+    # ------------------------------------------------------------------
+
+    def test_f1_backslash_denied_in_any_form(self):
+        for cmd in ("cat \\\n/etc/passwd", "cat \\\n.env", "ls \\\nconfig/.env",
+                    "rg foo \\\n/etc/shadow", "git show \\\nHEAD:.env",
+                    'cat "a\\\\b"', "rg foo\\\\bar .", "cat doc\\\\x"):
+            self._l2_denied(cmd, "backslash")
+
+    def test_f1_leading_whitespace_in_a_path_operand_denied(self):
+        # The other half of finding 1: even with the flatten fixed, an operand is
+        # checked stripped, so a quoted space is not a second escape hatch.
+        self._l2_denied('cat " /etc/passwd"', "path outside repo")
+        self._l2_denied('rg foo " /etc/shadow"', "path outside repo")
+        self._l2_denied('cat " .env"', "secret")
+        self._l2_denied('cat "/etc/passwd "', "path outside repo")
+
+    def test_f2_head_must_be_a_bare_allow_listed_word(self):
+        for cmd in ("/tmp/evil/cat x", "./cat x", "/usr/bin/ls", "./git status",
+                    "../tools/cat README.md", "bin/cat README.md"):
+            self._l2_denied(cmd, "bare")
+
+    def test_f3_option_values_are_path_checked(self):
+        for cmd in ("rg --ignore-file=/etc/shadow x", "rg --file=/etc/passwd foo",
+                    "rg -f=/etc/passwd foo", "rg -f/etc/passwd foo",
+                    "ls --block-size=/etc/passwd", "rg --ignore-file=.env x"):
+            self._l2_denied(cmd, "path outside repo" if "/etc/" in cmd else "secret")
+
+    def test_f3_path_naming_rg_options_denied_outright(self):
+        for cmd in ("rg --ignore-file .gitignore x .", "rg --file patterns.txt x .",
+                    "rg -f patterns.txt x .", "rg --path-separator=:: x ."):
+            self._l2_denied(cmd, "reads a path")
+
+    def test_f3_pattern_file_operand_still_reads_as_a_secret(self):
+        # The value of a denied option is checked BEFORE the option is refused, so
+        # the reason an L2 sees names the file, not the flag.
+        self._l2_denied("rg -f .env foo", "secret")
+
+    def test_f4_git_rev_path_specifiers_are_split_and_checked(self):
+        for cmd in ("git show HEAD:.env", "git show :.env",
+                    "git show HEAD:config/.env.local", "git show HEAD~1:keys/lane.key",
+                    "git show refs/heads/main:.git-credentials", "git diff HEAD -- :.env"):
+            self._l2_denied(cmd, "secret")
+        self._l2_denied("git show HEAD:/etc/passwd", "path outside repo")
+
+    def test_f5_secret_list_widened_and_case_insensitive(self):
+        for cmd in ("cat .netrc", "cat .NETRC", "cat config/.ssh/config",
+                    "cat id_ed25519", "cat id_ecdsa_sk", "cat .aws/credentials",
+                    "cat credentials", "cat secrets.yml", "cat secrets.yaml",
+                    "cat TLS/Server.Key", "cat srv.PEM", "cat vault.p12", "cat x.pfx",
+                    "cat db_credentials.json", "cat auth.json", "cat .git-credentials",
+                    "cat .npmrc", "cat .pypirc", "rg foo .ssh/"):
+            self._l2_denied(cmd, "secret")
+
+    def test_f5_secret_lookalikes_kept(self):
+        for cmd in ("cat .gitignore", "cat .npmrc.example", "cat inventory.yml.example",
+                    "cat .git/config", "cat README.md", "ls docs"):
+            self._l2_allowed(cmd)
+
+    def test_f6_rg_follow_flags_denied(self):
+        for cmd in ("rg -L foo .", "rg --follow foo .", "rg -iL foo ."):
+            self._l2_denied(cmd, "rg")
+
+    def test_f6_symlink_operand_may_not_escape_the_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            (tree / "inside.txt").write_text("ok", encoding="utf-8")
+            (tree / "link").symlink_to("inside.txt")
+            (tree / "escape").symlink_to("/etc/shadow")
+            (tree / "loop_a").symlink_to("loop_b")
+            (tree / "loop_b").symlink_to("loop_a")
+            env = dict(self.L2_ENV)
+            env["AUTOOS_REPO_ROOT"] = tmp
+
+            def run(cmd):
+                return run_plugin({"tool": "shell", "input": {"command": cmd}},
+                                  env_overrides=env, cwd=tmp)
+
+            for cmd in ("cat escape", "rg foo escape", "ls escape", "git show escape"):
+                res = run(cmd)
+                self.assertFalse(res["allowed"], f"an escaping symlink must be denied: {cmd!r}")
+                self.assertTrue((res["error"] or "").strip().startswith(DENIED_MARKER), cmd)
+                self.assertIn("outside the lane checkout", res["error"], cmd)
+            # unresolvable is not "allowed": ELOOP fails closed.
+            res = run("cat loop_a")
+            self.assertFalse(res["allowed"], "an unresolvable operand must be denied")
+            self.assertIn("cannot resolve", res["error"])
+            for cmd in ("cat inside.txt", "cat link", "cat nope.txt", "ls"):
+                res = run(cmd)
+                self.assertTrue(res["allowed"], f"an in-checkout read must be kept: {cmd!r}")
+                self.assertIsNone(res["error"])
+
+    def test_f7_wrapper_heads_denied(self):
+        for cmd in ("sudo ls", "sudo -u root cat f", "doas ls", "su - root",
+                    "exec ls", "command cat f", "nice ls", "timeout 5 ls", "time ls",
+                    "nohup ls", "stdbuf -o0 cat f", "sudo", "timeout"):
+            self._l2_denied(cmd, "wrapper")
 
 
 if __name__ == "__main__":
