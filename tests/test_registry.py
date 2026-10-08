@@ -4092,9 +4092,9 @@ class CleanTierRouteTests(unittest.TestCase):
               chain: the second priced id takes the other chain.
 
         Qwen3-Coder-30B stays retired (OVHCODER-DROP: OVH withdrew the id, a
-        completion 404s "does not exist"); with the provider live again the
-        provider-level gate no longer covers it, so it is gated per-leg in its
-        own seat route. ovh-gpt-oss-120b re-probed 200 but is UNPRICED, so rule
+        completion 404s "does not exist"); OVHCODER-DROP retired it outright — see
+        test_ovh_coder_leg_is_retired_not_merged, not a per-leg gate here.
+        ovh-gpt-oss-120b re-probed 200 but is UNPRICED, so rule
         (h) keeps it out of every chain — same per-leg gate, and the price gap
         is filed in logs/briefs/denylegs-gaps.md."""
         self.assertIs(self.reg["providers"]["ovhcloud"].get("available"), True)
@@ -4139,11 +4139,9 @@ class CleanTierRouteTests(unittest.TestCase):
                 for leg in route.get("legs") or []:
                     self.assertFalse(leg.startswith("ovhcloud/"), rid)
 
-        # the retired and the unpriced id keep their own operator-facing seat,
-        # gated per leg so nothing renders them.
-        self.assertIn(stale, routes["ovh-qwen3-coder-30b"]["legs"])
-        self.assertIs(routes["ovh-qwen3-coder-30b"]["unavailable_legs"][stale]
-                      ["available"], False)
+        # the unpriced id keeps its own operator-facing seat, gated per leg so
+        # nothing renders it; the retired one has no seat at all.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
         self.assertIn(unpriced, routes["ovh-gpt-oss-120b"]["legs"])
         gate = routes["ovh-gpt-oss-120b"]["unavailable_legs"][unpriced]
         self.assertIs(gate["available"], False)
@@ -4154,6 +4152,61 @@ class CleanTierRouteTests(unittest.TestCase):
                          ["ovhcloud/Qwen3.8-27B"])
         self.assertEqual(registry.gateway_legs(routes["ovh-gpt-oss-120b"], self.reg),
                          [])
+
+    def test_ovh_coder_leg_is_retired_not_merged(self):
+        """OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop).
+
+        OVH withdrew `Qwen3-Coder-30B-A3B-Instruct` upstream — a completion
+        request answers HTTP 404 "The model `Qwen3-Coder-30B-A3B-Instruct` does
+        not exist", and probe D-657 the same day 404'd both the `ovh/` and the
+        `ovhcloud/` spellings on central and on workstation. providers.ovhcloud
+        is AVAILABLE again the same day (OVH-REPROBE: gpt-oss-120b, Qwen3.8-27B
+        and Qwen3.5-397B-A17B answer 200), so a per-leg `available: false` gate
+        on a seat route would leave a declared route whose only leg can never
+        serve — a combo that renders nothing and an id that never stops
+        resolving. ORQWEN404's shape is the right one instead: the leg is out of
+        every chain (pinned by test_ovh_legs_ride_l3_chains_only_after_the_reprobe),
+        the seat ROUTE is deleted, and the id moves to
+        tools/registry.py OMNIROUTE_RETIRED_IDS so `apply` prunes the live combo.
+
+        So this pins the retirement, not the dead state: the id must be gone from
+        `routes`, named exactly once by the retire list, absent from every render
+        surface while present in combos.json's `retired`, and the models row is
+        kept — for its price history — carrying the dated note. Re-open only if
+        OVH re-lists the id and a fresh probe answers 200."""
+        leg = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        routes = self.reg["routes"]
+
+        # (1) the route is deleted, not gated.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
+        for rid, route in routes.items():
+            self.assertNotIn(leg, route.get("legs") or [], rid)
+            self.assertNotIn(leg, (route.get("unavailable_legs") or {}), rid)
+
+        # (2) the id retires, so apply prunes the live combo.
+        self.assertIn("ovh-qwen3-coder-30b", registry.OMNIROUTE_RETIRED_IDS)
+        self.assertNotIn("ovh-qwen3-coder-30b", registry.IDE_MODEL_ORDER)
+
+        # (3) nothing on any render surface names it; combos.json says retired.
+        combos = json.loads((ROOT / "configuration" / "omniroute"
+                             / "combos.json").read_text(encoding="utf-8"))
+        self.assertIn("ovh-qwen3-coder-30b", combos["retired"])
+        self.assertNotIn("ovh-qwen3-coder-30b", combos["omitted"])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         [c["name"] for c in combos["combos"]])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         registry.servable_route_ids(self.reg))
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         json.dumps(registry.render_ide(self.reg)))
+        # opencode.jsonc's hand passthrough left with the model (D5 pricing).
+        self.assertNotIn("ovh-direct-qwen3-coder-30b",
+                         (ROOT / "opencode.jsonc").read_text(encoding="utf-8"))
+
+        # (4) the model row survives for pricing history and says why.
+        row = self.reg["models"]["Qwen3-Coder-30B-A3B-Instruct"]
+        self.assertGreater(row["price_in"], 0)
+        self.assertTrue(row["price_source"])
+        self.assertIn("OVHCODER-DROP", row.get("$comment") or "")
 
 
 class ReviewLensRouteTests(unittest.TestCase):

@@ -459,14 +459,19 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # api_key -> stripped), and providers.ovhcloud.available: false empties the
         # three ovh-* routes, so they render nothing here and sit in combos.json's
         # `omitted` there. OVH-REPROBE 2026-10-08 restores the provider, so
-        # ovh-qwen3.8-27b renders its block again (it carries an OVH api_key); the
-        # other two singles stay in this set because their legs are gated per-leg —
-        # ovh-gpt-oss-120b unpriced, ovh-qwen3-coder-30b withdrawn upstream — which
-        # is the shape this test exists to pin: an all-gated route renders nothing.
+        # ovh-qwen3.8-27b renders its block again (it carries an OVH api_key);
+        # ovh-gpt-oss-120b stays in this set because its leg is gated per-leg as
+        # unpriced — which is the shape this test exists to pin: an all-gated
+        # route renders nothing. ovh-qwen3-coder-30b left with OVHCODER-DROP
+        # 2026-10-08, and not as an example of that shape: OVH withdrew the id
+        # upstream, so the route was deleted and its id retired rather than
+        # declared-and-gated. A deleted route is not a declaration that renders
+        # nothing, so it belongs to no set here (pinned in
+        # test_ovh_coder_leg_is_retired_not_merged).
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3",
                      "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean",
-                     "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b"):
+                     "ovh-gpt-oss-120b"):
             self.assertNotIn(gone, rendered)
         self.assertIn("ovh-qwen3.8-27b", rendered)
         self.assertIn("os.environ/OVHCLOUD_API_KEY", rendered["ovh-qwen3.8-27b"])
@@ -1459,14 +1464,22 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # whose only legs are the SS8-banned contributor copies (OR1d: declared
         # legs, none servable -> no declaration). OVH-REPROBE 2026-10-08 moved
         # ovh-qwen3.8-27b out of this set (the provider is live and priced again,
-        # so the seat renders); the two still-gated OVH singles stay omitted.
+        # so the seat renders); ovh-gpt-oss-120b stays omitted because its leg is
+        # gated for want of a price. OVHCODER-DROP 2026-10-08 took ovh-qwen3-coder-30b
+        # out of the omitted set by deleting the route: an omitted route is still a
+        # declaration, and a model OVH no longer serves is not one - it sits in the
+        # render's `retired` list instead, which is what makes apply prune the live
+        # combo (pinned in test_ovh_coder_leg_is_retired_not_merged).
         rendered = registry.render_omniroute(real_registry())
         combos = {c["name"]: c for c in rendered["combos"]}
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3", "spark-1.3-contributor",
-                     "ovh-gpt-oss-120b", "ovh-qwen3-coder-30b",
+                     "ovh-gpt-oss-120b",
                      "deepseek-v4.1-flash"):
             self.assertNotIn(gone, combos)
             self.assertIn(gone, rendered["omitted"])
+        self.assertNotIn("ovh-qwen3-coder-30b", combos)
+        self.assertNotIn("ovh-qwen3-coder-30b", rendered["omitted"])
+        self.assertIn("ovh-qwen3-coder-30b", rendered["retired"])
         self.assertEqual(combos["ovh-qwen3.8-27b"]["models"], ["ovh/Qwen3.8-27B"])
 
 

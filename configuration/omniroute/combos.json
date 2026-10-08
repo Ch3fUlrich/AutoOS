@@ -147,7 +147,8 @@
     "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). l2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
     "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time).",
-    "D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): every judged chain was re-cut from the probe union in configuration/omniroute/probes/probe-d657-{central,workstation}.tsv - only legs that answered ack 200 plus one tool call serve. The L1/L2 orchestrator chains are bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash (the cached pool is exactly those two free legs plus the vertex credit leg, so rule (b) free-before-credit moves vertex off the head spec SS7b put it at). The four SS3 lens combos land as l3-review-diff/-tests/-codebase; l3-review-transcript renders nothing because SS3's II>=44 bar has no probe-confirmed gateway leg (qoder legs left with SS7b, vertex claude 501s, muse free 403s). Every *-clean combo is one leg (vertex/gemini-3.8-flash): spec 3.1 rule 3 admits only a non-training paid/credit/subscription leg and rule (b-or) forces every openrouter leg :free, so the free band can never be clean - the clean band has no fallback until a second credit/paid leg passes a probe. policy.d657_combos (rendered through, like omitted/retired) is what tools/combo-contract.py --strict-d657 judges with its (f)-(i) gates."
+    "D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): every judged chain was re-cut from the probe union in configuration/omniroute/probes/probe-d657-{central,workstation}.tsv - only legs that answered ack 200 plus one tool call serve. The L1/L2 orchestrator chains are bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash (the cached pool is exactly those two free legs plus the vertex credit leg, so rule (b) free-before-credit moves vertex off the head spec SS7b put it at). The four SS3 lens combos land as l3-review-diff/-tests/-codebase; l3-review-transcript renders nothing because SS3's II>=44 bar has no probe-confirmed gateway leg (qoder legs left with SS7b, vertex claude 501s, muse free 403s). Every *-clean combo is one leg (vertex/gemini-3.8-flash): spec 3.1 rule 3 admits only a non-training paid/credit/subscription leg and rule (b-or) forces every openrouter leg :free, so the free band can never be clean - the clean band has no fallback until a second credit/paid leg passes a probe. policy.d657_combos (rendered through, like omitted/retired) is what tools/combo-contract.py --strict-d657 judges with its (f)-(i) gates.",
+    "OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured central: HTTP 404 'The model `Qwen3-Coder-30B-A3B-Instruct` does not exist'; probe D-657 the same day 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answered 200). The route is deleted from the registry and its id moved to tools/registry.py OMNIROUTE_RETIRED_IDS, so it left `omitted` and landed in `retired` here - apply prunes the live combo. TORDER's four credit singles are three; the models row stays for pricing history. providers.ovhcloud is available again (OVH-REPROBE same day), so this leg is retired, not provider-gated."
   ],
   "retired": [
     "tier1",
@@ -177,7 +178,8 @@
     "t3-driver-clean",
     "t3-driver-free-only",
     "t3-driver-paid",
-    "t4-researcher"
+    "t4-researcher",
+    "ovh-qwen3-coder-30b"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
@@ -188,7 +190,6 @@
     "hf-qwen3.8-27b",
     "opus-5-5",
     "ovh-gpt-oss-120b",
-    "ovh-qwen3-coder-30b",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "spark-1.3-contributor"

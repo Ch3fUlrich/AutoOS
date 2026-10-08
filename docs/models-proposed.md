@@ -165,7 +165,6 @@ boot, curated combos to work.
 | `or-nemotron-3-super-free` | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | free, 256k | **keep** (rendered from registry or-nemotron-3-super-free) |
 | `or-north-mini-code-free` | `openrouter/cohere/north-mini-code:free` | free, 256k | **keep** (rendered from registry or-north-mini-code-free) |
 | `ovh-gpt-oss-120b` | `ovh/gpt-oss-120b` | credit, 128k | **keep** (rendered from registry ovh-gpt-oss-120b) |
-| `ovh-qwen3-coder-30b` | `ovh/Qwen3-Coder-30B-A3B-Instruct` | credit, 128k | **keep** (rendered from registry ovh-qwen3-coder-30b) |
 | `ovh-qwen3.8-27b` | `ovh/Qwen3.8-27B` | credit, 128k | **keep** (rendered from registry ovh-qwen3.8-27b) |
 | `spark-1.3-contributor` | `meta-api/muse-spark-1.3-contributor` | cheap, 1M | **keep** (rendered from registry spark-1.3-contributor) |
 | `t4-rag` | `cohere/command-a-03-2025` → `cohere/command-r-plus-08-2024` | cheap, 128k | **keep** (rendered from registry t4-rag) |
@@ -257,7 +256,7 @@ are single-leg by design. `omitted` routes render no combo.
 | `openrouter` | `meta/muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
 | `openrouter` | `nvidia/nemotron-3-super-120b-a12b:free` | free | l2-worker (#4); l2-worker-free-only (#4); l3-driver (#4); l3-driver-free-only (#4); or-nemotron-3-super-free (#1) |  |
 | `openrouter` | `poolside/laguna-s-2.1:free` | free | l2-worker (#8); l2-worker-free-only (#8); l3-driver (#8); l3-driver-free-only (#5); or-laguna-s-2.1-free (#1) |  |
-| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | ovh-qwen3-coder-30b (#1) |  |
+| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | — | OVHCODER-DROP 2026-10-08: OVH withdrew the id (live 404), its seat route is deleted and retired; the model row stays for pricing history |
 | `ovhcloud` | `Qwen3.8-27B` | credit $4.7e-07 | l2-worker (#11); l2-worker-clean (#2); l3-driver (#11); l3-driver-clean (#2); ovh-qwen3.8-27b (#1) |  |
 | `ovhcloud` | `gpt-oss-120b` | credit | l2-worker (#10); l2-worker-clean (#1); l3-driver (#10); l3-driver-clean (#1); ovh-gpt-oss-120b (#1) |  |
 | `pollinations` | — | tier free, available False | none | no legs reference it |
@@ -306,7 +305,9 @@ Managed blocks mirror the registry tiers (served today): `t1-orchestrator`,
 `t4-rag`, `t4-researcher`, `spark-1.3-contributor`, `deepseek-v4.1-flash`,
 `gemini-3.8-flash`, `groq-qwen3.8-27b`, `or-laguna-s-2.1-free`,
 `or-nemotron-3-super-free`, `or-north-mini-code-free`, `ovh-gpt-oss-120b`,
-`ovh-qwen3-coder-30b`, `ovh-qwen3.8-27b`. `t2-worker-paid`/`t3-driver-paid`
+`ovh-qwen3.8-27b`. `ovh-qwen3-coder-30b` left this list when OVHCODER-DROP
+2026-10-08 deleted the route (OVH withdrew the model upstream, live 404).
+`t2-worker-paid`/`t3-driver-paid`
 have no gateway combo (hand-curated `deepseek/deepseek-flash` only). The
 `-free-only` groups mirror the gateway combos of the same name minus legs
 LiteLLM cannot address. The 2026-09-30 group table below is superseded

@@ -1750,7 +1750,7 @@
       "price_in": 7e-08,
       "price_out": 2.6e-07,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.07 in / $0.26 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route.",
+      "$comment": "OVH lane 2026-09-30 (measured: gateway GET /v1/models 200 context_length 128000 capabilities tool_calling true reasoning true; tools/probe-toolcalls.py-style trial through the gateway - ack chat 200 finish=stop, single tool call 200 finish=tool_calls get_weather cityOk, round trip 200 mentions18 noMoreCalls - so tool_calls is proven): the gateway serves this leg as 'ovh/Qwen3-Coder-30B-A3B-Instruct', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised is what the gateway's GET /v1/models row reported; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. OVHCODER-DROP 2026-10-08: OVH withdrew this id upstream (a completion request answers HTTP 404 'The model `Qwen3-Coder-30B-A3B-Instruct` does not exist'; probe D-657 the same day 404'd both the ovh/ and ovhcloud/ spellings on central and workstation). The row is kept for pricing history only - no route and no chain carries it, and its single-leg seat route is deleted and the id retired in tools/registry.py OMNIROUTE_RETIRED_IDS. Re-price only if OVH re-lists the id and a fresh probe answers 200.",
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
@@ -5032,33 +5032,6 @@
       "unavailable_legs": {
         "ovhcloud/gpt-oss-120b": {
           "$comment": "OVH-REPROBE 2026-10-08: the leg answers 200 again, but it is gated because it is UNPRICED, not because it is dead. ovhcloud/gpt-oss-120b resolves to the shared models.gpt-oss-120b row (cerebras/sambanova's free spelling), whose price_in/price_out are 0.0 with no price_source — providers.ovhcloud is tier credit, so combo-contract rule (h) fails the closed: a credit leg with no price row bills $0 while it drains the $200 grant invisibly (§7b delta b). The per-leg mechanism exists now (models.<id>.provider_prices.<provider>, LANE-PRICE-GAP/T1-CREDIT-FIX-6), it only needs a cited OVH number — none is readable: the OVH catalogue and prices pages were fetched 2026-10-08 and carry no per-token row for gpt-oss-120b. Gap filed in logs/briefs/denylegs-gaps.md. Re-open by filing provider_prices.ovhcloud with price_source + price_as_of.",
-          "available": false
-        }
-      }
-    },
-    "ovh-qwen3-coder-30b": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3-Coder-30B-A3B-Instruct (live 128000 matches registry 128000; priced, proven). Class credit. opencode/zed only.",
-      "class": "credit",
-      "id": "ovh-qwen3-coder-30b",
-      "legs": [
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "Qwen3-Coder-30B via OVH (credit)",
-          "output": 32768
-        }
-      },
-      "unavailable_legs": {
-        "ovhcloud/Qwen3-Coder-30B-A3B-Instruct": {
-          "$comment": "OVHCODER-DROP 2026-10-08: OVH withdrew the id upstream (a completion request answers HTTP 404 'The model Qwen3-Coder-30B-A3B-Instruct does not exist'; probe-d657 had already 404'd both spellings on both gateways). providers.ovhcloud is available again (OVH-REPROBE same day: gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answer 200), so the provider-level gate no longer covers this leg — it is gated here instead, and the combo renders `omitted` so apply prunes the live one. Re-open only if OVH re-lists the id and a fresh probe answers 200.",
           "available": false
         }
       }
