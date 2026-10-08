@@ -14,7 +14,8 @@ Why it exists: an L1 that wants phase-sized work starts a lane with
 coordinates; it never edits code (every write permission is denied in the
 rendered config, `L2_PERMISSIONS`, the bash-guard's read-only `l2` role in its
 child env, and the same instruction in its first prompt) and every change goes
-through a tier-3 run it spawns over the `autoos-agent` MCP — which is the ONLY
+through a tier-2 or tier-3 run it spawns over the `autoos-agent` MCP — always in
+its own clone, because profile l2 forces `--isolate` — which is the ONLY
 MCP server the lane enables, so an L2 has no editor, no filesystem MCP and no
 second spawner.
 
@@ -34,7 +35,11 @@ server reads `L2` back and (a) registers only the spawner's tools - no
 `l2_*` / `oc_*` / `cancel` / `respond`, so an L2 never sees a menu it is going to
 be refused, (b) still refuses the lane-control calls at the function, so the
 shared code cannot be reached around the list, and (c) refuses a `spawn` that is
-not a tier-3 worker - an L2 that could start tier 1 owns a session that writes.
+not a tier-2 or tier-3 worker in its own clone - an L2 that could start tier 1
+owns the L1's own seat. Each worker the lane does start is stamped
+`AUTOOS_AGENT_LAYER=L3` by the spawner (never by the caller), so it runs profile
+`l3`, which has no `spawn` tool at all, and its CLI refuses any run with exit
+code 14: the lane's depth budget ends with its own children.
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`),
 one directory per lane holding the generated oc_l1 config (0600: it names host
@@ -129,9 +134,13 @@ ROLE_LINES = (
     "`patch`, `task`) is denied and the shell guard runs in `l2` role, which "
     "leaves your shell a closed read-only list (`git status|log|diff|show`, "
     "ls, cat, rg, head, tail, wc, pwd) with no redirection at all. Every "
-    "change goes through the `autoos-agent` MCP, and the only spawn it answers "
-    "for an L2 is a tier-3 worker (`read_only`, or a review card) - tier 1, "
-    "tier 2 and a `role: orchestrate` card are refused before a run starts. "
+    "change goes through the `autoos-agent` MCP, and the only spawns it answers "
+    "for an L2 are workers: a tier-2 writer (`role: implement`) or a tier-3 "
+    "reviewer (`read_only`, or a review card), each forced into its own isolated "
+    "clone - tier 1 and a `role: orchestrate` card are refused before a run "
+    "starts, and each worker you start is marked a LEAF (L3), which never spawns "
+    "of its own: work you did not ask for is yours to report, not a child's to "
+    "start. "
     "Spawn the work that way (writer, then a cross-family reviewer), judge "
     "their reports, and report upward.",
     "Report upward with the `l2_report` tool on the `autoos-agent` MCP - never a "

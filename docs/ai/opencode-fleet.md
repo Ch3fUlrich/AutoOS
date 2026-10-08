@@ -150,8 +150,17 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
   companions — `spawn`, `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — and lists no lane tool, no
   `cancel`, no `respond` at all (an unknown profile falls back to this narrowest list, never to the full one). And it fences what
   remains: `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they read `L2` back,
-  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-3
-  worker only (tier 1, tier 2 and any `role: orchestrate` card are refused before a run dir exists). `l2_status` and `oc_status`
+  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-2
+  or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller passed), while tier 1 and
+  any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was a dead end: tier 3 is the
+  review-only seat and refuses an implement card, so an L2 could never start a writer (found live by AO-L2-PRODTEST). A spawn that
+  passes that fence is stamped `AUTOOS_AGENT_LAYER=L3` — the child's layer is decided by the spawner, from the spawner's own
+  environment, never inherited and never a plan entry or a caller's `extra`, because a child that chooses its own mark chooses its
+  own fence — and a server that reads `L3` back registers the L2 menu WITHOUT `spawn` (profile `l3`) and refuses a `spawn` call
+  made anyway: a leaf never spawns (skill rule `R-worker-06`). Both rules are read again by the CLI's `run` — the same helper, so a
+  lane's own shell cannot get a warmer answer than its own server gave — and either refusal exits `14` (`EXIT_LAYER_FENCE`), which
+  is a report upward, not a flag to fix and retry. An L1's worker carries no mark at all and keeps the menu it always had.
+  `l2_status` and `oc_status`
   stay open for a caller that can see them: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1 inbox.
 - The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied
   at creation, so there is no window in which the log sits world-readable next to a child environment that carries the password:
@@ -212,8 +221,9 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
   *inside* the repo (`.env*`, `*.key`, `*.pem`, `api-keys.yml`, `*credentials*.json`) with it. Anything else is denied with
   `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
   is a lane whose guard works;
-- the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 workers —
-  and only tier-3 — through the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox as a tier-3 spawn, since a read-only
+- the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn workers — a
+  tier-2 writer or a tier-3 reviewer, never tier 1 and never an `orchestrate` card, and always in an isolated clone — through the
+  `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox with the `l2_report` tool, since a read-only
   shell cannot append), and the launcher's hint line.
 
 **Where the reports land.** The child env carries `AUTOOS_L1_INBOX` (lane key `inbox_file`), resolved from `--inbox` or that

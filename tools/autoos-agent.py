@@ -63,6 +63,15 @@ Depth: each child gets AUTOOS_AGENT_DEPTH (parent + 1) and
 AUTOOS_AGENT_MAX_DEPTH (default 2, only ever lowered by --max-depth); a spawn
 past the max is refused with exit code 4.
 
+Layer: a lane marks which layer it runs at in AUTOOS_AGENT_LAYER (tools/
+oc_l1_render.py writes it; nothing else decides it). A spawn made for an L2 lane
+stamps its child AUTOOS_AGENT_LAYER=L3 — a LEAF — and both fences are enforced by
+the spawner, not inherited and never a caller's or a plan's own value: an L2 lane
+may start tier 2 or tier 3 only (never tier 1, never a role=orchestrate card, never
+Claude), and a leaf never spawns at all (R-worker-06). Either refusal exits 14,
+distinct from 2 on purpose: a layer refusal is a report upward, not a flag to fix
+and retry. An unmarked session is an L1's and is fenced by neither rule.
+
 Run identity: one canonical id per spawn, minted once in UTC as
 `YYYYMMDD-HHMMSS-<slug>-<hex6>` (slug from --title else the task, capped at 24
 chars). It names the sandbox dir, the `agent/<id>` branch, logs/workers/<id>.json
@@ -1496,6 +1505,125 @@ def worker_shell():
     return None if os.name == "nt" else WORKER_SHELL
 
 
+# --- the agent layer fence (D-665 AO-L2-LAUNCH; L2SPAWN-TIER fix 1) ----------
+#
+# A lane marks which layer it runs at in its own environment; the marker is the
+# lane's metadata, written by tools/oc_l1_render.py / tools/oc_l2.py, never an
+# argument a model can point at a peer layer. Two fences read it back:
+#
+#   L2  an L2 lane spawns tier-2 and tier-3 workers, never the L1's own seat, and
+#       never a Claude spend (`l2_spawn_refusal`).
+#   L3  the worker an L2 spawned is a LEAF — stamped here, by the spawner, from
+#       the *spawner's* environment, and a leaf never spawns at all (skill rule
+#       R-worker-06, `leaf_spawn_refusal`).
+#
+# Before the stamp existed, the marker stopped at the lane: WORKER_ENV_AUTOOS did
+# not name it, so a tier-2 child of an L2 ran the FULL tool profile again and
+# could climb back to tier 1 (the default budget is 2, so a grandchild fitted).
+# The value a child carries is therefore never inherited, never a plan entry and
+# never a caller's `extra` — it is decided by whoever starts the child.
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+AGENT_LAYER_L2 = "L2"
+AGENT_LAYER_LEAF = "L3"
+# The tiers a marked L2 lane may start. A SET, not `>= L2_SPAWN_TIER`: an open
+# interval read tier 4 and tier 99 as "a worker" and let them through to the
+# CLI's argparse, which exits 2 on them labelled as nothing.
+L2_SPAWN_TIER = 2
+L2_SPAWN_TIERS = (2, 3)
+
+
+def agent_layer(env=None) -> str:
+    """The layer this process runs at, as its environment marks it: "" when
+    nothing marked it (an L1 session, a plain operator shell, a worker of an
+    L1's). Stripped and upper-cased, so no spelling of a mark evades the fence."""
+    source = os.environ if env is None else env
+    return str(source.get(ENV_AGENT_LAYER, "")).strip().upper()
+
+
+def child_agent_layer(env=None) -> str:
+    """The layer to stamp the child of a spawn made from `env` with — "" for no
+    mark at all. The spawner's own mark, never the child's opinion of it: an L2's
+    worker is a leaf, a leaf's child cannot happen, and anything else is an
+    ordinary worker that keeps whatever its own caller gave it."""
+    layer = agent_layer(env)
+    if layer in (AGENT_LAYER_L2, AGENT_LAYER_LEAF):
+        return AGENT_LAYER_LEAF
+    return ""
+
+
+def leaf_spawn_refusal(env=None):
+    """R-worker-06: why a leaf never spawns, or None when this process may.
+
+    The message says what to do instead, because the leaf that reads it is
+    headless: the work it cannot do belongs in its report to whoever started it,
+    not in a child of its own.
+    """
+    if agent_layer(env) != AGENT_LAYER_LEAF:
+        return None
+    return ("%s=L3: this session is a spawned leaf, marked by the spawner that "
+            "started it, and a leaf never spawns (skill rule R-worker-06). Do the "
+            "task you were given and put what you could not do in your REPORT — "
+            "the caller that needs a deeper tier starts it, that is not yours to "
+            "reach down to" % ENV_AGENT_LAYER)
+
+
+def l2_spawn_refusal(run_tier, card=None, client=None, models=(), env=None):
+    """D-665 (AO-L2-LAUNCH criteria 3 and b): the gate a spawn made *for* an L2
+    lane passes through; None when this process is not marked L2, or the spawn is
+    a legal L2 worker.
+
+    The one source for both entry points — the MCP `spawn` and the CLI `run` — so
+    a lane's bash cannot get a different answer from its own MCP server:
+
+    * Claude (criterion b): an L2 lane runs free/credit only. The `claude` CLIENT
+      and any Claude MODEL PIN are refused whatever the tier, checked FIRST, so an
+      L2 cannot spend the Claude allowance even with a declared reason — the credit
+      budget is the L1's to apply, and cross-family review rides with it.
+    * Tier (criterion 3): the only thing an L2 may start is a worker, in
+      `L2_SPAWN_TIERS`, always in its own `--isolate` clone (the MCP profile forces
+      the clone, whatever the caller passed). Tier 1 stays with the L1: it is the
+      seat that carries the orchestration combo, and an L2 that could start one
+      owns the lane above itself. A `role: orchestrate` card is that same seat
+      reached through the resolver instead of through `--tier`, and the role is
+      compared normalised — a card that spells it "Orchestrate" is the same claim.
+      A tier outside the set (4, 99) is refused, not re-read as a worker.
+
+    The original wording of the tier rule — "below tier 3 is a session that holds
+    its own editor and a checkout of the main tree" — was half false: an isolated
+    worker holds a clone, so the editor was never the danger, and the fence that
+    mattered is the one the tier keeps anyway (tier 1 = the orchestrator's combo).
+    It cost the lane its only write path, because tier 3 refuses an implement card
+    (T2-RECORD-PIN).
+
+    This is the minimal gate; the full ROLE-GATE (which role may spawn which) is a
+    later lane.
+    """
+    if agent_layer(env) != AGENT_LAYER_L2:
+        return None
+    if client and resolver.is_claude_client(client):
+        return ("l2 lane: the %r client stays with the L1 - an L2 spawns free/"
+                "credit tiers only. Report to the L1 inbox and let the L1 run "
+                "Claude." % client)
+    for pin in models:
+        if resolver.claude_model_name(pin):
+            return ("l2 lane: pinning a Claude model (%s) is refused - an L2 runs "
+                    "free/credit only. Report to the L1 inbox and let the L1 run "
+                    "Claude." % pin)
+    try:
+        tier = int(run_tier)
+    except (TypeError, ValueError):
+        tier = None
+    role = str((card or {}).get("role") or "").strip().casefold()
+    if tier in L2_SPAWN_TIERS and role != "orchestrate":
+        return None
+    why = ("a role=orchestrate card is an L1's own seat"
+           if role == "orchestrate" else
+           "only tiers %s are workers" % " and ".join(str(t) for t in L2_SPAWN_TIERS))
+    return ("l2 lane: an L2 spawns tier-%d and tier-3 workers only, this request "
+            "is tier %s and %s. Report the work to the L1 inbox and let the L1 "
+            "start the tier." % (L2_SPAWN_TIER, run_tier, why))
+
+
 # AUTOOS_* by name. AUTOOS_KEYS_FILE and the *_API_KEY ones are deliberately not
 # here: the child gets the minted key, never the path to the file it came from.
 WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR",
@@ -1508,6 +1636,10 @@ WORKER_ENV_AUTOOS = ("AUTOOS_STATE_DIR", "AUTOOS_WORKERS_DIR", "AUTOOS_TASK_DIR"
                      "AUTOOS_AGENT_RUN_ID", "AUTOOS_AGENT_DEPTH",
                      "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX",
                      "AUTOOS_AGENT_TRANSCRIPT", "AUTOOS_AGENT_MCP_DRY_RUN",
+                     # which layer this process runs at, so a worker that spawns
+                     # is fenced by the mark its OWN spawner made (`ENV_AGENT_LAYER`
+                     # above; the value is stamped, never copied — see worker_env).
+                     "AUTOOS_AGENT_LAYER",
                      # the daily gate file path: the gate itself runs inside
                      # our own CLI, so the MCP server's preflight and detached
                      # runner must hand the CLI the path to the spend report
@@ -1724,6 +1856,17 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     env.pop("AUTOOS_OMNIROUTE_KEY", None)
     if key:
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    # LAYERFENCE (fix 1): the layer the child runs at is the spawner's decision,
+    # made from the spawner's own environment, and nothing else gets a vote — the
+    # allowlist copy above and a plan entry below both could otherwise name it, and
+    # a child that chooses its own mark chooses its own fence. Applied after the
+    # plan merge for the same reason as the SHELL pin. An unmarked spawner stamps
+    # nothing, so an L1's worker keeps the profile it always had.
+    layer = child_agent_layer(src)
+    if layer:
+        env[ENV_AGENT_LAYER] = layer
+    else:
+        env.pop(ENV_AGENT_LAYER, None)
     # CLAUDEBUDGET item 1 (ccf6f84) crossed with FF1 (D-106): this is the one
     # place a worker's env is built, so the orchestrator's Claude declaration is
     # stripped *here* rather than at each call site. The allowlist above already
@@ -1820,6 +1963,17 @@ def spawner_child_env(base: dict | None = None, extra: dict | None = None,
                   % n, file=sys.stderr)
             continue
         env[n] = v
+    # LAYERFENCE (fix 1), the one exception to the stamp, and copied LAST so an
+    # `extra` cannot relabel it: a child that is our own CLI carries the LANE's own
+    # mark verbatim, because it is that CLI which stamps the worker it launches and
+    # it re-reads the same two gates the server just read. Handing it the leaf mark
+    # instead would refuse the very spawn the profile had already allowed — the
+    # HOSTADMISSION-OFF shape exactly: one environment decides both halves.
+    layer = agent_layer(src)
+    if layer:
+        env[ENV_AGENT_LAYER] = layer
+    else:
+        env.pop(ENV_AGENT_LAYER, None)
     return env
 
 
@@ -2302,6 +2456,14 @@ ADMISSION_MEM_FLOOR_MB_DEFAULT = 6144
 ADMISSION_OFF_ENV = "AUTOOS_ADMISSION_OFF"
 ADMISSION_MEMINFO_ENV = "AUTOOS_MEMINFO_PATH"
 MEMINFO_PATH = "/proc/meminfo"
+# LAYERFENCE (lane L2GATES-tier fix 12, 2026-10-08): the layer a spawn sits at is
+# marked in its own environment, and two rules are enforced at the last mile with
+# this code rather than rc 2: a leaf (L3) never spawns at all (R-worker-06), and a
+# spawn made FOR an L2 lane is never the L1's seat (tier 1 / orchestrate / Claude).
+# Distinct from 2 because a caller that reads only the code must be able to tell
+# "your flags were wrong" from "your layer may not do this at all" — the second one
+# is a report to the caller above, not a retry.
+EXIT_LAYER_FENCE = 14
 # HOSTADMISSION-RACE (lane AO-ADMISSION fix 1, 2026-10-08): the gate's other
 # placeholder. `FREE_RESERVATION_SUFFIX` is one provider's leg; this one is the
 # host's slot — taken by the spawner that the host admitted, released when that
@@ -10198,6 +10360,15 @@ def cmd_ps(args) -> int:
 
 
 def cmd_run(args, cfg: dict) -> int:
+    # LAYERFENCE (fix 1, R-worker-06): a leaf never spawns, and this is the last
+    # mile of that rule — the MCP profile hides the tool, but a leaf that reaches
+    # for `tools/autoos-agent.py run` from its own shell is the same call. Checked
+    # before the inbox, the budget, the route and any clone, because the first word
+    # of a run that must not happen is a refusal, whatever the rest of the plan
+    # would have said. rc EXIT_LAYER_FENCE, named in the module header.
+    leaf = leaf_spawn_refusal()
+    if leaf is not None:
+        return refuse(leaf, EXIT_LAYER_FENCE)
     # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
     # when the caller names an inbox - a run with no AUTOOS_AGENT_INBOX set is
     # not policed here (e.g. an interactive, watched run). AUTOOS_AGENT_TRANSCRIPT
@@ -10493,6 +10664,18 @@ def cmd_run(args, cfg: dict) -> int:
     refusal = review_run_refusal(route.get("review_plan"))
     if refusal is not None:
         return refusal
+    # LAYERFENCE (fix 1, findings 2 and 3): the lane's own fence, on the tier the
+    # plan RESOLVED to and not on the flag the caller typed — `--tier 1` and a card
+    # that routes to tier 1 are the same seat. The MCP `spawn` calls the same
+    # helper, so a lane's bash cannot reach the CLI and get a warmer answer than its
+    # own server gave. Unmarked here (an L1 session, an operator shell) means the
+    # gate is not about this run at all and answers None.
+    layer_refusal = l2_spawn_refusal(
+        route.get("tier"), route.get("card"), client=client.name,
+        models=tuple(p for p in (args.model,
+                                 getattr(args, "free_model", None)) if p))
+    if layer_refusal is not None:
+        return refuse(layer_refusal, EXIT_LAYER_FENCE)
     if client.promo and route["privacy"] != "public":
         return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
     # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
