@@ -1,0 +1,53 @@
+model	gateway	ack	tool	cache	ack_ms	served	error
+agy/claude-opus-5-5-high	workstation	fail	fail	unknown	47	-	HTTP 429
+agy/claude-opus-5-5-low	workstation	fail	fail	unknown	16	-	HTTP 429
+agy/claude-opus-5-5-medium	workstation	fail	fail	unknown	47	-	HTTP 429
+agy/claude-sonnet-5-5-high	workstation	fail	fail	unknown	30	-	HTTP 429
+agy/claude-sonnet-5-5-low	workstation	fail	fail	unknown	15	-	HTTP 429
+agy/claude-sonnet-5-5-medium	workstation	fail	fail	unknown	16	-	HTTP 429
+agy/gemini-3.8-flash-high	workstation	fail	fail	unknown	15	-	HTTP 429
+agy/gemini-3.8-flash-low	workstation	fail	fail	unknown	15	-	HTTP 429
+agy/gemini-3.8-flash-medium	workstation	fail	fail	unknown	30	-	HTTP 429
+agy/gemini-3.8-flash-tiered	workstation	fail	fail	unknown	30	-	HTTP 429
+ainative/llama-4-maverick	workstation	fail	fail	unknown	40155	-	HTTP 429
+bazaarlink/deepseek/deepseek-v4-flash-0731free:free	workstation	ok	ok	false	4000	deepseek/deepseek-v4-flash-0731free:free	-
+bzl/deepseek/deepseek-v4-flash-0731free:free	workstation	ok	ok	true	7077	deepseek/deepseek-v4-flash-0731free:free	-
+cohere/command-a-03-2025	workstation	ok	ok	false	343	command-a-03-2025	-
+cohere/command-a-plus-05-2026	workstation	ok	ok	false	780	command-a-plus-05-2026	-
+cohere/command-r-plus-08-2024	workstation	ok	ok	false	436	command-r-plus-08-2024	-
+free-ai/google/gemini-3.8-flash	workstation	fail	fail	unknown	87515	-	HTTP 429
+free-ai/qwen7b	workstation	ok	fail	unknown	875	qwen7b	-
+gemini/deep-research-max-preview-04-2026	workstation	fail	fail	unknown	328	-	HTTP 402
+gemini/deep-research-preview-04-2026	workstation	fail	fail	unknown	14	-	HTTP 401
+gemini/deep-research-pro-preview-12-2025	workstation	fail	fail	unknown	31	-	HTTP 401
+gemini/gemini-3.8-flash	workstation	fail	fail	unknown	16	-	HTTP 401
+groq/openai/gpt-oss-120b	workstation	ok	ok	unknown	452	openai/gpt-oss-120b	-
+groq/openai/gpt-oss-20b	workstation	ok	ok	unknown	218	openai/gpt-oss-20b	-
+groq/qwen/qwen3.8-27b	workstation	ok	ok	unknown	203	qwen/qwen3.8-27b	HTTP 429
+mistral/mistral-code-latest	workstation	ok	ok	false	438	mistral-code-latest	-
+morph/morph-dsv4flash	workstation	fail	fail	unknown	15	-	HTTP 401
+nscale/Qwen/Qwen3-235B-A22B-Instruct-2507	workstation	ok	ok	unknown	936	Qwen/Qwen3-235B-A22B-Instruct-2507	-
+nscale/Qwen/Qwen3-32B	workstation	ok	ok	unknown	2484	Qwen/Qwen3-32B	-
+nscale/mistralai/Devstral-Small-2505	workstation	ok	fail	unknown	469	mistralai/Devstral-Small-2505	HTTP 400
+nscale/openai/gpt-oss-120b	workstation	ok	ok	unknown	1108	openai/gpt-oss-120b	-
+oc/deepseek-v4-flash-free	workstation	fail	fail	unknown	3797	-	HTTP 401
+oc/muse-spark-1.2-contributor-free	workstation	fail	fail	unknown	3234	-	HTTP 403
+oc/muse-spark-1.3-contributor-free	workstation	fail	fail	unknown	219	-	HTTP 403
+ollama-cloud/deepseek-v4-flash	workstation	fail	fail	unknown	15	-	HTTP 401
+opencode-zen/muse-spark-1.2-contributor-free	workstation	fail	fail	unknown	35390	-	HTTP 403
+opencode-zen/muse-spark-1.3-contributor-free	workstation	fail	fail	unknown	22811	-	HTTP 403
+openrouter/cohere/north-mini-code:free	workstation	ok	ok	false	1734	cohere/north-mini-code:free	-
+openrouter/nvidia/nemotron-3-super-120b-a12b:free	workstation	ok	ok	true	891	nvidia/nemotron-3-super-120b-a12b:free	-
+openrouter/nvidia/nemotron-3-ultra-550b-a55b:free	workstation	ok	ok	false	6313	nvidia/nemotron-3-ultra-550b-a55b:free	-
+openrouter/poolside/laguna-s-2.1:free	workstation	ok	ok	false	3000	poolside/laguna-s-2.1:free	-
+openrouter/qwen/qwen3.8-27b:free	workstation	fail	fail	unknown	141	-	HTTP 404
+openrouter/thinkingmachines/inkling-small:free	workstation	fail	fail	unknown	33859	-	HTTP 403
+ovh/Qwen3-Coder-30B-A3B-Instruct	workstation	fail	fail	unknown	155	-	HTTP 404
+ovh/Qwen3.8-27B	workstation	fail	fail	unknown	16	-	HTTP 404
+ovh/gpt-oss-120b	workstation	fail	fail	unknown	16	-	HTTP 404
+ovhcloud/Qwen3-Coder-30B-A3B-Instruct	workstation	fail	fail	unknown	16	-	HTTP 404
+ovhcloud/Qwen3.8-27B	workstation	fail	fail	unknown	47	-	HTTP 404
+ovhcloud/gpt-oss-120b	workstation	fail	fail	unknown	0	-	HTTP 404
+vertex/claude-opus-5	workstation	fail	fail	unknown	24077	-	HTTP 501
+vertex/claude-sonnet-5	workstation	fail	fail	unknown	24125	-	HTTP 501
+vertex/gemini-3.8-flash	workstation	ok	ok	unknown	6546	gemini-3.8-flash	transport: TimeoutError

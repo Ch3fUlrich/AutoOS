@@ -1,0 +1,53 @@
+model	gateway	ack	tool	cache	ack_ms	served	error
+agy/claude-opus-5-5-high	central	fail	fail	unknown	106548	-	HTTP 429
+agy/claude-opus-5-5-low	central	fail	fail	unknown	23	-	HTTP 429
+agy/claude-opus-5-5-medium	central	fail	fail	unknown	110796	-	HTTP 429
+agy/claude-sonnet-5-5-high	central	fail	fail	unknown	103822	-	HTTP 429
+agy/claude-sonnet-5-5-low	central	fail	fail	unknown	108205	-	HTTP 429
+agy/claude-sonnet-5-5-medium	central	fail	fail	unknown	110445	-	HTTP 429
+agy/gemini-3.8-flash-high	central	fail	fail	unknown	14	-	HTTP 429
+agy/gemini-3.8-flash-low	central	fail	fail	unknown	11	-	HTTP 429
+agy/gemini-3.8-flash-medium	central	fail	fail	unknown	8	-	HTTP 429
+agy/gemini-3.8-flash-tiered	central	fail	fail	unknown	9	-	HTTP 429
+ainative/llama-4-maverick	central	fail	fail	unknown	41893	-	HTTP 429
+bazaarlink/deepseek/deepseek-v4-flash-0731free:free	central	ok	ok	true	24251	deepseek/deepseek-v4-flash-0731free:free	-
+bzl/deepseek/deepseek-v4-flash-0731free:free	central	ok	ok	true	4002	deepseek/deepseek-v4-flash-0731free:free	-
+cohere/command-a-03-2025	central	ok	ok	false	538	command-a-03-2025	-
+cohere/command-a-plus-05-2026	central	ok	ok	false	882	command-a-plus-05-2026	-
+cohere/command-r-plus-08-2024	central	ok	ok	false	411	command-r-plus-08-2024	-
+free-ai/google/gemini-3.8-flash	central	fail	fail	unknown	133505	-	HTTP 503
+free-ai/qwen7b	central	ok	fail	unknown	894	qwen7b	-
+gemini/deep-research-max-preview-04-2026	central	fail	fail	unknown	265	-	HTTP 402
+gemini/deep-research-preview-04-2026	central	fail	fail	unknown	12	-	HTTP 401
+gemini/deep-research-pro-preview-12-2025	central	fail	fail	unknown	9	-	HTTP 401
+gemini/gemini-3.8-flash	central	fail	fail	unknown	5	-	HTTP 401
+groq/openai/gpt-oss-120b	central	ok	ok	unknown	431	openai/gpt-oss-120b	-
+groq/openai/gpt-oss-20b	central	ok	ok	unknown	355	openai/gpt-oss-20b	-
+groq/qwen/qwen3.8-27b	central	ok	ok	unknown	182	qwen/qwen3.8-27b	-
+mistral/mistral-code-latest	central	ok	ok	false	450	mistral-code-latest	-
+morph/morph-dsv4flash	central	fail	fail	unknown	31409	-	HTTP 429
+nscale/Qwen/Qwen3-235B-A22B-Instruct-2507	central	ok	ok	unknown	814	Qwen/Qwen3-235B-A22B-Instruct-2507	-
+nscale/Qwen/Qwen3-32B	central	ok	ok	unknown	2284	Qwen/Qwen3-32B	-
+nscale/mistralai/Devstral-Small-2505	central	ok	fail	unknown	523	mistralai/Devstral-Small-2505	HTTP 400
+nscale/openai/gpt-oss-120b	central	ok	ok	unknown	909	openai/gpt-oss-120b	-
+oc/deepseek-v4-flash-free	central	fail	fail	unknown	3394	-	HTTP 401
+oc/muse-spark-1.2-contributor-free	central	fail	fail	unknown	3251	-	HTTP 403
+oc/muse-spark-1.3-contributor-free	central	fail	fail	unknown	358	-	HTTP 403
+ollama-cloud/deepseek-v4-flash	central	fail	fail	unknown	27	-	HTTP 400
+opencode-zen/muse-spark-1.2-contributor-free	central	fail	fail	unknown	35215	-	HTTP 403
+opencode-zen/muse-spark-1.3-contributor-free	central	fail	fail	unknown	22919	-	HTTP 403
+openrouter/cohere/north-mini-code:free	central	ok	ok	false	2034	cohere/north-mini-code:free	-
+openrouter/nvidia/nemotron-3-super-120b-a12b:free	central	ok	ok	true	1442	nvidia/nemotron-3-super-120b-a12b:free	-
+openrouter/nvidia/nemotron-3-ultra-550b-a55b:free	central	ok	ok	false	4054	nvidia/nemotron-3-ultra-550b-a55b:free	-
+openrouter/poolside/laguna-s-2.1:free	central	ok	ok	false	11023	poolside/laguna-s-2.1:free	-
+openrouter/qwen/qwen3.8-27b:free	central	fail	fail	unknown	137	-	HTTP 404
+openrouter/thinkingmachines/inkling-small:free	central	fail	fail	unknown	33663	-	HTTP 403
+ovh/Qwen3-Coder-30B-A3B-Instruct	central	fail	fail	unknown	129	-	HTTP 404
+ovh/Qwen3.8-27B	central	fail	fail	unknown	6	-	HTTP 404
+ovh/gpt-oss-120b	central	fail	fail	unknown	6	-	HTTP 404
+ovhcloud/Qwen3-Coder-30B-A3B-Instruct	central	fail	fail	unknown	11	-	HTTP 404
+ovhcloud/Qwen3.8-27B	central	fail	fail	unknown	8	-	HTTP 404
+ovhcloud/gpt-oss-120b	central	fail	fail	unknown	6	-	HTTP 404
+vertex/claude-opus-5	central	fail	fail	unknown	23017	-	HTTP 501
+vertex/claude-sonnet-5	central	fail	fail	unknown	24045	-	HTTP 501
+vertex/gemini-3.8-flash	central	ok	ok	unknown	5846	gemini-3.8-flash	-
