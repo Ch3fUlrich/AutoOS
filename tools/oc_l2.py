@@ -3,8 +3,8 @@
 
 One OpenCode orchestrator per PHASE, built on the L1 launcher rather than
 beside it: this module only resolves what an L2 lane IS (a lane name, the
-gateway combo's model, the spawner-only MCP list, the guard's orchestrator
-role, the brief as the first prompt), writes that as an oc_l1 lane config,
+gateway combo's model, the spawner-only MCP list, the guard's read-only role,
+the brief as the first prompt), writes that as an oc_l1 lane config,
 and hands the whole start/status pipeline to `tools/oc_l1.py` — the render,
 the health poll, the bash-guard canary and the state file are the same code
 the L1 lanes run, so a fix to the canary lands here for free.
@@ -12,7 +12,7 @@ the L1 lanes run, so a fix to the canary lands here for free.
 Why it exists: an L1 that wants phase-sized work starts a lane with
 `l2_start(repo, phase, brief)` instead of spawning writers itself. The L2
 coordinates; it never edits code (every write permission is denied in the
-rendered config, `L2_PERMISSIONS`, the bash-guard's `orchestrator` role in its
+rendered config, `L2_PERMISSIONS`, the bash-guard's read-only `l2` role in its
 child env, and the same instruction in its first prompt) and every change goes
 through a tier-3 run it spawns over the `autoos-agent` MCP — which is the ONLY
 MCP server the lane enables, so an L2 has no editor, no filesystem MCP and no
@@ -106,8 +106,9 @@ PERMISSION_DEFAULTS = oc_l1_render.PERMISSIONS
 # apply_patch: patch}); both spellings are emitted because a rule only binds
 # under the name the build matches - see lib/agent_harness.py KEYDENY3b.
 # `read` and `bash` stay allowed: an L2 inspects the tree and runs read-only
-# checks, and `bash` is fenced by the guard plugin in `orchestrator` role, which
-# the canary proves before the lane is ever prompted.
+# checks, and `bash` is fenced by the guard plugin in the read-only `l2` role -
+# a closed list of inspection commands, no redirection anywhere - which the
+# canary proves before the lane is ever prompted.
 L2_PERMISSIONS = {
     "edit": "deny", "write": "deny",
     "patch": "deny", "apply_patch": "deny",
@@ -122,14 +123,18 @@ ROLE_LINES = (
     "You are the L2 orchestrator of this phase (%s). Load the `%s` skill first.",
     "You NEVER edit code and you never run a write against the repository: "
     "every file-mutating and spawn permission of this session (`edit`, `write`, "
-    "`patch`, `task`) is denied and the shell guard runs in "
-    "`orchestrator` role. Every change goes through the `autoos-agent` MCP: "
+    "`patch`, `task`) is denied and the shell guard runs in `l2` role, which "
+    "leaves your shell a closed read-only list (`git status|log|diff|show`, "
+    "ls, cat, rg, head, tail, wc, pwd) with no redirection at all. Every "
+    "change goes through the `autoos-agent` MCP: "
     "spawn tier-3 runs (writer, then a cross-family reviewer) and judge their "
     "reports.",
     "Report to the L1 inbox at `%s`: append one line per milestone prefixed "
     "`REPORT` and a final line prefixed `DONE` (or `BLOCKED`), each opened by "
     "a UTC `%%Y-%%m-%%dT%%H:%%M:%%SZ` timestamp - that stamp is what the reader "
-    "parses, a line without it is invisible to it.",
+    "parses, a line without it is invisible to it. Your own shell cannot "
+    "append and cannot run the writer that would: the report is a tier-3 "
+    "spawn whose whole task is that one line.",
 )
 
 _KILL_WAIT_S = 5.0
@@ -329,7 +334,10 @@ def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
         "instructions": ["AGENTS.md", str(brief)],
         "plugins": [gdir],
         "permission": dict(L2_PERMISSIONS),
-        "guard_role": "orchestrator",
+        # AO-L2-LAUNCH merge criterion 1: not `orchestrator`, which scopes an
+        # L2's writes to .oc-pilot/. An L2 has no writable scope: the guard's
+        # read-only role, a closed list of inspection commands.
+        "guard_role": "l2",
         # Sonnet final REJECT 2026-10-08 finding 2: one MCP server answers both
         # levels, so an L2 could start, stop and nudge lanes. The lane marks its
         # own layer in its own environment and the server refuses lane-control

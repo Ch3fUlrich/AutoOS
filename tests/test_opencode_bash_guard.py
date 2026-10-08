@@ -407,5 +407,147 @@ class TestOpenCodeBashGuard(unittest.TestCase):
             self.assertIn(DENIED_MARKER, res["error"], f"marker missing for {cmd!r}")
 
 
+# ---------------------------------------------------------------------------
+# AO-L2-LAUNCH merge criterion 1: the L2 read-only role (AUTOOS_GUARD_ROLE=l2).
+#
+# An orchestrator-L2 may inspect a tree and run read-only checks and NOTHING
+# else: the shell is a closed allow list of command heads, not a write-scoped
+# one. `orchestrator` scopes writes to .oc-pilot/; an L2 has no writable scope
+# at all, because every change it makes is supposed to be a tier-3 spawn. So a
+# redirect to .oc-pilot/ is refused here, a mutating `git` verb is refused, and
+# any head that is not on the list is refused - fail closed, as the L2's whole
+# contract depends on it.
+# ---------------------------------------------------------------------------
+
+class TestL2ReadOnlyRole(unittest.TestCase):
+
+    L2_ENV = {"AUTOOS_GUARD_ROLE": "l2"}
+
+    def _l2_denied(self, cmd, *needles):
+        res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                         env_overrides=dict(self.L2_ENV))
+        self.assertFalse(res["allowed"], f"l2 role must deny: {cmd!r} (error={res['error']})")
+        self.assertIsNotNone(res["error"])
+        self.assertTrue(res["error"].strip().startswith(DENIED_MARKER),
+                        "the canary matches the marker at the start only: %r" % res["error"])
+        self.assertIn("l2 read-only", res["error"], cmd)
+        for needle in needles:
+            self.assertIn(needle, res["error"].lower(), cmd)
+
+    def _l2_allowed(self, cmd):
+        res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                         env_overrides=dict(self.L2_ENV))
+        self.assertTrue(res["allowed"], f"l2 role must allow: {cmd!r} (error={res['error']})")
+        self.assertIsNone(res["error"])
+
+    # (1) the allow list, verbatim
+    def test_allow_list_git_heads(self):
+        for cmd in ("git status", "git status --short", "git log --oneline -5",
+                    "git diff", "git diff HEAD~1 -- tools", "git show HEAD"):
+            self._l2_allowed(cmd)
+
+    def test_allow_list_plain_heads(self):
+        for cmd in ("ls -la", "cat file.txt", "rg pattern .", "head -5 f.txt",
+                    "tail -n 20 f.log", "wc -l f.txt", "pwd"):
+            self._l2_allowed(cmd)
+
+    def test_allow_list_pipes_between_read_only_heads(self):
+        self._l2_allowed("git log --oneline | head -20")
+        self._l2_allowed("ls -la | wc -l")
+
+    def test_allow_list_wrapper_of_read_only_head(self):
+        # `timeout 5 ls` is still just `ls`; the wrapper is skipped, the head
+        # is what the list applies to.
+        self._l2_allowed("timeout 5 ls")
+
+    # (2) everything else is refused
+    def test_redirect_denied_even_into_the_pilot_dir(self):
+        self._l2_denied("echo x > f", "f")
+        self._l2_denied("echo x >> f.log", "f.log")
+        self._l2_denied("echo x > .oc-pilot/notes.txt", ".oc-pilot")
+        self._l2_denied("false 2> /tmp/err.log", "/tmp/err.log")
+        self._l2_denied("echo x >| /tmp/f.txt", "/tmp/f.txt")
+
+    def test_git_mutating_verbs_denied(self):
+        for cmd in ("git commit -m x", "git add -A", "git push", "git checkout -- file",
+                    "git reset HEAD~1", "git rebase main", "git apply p.diff",
+                    "git merge origin/main", "git branch -f x HEAD"):
+            self._l2_denied(cmd, "git")
+
+    def test_writing_and_spawning_heads_denied(self):
+        for cmd in ("rm -rf /tmp/x", "python3 -c 'print(1)'", "curl https://example.com",
+                    "mkdir d", "touch f", "tee /tmp/x", "cp a b", "mv a b", "sed -i s/a/b/ f",
+                    "bash -c 'ls'", "npm install", "git", "echo x"):
+            self._l2_denied(cmd)
+
+    def test_pipe_into_a_writer_denied(self):
+        self._l2_denied("ls | tee out.txt", "tee")
+
+    def test_wrapper_head_still_audited(self):
+        self._l2_denied("sudo rm -f /tmp/x", "rm")
+        self._l2_denied("timeout 5 python3 -c 'x'", "python3")
+
+    def test_command_substitution_denied(self):
+        # `cat $(ls)` reads as `cat` on the list plus an unlisted command that
+        # ran first: a substitution is not read-only, whatever its parts are.
+        self._l2_denied("cat $(ls)", "substitution")
+        self._l2_denied("ls `pwd`", "substitution")
+
+    def test_stdin_redirection_denied(self):
+        self._l2_denied("cat < f.txt", "redirection")
+
+    # (3) the canary must still be denied under the new role, with the marker
+    def test_canary_incident_denied_with_marker(self):
+        for cmd in (INCIDENT_COMMAND, INCIDENT_COMMAND + "\n"):
+            res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                             env_overrides=dict(self.L2_ENV))
+            self.assertFalse(res["allowed"], f"the probe must be denied: {cmd!r}")
+            self.assertIn(DENIED_MARKER, res["error"])
+            self.assertIn("l2 read-only", res["error"])
+
+    def test_role_denies_without_the_python_guard_present(self):
+        # Defense in depth: the role gate is the lane's own, so a missing
+        # legacy guard must not turn the read-only shell back into a writable
+        # one. The orchestrator role has the same shape of hole; this one is
+        # pinned because an L2 has NO writable scope to fall back on.
+        with tempfile.TemporaryDirectory() as empty_dir:
+            env = dict(self.L2_ENV)
+            env["AUTOOS_REPO_ROOT"] = empty_dir
+            res = run_plugin({"tool": "shell", "input": {"command": "git commit -m x"}},
+                             env_overrides=env)
+        self.assertFalse(res["allowed"], "the role alone must deny")
+        self.assertIn(DENIED_MARKER, res["error"] or "")
+
+    # (4) the other roles are untouched by this gate
+    def test_l2_rules_do_not_leak_into_the_orchestrator_role(self):
+        res = run_plugin({"tool": "shell", "input": {"command": "git commit -m x"}},
+                         env_overrides={"AUTOOS_GUARD_ROLE": "orchestrator"})
+        self.assertFalse(res["allowed"])
+        self.assertIn("orchestrator role", res["error"])
+        # `cat` is read-only for both, but the orchestrator may write inside
+        # .oc-pilot/ while an L2 may not write anywhere.
+        self.assertTrue(run_plugin(
+            {"tool": "shell", "input": {"command": "echo hi > .oc-pilot/notes.txt"}},
+            env_overrides={"AUTOOS_GUARD_ROLE": "orchestrator"})["allowed"])
+
+    def test_role_unset_keeps_old_behaviour(self):
+        res = run_plugin({"tool": "shell", "input": {"command": "curl https://example.com"}},
+                         env_overrides={"AUTOOS_GUARD_ROLE": None})
+        self.assertTrue(res["allowed"], f"role unset must keep old behaviour: {res['error']}")
+        res = run_plugin({"tool": "shell", "input": {"command": "echo x > f"}},
+                         env_overrides={"AUTOOS_GUARD_ROLE": None})
+        self.assertTrue(res["allowed"], f"role unset must keep old behaviour: {res['error']}")
+
+    def test_l2_role_still_runs_the_legacy_guard(self):
+        # An unquoted here-document whose body expands is denied by BOTH gates;
+        # the legacy python guard runs after the role check, so the incident
+        # rules cannot be dropped by a role that allows the head.
+        cmd = 'ls\ncat <<EOF\n`netplan apply`\nEOF'
+        res = run_plugin({"tool": "shell", "input": {"command": cmd}},
+                         env_overrides={"AUTOOS_GUARD_ROLE": None})
+        self.assertFalse(res["allowed"], "the legacy incident rule still applies")
+        self.assertIn("heredoc", (res["error"] or "").lower())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -536,9 +536,11 @@ function checkCopyMove(cmd, args) {
   return null;
 }
 
-function checkGit(args) {
-  let i = 0;
+function gitSubcommand(args) {
+  // git's subcommand and the arguments after it, skipping the global options
+  // that carry a value (`git -C dir status`). Null when no subcommand follows.
   const n = args.length;
+  let i = 0;
   while (i < n) {
     const a = args[i];
     if (a === "--") break;
@@ -554,8 +556,14 @@ function checkGit(args) {
     break;
   }
   if (i >= n) return null;
-  const sub = args[i];
-  const rest = args.slice(i + 1);
+  return { sub: args[i], rest: args.slice(i + 1) };
+}
+
+function checkGit(args) {
+  const g = gitSubcommand(args);
+  if (g === null) return null;
+  const sub = g.sub;
+  const rest = g.rest;
   if (ORCH_GIT_DENY.has(sub)) {
     return `git ${sub} is a mutation command; orchestrators may not use it`;
   }
@@ -892,6 +900,107 @@ function orchestratorDenialReason(command, depth = 0) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Orchestrator-L2 role (AUTOOS_GUARD_ROLE=l2) - AO-L2-LAUNCH merge criterion 1
+//
+// An L2 coordinates a phase and writes NOTHING: every change it wants is a
+// tier-3 run it spawns over the autoos-agent MCP. `orchestrator` scopes writes
+// to .oc-pilot/; this role has no writable scope at all, so the test is a
+// CLOSED LIST of command heads rather than a write-target:
+//
+// - `git status|log|diff|show`, ls, cat, rg, head, tail, wc, pwd
+// - no output redirection, to anywhere - not even .oc-pilot/ or /dev/null
+// - no stdin redirection and no command or process substitution: each of those
+//   feeds or runs something the list never approved (this is also what keeps
+//   the canary's own probe denied under the new role)
+// - every segment of a pipe is audited, so `ls | tee f` is refused as `tee`
+// - a wrapper (sudo, timeout, env ...) is skipped, not obeyed
+//
+// Anything else is denied, fail closed.
+// ---------------------------------------------------------------------------
+
+const L2_READ_HEADS = new Set(["ls", "cat", "rg", "head", "tail", "wc", "pwd"]);
+const L2_GIT_SUBCOMMANDS = new Set(["status", "log", "diff", "show"]);
+const L2_LIST_TEXT = "git status|log|diff|show, ls, cat, rg, head, tail, wc, pwd";
+
+function stdinOrSubstitutionReason(command) {
+  // One pass outside quotes for the operators a head list cannot approve:
+  // `<` (any stdin redirection), a backtick, `$(`, and `>(`.
+  const n = command.length;
+  let i = 0;
+  while (i < n) {
+    const c = command[i];
+    if (c === "'") {
+      const j = command.indexOf("'", i + 1);
+      i = j === -1 ? n : j + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (command[j] === "\\" && j + 1 < n) { j += 2; continue; }
+        if (command[j] === '"') break;
+        j += 1;
+      }
+      i = j < n ? j + 1 : n;
+      continue;
+    }
+    if (c === "\\" && i + 1 < n) { i += 2; continue; }
+    if (c === "#" && (i === 0 || /[\s;|&(]/.test(command[i - 1]))) {
+      const j = command.indexOf("\n", i);
+      i = j === -1 ? n : j;
+      continue;
+    }
+    if (c === "<") {
+      const doubled = i + 1 < n && command[i + 1] === "<";
+      return doubled
+        ? "a here-document or here-string feeds the command data the list never approved"
+        : "a stdin redirection reads the command from a file the list never approved";
+    }
+    if (c === "`") {
+      return "a backtick command substitution runs a command the list never approved";
+    }
+    if (c === "$" && i + 1 < n && command[i + 1] === "(") {
+      return "a $(...) command substitution runs a command the list never approved";
+    }
+    if (c === ">" && i + 1 < n && command[i + 1] === "(") {
+      return "a process substitution runs a command the list never approved";
+    }
+    i += 1;
+  }
+  return null;
+}
+
+function l2ReadOnlyDenialReason(command) {
+  for (const target of redirectWriteTargets(command)) {
+    return `output redirect to ${target} writes a file; an L2 may not write anywhere`;
+  }
+  const stdinReason = stdinOrSubstitutionReason(command);
+  if (stdinReason) return stdinReason;
+  for (const seg of collectSegments(command)) {
+    const words = tokenizeSegment(seg);
+    const idx = skipLeading(words, 0);
+    if (idx >= words.length) continue;
+    const head = baseName(words[idx]);
+    if (head === "git") {
+      const args = words.slice(idx + 1);
+      const g = gitSubcommand(args);
+      if (g === null) return "git without a subcommand may run any verb";
+      if (!L2_GIT_SUBCOMMANDS.has(g.sub)) {
+        return `git ${g.sub} is not on the read-only list (${L2_LIST_TEXT})`;
+      }
+      // `git log --output=f` is a file write wearing a read-only verb.
+      const out = g.rest.find((a) => a === "--output" || a.startsWith("--output="));
+      if (out) return `git ${g.sub} ${out} writes a file; an L2 may not write anywhere`;
+      continue;
+    }
+    if (!L2_READ_HEADS.has(head)) {
+      return `${head} is not on the read-only list (${L2_LIST_TEXT})`;
+    }
+  }
+  return null;
+}
+
 export default {
   id: "bash-guard",
   async setup(ctx) {
@@ -907,13 +1016,16 @@ export default {
         ? e.input.command
         : "";
 
-      if (process.env.AUTOOS_GUARD_ROLE === "orchestrator") {
-        const reason = orchestratorDenialReason(command);
+      const role = process.env.AUTOOS_GUARD_ROLE;
+      if (role === "orchestrator" || role === "l2") {
+        // The canary recognises a denial only by the "bash-guard: DENIED"
+        // marker, and this throw runs before the python guard, so the role
+        // denial must carry that marker verbatim (D-665).
+        const reason = role === "l2" ? l2ReadOnlyDenialReason(command)
+                                     : orchestratorDenialReason(command);
         if (reason) {
-          // The canary recognises a denial only by the "bash-guard: DENIED"
-          // marker, and this throw runs before the python guard, so the role
-          // denial must carry that marker verbatim (D-665).
-          throw new Error(`bash-guard: DENIED - orchestrator role: ${reason}`);
+          const label = role === "l2" ? "l2 read-only" : "orchestrator role";
+          throw new Error(`bash-guard: DENIED - ${label}: ${reason}`);
         }
       }
 

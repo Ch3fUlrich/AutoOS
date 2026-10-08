@@ -241,8 +241,25 @@ class LaneTest(unittest.TestCase):
         self.assertEqual(rc, 0, result)
         wait_file(self.rec)
         rec = json.loads(self.rec.read_text(encoding="utf-8"))
-        self.assertEqual(rec["guard_role"], "orchestrator")
+        # AO-L2-LAUNCH merge criterion 1: an L2 is not merely an orchestrator
+        # whose writes stay inside .oc-pilot/ - it has NO writable scope, so it
+        # renders the guard's read-only `l2` role.
+        self.assertEqual(rec["guard_role"], "l2")
+        self.assertEqual(oc_l2.read_config(self._lane_name())["guard_role"], "l2")
         self.assertEqual(rec["l1_inbox"], str(self.l1_inbox))
+
+    def test_the_rendered_role_is_a_role_the_plugin_dispatches_on(self):
+        # oc_l2's `guard_role` and the plugin's role dispatch are one contract:
+        # a lane that renders a role nobody implements is an unguarded lane that
+        # believes itself guarded, because the canary only proves the guard
+        # denied SOMETHING. Pinned by reading both sides, not by a shared const.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        role = oc_l2.read_config(self._lane_name())["guard_role"]
+        src = (GUARD_DIR / "index.mjs").read_text(encoding="utf-8")
+        self.assertEqual(role, "l2")
+        self.assertIn("process.env.AUTOOS_GUARD_ROLE", src)
+        self.assertIn('role === "%s"' % role, src)
 
     # Sonnet final REJECT 2026-10-08 finding 2: the same MCP server answers an
     # L1 and an L2, so an L2 could start, stop and nudge lanes - i.e. relaunch
