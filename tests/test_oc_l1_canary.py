@@ -475,6 +475,68 @@ class TestUnnamedGuardedCall(_Base):
         self.assertIn("no shell tool call", self._state()["canary"]["detail"])
 
 
+class TestDenialMarkerAnchor(_Base):
+    """F3: the marker must ANCHOR the error text, not appear inside it.
+
+    `DENIED_MARKER in err` let any model-authored text that quoted the marker
+    pass the canary: an echoed sentence, a tool output that merely mentioned
+    it, or an error from a non-error status.
+    """
+
+    def _err_item(self, error, status="error", tool="shell"):
+        return [{"type": "assistant", "content": [
+            {"type": "tool", "tool": tool,
+             "state": {"status": status, "error": error}}]}]
+
+    def test_marker_midway_is_not_a_denial(self):
+        self.srv.canary_items = self._err_item(
+            "command failed; bash-guard: DENIED is what a guard would print")
+        rc, out = self._start()
+        self.assertEqual(rc, 5)
+        self.assertIn("canary denied=no", out)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_marker_in_a_tool_output_that_completed_is_not_a_denial(self):
+        self.srv.canary_items = self._err_item(
+            "bash-guard: DENIED - heredoc", status="completed")
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertFalse(self._state()["canary"]["denied"])
+        self.assertIn("tool completed without denial",
+                      self._state()["canary"]["detail"])
+
+    def test_marker_echoed_in_prose_is_not_a_denial(self):
+        self.srv.canary_items = [{"type": "assistant", "content": [
+            {"type": "text", "text": "bash-guard: DENIED - unquoted heredoc"}]}]
+        rc, _ = self._start()
+        self.assertEqual(rc, 5)
+        self.assertFalse(self._state()["canary"]["denied"])
+
+    def test_real_denial_still_counts_with_leading_noise_whitespace(self):
+        # the plugin throws the guard's stderr, trimmed; opencode may pad it, so
+        # whitespace before the marker is still an anchored denial.
+        self.srv.canary_items = self._err_item(
+            "\n  bash-guard: DENIED - unquoted heredoc <<CANARY_EOF\n")
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self._state()["canary"]["denied"])
+
+    def test_denial_from_a_bash_spelling_still_counts(self):
+        self.srv.canary_items = self._err_item(
+            "bash-guard: DENIED - unquoted heredoc", tool="bash")
+        rc, _ = self._start()
+        self.assertEqual(rc, 0)
+        self.assertTrue(self._state()["canary"]["denied"])
+
+    def test_the_helper_anchors_and_never_substrings(self):
+        self.assertTrue(oc_l1_canary._is_denial("bash-guard: DENIED - x"))
+        self.assertTrue(oc_l1_canary._is_denial("  bash-guard: DENIED\n"))
+        self.assertFalse(oc_l1_canary._is_denial("see: bash-guard: DENIED"))
+        self.assertFalse(oc_l1_canary._is_denial(""))
+        self.assertFalse(oc_l1_canary._is_denial(None))
+        self.assertFalse(oc_l1_canary._is_denial({"error": "bash-guard: DENIED"}))
+
+
 class TestTimeout(_Base):
     mode = "timeout"
 

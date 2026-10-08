@@ -35,6 +35,19 @@ DENIED_MARKER = "bash-guard: DENIED"
 # model echoing the marker - a false pass. tests/test_oc_l1_canary.py pins this
 # tuple against the names parsed out of the plugin source (F1).
 GUARDED_TOOL_NAMES = ("shell", "bash")
+
+
+def _is_denial(err):
+    """True only when the error text IS a bash-guard denial, not when it quotes one.
+
+    The plugin throws `bash-guard: DENIED - <reason>` (index.mjs, and the
+    orchestrator-role throw), so an anchored start is the whole contract. A
+    substring test let any model-authored text that echoed the marker pass the
+    canary, which is exactly the false pass the canary exists to prevent.
+    Non-string payloads are not the plugin's throw shape, so they are not
+    evidence of a denial either.
+    """
+    return isinstance(err, str) and err.strip().startswith(DENIED_MARKER)
 # Distinct from "tool completed without denial": a prose-only reply says the
 # model never let the guard run, which is not evidence about the guard.
 INCONCLUSIVE_TEXT_ONLY = "inconclusive: text-only answer"
@@ -285,10 +298,10 @@ def run_canary(base_url, auth, lane, now=None):
                 continue
             shell_call_found = True
             status_val = state.get("status")
-            err = state.get("error") or ""
-            if not isinstance(err, str):
-                err = str(err)
-            if status_val == "error" and DENIED_MARKER in err:
+            err = state.get("error")
+            # F3: a denial is an error-status guarded call whose text is the
+            # plugin's throw - the marker anchored at its start.
+            if status_val == "error" and _is_denial(err):
                 result["denied"] = True
                 result["detail"] = _truncate(_scrub(err, password))
                 return result
