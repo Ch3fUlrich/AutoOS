@@ -910,8 +910,30 @@ class TestL2ReadOnlyRole(unittest.TestCase):
                 'rg -r"$AUTOOS_OMNIROUTE_KEY" foo README.md',
                 "rg --replace=$AUTOOS_OMNIROUTE_KEY foo README.md",
                 "rg -e$AUTOOS_OMNIROUTE_KEY README.md",
-                "rg -A$((1)) foo README.md"):
+                "rg -A$((1)) foo README.md",
+                # fix 11: the quote is not a boundary the guard honours, so a `"`
+                # glued around the value - on a flag or on a plain operand - is the
+                # same read. `cat "README$KEY.md"` puts the key inside a FILE NAME,
+                # which no flag rule ever looks at.
+                'rg -e"$AUTOOS_OMNIROUTE_KEY" README.md',
+                'rg -r"${OPENCODE_SERVER_PASSWORD}" foo README.md',
+                'cat "README$AUTOOS_OMNIROUTE_KEY.md"',
+                'rg foo"$AUTOOS_OMNIROUTE_KEY" README.md',
+                'rg --replace="$(printenv AUTOOS_OMNIROUTE_KEY)" foo README.md',
+                'head -c"$((1+1))" README.md',
+                "git log --format=$AUTOOS_OMNIROUTE_KEY",
+                "git log --grep=${AUTOOS_OMNIROUTE_KEY}"):
             self._l2_denied(cmd, "expansion")
+        # ANSI-C quoting writes the `$` as `\x24`, so the command can carry an
+        # expansion with no `$` in the text at all - and the backslash that spells
+        # it is what the guard reads first. Both are refused, fail closed.
+        for cmd in ("rg $'\\x41' README.md",
+                    "rg -r$'\\x24AUTOOS_OMNIROUTE_KEY' foo README.md"):
+            self._l2_denied(cmd, "backslash")
+        # A backtick is a substitution with no `$` either; the substitution scan
+        # runs before any operand rule, whatever flag it rides in on.
+        self._l2_denied("rg -r`printenv AUTOOS_OMNIROUTE_KEY` foo README.md",
+                        "substitution")
         # `~` is expanded by the same shell, and a leading `~` reaches a home
         # directory outside the checkout whatever flag it is glued to.
         for cmd in ("head -n~/lane.key README.md", "rg -m~/x foo README.md"):
