@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from test_oc_l1 import make_lane, run_main, write_cfg  # noqa: E402
+from oc_l1_render import PERMISSIONS  # noqa: E402
 
 
 def render(tmp, **over):
@@ -166,6 +167,29 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(cfg["permission"]["task"], "deny")
         self.assertEqual(cfg["permission"]["webfetch"], "deny")
         self.assertEqual(cfg["permission"]["bash"], "allow")
+
+    def test_the_rendered_L2_permission_block_denies_every_write(self):
+        # Sonnet final REJECT 2026-10-08 finding 1: the renderer's default
+        # `edit: allow` reached an L2 lane, and the one `task: deny` override
+        # left it there - an L2 that can edit never spawns. The block an L2
+        # renders is pinned here, at the renderer, from the single home in
+        # tools/oc_l2.py: the file-mutating keys (edit / write / patch and its
+        # alias) and the two spawn-gate spellings are denied; read and the
+        # guarded shell stay allowed.
+        import oc_l2
+        cfg, _ = render(self.tmp, permission=dict(oc_l2.L2_PERMISSIONS))
+        perm = cfg["permission"]
+        for key in ("edit", "write", "patch", "apply_patch", "task", "subagent"):
+            self.assertEqual(perm[key], "deny", key)
+        for key in ("read", "bash"):
+            self.assertEqual(perm[key], "allow", key)
+        self.assertEqual(perm, dict(PERMISSIONS, **oc_l2.L2_PERMISSIONS))
+
+    def test_an_L1_lane_still_renders_the_writable_defaults(self):
+        # The L1 hole the review asks about is reported, not silently widened:
+        # nothing here changes what a lane without overrides renders.
+        cfg, _ = render(self.tmp)
+        self.assertEqual(cfg["permission"], dict(PERMISSIONS))
 
     def test_bad_permission_override_refused(self):
         for bad in ({"task": "no"}, {"task": True}, "task", {"external_directory": "deny"},

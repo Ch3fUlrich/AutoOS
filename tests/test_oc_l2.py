@@ -161,8 +161,19 @@ class LaneTest(unittest.TestCase):
         self.assertEqual(models["l2-orchestrator"]["limit"]["context"], 1048576)
         self.assertEqual({n for n, e in cfg["mcp"].items() if e.get("enabled")},
                          {"autoos-agent"})
-        self.assertEqual(cfg["permission"]["task"], "deny")
-        self.assertEqual(cfg["permission"]["bash"], "allow")
+        # Sonnet final REJECT 2026-10-08 finding 1: `permission.task` alone left
+        # the renderer's `edit: allow` standing, so an L2 could write files with
+        # its own editor tools and never spawn. Every file-mutating key the
+        # opencode schema declares is denied here; read and the guarded shell
+        # stay allowed because the L2 still has to inspect and run checks.
+        self.assertEqual(cfg["permission"], {
+            "bash": "allow", "edit": "deny", "read": "allow",
+            "autoos-agent_*": "allow",
+            "write": "deny", "patch": "deny", "apply_patch": "deny",
+            "task": "deny", "subagent": "deny",
+        })
+        self.assertEqual(cfg["permission"], dict(oc_l2.PERMISSION_DEFAULTS,
+                                                 **oc_l2.L2_PERMISSIONS))
         self.assertEqual(cfg["plugins"], [str(GUARD_DIR)])
         # the spawner MCP still gets its workers dir pinned (the 600 s `ps` hang)
         self.assertEqual(cfg["mcp"]["autoos-agent"]["environment"]["AUTOOS_WORKERS_DIR"],

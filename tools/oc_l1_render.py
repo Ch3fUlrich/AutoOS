@@ -22,8 +22,9 @@ repo-file shape):
     missing from the repo file is a config error.
   * "plugins": the configured plugin DIRECTORIES (key omitted when empty).
   * "permission": bash/edit/read plus autoos-agent_* allowed; an optional
-    lane "permission" object holds extra entries ({"task": "deny"} for an L2
-    lane, D-665) that override the defaults; an optional lane
+    lane "permission" object holds extra entries that override the defaults
+    (an L2 lane renders oc_l2.L2_PERMISSIONS - every file-mutating key denied,
+    D-665 + Sonnet final REJECT 2026-10-08 finding 1); an optional lane
     "external_directory" list of path globs is rendered as allow entries
     (lane c 2026-10-05: the outside-folder access moves from a hand-edited
     host overlay into the lane config).
@@ -258,8 +259,8 @@ def render(lane, repo_config_path):
             )
         cfg["permission"]["external_directory"] = {p: "allow" for p in ext}
     # D-665 (AO-L2-LAUNCH): the lane's own permission entries win over the
-    # defaults - an L2 lane renders {"task": "deny"} so it cannot launch a
-    # nested agent session of its own and must go through the spawner.
+    # defaults - an L2 lane denies every file-mutating key and the spawn gate
+    # so it can only coordinate, and every change goes through the spawner.
     overrides = lane.get("permission")
     if overrides:
         cfg["permission"].update(overrides)

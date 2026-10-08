@@ -11,11 +11,12 @@ the L1 lanes run, so a fix to the canary lands here for free.
 
 Why it exists: an L1 that wants phase-sized work starts a lane with
 `l2_start(repo, phase, brief)` instead of spawning writers itself. The L2
-coordinates; it never edits code (`permission.task: deny` in the rendered
-config, the bash-guard's `orchestrator` role in its child env, and the same
-instruction in its first prompt) and every change goes through a tier-3 run
-it spawns over the `autoos-agent` MCP — which is the ONLY MCP server the lane
-enables, so an L2 has no editor, no filesystem MCP and no second spawner.
+coordinates; it never edits code (every write permission is denied in the
+rendered config, `L2_PERMISSIONS`, the bash-guard's `orchestrator` role in its
+child env, and the same instruction in its first prompt) and every change goes
+through a tier-3 run it spawns over the `autoos-agent` MCP — which is the ONLY
+MCP server the lane enables, so an L2 has no editor, no filesystem MCP and no
+second spawner.
 
 Reporting (L2 -> L1): the lane's child env carries `AUTOOS_L1_INBOX` = the L1
 inbox the resolved lane key `inbox_file` names, and the first prompt tells the
@@ -63,6 +64,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
+import oc_l1_render  # noqa: E402
 from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -82,13 +84,37 @@ ENV_STATE_DIR = "AUTOOS_OCL2_STATE_DIR"
 ENV_GUARD_DIR = "AUTOOS_OCL2_GUARD_DIR"
 GUARD_PLUGIN_RELPATH = Path("configuration") / "opencode" / "plugins" / "bash-guard"
 
+# The renderer's own defaults, imported not restated (one home): an L2 lane
+# overrides a subset of them and everything else renders unchanged.
+PERMISSION_DEFAULTS = oc_l1_render.PERMISSIONS
+# What an L2 may not do, in opencode's own permission vocabulary.
+#
+# Sonnet final REJECT 2026-10-08 finding 1: this used to be `{"task": "deny"}`
+# alone, and the renderer's default `edit: allow` therefore survived into the
+# L2's config - an orchestrator that can edit files has no reason to spawn, and
+# the whole tier contract (L2 coordinates, L3 writes) silently disappeared.
+# `write` is the older spelling of the same key and `apply_patch` the alias of
+# `patch` (opencode v2's rename map is {bash: shell, task: subagent,
+# apply_patch: patch}); both spellings are emitted because a rule only binds
+# under the name the build matches - see lib/agent_harness.py KEYDENY3b.
+# `read` and `bash` stay allowed: an L2 inspects the tree and runs read-only
+# checks, and `bash` is fenced by the guard plugin in `orchestrator` role, which
+# the canary proves before the lane is ever prompted.
+L2_PERMISSIONS = {
+    "edit": "deny", "write": "deny",
+    "patch": "deny", "apply_patch": "deny",
+    "task": "deny", "subagent": "deny",
+    "read": "allow", "bash": "allow",
+}
+
 SKILL = "unattended-orchestration"
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
 ROLE_LINES = (
     "You are the L2 orchestrator of this phase (%s). Load the `%s` skill first.",
     "You NEVER edit code and you never run a write against the repository: "
-    "`permission.task` is denied in this session and the shell guard runs in "
+    "every file-mutating and spawn permission of this session (`edit`, `write`, "
+    "`patch`, `task`) is denied and the shell guard runs in "
     "`orchestrator` role. Every change goes through the `autoos-agent` MCP: "
     "spawn tier-3 runs (writer, then a cross-family reviewer) and judge their "
     "reports.",
@@ -277,7 +303,7 @@ def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
         "mcp": ["autoos-agent"],
         "instructions": ["AGENTS.md", str(brief)],
         "plugins": [gdir],
-        "permission": {"task": "deny"},
+        "permission": dict(L2_PERMISSIONS),
         "guard_role": "orchestrator",
         "inbox_file": str(l1_inbox),
         "first_prompt_file": str(prompt_file),
