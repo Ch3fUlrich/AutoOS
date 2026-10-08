@@ -3459,9 +3459,9 @@ class PlanReviewCardTests(unittest.TestCase):
                       self.NOW)
 
     def test_a_review_card_with_an_author_carries_the_review_decision(self):
-        # T0-PAID-4 Q1 (D-212/D-219): the paid meta head must not review a
-        # qwen card while a free entry is usable -- the free google reviewer
-        # takes it.
+        # T0-PAID-4 Q1 (D-212/D-219): a paid entry must not review a qwen card
+        # while a free entry is usable -- the free google reviewer takes it,
+        # which is also where the D657-D2 list now leads (its head is free).
         review = self.plan(author="qwen")["review"]
         self.assertEqual(review["author_family"], "qwen")
         self.assertEqual(review["reviewer"]["family"], "google")
@@ -3478,8 +3478,12 @@ class PlanReviewCardTests(unittest.TestCase):
         review = plan["review"]
         self.assertNotEqual(review["reviewer"]["family"], "meta")
         self.assertIn("meta", [s["family"] for s in review["skipped"]])
-        # --explain's job: the skipped candidate is visible, not gone.
-        self.assertTrue([l for l in plan["explain"] if "omniroute/spark-1.3" in l])
+        # --explain's job: the skipped candidate is visible, not gone. The
+        # spelling is the meta seat the D657-D2 list carries -- the free Muse
+        # grant, since §8 took the paid contributor combo off the list -- read
+        # by the id half the operator's `muse-spark-1.3` shape, not a full model
+        # name, so the pin outlives the next seat change.
+        self.assertTrue([l for l in plan["explain"] if "muse-spark-1.3" in l])
 
     def test_a_card_without_an_author_has_no_review_decision(self):
         self.assertIsNone(self.plan()["review"])
