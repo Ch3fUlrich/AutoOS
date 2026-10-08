@@ -247,7 +247,7 @@ class L2SpawnTierGateTest(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             self._argv(req, **dict(env, AUTOOS_AGENT_LAYER="L2"))
         msg = str(cm.exception)
-        self.assertIn(needle, msg, msg)
+        self.assertIn(needle.lower(), msg.lower(), msg)
         self.assertIn("l2", msg.lower(), msg)
         return msg
 
@@ -285,6 +285,59 @@ class L2SpawnTierGateTest(unittest.TestCase):
                                                         "complexity": "trivial"}},
                                  AUTOOS_AGENT_LAYER="L2")
         self.assertEqual(agent_tier(route["combo"]), 3, route)
+
+    # AO-L2-LAUNCH criterion b (Claude off the L2): an L2 lane runs free/credit
+    # only - the Claude allowance is the L1's to spend, cross-family review
+    # included. So the claude CLIENT and any Claude MODEL PIN are refused from
+    # profile l2 whatever the tier, ahead of the credit-budget gate (which an L2
+    # must not be able to talk past with a declared reason).
+    def test_a_claude_client_is_refused_from_profile_l2(self):
+        # tier 3 read-only is otherwise a legal L2 spawn; naming the claude
+        # client is what the gate refuses here.
+        self._refused({"task": "t", "client": "claude", "tier": 3,
+                       "read_only": True}, "claude")
+
+    def test_a_claude_model_pin_is_refused_from_profile_l2(self):
+        for pin in ("anthropic/claude-opus-4-1", "sonnet-5",
+                    "openrouter/anthropic/claude-sonnet-4"):
+            self._refused({"task": "t", "tier": 3, "read_only": True,
+                           "model": pin}, "claude")
+
+    def test_a_free_claude_model_pin_is_refused_from_profile_l2(self):
+        self._refused({"task": "t", "tier": 3, "read_only": True,
+                       "free": True, "model": "anthropic/claude-haiku-4"}, "claude")
+
+    def test_a_non_claude_tier_three_spawn_passes_the_claude_gate(self):
+        # The gate must refuse nothing the lane was built to ask for: an opencode
+        # tier-3 read-only worker with no Claude pin is still legal.
+        argv, _ = self._argv({"task": "t", "tier": 3, "read_only": True},
+                             AUTOOS_AGENT_LAYER="L2")
+        self.assertEqual(argv[argv.index("--tier") + 1], "3")
+
+    def test_the_claude_gate_is_the_profile_and_not_the_process(self):
+        # Outside profile l2 the same claude client / pin is a legal plan: this
+        # gate is an L2 property, not a general Claude ban. (build_argv runs no
+        # credit-budget check; the L1 budget is enforced in spawn(), elsewhere.)
+        argv, _ = self._argv({"task": "t", "client": "claude", "tier": 3,
+                              "read_only": True})
+        self.assertIn("claude", argv)
+
+    def test_the_helper_reads_the_client_and_the_model_pins(self):
+        l2 = {mcp_server.ENV_AGENT_LAYER: "L2"}
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            3, None, client="claude", env=l2))
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            3, None, models=("anthropic/claude-opus-4-1",), env=l2))
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            3, {"role": "review"}, models=("sonnet-5",), env=l2))
+        # a non-Claude model and the opencode client sail through
+        self.assertIsNone(mcp_server.l2_spawn_refusal(
+            3, {"role": "review"}, client="opencode",
+            models=("openrouter/deepseek/deepseek-chat",), env=l2))
+        # and none of it fires outside profile l2
+        self.assertIsNone(mcp_server.l2_spawn_refusal(
+            3, None, client="claude",
+            models=("anthropic/claude-opus-4-1",), env={}))
 
     def test_the_gate_is_the_profile_and_not_the_process(self):
         # Nothing marks this server as a lane: the same spawn is a plan, as it

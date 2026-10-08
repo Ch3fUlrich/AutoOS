@@ -240,24 +240,42 @@ def tool_names_for(profile: str) -> tuple:
 L2_SPAWN_TIER = 3
 
 
-def l2_spawn_refusal(run_tier: int, card: dict | None, env=None):
-    """D-665 (AO-L2-LAUNCH criterion 3): the tier gate a spawn from profile `l2`
-    passes through; None when this server is not an L2's, or the spawn is a worker.
+def l2_spawn_refusal(run_tier: int, card: dict | None, client: str | None = None,
+                     models=(), env=None):
+    """D-665 (AO-L2-LAUNCH criteria 3 and b): the gate a spawn from profile `l2`
+    passes through; None when this server is not an L2's, or the spawn is a legal
+    L2 worker.
 
-    An L2 lane coordinates: its shell is a closed read-only list and its editor is
-    denied, so the only thing it can legitimately start is a tier-3 worker that
-    does the writing in its own clone. A tier below that is a session holding an
-    editor and a checkout of the main tree, and a `role: orchestrate` card is the
-    L1's own seat reached through the resolver instead of through `--tier` - both
-    are an L2 climbing out of its lane. The check reads the TIER THE REQUEST
-    RESOLVES TO, not the flag the caller typed, so a card that routes to tier 2 is
-    refused exactly as `--tier 2` is.
+    Two rules, both "what an L2 exists not to have":
+
+    * Claude (criterion b): an L2 lane runs free/credit only. The `claude` CLIENT
+      and any Claude MODEL PIN are refused whatever the tier, checked FIRST, so an
+      L2 cannot spend the Claude allowance even with a declared reason - the credit
+      budget is the L1's to apply, and cross-family review rides with it.
+    * Tier (criterion 3): an L2 coordinates - its shell is a closed read-only list
+      and its editor is denied - so the only thing it may start is a tier-3 worker
+      writing in its own clone. Below that is a session holding an editor and a
+      checkout of the main tree, and a `role: orchestrate` card is the L1's own
+      seat reached through the resolver instead of through `--tier` - both are an
+      L2 climbing out of its lane. The check reads the TIER THE REQUEST RESOLVES
+      TO, not the flag the caller typed, so a card that routes to tier 2 is refused
+      exactly as `--tier 2` is.
 
     This is the minimal gate; the full ROLE-GATE (which role may spawn which) is a
     later lane.
     """
     if mcp_tool_profile(env) != NARROWEST_PROFILE:
         return None
+    res = agent.resolver
+    if client and res.is_claude_client(client):
+        return ("l2 lane: the %r client stays with the L1 - an L2 spawns free/"
+                "credit tiers only. Report to the L1 inbox and let the L1 run "
+                "Claude." % client)
+    for pin in models:
+        if res.claude_model_name(pin):
+            return ("l2 lane: pinning a Claude model (%s) is refused - an L2 runs "
+                    "free/credit only. Report to the L1 inbox and let the L1 run "
+                    "Claude." % pin)
     role = (card or {}).get("role")
     if int(run_tier) >= L2_SPAWN_TIER and role != "orchestrate":
         return None
@@ -791,13 +809,17 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
-    # D-665 (AO-L2-LAUNCH criterion 3): a spawn that resolves below tier 3 is not
-    # a worker an L2 may start. Checked here, at the one place the tier is known
-    # after routing (a flag, or whatever combo a card selected), so the caller's
-    # own `--tier` cannot talk its way past a card that routes to tier 2 - and a
-    # dry run is refused too, because a preview an agent would believe is the same
-    # lie as the launch.
-    l2_refusal = l2_spawn_refusal(run_tier, gate_card)
+    # D-665 (AO-L2-LAUNCH criteria 3 and b): the L2 gate. A spawn that resolves
+    # below tier 3 is not a worker an L2 may start, and a Claude client or a
+    # Claude model pin is a spend an L2 may not make. Checked here, at the one
+    # place the tier is known after routing (a flag, or whatever combo a card
+    # selected), so the caller's own `--tier` cannot talk its way past a card that
+    # routes to tier 2 - and a dry run is refused too, because a preview an agent
+    # would believe is the same lie as the launch. The pins travel to the ONE L2
+    # helper so the tier rule and the Claude rule cannot drift apart.
+    l2_refusal = l2_spawn_refusal(
+        run_tier, gate_card, client=client,
+        models=tuple(p for p in (req.get("model"), req.get("free_model")) if p))
     if l2_refusal is not None:
         raise ValueError(l2_refusal)
     # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
