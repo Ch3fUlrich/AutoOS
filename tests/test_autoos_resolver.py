@@ -2099,11 +2099,14 @@ class PlanTests(unittest.TestCase):
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN put the unproven
         # ovhcloud/gpt-oss-120b head on -clean) and ffe384a0 (credit spend
-        # guard refuses it as unpriced). With only that head proven the plan
-        # fail-closes instead of picking an unsafe leg -- pinned below by the
-        # None route plus the named credit-unpriced reason -- and with a priced
-        # private-safe leg proven the plan must route to it with every serving
-        # leg private-safe. Either half fails if an unsafe leg were ever picked.
+        # guard refuses it as unpriced). D657-D2 (2026-10-08) moved it again:
+        # every ovh leg 404s on both probe gateways and is out of the chains,
+        # and the clean head is now vertex/gemini-3.8-flash — priced and
+        # private-safe — so "prove only the clean head" no longer starves. The
+        # fail-closed half is now pinned the honest way: prove NOTHING, and the
+        # sensitive plan must answer input_required naming the unproven head.
+        # Then prove the head and every serving leg of the route it picks must
+        # be private-safe. Either half fails if an unsafe leg were ever picked.
         # PRIV brief 2026-09-26, the found bug: `route --card
         # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
         # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
@@ -2123,14 +2126,14 @@ class PlanTests(unittest.TestCase):
                    "tests": True, "need_tokens": 1000}
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
-        starved = r.plan(card, features, client_state, registry, overlay, [],
-                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        nothing_proven = {"legs": {leg: {"tool_calls": {"value": "unproven"}}
+                                   for leg in overlay["legs"]}}
+        starved = r.plan(card, features, client_state, registry, nothing_proven,
+                         [], "muse-spark", self.dt(2026, 9, 29, 9, 0))
         self.assertIsNone(starved["route"], starved)
         self.assertEqual(starved["state"], "input_required", starved)
-        self.assertIn("credit leg unpriced gpt-oss-120b",
+        self.assertIn("%s: tool_calls" % clean_head_leg(registry),
                       starved["reason"], starved["reason"])
-        overlay["legs"]["ovhcloud/Qwen3.8-27B"] = {
-            "tool_calls": {"value": "proven"}}
         result = r.plan(card, features, client_state, registry, overlay, [],
                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
         self.assertIsNotNone(result["route"], result)
@@ -2860,7 +2863,13 @@ class MetaApiResolverTests(unittest.TestCase):
     (evidence: dev.meta.ai/docs/pricing-rate-limits), so a privacy=sensitive
     card must never reach it. filter_routes() is where that is enforced: one
     non-private-safe serving leg disqualifies the whole route (spec: privacy is
-    a hard filter, only -clean routes serve sensitive work)."""
+    a hard filter, only -clean routes serve sensitive work).
+
+    D657-D2 (2026-10-08) supersedes the "main writer for normal work" half:
+    combo-v2 §8 bans the paid meta muse from every chain, so the leg is gated
+    unavailable and rides only its own declaration. The private-safe rule it was
+    written to protect is still pinned, now over the routes that declare it.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -2878,49 +2887,76 @@ class MetaApiResolverTests(unittest.TestCase):
         self.assertFalse(safe)
         self.assertIn("train", reason.lower())
 
+    def contributor_routes(self):
+        """Route ids that still DECLARE a meta contributor leg (either
+        spelling). D657-D2 + combo-v2 §8 leave only the two gated declarations —
+        the single-writer route and l1-orchestrator-clean's documented
+        CLEAN_ROUTE_EXEMPTIONS leg — so both tests below read that set from the
+        registry instead of naming chains that no longer carry the leg."""
+        contributors = ("meta_api/muse-spark-1.3-contributor",
+                        "openrouter/meta/muse-spark-1.3-contributor")
+        return sorted(rid for rid, route in self.registry["routes"].items()
+                      if set(route.get("legs") or []) & set(contributors))
+
     def test_a_sensitive_card_removes_every_route_the_leg_heads(self):
+        # D657-D2 (2026-10-08) + combo-v2 §8 ("no paid deepseek/meta muse"):
+        # the contributor leg left the orchestrator chains, so naming
+        # l1-orchestrator / l1-orchestrator-paid here pinned a membership that
+        # no longer exists — those two are now refused for a sensitive card by
+        # the free-pool privacy rule, not by this leg. The routes that DO still
+        # declare it are read back from the registry (l1-orchestrator-clean
+        # keeps it deliberately: tools/registry.py CLEAN_ROUTE_EXEMPTIONS), and
+        # each must be refused with a reason that names a training contract.
+        headed = self.contributor_routes()
+        self.assertEqual(headed, ["l1-orchestrator-clean",
+                                 "spark-1.3-contributor"], headed)
         card = {"kind": "review", "privacy": "sensitive"}
         survivors, removed = r.filter_routes(
             card, {"need_tokens": 1000}, self.state(), self.registry, {})
-        for route_id in ("l1-orchestrator", "l1-orchestrator-paid",
-                         "spark-1.3-contributor"):
+        for route_id in headed:
             self.assertNotIn(route_id, survivors, route_id)
             self.assertIn(route_id, removed, route_id)
-            joined = " ".join(removed[route_id])
-            self.assertIn("privacy: meta_api/muse-spark-1.3-contributor",
-                          joined, route_id)
+            self.assertTrue(any("trains on prompts" in reason
+                                for reason in removed[route_id]),
+                            "%s: refused without naming the training contract "
+                            "(%s)" % (route_id, removed[route_id]))
+        # the L1 band a sensitive card still must not reach, now for the free
+        # pools it heads (PRIV: "Free first, private never"):
+        for route_id in ("l1-orchestrator", "l1-orchestrator-free-only"):
+            self.assertNotIn(route_id, survivors, route_id)
+            self.assertIn("privacy:", " ".join(removed[route_id]), route_id)
 
-    def test_a_public_card_routes_through_the_contributor_leg(self):
+    def test_a_public_card_is_never_served_the_banned_contributor_leg(self):
+        # §8 (combo-v2) bans the paid meta muse out of every chain, so the leg
+        # that used to be "the main writer for normal work" answers nothing any
+        # more — the registry gates it unavailable on both its spellings, which
+        # is pinned here instead of the old "public card lands on it" claim.
+        # What the L1 band still owes a public card is unchanged: a free head,
+        # a priced credit tail, and no paid leg selected while the free band is
+        # healthy (R4a / D-212, FREEKEYS-2 / D-141).
         card = {"kind": "review", "privacy": "public"}
-        survivors, _ = r.filter_routes(
+        survivors, removed = r.filter_routes(
             card, {"need_tokens": 1000}, self.state(), self.registry, {})
-        for route_id in ("l1-orchestrator", "l1-orchestrator-paid",
-                         "spark-1.3-contributor"):
-            self.assertIn(route_id, survivors, route_id)
+        self.assertIn("l1-orchestrator", survivors)
+        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
+            self.assertNotIn(route_id, survivors, route_id)
+            self.assertIn(route_id, removed, route_id)
         legs, skipped, _notes = r.usable_legs(
             self.registry["routes"]["l1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
-        # R4a (D-212, supersedes D-141 ordering cited below): the paid
-        # contributor leg is last resort, not merely "not first" -- while a
-        # free leg of the route is healthy it is not selected at all. It stays
-        # in skipped with its held-back reason, and everything usable is free.
-        # FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid, so the
-        # paid contributor leg is no longer the first leg a public card sees — it is
-        # still the leg the route *serves* the writer on, and everything ahead of it
-        # must be free, which is the whole point of the reorder.
-        self.assertNotIn(("meta_api", "muse-spark-1.3-contributor"), legs)
-        self.assertIn("meta_api/muse-spark-1.3-contributor", skipped)
-        self.assertTrue(any(reason.startswith("paid held back")
-                            for reason in
-                            skipped["meta_api/muse-spark-1.3-contributor"]))
+        self.assertEqual(self.contributor_routes(),
+                         ["l1-orchestrator-clean", "spark-1.3-contributor"],
+                         "§8 leaves the contributor leg in gated declarations "
+                         "only — it rides no chain any more")
+        self.assertNotIn("meta_api/muse-spark-1.3-contributor", skipped,
+                         "an unavailable leg is dropped by the availability "
+                         "gate before the paid-hold-back rule ever sees it")
         for leg in legs:
             self.assertIn(self.registry["providers"][leg[0]]["tier"],
                           ("free", "trial", "credit"), leg)
         # T1-CREDIT-FIX-6 (D-220): the vertex leg of gemini-3.8-flash is
-        # priced per provider now, so it correctly survives while the paid
-        # leg is held back -- the band order is free -> credit -> paid. The
-        # paid leg stays held back while a freeish leg is healthy (R4a), so
-        # the band check runs over the surviving legs, all below paid.
+        # priced per provider now, so it survives as the chain's tail while the
+        # free head stays first — the band order is free -> credit -> paid.
         band = {"free": 0, "credit": 1, "paid": 2, "subscription": 2}
         ranks = [band[self.registry["providers"][leg[0]]["tier"]]
                  for leg in legs]
@@ -2930,8 +2966,7 @@ class MetaApiResolverTests(unittest.TestCase):
             paid, _s, _n = r.usable_legs(
                 self.registry["routes"][paid_route], card,
                 {"need_tokens": 1000}, self.state(), self.registry, {})
-            self.assertEqual(paid[0], ("meta_api", "muse-spark-1.3-contributor"),
-                             paid_route)
+            self.assertEqual(paid, [], paid_route)
 
     def test_no_clean_route_serves_the_contributor_leg(self):
         card = {"kind": "review", "privacy": "sensitive"}
