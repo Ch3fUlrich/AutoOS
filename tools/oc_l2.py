@@ -386,35 +386,41 @@ def live_session(lane):
 # --- stop / inbox ------------------------------------------------------------
 
 
-def _child_argv(pid):
-    """The PID's argv, token by token. POSIX only - Windows has no /proc, and
-    there oc_l1's own taskkill /T /PID is the path (the state file is written
-    0600 by the launcher alone)."""
-    try:
-        raw = Path("/proc/%d/cmdline" % pid).read_bytes()
-    except (OSError, ValueError):
-        return None
-    return [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p] or None
+def _identity_ok(pid, state):
+    """May this PID be signalled as the lane? (True, None) or (False, why).
 
-
-def _looks_like_the_lane(pid, lane):
-    """Identity check before a kill: the recorded PID (never a name lookup) and
-    a token of its argv that IS the lane's binary - either the exact path, or
-    the same name with the extension dropped, because an `exec` chain replaces
-    the wrapper's image (`fake_opencode.sh` becomes `fake_opencode.py`). A
-    recycled PID only mentioning the word is refused: `grep opencode serve` and
-    `tail notes-about-opencode.md` carry no such token. A heuristic against the
-    common recycling case, not a proof; unreadable (Windows, already gone) is no
-    evidence to refuse on."""
-    argv = _child_argv(pid)
-    if argv is None:
-        return True
-    bin_ = lane.get("opencode_bin") or ""
-    stem = os.path.splitext(os.path.basename(bin_))[0]
-    for token in argv:
-        if token == bin_ or (stem and os.path.splitext(os.path.basename(token))[0] == stem):
-            return True
-    return False
+    Identity is the recorded command line AND the kernel start time of that
+    exact PID - not a token of the command line that resembles the binary's
+    name. A recycled PID can inherit the dead lane's number, and a wrapper's
+    `exec` chain means the live head token is not the recorded one, so the
+    comparison is made over the launcher's own arguments (everything after the
+    head) plus the start time, which is the one fact a recycler cannot copy.
+    A state file written before the launcher recorded either fact proves
+    nothing: refusing keeps the process that is not provably the lane alive and
+    keeps the state that describes it. An unreadable /proc (Windows, or already
+    gone) is not evidence to refuse on.
+    """
+    recorded = state.get("argv")
+    start = state.get("start_time")
+    if not isinstance(recorded, list) or not recorded or \
+            not isinstance(start, int):
+        return False, ("pid %d cannot be verified: the state file records no "
+                       "argv/start_time - leave it running and kill it by hand "
+                       "if the lane must go" % pid)
+    live = oc_l1_serve.proc_argv(pid)
+    if live is None:
+        return True, None
+    args = recorded[1:]
+    if live[len(live) - len(args):] != args:
+        return False, ("pid %d is not the lane's recorded command - refused to "
+                       "kill it, the state file stays" % pid)
+    now = oc_l1_serve.proc_starttime(pid)
+    if now is not None and now != start:
+        return False, ("pid %d is the lane's command but not its process: start "
+                       "time %s is not the recorded %s (a recycled pid) - "
+                       "refused to kill it, the state file stays"
+                       % (pid, now, start))
+    return True, None
 
 
 def _pgid(pid):
@@ -487,26 +493,38 @@ def cmd_stop(name):
         oc_l1_serve._kill_pid(pid)
         out["killed_pids"].append(pid)
     else:
-        if not _looks_like_the_lane(pid, lane):
-            out.update(stopped=False, orphan=True,
-                       detail="pid %d is not the lane's opencode server - refused to kill "
-                              "it, the state file stays" % pid)
+        ok, why = _identity_ok(pid, state)
+        if not ok:
+            out.update(stopped=False, orphan=True, detail=why)
             return out
         # start_new_session=True made the child its own group leader, so the
         # group is the tree: whatever `opencode serve` forks dies with it.
-        pgid = _pgid(pid) or pid
-        try:
-            os.killpg(pgid, signal.SIGTERM)
-            out["killed_pids"].append(pgid)
-        except (ProcessLookupError, PermissionError, OSError):
-            oc_l1_serve._kill_pid(pid)
+        # Anywhere else the process belongs to whoever started it - possibly
+        # this very caller - and only the recorded PID may be signalled.
+        if _pgid(pid) == pid:
+            try:
+                os.killpg(pid, signal.SIGTERM)
+                out["killed_pids"].append(pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                oc_l1_serve._kill_pid(pid)
+                out["killed_pids"].append(pid)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
             out["killed_pids"].append(pid)
     if not _wait_gone(pid, _KILL_WAIT_S) and os.name != "nt":
-        pgid = _pgid(pid) or pid
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
+        if _pgid(pid) == pid:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        else:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         _wait_gone(pid, _KILL_HARD_WAIT_S)
     if not _pid_gone(pid):
         out.update(stopped=False, orphan=True,

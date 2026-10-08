@@ -19,12 +19,15 @@ import io
 import json
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -159,7 +162,18 @@ class StartTest(unittest.TestCase):
             self.assertTrue(r["auth_ok"], "request without Basic auth: %r" % r)
         st = json.loads(Path(self.lane["state_file"]).read_text())
         self.assertEqual(set(st), {"name", "session_id", "port", "pid",
-                                   "started_utc", "canary", "prompted"})
+                                   "started_utc", "canary", "prompted",
+                                   # Sonnet final REJECT 2026-10-08 finding 4: a
+                                   # stop must recognise the process it is killing
+                                   # by its WHOLE recorded command line and by the
+                                   # kernel start time of that exact PID.
+                                   "argv", "start_time"})
+        self.assertEqual(st["argv"][0], self.lane["opencode_bin"])
+        self.assertEqual(st["argv"][1:],
+                         ["serve", "--hostname", "127.0.0.1",
+                          "--port", str(self.srv.port)])
+        if os.name != "nt":
+            self.assertIsInstance(st["start_time"], int)
         self.assertIs(st["prompted"], True)
         self.assertEqual(st["name"], "l1test")
         self.assertEqual(st["session_id"], FAKE_SESSION_ID)
@@ -368,6 +382,67 @@ class StartTest(unittest.TestCase):
         self.assertTrue(state_pid is not None)
         time.sleep(0.5)
         self.assertFalse(pid_alive(state_pid), "child %s still alive" % state_pid)
+
+
+@unittest.skipIf(os.name == "nt", "process groups")
+class TestKillPidScope(unittest.TestCase):
+    """Sonnet final REJECT (finding 4): a process GROUP may be signalled only
+    when the recorded PID leads it.
+
+    `os.killpg(os.getpgid(pid), ...)` is correct for a child the launcher started
+    with start_new_session=True and catastrophic for anything else: getpgid()
+    then names the CALLER's group, so the launcher kills itself and every sibling
+    process sharing it. The group call is spied rather than run, so the pre-fix
+    code cannot take this suite down with it.
+    """
+
+    _SLEEP = "import time; time.sleep(120)"
+
+    def setUp(self):
+        self._procs = []
+
+    def tearDown(self):
+        for proc in self._procs:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _spawn(self, **kwargs):
+        proc = subprocess.Popen([sys.executable, "-c", self._SLEEP], **kwargs)
+        self._procs.append(proc)
+        return proc
+
+    def test_a_group_leader_child_is_signalled_as_a_group(self):
+        proc = self._spawn(start_new_session=True)
+        calls = []
+        with mock.patch.object(os, "killpg",
+                               side_effect=lambda pgid, sig: calls.append((pgid, sig))):
+            oc_l1_serve._kill_pid(proc.pid)
+        self.assertEqual(calls, [(proc.pid, signal.SIGTERM)],
+                         "the tree the child forked survives a pid-only kill")
+
+    def test_a_process_in_the_callers_group_is_signalled_by_pid_only(self):
+        proc = self._spawn()  # no start_new_session: it shares THIS process's group
+        calls = []
+        with mock.patch.object(os, "killpg",
+                               side_effect=lambda pgid, sig: calls.append((pgid, sig))):
+            oc_l1_serve._kill_pid(proc.pid)
+        self.assertEqual(calls, [], "the caller's own group was signalled")
+        proc.wait(timeout=10)
+        self.assertEqual(proc.poll(), -int(signal.SIGTERM))
+
+    def test_proc_starttime_names_a_live_process_and_nothing_a_dead_one(self):
+        self.assertIsInstance(oc_l1_serve.proc_starttime(os.getpid()), int)
+        gone = self._spawn()
+        gone.kill()
+        gone.wait()
+        self.assertIsNone(oc_l1_serve.proc_starttime(gone.pid))
+        self.assertIsNone(oc_l1_serve.proc_argv(gone.pid))
 
 
 class TestPrivateScratchModes(unittest.TestCase):

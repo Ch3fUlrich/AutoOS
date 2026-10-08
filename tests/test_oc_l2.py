@@ -10,9 +10,11 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +24,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1  # noqa: E402
+import oc_l1_serve  # noqa: E402
 import oc_l2  # noqa: E402
 import autoos_inbox  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
@@ -39,6 +42,31 @@ from _oc_l1_fakes import (  # noqa: E402
 
 GUARD_DIR = ROOT / "configuration" / "opencode" / "plugins" / "bash-guard"
 BRIEF = "GOAL: make the tests green.\nFILES: tools/\nDONE: suite passes.\n"
+# a stand-in for "somebody else's process", long enough to outlive the test body
+_SLEEP_CODE = "import time; time.sleep(120)"
+# ... and one that has a child of its own, so a group kill is observable: the
+# child must survive a stop of the parent it is grouped with.
+_PARENT_WITH_CHILD = (
+    "import subprocess, sys, time; "
+    "kid = subprocess.Popen(['sleep', '120']); "
+    "open(sys.argv[1], 'w').write(str(kid.pid)); "
+    "time.sleep(120)"
+)
+
+
+def _is_alive(pid):
+    """Is this PID still running? A grandchild is not this test's child, so it
+    is never a zombie of ours."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
 
 
 class NameTest(unittest.TestCase):
@@ -314,16 +342,27 @@ class LaneTest(unittest.TestCase):
         out2 = oc_l2.cmd_stop(result["lane"])
         self.assertTrue(out2["stopped"])
 
-    def _lane_with_foreign_pid(self, name, pid):
-        """A lane whose state file names a PID stop must not accept."""
+    def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset"):
+        """A lane whose state file names a PID stop must not accept.
+
+        `argv` and `start_time` are what the launcher records for its own child;
+        `start_time="unset"` keeps the pre-fix shape (no such key at all),
+        "match" reads the live PID's real value, anything else is written as-is.
+        """
         lane = oc_l2.build_lane(name, self.proj, "p1", self.brief,
                                 "l2-orchestrator", self.l1_inbox,
                                 opencode_bin=self.bin_,
                                 password_env=PW_ENV, port=self.srv.port)
         Path(lane["scratch_dir"]).mkdir(parents=True, exist_ok=True)
-        Path(lane["state_file"]).write_text(json.dumps({
-            "name": name, "session_id": "ses_x", "port": self.srv.port,
-            "pid": pid, "started_utc": oc_l2._now_ts()}), encoding="utf-8")
+        st = {"name": name, "session_id": "ses_x", "port": self.srv.port,
+              "pid": pid, "started_utc": oc_l2._now_ts()}
+        if argv is not None:
+            st["argv"] = argv
+        if start_time == "match":
+            st["start_time"] = oc_l1_serve.proc_starttime(pid)
+        elif start_time != "unset":
+            st["start_time"] = start_time
+        Path(lane["state_file"]).write_text(json.dumps(st), encoding="utf-8")
         oc_l2.write_config(lane)
         return lane
 
@@ -337,24 +376,31 @@ class LaneTest(unittest.TestCase):
             self.assertIsNone(sleeper.poll(), "stop killed a process that is not the lane")
             self.assertIs(out["stopped"], False)
             self.assertTrue(out["orphan"])
+            self.assertIn("argv", out["detail"],
+                          "a state file with no recorded command must be refused, "
+                          "naming the missing record as the reason")
             self.assertTrue(sf.is_file(), "a refused stop must keep the state file")
         finally:
             sleeper.kill()
             sleeper.wait()
 
     def test_stop_refuses_a_recycled_pid_that_only_mentions_the_word(self):
-        # The identity match is per argv TOKEN, not over the whole command line:
-        # a recycled PID running a grep, a tail or an editor over a path that
-        # happens to contain the binary's name is not the lane, and killing its
-        # process group would be the kill-by-name this tool forbids.
+        # Identity is the whole recorded command line, not a token that happens
+        # to contain the binary's name: a recycled PID running a grep, a tail or
+        # an editor over such a path is not the lane, and signalling its process
+        # group would be the kill-by-name this tool forbids.
+        argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
+                "--port", str(self.srv.port)]
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
                                     "--pattern=fake_opencode serve"])
         try:
             name = self._lane_name()
-            lane = self._lane_with_foreign_pid(name, sleeper.pid)
+            lane = self._lane_with_foreign_pid(name, sleeper.pid, argv=argv,
+                                               start_time="match")
             out = oc_l2.cmd_stop(name)
             self.assertIsNone(sleeper.poll(), "stop killed a recycled PID")
             self.assertIs(out["stopped"], False)
+            self.assertIn("command", out["detail"])
             self.assertTrue(Path(lane["state_file"]).is_file())
         finally:
             sleeper.kill()
@@ -364,6 +410,74 @@ class LaneTest(unittest.TestCase):
         out = oc_l2.cmd_stop("l2-nosuchlane-nophase")
         self.assertIs(out["stopped"], False)
         self.assertIn("no lane config", out["detail"])
+
+    # (3b) Sonnet final REJECT 2026-10-08 finding 4: identity is the WHOLE
+    #      recorded command line plus the kernel start time of that exact PID,
+    #      and the process GROUP is only signalled when the recorded PID leads
+    #      it - which only a lane this launcher started with start_new_session
+    #      ever does.
+    def test_stop_refuses_a_recycled_pid_that_replays_the_lane_argv(self):
+        # A recycled PID can inherit the dead lane's number AND, if the new
+        # owner is another copy of the same wrapper, its command line. The
+        # starttime is the one fact a recycler cannot fake.
+        argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
+                "--port", str(self.srv.port)]
+        victim = subprocess.Popen([sys.executable, "-c", _SLEEP_CODE] + argv[1:])
+        try:
+            name = self._lane_name()
+            lane = self._lane_with_foreign_pid(name, victim.pid, argv=argv,
+                                               start_time=oc_l1_serve.proc_starttime(victim.pid) + 1)
+            out = oc_l2.cmd_stop(name)
+            self.assertIsNone(victim.poll(), "stop killed a recycled PID")
+            self.assertIs(out["stopped"], False)
+            self.assertTrue(out["orphan"])
+            self.assertIn("start", out["detail"].lower())
+            self.assertTrue(Path(lane["state_file"]).is_file())
+        finally:
+            victim.kill()
+            victim.wait()
+
+    @unittest.skipIf(os.name == "nt", "process groups")
+    def test_stop_never_signals_a_group_it_did_not_create(self):
+        argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
+                "--port", str(self.srv.port)]
+        pid_file = self.td / "kid.pid"
+        # a lane-shaped command line, but started by the test process: it is in
+        # the TEST's group, so killpg() here would signal this very suite and
+        # every sibling process - the exact bug the fix closes.
+        victim = subprocess.Popen([sys.executable, "-c", _PARENT_WITH_CHILD,
+                                   str(pid_file)] + argv[1:])
+        kid = None
+        calls = []
+        try:
+            deadline = time.time() + 10
+            while not pid_file.is_file() and time.time() < deadline:
+                time.sleep(0.1)
+            kid = int(pid_file.read_text(encoding="utf-8"))
+            name = self._lane_name()
+            self._lane_with_foreign_pid(name, victim.pid, argv=argv,
+                                        start_time="match")
+            # spy, not proxy: running the pre-fix code here must not take the
+            # whole suite down with it - the group in question is the suite's own.
+            with mock.patch.object(os, "killpg",
+                                   side_effect=lambda pgid, sig: calls.append((pgid, sig))):
+                out = oc_l2.cmd_stop(name)
+            self.assertEqual(calls, [],
+                             "stop signalled a process group it did not create")
+            self.assertTrue(out["stopped"], out)
+            self.assertEqual(out["killed_pids"], [victim.pid],
+                             "the group was signalled, not just the recorded PID")
+            self.assertFalse(pid_alive(victim.pid))
+            self.assertTrue(_is_alive(kid),
+                            "an unrelated process in the caller's group died")
+        finally:
+            victim.kill()
+            victim.wait()
+            if kid:
+                try:
+                    os.kill(kid, signal.SIGKILL)
+                except OSError:
+                    pass  # already gone with its group in the pre-fix code
 
     # (4) inbox: the line lands, the session is nudged
     def test_inbox_appends_a_parseable_record_and_nudges(self):

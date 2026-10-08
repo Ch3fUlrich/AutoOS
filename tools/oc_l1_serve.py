@@ -103,8 +103,44 @@ HINT_LINE = (
 # --- child management ---------------------------------------------------------
 
 
+def proc_argv(pid):
+    """The PID's argv, token by token; None when /proc cannot answer (Windows,
+    or the process is already gone)."""
+    try:
+        raw = Path("/proc/%d/cmdline" % pid).read_bytes()
+    except (OSError, ValueError):
+        return None
+    return [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p] or None
+
+
+def proc_starttime(pid):
+    """This PID's kernel start time (clock ticks since boot); None where /proc
+    does not exist.
+
+    The one identity fact a recycler cannot inherit: PID numbers are handed out
+    again, so a matching command line is not proof the recorded process is
+    still the one running. Field 22 of /proc/<pid>/stat counted from the start;
+    comm (field 2) may itself contain spaces and parentheses, so the split is
+    made after the LAST ')'."""
+    try:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as fh:
+            fields = fh.read().rsplit(")", 1)[1].split()
+    except (OSError, ValueError, IndexError):
+        return None
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
+
 def _kill_pid(pid):
-    """Best-effort kill of a child we started, by its recorded PID only."""
+    """Best-effort kill of a child we started, by its recorded PID only.
+
+    The process GROUP is the tree only where the PID leads it, which is true of
+    a child this launcher spawned with `start_new_session=True` and false of
+    anything else: `os.getpgid(pid)` on a non-leader is the CALLER's group, so
+    an unconditional killpg would signal the launcher itself and every sibling
+    process sharing its group (Sonnet final REJECT, finding 4)."""
     try:
         if os.name == "nt":
             subprocess.run(
@@ -112,16 +148,20 @@ def _kill_pid(pid):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+            return
+        leader = os.getpgid(pid) == pid
+    except (OSError, ProcessLookupError):
+        leader = False
+    try:
+        if leader:
+            os.killpg(pid, signal.SIGTERM)
         else:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass
-    except OSError:
-        pass
+            os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, OSError):
+            pass
 
 
 def _private_dir(path):
@@ -391,6 +431,11 @@ def cmd_start(lane, args):
         "pid": pid,
         "started_utc": started,
         "prompted": False,
+        # what a later stop matches the live PID against: the command line this
+        # call ran and when the kernel started that exact process. A PID number
+        # alone is recycled memory.
+        "argv": list(proc.args),
+        "start_time": proc_starttime(pid),
     }
     try:
         _write_state(lane["state_file"], st)
