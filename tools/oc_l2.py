@@ -26,6 +26,13 @@ L2 to write its `REPORT` / `DONE` lines there. Work going the other way
 the path the append reports) and the live session nudged with the same POST
 /api/session/{id}/prompt the launcher uses for its first prompt.
 
+Steering stays with the L1 (REJECT finding 2): the same MCP server and the same
+lane tools answer at both levels, so the L2 lane marks its own level in its child
+env (`agent_layer: "L2"` -> `AUTOOS_AGENT_LAYER`) and `autoos_agent_mcp` refuses
+`l2_start` / `l2_stop` / `l2_inbox` / `oc_start` / `oc_restart` when it reads `L2`
+back - an L2 cannot relaunch its supervisor or switch off a neighbour's phase. It
+may still read (`l2_status`, `oc_status`) and spawn tier-3 workers.
+
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`),
 one directory per lane holding the generated oc_l1 config (0600: it names host
 paths), the scratch dirs, the composed first prompt and the lane's inbox. A
@@ -292,7 +299,8 @@ def first_prompt_text(brief_text, name, l1_inbox):
 
 
 def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
-               password_env=ENV_PW, port=None, guard_dir=None, model=None):
+               password_env=ENV_PW, port=None, guard_dir=None, model=None,
+               child_env=None):
     """The oc_l1 lane dict for one phase. `handoff` is the brief because
     oc_l1 requires the file the session reads first; the prompt body itself
     travels in `first_prompt_file`, which the composed brief+footer owns."""
@@ -322,6 +330,12 @@ def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
         "plugins": [gdir],
         "permission": dict(L2_PERMISSIONS),
         "guard_role": "orchestrator",
+        # Sonnet final REJECT 2026-10-08 finding 2: one MCP server answers both
+        # levels, so an L2 could start, stop and nudge lanes. The lane marks its
+        # own layer in its own environment and the server refuses lane-control
+        # tools when it reads L2 back.
+        "agent_layer": "L2",
+        "child_env": list(child_env or []),
         "inbox_file": str(l1_inbox),
         "first_prompt_file": str(prompt_file),
         "scratch_dir": str(scratch),
@@ -651,7 +665,8 @@ def _already_running(name, lane):
 
 
 def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
-              opencode_bin=None, password_env=ENV_PW, port=None, model=None):
+              opencode_bin=None, password_env=ENV_PW, port=None, model=None,
+              child_env=None):
     """Render -> serve -> canary -> first prompt for one phase, through oc_l1.
     A phase lane that is already live is REFUSED, not re-prompted: a second
     `start` would hand the same L2 a second brief and read as a fresh phase."""
@@ -670,7 +685,7 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
     inbox = resolve_l1_inbox(l1_inbox)
     lane = build_lane(name, repo_p, phase, brief_p, combo, inbox,
                       opencode_bin=opencode_bin, password_env=password_env,
-                      port=port, model=model)
+                      port=port, model=model, child_env=child_env)
     running = _already_running(name, lane)
     if running:
         if running["canary_denied"] and running["prompted"]:

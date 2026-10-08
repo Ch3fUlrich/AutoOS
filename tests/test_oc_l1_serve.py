@@ -232,6 +232,79 @@ class StartTest(unittest.TestCase):
         self.assertTrue(body.startswith(first),
                         "the earlier stderr must not be truncated away")
 
+    # (3d) Sonnet final REJECT 2026-10-08 finding 2: `_spawn` handed the lane
+    #      `dict(os.environ)` - every credential the launcher's shell happened to
+    #      export sat in the lane's /proc/<pid>/environ, readable by the lane, by
+    #      its MCP server and by every tier-3 worker it spawns. The child env is
+    #      an allowlist now: names the lane's own machinery reads, plus what the
+    #      lane declares in `child_env`; a value never comes from the config file.
+    def test_child_env_is_an_allowlist_not_the_launchers_environment(self):
+        secrets = {"GH_TOKEN": "ghp_NOT-A-REAL-TOKEN-000",
+                   "AUTOOS_LITELLM_API_KEY": "sk-not-a-real-key-000",
+                   "DB_PASSWORD": "not-a-real-password-000",
+                   "STRIPE_SECRET": "sk_not_a_real_value"}
+        needed = {"AUTOOS_OMNIROUTE_URL": "https://gateway.invalid",
+                  "AUTOOS_OMNIROUTE_KEY": "sk-NOT-A-REAL-VALUE-000",
+                  "AUTOOS_TASK_DIR": str(self.td / "task"),
+                  "AUTOOS_RUN_DIR": str(self.td / "run"),
+                  "AUTOOS_AGENT_DEPTH": "1",
+                  "AUTOOS_CLAUDE_CRITICAL": "1"}
+        for name, value in list(secrets.items()) + list(needed.items()):
+            self.addCleanup(os.environ.pop, name, None)
+            os.environ[name] = value
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        for name in list(secrets) + [PW_ENV]:
+            self.assertNotIn(name, rec["env_names"],
+                             "%s must not reach the lane child" % name)
+        for name in list(needed) + ["PATH", "HOME", "OPENCODE_CONFIG",
+                                    "OPENCODE_SERVER_PASSWORD", "XDG_CONFIG_HOME",
+                                    RECORD_ENV]:
+            self.assertIn(name, rec["env_names"],
+                          "the lane lost a variable its own tools read: %s" % name)
+        # the report of what stayed behind is NAMES ONLY: a value printed by the
+        # launcher travels into the log, the terminal and any transcript
+        for value in list(secrets.values()):
+            self.assertNotIn(value, out + json.dumps(rec),
+                             "a credential value must never be printed or recorded")
+
+    # the server password goes to the child under ONE name, and a lane cannot
+    # smuggle the launcher's password variable in through child_env either
+    def test_the_password_name_is_never_forwarded_even_when_the_lane_asks(self):
+        self.lane["child_env"] = [RECORD_ENV, PW_ENV]
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        self.assertNotIn(PW_ENV, rec["env_names"],
+                         "the launcher's password variable must stay with the launcher")
+        self.assertIn("OPENCODE_SERVER_PASSWORD", rec["env_names"])
+
+    # (3f) the layer marker: an L2 lane's own env says L2, so the MCP server the
+    #      lane starts can refuse lane-control tools. An L1 lane marks nothing.
+    def test_agent_layer_marker_reaches_the_child_from_the_lane(self):
+        self.lane["agent_layer"] = "L2"
+        rc, out = self._start()
+        self.assertEqual(rc, 0, out)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        self.assertEqual(rec["agent_layer"], "L2")
+        self.assertIn("AUTOOS_AGENT_LAYER", rec["env_names"])
+
+    def test_agent_layer_is_not_inherited_from_the_shell(self):
+        os.environ["AUTOOS_AGENT_LAYER"] = "L2"
+        try:
+            rc, out = self._start()
+            self.assertEqual(rc, 0, out)
+            wait_file(self.rec)
+            rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        finally:
+            os.environ.pop("AUTOOS_AGENT_LAYER", None)
+        self.assertIsNone(rec["agent_layer"],
+                          "an unmarked lane is an L1 lane: it must not inherit L2")
+
     # (3e) D-665 (AO-L2-LAUNCH): the guard role and the L1 inbox are LANE
     #      properties. The child gets them from the lane - and never from the
     #      shell that happened to export them.

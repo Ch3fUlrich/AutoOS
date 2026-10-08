@@ -191,7 +191,11 @@ class LaneTest(unittest.TestCase):
 
     def _start(self, **over):
         kw = dict(combo="l2-orchestrator", opencode_bin=self.bin_,
-                  password_env=PW_ENV, port=self.srv.port)
+                  password_env=PW_ENV, port=self.srv.port,
+                  # the fake binary reads its record path from the environment,
+                  # and the lane child env is an allowlist (REJECT finding 2), so
+                  # the lane has to declare that name like any real extra would
+                  child_env=[RECORD_ENV])
         kw.update(over)
         return oc_l2.cmd_start(self.proj, "ao-deadrows", self.brief, **kw)
 
@@ -239,6 +243,20 @@ class LaneTest(unittest.TestCase):
         rec = json.loads(self.rec.read_text(encoding="utf-8"))
         self.assertEqual(rec["guard_role"], "orchestrator")
         self.assertEqual(rec["l1_inbox"], str(self.l1_inbox))
+
+    # Sonnet final REJECT 2026-10-08 finding 2: the same MCP server answers an
+    # L1 and an L2, so an L2 could start, stop and nudge lanes - i.e. relaunch
+    # its own supervisor or dead-man-switch another phase. The lane marks its
+    # layer in its own environment and the MCP refuses on reading it; the mark
+    # has to come from the lane, because a marker a process inherits from some
+    # unrelated shell is a lie in both directions.
+    def test_the_lane_marks_its_layer_for_the_mcp_fence(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        wait_file(self.rec)
+        rec = json.loads(self.rec.read_text(encoding="utf-8"))
+        self.assertEqual(rec["agent_layer"], "L2")
+        self.assertEqual(oc_l2.read_config(self._lane_name())["agent_layer"], "L2")
 
     def test_first_prompt_is_the_brief_plus_the_fixed_footer(self):
         result, rc = self._start()
@@ -677,7 +695,9 @@ class McpToolTest(unittest.TestCase):
 
     def test_l2_start_argv_and_allowlisted_env(self):
         out, seen = self._call(self.mcp.l2_start, "/srv/proj", "p1", "/srv/brief.md",
-                               **{"AUTOOS_OCL1_PW": "sk-NOT-A-REAL-VALUE-000"})
+                               **{"AUTOOS_OCL1_PW": "sk-NOT-A-REAL-VALUE-000",
+                                  "AUTOOS_OMNIROUTE_URL": "https://gateway.invalid",
+                                  "AUTOOS_OMNIROUTE_KEY": "sk-NOT-A-REAL-VALUE-000"})
         self.assertEqual(out["lane"], "l2-proj-p1")
         self.assertEqual(seen["argv"][2:], ["start", "--repo", "/srv/proj",
                                             "--phase", "p1", "--brief", "/srv/brief.md",
@@ -688,7 +708,11 @@ class McpToolTest(unittest.TestCase):
         self.assertEqual(env["AUTOOS_OCL1_PW"], "sk-NOT-A-REAL-VALUE-000")
         # an allowlist, not the caller's whole environment
         self.assertNotIn("GH_TOKEN", env)
-        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
+        # REJECT finding 2: the lane child inherits the LAUNCHER's environment,
+        # and the rendered config references both gateway names as {env:...}.
+        # Forwarding only the URL starts a lane whose model call has no key.
+        self.assertEqual(env["AUTOOS_OMNIROUTE_URL"], "https://gateway.invalid")
+        self.assertEqual(env["AUTOOS_OMNIROUTE_KEY"], "sk-NOT-A-REAL-VALUE-000")
         self.assertEqual(seen["kw"]["timeout"], self.mcp._L2_TIMEOUT_S["start"])
 
     def test_the_other_three_tools_pass_the_lane(self):
@@ -718,6 +742,50 @@ class McpToolTest(unittest.TestCase):
         _, seen = self._call(self.mcp.l2_inbox, "l2-proj-p1", "work",
                              **{"AUTOOS_OCL1_PW": "sk-NOT-A-REAL-VALUE-000"})
         self.assertNotIn("sk-NOT-A-REAL-VALUE-000", " ".join(seen["argv"]))
+
+    # REJECT finding 2: the five lane-CONTROL tools. Their refusal is the whole
+    # point, so the launcher subprocess must never be reached at all - a spy that
+    # raises proves the code path was not taken.
+    def test_lane_control_is_refused_from_inside_an_l2(self):
+        def boom(*a, **k):
+            raise AssertionError("a refused tool must run no subprocess: %r" % (a,))
+
+        calls = ((self.mcp.l2_start, ("/srv/proj", "p1", "/srv/brief.md")),
+                 (self.mcp.l2_stop, ("l2-proj-p1",)),
+                 (self.mcp.l2_inbox, ("l2-proj-p1", "take it")),
+                 (self.mcp.oc_start, ("l1-pilot",)),
+                 (self.mcp.oc_restart, ("l1-pilot",)))
+        self.assertEqual({fn.__name__ for fn, _ in calls},
+                         set(self.mcp.LANE_CONTROL_TOOLS),
+                         "the fenced set and the tools tested must be one list")
+        with mock.patch.object(self.mcp.subprocess, "run", boom), \
+                mock.patch.dict(os.environ, {self.mcp.ENV_AGENT_LAYER: "L2"}):
+            for fn, args in calls:
+                out = fn(*args)
+                self.assertIs(out["refused"], True, fn.__name__)
+                self.assertIs(out["ok"], False, fn.__name__)
+                self.assertIn("L2", out["detail"], fn.__name__)
+                self.assertIn("l2_status", out["detail"],
+                              "the refusal must say what an L2 may still do")
+
+    def test_reading_a_lane_is_still_allowed_from_inside_an_l2(self):
+        # an L2 watching its own phase is ordinary work; the fence is on CONTROL
+        with mock.patch.dict(os.environ, {self.mcp.ENV_AGENT_LAYER: "L2"}):
+            out, seen = self._call(self.mcp.l2_status, "l2-proj-p1")
+        self.assertEqual(seen["argv"][2:], ["status", "--lane", "l2-proj-p1"])
+        self.assertNotIn("refused", out)
+        with mock.patch.dict(os.environ, {self.mcp.ENV_AGENT_LAYER: "L2"}):
+            out, seen = self._call(self.mcp.oc_status, "l1-pilot")
+        self.assertEqual(seen["argv"][2:], ["status", "--name", "l1-pilot"])
+        self.assertNotIn("refused", out)
+
+    def test_the_fence_is_off_for_a_server_that_is_not_in_a_lane(self):
+        # the L1's own MCP: same code, no marker in its environment
+        self.assertNotIn(self.mcp.ENV_AGENT_LAYER, os.environ)
+        _, seen = self._call(self.mcp.l2_stop, "l2-proj-p1")
+        self.assertEqual(seen["argv"][2:], ["stop", "--lane", "l2-proj-p1"])
+        _, seen = self._call(self.mcp.oc_start, "l1-pilot")
+        self.assertEqual(seen["argv"][2:], ["start", "--name", "l1-pilot"])
 
 
 if __name__ == "__main__":

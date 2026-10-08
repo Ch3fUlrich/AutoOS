@@ -4,6 +4,42 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- L2LAUNCH-REJECT (2026-10-08, lane AO-L2-LAUNCH, Sonnet final REJECT of the D-665 launch work): seven findings, one commit and one
+  failing-first test each. **(F1, HIGH)** `permission.task: deny` alone left the renderer's `edit: allow` standing, so an L2 — whose
+  whole job is to coordinate — could write files with its own editor tools; `tools/oc_l2.py` now denies every file-mutating and
+  spawn key the opencode schema declares, in both spellings (`edit`, `write`, `patch`, `apply_patch`, `task`, `subagent`, from
+  `lib/agent_harness.py`'s rename map), keeping `read` and the guarded `bash`. REPORT: the same hole exists for **L1** lanes —
+  `PERMISSIONS` in `tools/oc_l1_render.py` still renders `edit: allow`, deliberately unchanged, because an L1 lane does write work;
+  closing it is a decision, not a fix. **(F2, HIGH)** one `autoos-agent` MCP server answers both levels, so an L2 could call
+  `l2_start`/`l2_stop`/`l2_inbox`/`oc_start`/`oc_restart` and relaunch its own supervisor or switch off a neighbour's phase; the L2
+  lane now marks its level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER` in the child env, a lane property and never an inherited one)
+  and those five tools answer `refused: true` when they read `L2` back, without reaching the launcher at all — the two status tools
+  stay open. And `_spawn` no longer hands the lane `dict(os.environ)`, which put every credential the launcher's shell exported
+  (GitHub token, provider key, database password) in `/proc/<pid>/environ` where the lane, its MCP server and every worker it spawns
+  could read it: `oc_l1.env_is_allowed` is one rule — the names and families a session needs, minus every credential-shaped name in
+  them, the two gateway names exempt because the rendered config references them as `{env:...}`, the server password reaching the
+  child under `OPENCODE_SERVER_PASSWORD` only — with a lane-level `child_env` list of extra NAMES (a value or a credential name in a
+  lane config is refused by validation) and a names-only report of what stayed behind. Found while testing it: `_OC_L1_ENV_KEYS`
+  forwarded `AUTOOS_OMNIROUTE_URL` but not `AUTOOS_OMNIROUTE_KEY`, so a lane started through the MCP had no key for its model.
+  **(F3, MED)** `inbox` nudged any session whose state file answered 200, including an rc-5 lane whose canary never denied: the line
+  is still appended, but the wake is refused (`refused: true`, exit 2) unless the stored canary denied AND the pilot was prompted.
+  **(F4, MED)** `stop` signalled the recorded PID's *process group* unconditionally — when that PID was not the lane's own child
+  leader it SIGTERM'd the caller's whole group, i.e. the suite or the L1 — and matched the lane by command *stem*; now the group is
+  signalled only when `getpgid(pid) == pid`, and identity is the full recorded `argv` tail plus the `/proc` start time the launcher
+  records at spawn, failing closed on a state file that carries neither. **(F5, MED)** the canary counted a denial on any guarded
+  tool call whose error text started with the marker, so a lane that denied some *other* command passed; a denial now has to be of
+  the canary's own command. **(F6, MED)** `derive_port` is a hash guess onto 47200-47299 and `start` spawned onto it blind: a
+  collision cost a health-poll timeout, a killed child and read as a broken lane. The port is bound-tested before the spawn, the
+  walk continues forward inside the range (refused when the range is full), and the port the server actually took is what the state
+  file records — status, stop, canary and inbox all talk to the server that answers. **(F7, LOW)** a lane named
+  `l2-<repo-basename>-<phase>` collided between two checkouts of the same basename (two sandboxes of one project = one lane), and a
+  second `start` called an unverified rc-5 stub "already running"; the name now carries a six-hex tag of the repo's absolute path
+  (one project spelled two ways stays one lane) and the two refusal messages differ: a live guarded lane points at `l2_inbox`, a
+  stub says it never cleared its canary and must be stopped first.
+  Tests: the pinned suite (`test_oc_l1`, `test_oc_l1_canary`, `test_oc_l1_serve`, `test_oc_l1_render`, `test_oc_l1_status`,
+  `test_oc_l2`, `test_opencode_bash_guard`, `test_bash_guard`) 326 → 360, all green; each fix was seen red first, the whole set
+  re-run green after the last one. Docs: `docs/ai/opencode-fleet.md`, `configuration/oc-l1.example.json`, and the module docstrings
+  of `tools/oc_l1.py`, `tools/oc_l1_serve.py`, `tools/oc_l2.py`, `tools/autoos_agent_mcp.py`.
 - CANARYFIX2 (2026-10-08, lane AO-L2-LAUNCH step 2, security seat REJECT of CANARYFIX): five ways the L1 canary could report
   `denied=yes` without the bash-guard ever denying anything, each closed with a test that failed first.
   **(F1)** `tools/oc_l1_canary.py` accepted the tool name `execute`, which the guard's `execute.before` hook never inspects

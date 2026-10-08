@@ -96,11 +96,13 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
   `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
 - The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
   tools run `git rev-parse` with an inherited stdin and, under opencode's stdio transport, the first `ps` call hangs.
-- Four optional keys exist for a lane that orchestrates instead of writes (D-665, used by `oc_l2.py`): `permission` (a map merged
+- Six optional keys exist for a lane that orchestrates instead of writes (D-665, used by `oc_l2.py`): `permission` (a map merged
   OVER the rendered permission defaults, e.g. `{"task": "deny"}`; the reserved key `external_directory` is refused there because it
   has its own lane list), `guard_role` (exported to the server child as `AUTOOS_GUARD_ROLE`), `inbox_file` (exported as
-  `AUTOOS_L1_INBOX`) and `first_prompt_file` (posted verbatim as the pilot's first prompt instead of the handoff head). An L1 lane
-  that sets none of them behaves exactly as before.
+  `AUTOOS_L1_INBOX`), `first_prompt_file` (posted verbatim as the pilot's first prompt instead of the handoff head), `agent_layer`
+  (exported as `AUTOOS_AGENT_LAYER` — the level the lane runs at, and what the MCP fence below reads) and `child_env` (the extra
+  environment NAMES a lane needs beyond the inherited set; any lane may set it). An L1 lane that sets none of them behaves exactly
+  as before.
 
 ### start, relaunch and the canary
 
@@ -129,9 +131,24 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
 - A second `start` on a live session posts nothing new and prints the stored canary line; if that stored canary was not denied
   it prints `UNATTENDED-REFUSED` and exits 5 again (it never reports a refused start as live). A `start` that finds the server
   dead is a RELAUNCH: it starts a new server and runs the canary again, and `heartbeat.json` gets the new result.
-- The server child inherits the launcher's FULL environment (opencode, `uv` and the MCP servers need PATH, the profile
-  directories and the gateway variables); the launcher adds the XDG isolation and the Basic password. Run the launcher from a
-  shell that holds only what the pilot may see.
+- The server child's environment is an **allowlist**, not `dict(os.environ)` (D-665 fix 2): handing over the launcher's whole
+  environment put every credential the shell happened to export — a GitHub token, a provider key, a database password — in the
+  lane's `/proc/<pid>/environ`, readable by the lane, by the MCP server it starts and by every worker it spawns. `oc_l1` holds the
+  rule in one place: the names a session needs (`PATH`, `HOME`, locale, terminal, proxy and certificate variables, the `XDG_*`,
+  `GIT_*`, `NODE_*`, `PYTHON*`, `SSL_*`, `AUTOOS_*`, `SESSION_*` families, the Windows equivalents) minus every credential-shaped
+  name in them — a name ending in `_PW`/`_KEY`/`_TOKEN`/`_SECRET`/`_PASSWORD` or containing `PASSWORD`/`SECRET`/`TOKEN`/
+  `CREDENTIAL`/`APIKEY` stays with the launcher. Two credentials are exempt because the rendered config references them as
+  `{env:...}` and the lane has no other way to its model: `AUTOOS_OMNIROUTE_URL` and `AUTOOS_OMNIROUTE_KEY`. The server password
+  reaches the child under `OPENCODE_SERVER_PASSWORD` alone, and `AUTOOS_GUARD_ROLE`/`AUTOOS_L1_INBOX`/`AUTOOS_AGENT_LAYER` are set
+  from the LANE and never inherited. A lane that genuinely needs one more variable names it in `child_env`; a credential-shaped
+  name there is a validation error, and a value never belongs in a lane config. What was left behind is printed by NAME at spawn,
+  so a missing variable is diagnosable instead of silent.
+- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same four lane tools are on it, so
+  without a fence an L2 could start, stop or nudge lanes — relaunch its own supervisor, or switch off a phase it does not own. The
+  L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env, which opencode passes to the MCP
+  server it starts), and `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` answer `refused: true` when they read `L2`
+  back. `l2_status` and `oc_status` stay open: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1
+  inbox.
 - The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied
   at creation, so there is no window in which the log sits world-readable next to a child environment that carries the password:
   the guard's fail-open notes are written there, and

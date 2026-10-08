@@ -16,8 +16,11 @@ start
     interrupted), prints 'already live' and exits 0.
   * Renders the scratch config (oc_l1.render), then starts
     <opencode_bin> serve --hostname 127.0.0.1 --port <port> with cwd =
-    the lane cwd and a CHILD environment that isolates XDG_* under
-    scratch_dir and sets OPENCODE_CONFIG plus OPENCODE_SERVER_PASSWORD
+    the lane cwd and a CHILD environment that is an ALLOWLIST of the
+    launcher's (oc_l1.env_is_allowed - never `dict(os.environ)`, which handed
+    the lane every credential the shell happened to export), isolated so that
+    XDG_* lives under scratch_dir, with OPENCODE_CONFIG plus
+    OPENCODE_SERVER_PASSWORD
     (child env only - never on the command line, never written to a
     file, never printed). The child's stderr is appended to
     <scratch_dir>/opencode.log so the plugin's fail-open notes are
@@ -32,9 +35,13 @@ start
     'first_prompt_file' read verbatim when set (D-665: an L2 phase brief is
     composed by tools/oc_l2.py), else the relaunch line, the first 40 lines
     of the handoff, and the MCP hint line verbatim.
-  * The child environment carries AUTOOS_GUARD_ROLE / AUTOOS_L1_INBOX when
-    the lane sets 'guard_role' / 'inbox_file', and drops both otherwise -
-    the guard's role is a lane property, never an inherited one.
+  * The child environment carries AUTOOS_GUARD_ROLE / AUTOOS_L1_INBOX /
+    AUTOOS_AGENT_LAYER when the lane sets 'guard_role' / 'inbox_file' /
+    'agent_layer', and drops each one otherwise - the guard's role, the inbox a
+    lane reports to and the level the MCP fence reads are lane properties, never
+    inherited ones (D-665, REJECT finding 2). A lane needs a further variable: it
+    names it in 'child_env' (a NAME, validated; credential-shaped names are
+    refused, because a value or a secret in a lane config is a leak).
   * Writes the state file {name, session_id, port, pid, started_utc}
     atomically (temp file + os.replace, mode 0600 on POSIX), prints
     'started <name> session <id> port <port> pid <pid>' and exits 0,
@@ -255,27 +262,62 @@ def _resolve_port(lane, name):
     return chosen
 
 
+def _child_env(lane, rendered, password):
+    """The lane child's environment: an allowlist, not the launcher's own.
+
+    `dict(os.environ)` handed the lane every credential the shell happened to
+    export, where the lane, its MCP server and every worker it spawns could read
+    it back out of /proc/<pid>/environ (Sonnet final REJECT 2026-10-08 finding 2).
+    `oc_l1.env_is_allowed` is the rule; this function only applies it and pins
+    what the lane itself declares. Names are reported when a credential is left
+    behind - a value never is.
+    """
+    child_env = lane.get("child_env") or ()
+    password_env = lane.get("password_env")
+    scratch = Path(lane["scratch_dir"])
+    env, left_behind = {}, []
+    for name, value in os.environ.items():
+        if oc_l1.env_is_allowed(name, password_env=password_env,
+                                child_env=child_env):
+            env[name] = value
+        # the lane's own password variable staying behind is the design, not
+        # news; the report is for a credential someone may have meant to forward
+        elif (name != password_env and oc_l1.env_is_credential_name(name)):
+            left_behind.append(name)
+    if left_behind:
+        names = ", ".join(sorted(left_behind)[:8])
+        if len(left_behind) > 8:
+            names += " (+%d more)" % (len(left_behind) - 8)
+        print("oc_l1: lane child env: %d credential-shaped variable(s) stayed with "
+              "the launcher: %s - a lane that genuinely needs one declares it in "
+              "'child_env' under a non-credential name"
+              % (len(left_behind), names), file=sys.stderr)
+    for var, sub in XDG_SUBDIRS:
+        env[var] = str(scratch / sub)
+    env["OPENCODE_CONFIG"] = str(rendered)
+    env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
+    # D-665 (AO-L2-LAUNCH): the bash-guard role, the L1 inbox and the agent layer
+    # are lane properties, not host properties - so each is set from the lane and
+    # removed otherwise. An L1 lane must never gain the orchestrator rules, or the
+    # L2 marker that lets the MCP refuse lane-control tools, because some unrelated
+    # shell happened to export the variable.
+    for _var, _key in ((oc_l1.ENV_GUARD_ROLE, "guard_role"),
+                       (oc_l1.ENV_L1_INBOX, "inbox_file"),
+                       (oc_l1.ENV_AGENT_LAYER, "agent_layer")):
+        if lane.get(_key):
+            env[_var] = lane[_key]
+        else:
+            env.pop(_var, None)
+    return env
+
+
 def _spawn(lane, rendered, password, port):
     """Start the explicit opencode binary; child env isolated in scratch."""
     scratch = Path(lane["scratch_dir"])
     _private_dir(scratch)
     for var, sub in XDG_SUBDIRS:
         _private_dir(scratch / sub)
-    env = dict(os.environ)
-    for var, sub in XDG_SUBDIRS:
-        env[var] = str(scratch / sub)
-    env["OPENCODE_CONFIG"] = str(rendered)
-    env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
-    # D-665 (AO-L2-LAUNCH): the bash-guard role and the L1 inbox are lane
-    # properties, not host properties - so each is set from the lane and
-    # removed otherwise. An L1 lane must never gain the orchestrator rules
-    # because some unrelated shell happened to export the variable.
-    for _var, _key in ((oc_l1.ENV_GUARD_ROLE, "guard_role"),
-                       (oc_l1.ENV_L1_INBOX, "inbox_file")):
-        if lane.get(_key):
-            env[_var] = lane[_key]
-        else:
-            env.pop(_var, None)
+    env = _child_env(lane, rendered, password)
     argv = [lane["opencode_bin"], "serve", "--hostname", HOST,
             "--port", str(port)]
     err_log = _child_stderr_log(scratch)

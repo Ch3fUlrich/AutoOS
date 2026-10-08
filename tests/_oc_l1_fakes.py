@@ -35,13 +35,15 @@ HINT_EXPECTED = (
 
 FAKE_PY = """import json, os, sys
 rec = os.environ["%s"]
-names = [k for k in ("OPENCODE_CONFIG", "OPENCODE_SERVER_PASSWORD",
-    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-    "XDG_CACHE_HOME", "AUTOOS_GUARD_ROLE", "AUTOOS_L1_INBOX") if k in os.environ]
+# every NAME the child was given, sorted: the launcher hands a lane an
+# allowlist, and a test can only pin that if the fake reports the whole set
+# (values never travel - a token in a test artifact is the leak being tested)
+names = sorted(os.environ)
 with open(rec, "w", encoding="utf-8") as f:
     json.dump({"argv": sys.argv[1:], "env_names": names, "pid": os.getpid(),
                "guard_role": os.environ.get("AUTOOS_GUARD_ROLE"),
-               "l1_inbox": os.environ.get("AUTOOS_L1_INBOX")}, f)
+               "l1_inbox": os.environ.get("AUTOOS_L1_INBOX"),
+               "agent_layer": os.environ.get("AUTOOS_AGENT_LAYER")}, f)
 sys.stderr.write("%s\\n")
 sys.stderr.flush()
 import time
@@ -282,6 +284,11 @@ def make_lane(td, port):
         # A real lane carries the bash-guard plugin; `start` refuses one that
         # does not (D-665), so the fake must look like the guarded default.
         "plugins": [GUARD_PLUGIN],
+        # D-665 (AO-L2-LAUNCH fix 2): the lane child env is an allowlist, so a
+        # fake binary that reads its record path out of the environment has to
+        # declare that name as the lane's own extra - exactly what a real lane
+        # config does for a variable the launcher's allowlist does not know.
+        "child_env": [RECORD_ENV],
         "scratch_dir": str(td / "scratch"),
         "state_file": str(td / "state" / "l1test.state.json"),
         "heartbeat_file": str(td / "scratch" / "heartbeat.json"),

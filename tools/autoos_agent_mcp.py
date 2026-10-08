@@ -140,11 +140,43 @@ _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
 _OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
                    "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL",
                    "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME",
-                   "AUTOOS_OMNIROUTE_URL")
+                   # the gateway PAIR: the rendered lane config references both
+                   # as {env:...}, and the lane child inherits this process's
+                   # environment - forward only the URL and a lane starts with no
+                   # key for its model
+                   "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY")
 
 
 def _oc_l1_env() -> dict:
     return {k: os.environ[k] for k in _OC_L1_ENV_KEYS if k in os.environ}
+
+
+# Sonnet final REJECT 2026-10-08 finding 2: one MCP server answers an L1 and an
+# L2, so an L2 could start, stop and nudge lanes - relaunch its own supervisor, or
+# switch off a phase it does not own. A lane marks the layer it runs at in its own
+# environment (tools/oc_l2.py marks L2; an L1 lane marks nothing) and this server
+# refuses the lane-CONTROL tools when it reads L2 back. Reading a lane stays
+# allowed: an L2 watching its own phase is ordinary work, and it reports upward to
+# the L1 inbox instead of steering.
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+# The tools this fence covers. It is a list, not a comment, so the suite can pin
+# that the set of tools it refuses is exactly the set it tests: a lane-control
+# tool added later makes that test say which one is unfenced.
+LANE_CONTROL_TOOLS = ("l2_start", "l2_stop", "l2_inbox", "oc_start", "oc_restart")
+
+
+def lane_control_fence(tool: str) -> dict | None:
+    """The refusal an L2 gets for a lane-control tool; None when this server is
+    not running inside an L2 lane."""
+    if os.environ.get(ENV_AGENT_LAYER, "").strip().upper() != "L2":
+        return None
+    return {"ok": False, "refused": True, "tool": tool,
+            "detail": "refused: this MCP server runs inside an L2 lane (%s=L2), and "
+                      "only the L1 that owns the lanes may start, stop or nudge one; "
+                      "read with l2_status/oc_status and report to the L1 inbox "
+                      "instead" % ENV_AGENT_LAYER}
+
+
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 _OC_EXIT_HINT = {
     0: "ok",
@@ -191,6 +223,9 @@ def oc_start(lane: str) -> dict:
     """Start a lane through tools/oc_l1.py (render -> serve -> canary -> first prompt).
     Requires the lane password in this process's environment (AUTOOS_OCL1_PW);
     it is never read, printed or logged here."""
+    fence = lane_control_fence("oc_start")
+    if fence is not None:
+        return fence
     argv = _oc_l1_args(lane, "start")
     r = subprocess.run(argv, capture_output=True, text=True, timeout=420,
                        stdin=subprocess.DEVNULL, env=_oc_l1_env())
@@ -207,6 +242,9 @@ def oc_restart(lane: str) -> dict:
     pid recorded in ~/fleet/<lane>/state/, delete that state file; the lane's
     watcher then starts it fresh within ~2 minutes (never kill by process
     name). Passwords are not touched."""
+    fence = lane_control_fence("oc_restart")
+    if fence is not None:
+        return fence
     import glob as _glob
     if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
         raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
@@ -280,6 +318,9 @@ def l2_start(repo: str, phase: str, brief_path: str,
     gateway combo, the autoos-agent spawner as its only MCP, permission.task
     denied and the bash-guard in orchestrator role. The first prompt is the
     brief's own text plus the fixed role footer."""
+    fence = lane_control_fence("l2_start")
+    if fence is not None:
+        return fence
     return _oc_l2("start", ["--repo", str(repo), "--phase", str(phase),
                             "--brief", str(brief_path), "--combo", str(combo)])
 
@@ -295,6 +336,9 @@ def l2_stop(lane: str) -> dict:
     state file. An orphaned `serve` still holding the port would make the next
     start's health poll answer for the wrong server (R-coord-10), so a stop
     that cannot prove the tree dead reports orphan=true and keeps the state."""
+    fence = lane_control_fence("l2_stop")
+    if fence is not None:
+        return fence
     return _oc_l2("stop", ["--lane", str(lane)])
 
 
@@ -303,6 +347,9 @@ def l2_inbox(lane: str, text: str) -> dict:
     record to the lane's inbox and nudge its session with the launcher's own
     prompt call. The line is kept even when the lane is not live; a lane whose
     canary never denied is refused the nudge (refused=true, exit_code 2)."""
+    fence = lane_control_fence("l2_inbox")
+    if fence is not None:
+        return fence
     return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
 
 
@@ -1636,7 +1683,9 @@ def serve() -> None:
         """c2 (2026-10-06): one lane's status through tools/oc_l1.py - verdict
         live / silent / dead plus the exact next step for each. The lane
         password is never read, printed or logged; a missing password env
-        surfaces as exit_code 2 with the remediation in "outcome" (oc_start)."""
+        surfaces as exit_code 2 with the remediation in "outcome" (oc_start).
+        Reading a lane stays allowed inside an
+        L2 - the fence is on control."""
         return oc_status(lane)
 
     @app.tool(name="oc_start")
@@ -1646,7 +1695,10 @@ def serve() -> None:
         (AUTOOS_OCL1_PW) to be set in this session's environment. Exit-code
         meanings travel in the answer's "outcome": 0 ok; 2 config/password;
         4 server not healthy; 5 UNATTENDED-REFUSED (canary not denied - fix
-        the guard, delete the state file, restart, supervise)."""
+        the guard, delete the state file, restart, supervise). 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return oc_start(lane)
 
     @app.tool(name="oc_restart")
@@ -1654,7 +1706,10 @@ def serve() -> None:
         """c2 (2026-10-06): force-restart a lane the way the handoff card
         prescribes (kill the recorded pid, delete the state file; the watcher
         starts the lane within ~2 minutes). Never kills by process name and
-        never touches passwords. Verify afterwards with oc_status."""
+        never touches passwords. Verify afterwards with oc_status. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return oc_restart(lane)
 
     @app.tool(name="l2_start")
@@ -1673,13 +1728,18 @@ def serve() -> None:
         running - send it work with l2_inbox instead. Answers lane, port,
         session_id, pid, canary{denied,detail}; exit_code 5 is
         UNATTENDED-REFUSED (canary not denied: l2_stop, fix the guard, start
-        again)."""
+        again). 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return l2_start(repo, phase, brief_path, combo)
 
     @app.tool(name="l2_status")
     def _l2_status(lane: str) -> dict:
         """D-665: a phase lane's verdict - live / silent / dead / absent - plus
-        its session id, port, phase and last canary result."""
+        its session id, port, phase and last canary result.
+        Reading a lane stays allowed inside an
+        L2 - the fence is on control."""
         return l2_status(lane)
 
     @app.tool(name="l2_stop")
@@ -1687,7 +1747,10 @@ def serve() -> None:
         """D-665: stop a phase lane cleanly (R-coord-10): kill the recorded
         PID's process group, verify it died, then remove the state file. A PID
         whose command line is not the lane's opencode is never killed; an
-        orphan reports stopped=false."""
+        orphan reports stopped=false. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return l2_stop(lane)
 
     @app.tool(name="l2_inbox")
@@ -1695,7 +1758,10 @@ def serve() -> None:
         """D-665: give a running phase lane more work - append one timestamped
         record to the lane's inbox and nudge its session with the launcher's
         own prompt call. The append happens whether or not the nudge lands;
-        empty text is refused."""
+        empty text is refused. 
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
         return l2_inbox(lane, text)
 
     @app.tool(name="heartbeat")

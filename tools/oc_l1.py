@@ -24,6 +24,9 @@ render
     (default ["autoos-agent"]; its environment pins AUTOOS_WORKERS_DIR); an enabled name missing from the repo
     file is a config error.
   * "plugins": the configured plugin DIRECTORIES (key omitted when empty); "permission" as in the render module.
+  * The lane child gets an ALLOWLIST environment (env_is_allowed): the names a session needs, minus every credential-shaped
+    name - see LANE_ENV_ALLOW. 'child_env' declares extra names (never values); 'agent_layer' is exported as
+    AUTOOS_AGENT_LAYER so the MCP server the lane starts can refuse lane-control tools inside an L2.
   * No "server" block: the hostname (127.0.0.1) and the lane port (default: stable sha256-of-name hash in
     47200-47299) are command-line flags of `opencode serve`.
 
@@ -58,6 +61,92 @@ _PERMISSION_KEY_RE = re.compile(r"[a-z][a-z0-9_*]*\Z")
 PERMISSION_EFFECTS = ("allow", "deny", "ask")
 ENV_GUARD_ROLE = "AUTOOS_GUARD_ROLE"
 ENV_L1_INBOX = "AUTOOS_L1_INBOX"
+ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
+
+# --- the lane child environment (Sonnet final REJECT 2026-10-08, finding 2) ---
+#
+# `start` handed the lane `dict(os.environ)`, so every credential the launcher's
+# shell happened to export - a GitHub token, a provider key, a database password -
+# sat in /proc/<pid>/environ where the lane, the MCP server it starts and every
+# worker it spawns could read it. A lane is a model session: it gets the variables
+# a session legitimately needs and nothing else.
+#
+# The rule is one allowlist of NAMES plus one allowlist of NAME PREFIXES (the
+# families a real session needs: git's own internals, XDG, locale, the fleet's
+# AUTOOS_* knobs), minus every credential-shaped name inside those families.
+# LANE_ENV_ALLOW beats the credential pattern - the two gateway names below are
+# the rendered config's own `{env:...}` references, so the lane cannot reach its
+# model without them, and they are the only credentials a lane is ever handed.
+# Anything else a lane needs is declared by NAME in the lane's `child_env`; the
+# value is inherited, never stored in a lane config file.
+LANE_ENV_ALLOW = (
+    # finding the binaries and writing to a home
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP",
+    "APPDATA", "LOCALAPPDATA", "USERPROFILE", "SystemRoot", "WINDIR", "COMSPEC",
+    "PATHEXT", "HOMEDRIVE", "HOMEPATH", "NUMBER_OF_PROCESSORS",
+    # locale, terminal, timezone and colour, so output matches the launcher's
+    "LANG", "LANGUAGE", "TERM", "TZ", "PAGER", "EDITOR", "VISUAL",
+    "NO_COLOR", "FORCE_COLOR", "COLORTERM",
+    # reaching the gateway through a proxy, and trusting its certificate
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY", "WAYLAND_DISPLAY",
+    # the gateway pair: the rendered config references them as {env:...} and the
+    # lane has no other way to its model. NAMES only - the values stay in the
+    # launcher's environment.
+    "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY",
+)
+LANE_ENV_ALLOW_PREFIXES = (
+    "LC_", "XDG_", "GIT_", "OPENCODE_", "NODE_", "PYTHON", "SSL_", "OPENSSL_",
+    "AUTOOS_", "SESSION_", "OMNIGRAPH_", "OMNIROUTE_",  # non-secret names, see below
+)
+# A name ending in one of these holds a credential, whatever family it sits in.
+LANE_ENV_CREDENTIAL_SUFFIXES = ("_PW", "_PWD", "_KEY", "_KEYFILE", "_APIKEY",
+                                "_TOKEN", "_SECRET", "_PASSWORD", "_PASSPHRASE",
+                                "_CREDENTIAL")
+LANE_ENV_CREDENTIAL_WORDS = ("PASSWORD", "PASSPHRASE", "SECRET", "CREDENTIAL",
+                             "TOKEN", "APIKEY")
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+# Three variables are LANE properties, never host ones: the guard's role, where
+# the lane reports to, and which level the lane runs at. Each is written from the
+# lane config and denied here, so an unrelated shell that happened to export one
+# cannot decide what a lane is.
+LANE_ONLY_ENV = (ENV_GUARD_ROLE, ENV_L1_INBOX, ENV_AGENT_LAYER)
+
+
+def env_is_credential_name(name):
+    """True when a variable NAME says its value is a credential.
+
+    Used to keep credentials out of a lane child's environment. Only the name is
+    ever examined - a value is not read here, and never is.
+    """
+    upper = name.upper()
+    if upper.endswith(LANE_ENV_CREDENTIAL_SUFFIXES):
+        return True
+    return any(word in upper for word in LANE_ENV_CREDENTIAL_WORDS)
+
+
+def env_is_allowed(name, password_env=None, child_env=()):
+    """Whether the launcher may hand `name` to the lane child at all."""
+    if name in LANE_ONLY_ENV:
+        return False
+    if password_env and name == password_env:
+        # the lane server's own password: the child gets it under
+        # OPENCODE_SERVER_PASSWORD and nowhere else
+        return False
+    if name in LANE_ENV_ALLOW:
+        return True
+    if env_is_credential_name(name):
+        return False
+    if name in child_env:
+        return True
+    # the family check is case-insensitive on purpose: `LC_*` and `PYTHON*`
+    # appear in both cases across platforms and none of them is a secret
+    return name.upper().startswith(LANE_ENV_ALLOW_PREFIXES)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -298,6 +387,41 @@ def validate_lane(lane, name):
             "plugin knows 'orchestrator')" % name
         )
 
+    # REJECT finding 2: the two seams of the child environment. `child_env` is a
+    # list of NAMES the launcher's allowlist does not already cover - a value in
+    # a lane config would be a secret on disk, and a credential name would be the
+    # leak the allowlist exists to close. `agent_layer` marks which level the lane
+    # runs at so the MCP server it starts can refuse lane-control tools.
+    child_env = lane.get("child_env", [])
+    if not isinstance(child_env, list) or not all(
+        isinstance(x, str) and len(x) <= 128 and _ENV_NAME_RE.match(x)
+        for x in child_env
+    ):
+        raise LaneError(
+            "lane '%s': 'child_env' must be a list of environment variable NAMES "
+            "matching [A-Za-z_][A-Za-z0-9_]* (values never belong in a lane config)"
+            % name
+        )
+    for entry in child_env:
+        if entry == password_env or entry == "OPENCODE_SERVER_PASSWORD" \
+                or env_is_credential_name(entry):
+            raise LaneError(
+                "lane '%s': 'child_env' entry '%s' names a credential: a lane "
+                "child inherits non-secret names only, so put it in the launcher's "
+                "environment under a name that does not, or leave the host's secret "
+                "with the host" % (name, entry)
+            )
+
+    agent_layer = lane.get("agent_layer")
+    if agent_layer is not None and (
+        not isinstance(agent_layer, str) or not _IDENT_RE.match(agent_layer)
+    ):
+        raise LaneError(
+            "lane '%s': 'agent_layer' must be an upper-case identifier such as "
+            "'L2' (it is exported as %s and read as a level name)"
+            % (name, ENV_AGENT_LAYER)
+        )
+
     return {
         "name": name,
         "cwd": cwd,
@@ -326,6 +450,10 @@ def validate_lane(lane, name):
         "guard_role": guard_role,
         "inbox_file": need_abs("inbox_file"),
         "first_prompt_file": need_abs("first_prompt_file"),
+        # REJECT finding 2: the resolved lane is what `start` spawns from, so an
+        # extra name or a layer mark that validation drops never reaches a child.
+        "child_env": list(child_env),
+        "agent_layer": agent_layer,
     }
 
 

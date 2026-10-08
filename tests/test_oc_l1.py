@@ -241,6 +241,50 @@ class PortFreeTest(unittest.TestCase):
             held.close()
 
 
+class ChildEnvValidationTest(unittest.TestCase):
+    """Sonnet final REJECT 2026-10-08 finding 2: the lane child gets an
+    allowlist, and a lane that needs one more variable NAMES it in `child_env`.
+    The validator is what keeps that declaration from turning into a way to
+    smuggle a credential - or a value at all - into a lane config on disk, and
+    it is the production path: `start` spawns the RESOLVED lane, so a key
+    validation drops never reaches the child."""
+
+    def _resolved(self, **over):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            return oc_l1.validate_lane(make_lane(Path(td), **over), "l1test")
+
+    def test_child_env_names_survive_validation(self):
+        resolved = self._resolved(child_env=["OC_L1_FAKE_RECORD", "AUTOOS_TASK_DIR"])
+        self.assertEqual(resolved["child_env"], ["OC_L1_FAKE_RECORD", "AUTOOS_TASK_DIR"])
+        self.assertEqual(self._resolved()["child_env"], [],
+                         "a lane that declares nothing gets the allowlist only")
+
+    def test_agent_layer_survives_validation(self):
+        self.assertEqual(self._resolved(agent_layer="L2")["agent_layer"], "L2")
+        self.assertIsNone(self._resolved()["agent_layer"],
+                          "an unmarked lane is an L1 lane")
+
+    def test_a_bad_child_env_shape_is_refused(self):
+        for bad in ("OC_L1_FAKE_RECORD", ["HAS-DASH"], ["1STARTS_WITH_A_DIGIT"],
+                    ["SPAC ED"], [""], [42], ["a" * 200]):
+            with self.assertRaises(oc_l1.LaneError, msg="child_env=%r" % (bad,)):
+                self._resolved(child_env=bad)
+
+    def test_a_credential_shaped_child_env_name_is_refused(self):
+        for name in ("GH_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY",
+                     "AUTOOS_LITELLM_API_KEY", "OPENCODE_SERVER_PASSWORD",
+                     "AUTOOS_OCL1_TEST_PW", "MY_APIKEY"):
+            with self.assertRaises(oc_l1.LaneError) as cm:
+                self._resolved(child_env=[name])
+            self.assertIn(name, str(cm.exception),
+                          "the refusal must name the entry it refused")
+
+    def test_an_agent_layer_that_is_not_an_identifier_is_refused(self):
+        for bad in ("l2 lane", "L2; rm", "", "L2\nX: 1", 2):
+            with self.assertRaises(oc_l1.LaneError, msg="agent_layer=%r" % (bad,)):
+                self._resolved(agent_layer=bad)
+
+
 class DefaultConfigPathTest(unittest.TestCase):
     def test_per_platform(self):
         d = oc_l1.default_config_path()
