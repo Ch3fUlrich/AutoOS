@@ -4,12 +4,17 @@ unittest, stdlib only, NO real opencode: a fake v2 API server runs in a
 thread on 127.0.0.1 (ephemeral port) and requires Basic auth; the lane's
 opencode_bin is a tiny script that records its argv and the NAMES (not
 values) of selected env vars to a JSON file, then sleeps.
+
+TestPrivateScratchModes covers F4: the scratch tree is 0700 and the child's
+stderr log 0600, both modes applied at creation, with no chmod-after-open
+window and a permissive umask unable to loosen them.
 """
 
 import contextlib
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -308,6 +313,104 @@ class StartTest(unittest.TestCase):
         self.assertTrue(state_pid is not None)
         time.sleep(0.5)
         self.assertFalse(pid_alive(state_pid), "child %s still alive" % state_pid)
+
+
+class TestPrivateScratchModes(unittest.TestCase):
+    """F4: the scratch dir and the child's log get their mode AT CREATION.
+
+    `open(path, "ab")` followed by `os.chmod` is a window: between the two the
+    log holds the child's environment-adjacent output with the caller's umask
+    (0o022 -> 0o644 world-readable; 0o000 -> 0o666). The mode must come from
+    os.open(..., 0o600) and mkdir under a 0o077 umask, so no chmod is needed
+    for a file or directory that did not exist yet.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="oc_l1_modes_")
+        self.td = Path(self._td.name)
+        self._old_umask = os.umask(0o022)
+
+    def tearDown(self):
+        os.umask(self._old_umask)
+        try:
+            self._td.cleanup()
+        except OSError:
+            shutil.rmtree(self.td, ignore_errors=True)
+
+    def _log_with_chmod_spy(self, scratch):
+        """Return (file handle, [(path, mode)]) for os.chmod calls during open."""
+        seen = []
+        real = os.chmod
+
+        def spy(path, mode, *a, **k):
+            seen.append((str(path), mode))
+            return real(path, mode, *a, **k)
+
+        os.chmod = spy
+        try:
+            fh = oc_l1_serve._child_stderr_log(scratch)
+        finally:
+            os.chmod = real
+        return fh, seen
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_scratch_dir_is_0700_from_mkdir(self):
+        scratch = self.td / "scratch" / "deep"
+        fh = oc_l1_serve._child_stderr_log(scratch)
+        self.assertIsNotNone(fh)
+        fh.close()
+        self.assertEqual(os.stat(scratch).st_mode & 0o777, 0o700)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_log_is_0600_without_a_chmod_after_the_open(self):
+        scratch = self.td / "scratch"
+        log = scratch / "opencode.log"
+        fh, chmods = self._log_with_chmod_spy(scratch)
+        self.assertIsNotNone(fh)
+        fh.close()
+        self.assertEqual(os.stat(log).st_mode & 0o777, 0o600)
+        touching_log = [c for c in chmods if c[0].endswith("opencode.log")]
+        self.assertEqual(touching_log, [],
+                         "log mode must be set by os.open, not chmod after it")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_a_permissive_umask_cannot_loosen_the_created_modes(self):
+        os.umask(0o000)
+        scratch = self.td / "scratch"
+        fh = oc_l1_serve._child_stderr_log(scratch)
+        self.assertIsNotNone(fh)
+        fh.close()
+        self.assertEqual(os.stat(scratch).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(scratch / "opencode.log").st_mode & 0o777,
+                         0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_a_log_left_loose_by_an_earlier_run_is_repaired_not_widened(self):
+        scratch = self.td / "scratch"
+        scratch.mkdir()
+        log = scratch / "opencode.log"
+        log.write_text("old\n", encoding="utf-8")
+        os.chmod(log, 0o644)
+        fh = oc_l1_serve._child_stderr_log(scratch)
+        self.assertIsNotNone(fh)
+        fh.write(b"new\n")
+        fh.close()
+        self.assertEqual(os.stat(log).st_mode & 0o777, 0o600)
+        self.assertEqual(log.read_text(encoding="utf-8"), "old\nnew\n")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_spawn_dirs_are_private(self):
+        scratch = self.td / "scratch"
+        for _var, sub in oc_l1_serve.XDG_SUBDIRS:
+            oc_l1_serve._private_dir(scratch / sub)
+        self.assertEqual(os.stat(scratch).st_mode & 0o777, 0o700)
+
+    def test_the_source_no_longer_opens_then_chmods_the_handle(self):
+        src = (ROOT / "tools" / "oc_l1_serve.py").read_text(encoding="utf-8")
+        self.assertNotIn("os.chmod(fh.fileno()", src)
+        self.assertIn("os.O_CREAT", src)
+        self.assertIn("os.O_APPEND", src)
+        self.assertIn("0o600", src)
 
 
 if __name__ == "__main__":

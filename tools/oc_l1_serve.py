@@ -21,7 +21,9 @@ start
     (child env only - never on the command line, never written to a
     file, never printed). The child's stderr is appended to
     <scratch_dir>/opencode.log so the plugin's fail-open notes are
-    visible after the fact (D-665).
+    visible after the fact (D-665); that log is created 0600 and the
+    scratch tree 0700, the modes applied at creation so no window leaves
+    them world-readable (F4).
   * Polls GET /api/session/active with Basic auth (user 'opencode')
     every 0.5 s for health_timeout_s (raw lane key, default 30); on
     failure kills the child by its recorded PID and exits 4.
@@ -117,30 +119,77 @@ def _kill_pid(pid):
         pass
 
 
+def _private_dir(path):
+    """Create a scratch directory 0700, with the mode applied AT creation.
+
+    mkdir-then-chmod leaves a window in which the child's config, state and log
+    sit in a directory readable by the rest of the machine; a umask of 0o077
+    makes the requested mode exact instead of merely "not wider than". A
+    directory an earlier, looser launcher left behind is tightened, never
+    widened (F4).
+    """
+    if os.name == "nt":
+        path.mkdir(parents=True, exist_ok=True)
+        return
+    old_umask = os.umask(0o077)
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    finally:
+        os.umask(old_umask)
+    try:
+        if os.stat(path).st_mode & 0o777 != 0o700:
+            os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
 def _child_stderr_log(scratch):
     """Open <scratch>/opencode.log for the child's stderr; None on any failure.
 
     The bash-guard plugin writes its fail-open notes to the child's stderr;
     DEVNULL made an un-loaded guard invisible (D-665). Losing the log must
     never lose the lane, so this opens best-effort and the caller falls back.
+
+    The child's environment carries the server password and this file sits in
+    the same directory, so both are created private from the first byte: no
+    open-then-chmod window (F4).
     """
+    log_path = scratch / "opencode.log"
     try:
-        scratch.mkdir(parents=True, exist_ok=True)
-        fh = open(scratch / "opencode.log", "ab")
+        _private_dir(scratch)
+        if os.name == "nt":
+            return open(log_path, "ab")
+        old_umask = os.umask(0o077)
+        try:
+            fd = os.open(str(log_path),
+                         os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        finally:
+            os.umask(old_umask)
     except OSError:
         return None
     try:
-        os.chmod(fh.fileno(), 0o600)  # child env vars are in this file's neighbourhood
+        # only a log an earlier, looser launcher left behind needs tightening;
+        # one created here already has its mode
+        if os.fstat(fd).st_mode & 0o777 != 0o600:
+            os.fchmod(fd, 0o600)
     except OSError:
         pass
-    return fh
+    try:
+        return os.fdopen(fd, "ab")
+    except OSError:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return None
 
 
 def _spawn(lane, rendered, password):
     """Start the explicit opencode binary; child env isolated in scratch."""
     scratch = Path(lane["scratch_dir"])
+    _private_dir(scratch)
     for var, sub in XDG_SUBDIRS:
-        (scratch / sub).mkdir(parents=True, exist_ok=True)
+        _private_dir(scratch / sub)
     env = dict(os.environ)
     for var, sub in XDG_SUBDIRS:
         env[var] = str(scratch / sub)
