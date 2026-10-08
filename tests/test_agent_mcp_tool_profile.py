@@ -54,6 +54,11 @@ def registered_tool_names(profile):
     return {t.name for t in asyncio.run(app.list_tools())}
 
 
+def agent_tier(combo):
+    """The tier the CLI's own route table says a combo name runs at."""
+    return mcp_server.agent._tier_for_route(combo)
+
+
 class ProfileSelectionTest(unittest.TestCase):
     """The env marker, read once, names the profile - nothing else does."""
 
@@ -190,6 +195,95 @@ class LaneRendersTheMarkerTest(unittest.TestCase):
         # set one would hide the L1's own lane-control tools.
         env = self._render(agent_layer=None)["mcp"]["autoos-agent"]["environment"]
         self.assertNotIn("AUTOOS_AGENT_LAYER", env)
+
+
+class L2SpawnTierGateTest(unittest.TestCase):
+    """Criterion 3: inside profile l2 a spawn is a tier-3 worker or nothing.
+
+    The gate reads the profile the same server was registered under, so it cannot
+    drift from the list the lane was shown. A tier below 3 is a session that
+    holds its own editor - exactly what an L2 must not own - and a
+    `role: orchestrate` card is the same thing reached through the resolver
+    instead of the flag.
+    """
+
+    def _argv(self, req, **env):
+        with mock.patch.dict(os.environ, env):
+            return mcp_server.build_argv(dict(req, cwd=str(ROOT)),
+                                         "20261008-000000-l2gate-abcdef")
+
+    def _refused(self, req, needle, **env):
+        with self.assertRaises(ValueError) as cm:
+            self._argv(req, **dict(env, AUTOOS_AGENT_LAYER="L2"))
+        msg = str(cm.exception)
+        self.assertIn(needle, msg, msg)
+        self.assertIn("l2", msg.lower(), msg)
+        return msg
+
+    def test_an_explicit_tier_below_three_is_refused(self):
+        for tier in (1, 2):
+            self._refused({"task": "t", "tier": tier}, "tier %s" % tier)
+        # a caller that sends the tier as text (JSON) is the same spawn
+        self._refused({"task": "t", "tier": "2"}, "tier 2")
+
+    def test_a_card_below_three_is_refused_by_its_resolved_tier(self):
+        # The default card routes to tier 2, so an L2 that asks for nothing gets
+        # the same refusal - the gate reads the route, never only the flag.
+        self._refused({"task": "t"}, "tier 2")
+        self._refused({"task": "t", "card": {"role": "implement",
+                                             "complexity": "standard"}}, "tier 2")
+
+    def test_an_orchestrate_card_is_refused_whatever_tier_it_routes_to(self):
+        msg = self._refused({"task": "t", "card": {"role": "orchestrate",
+                                                   "ctx": "1m"}}, "orchestrate")
+        self.assertIn("tier 1", msg, msg)
+
+    def test_a_tier_three_spawn_passes_the_gate(self):
+        # What an L2 actually spawns: a tier-3 worker. The existing rule that tier
+        # 3 is the review-only seat still applies (T2-RECORD-PIN), so a tier-3
+        # spawn that is legal is `--read-only` or a review card - the L2 gate must
+        # refuse nothing the lane was built to ask for.
+        argv, _ = self._argv({"task": "t", "tier": 3, "read_only": True},
+                             AUTOOS_AGENT_LAYER="L2")
+        self.assertEqual(argv[argv.index("--tier") + 1], "3")
+        self.assertIn("--read-only", argv)
+        argv, _ = self._argv({"task": "t", "tier": "3", "read_only": True},
+                             AUTOOS_AGENT_LAYER="L2")
+        self.assertEqual(argv[argv.index("--tier") + 1], "3")
+        argv, route = self._argv({"task": "t", "card": {"role": "review",
+                                                        "complexity": "trivial"}},
+                                 AUTOOS_AGENT_LAYER="L2")
+        self.assertEqual(agent_tier(route["combo"]), 3, route)
+
+    def test_the_gate_is_the_profile_and_not_the_process(self):
+        # Nothing marks this server as a lane: the same spawn is a plan, as it
+        # was before the profile existed.
+        argv, route = self._argv({"task": "t", "tier": 2})
+        self.assertIn("2", argv)
+        self.assertEqual(route["reason"], "explicit-tier")
+        argv, route = self._argv({"task": "t", "card": {"role": "orchestrate",
+                                                        "ctx": "1m"}})
+        self.assertEqual(route["combo"], "l1-orchestrator")
+
+    def test_the_helper_reads_the_profile_and_the_resolved_tier(self):
+        l2 = {"AUTOOS_AGENT_LAYER": "L2"}
+        self.assertIsNone(mcp_server.l2_spawn_refusal(3, None, env=l2))
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(2, None, env=l2))
+        # the role is refused whatever tier it happens to route to
+        self.assertIsNotNone(mcp_server.l2_spawn_refusal(
+            3, {"role": "orchestrate"}, env=l2))
+        # and none of it applies outside profile l2
+        self.assertIsNone(mcp_server.l2_spawn_refusal(1, {"role": "orchestrate"},
+                                                      env={}))
+
+    def test_spawn_answers_the_refusal_without_starting_anything(self):
+        # The end of the path, not the helper: what the L2's `spawn` tool returns.
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_LAYER": "L2",
+                                          "AUTOOS_AGENT_MCP_DRY_RUN": "1"}):
+            out = mcp_server.spawn({"task": "t", "tier": 1, "cwd": str(ROOT)})
+        self.assertEqual(out["state"], "rejected", out)
+        self.assertIn("tier 1", out["error"], out)
+        self.assertNotIn("id", out, "a refused spawn must not name a run")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,31 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- L2GATES (2026-10-08, lane AO-L2-LAUNCH, the three merge criteria left open by L2LAUNCH-REJECT), one commit and failing-first tests
+  each. **(1) the L2 shell is read-only, not scoped-write**: the bash-guard gained its own role, `AUTOOS_GUARD_ROLE=l2` (set by
+  `tools/oc_l2.py`), whose allow list is `git status|log|diff|show`, `ls`, `cat`, `rg`, `head`, `tail`, `wc`, `pwd` and nothing else —
+  any output redirect, any stdin redirect or here-document, any backtick/`$(…)`/`>(…)` substitution, and every mutating `git` verb
+  are denied with `bash-guard: DENIED - l2 read-only: …`. Both roles share one tokenizer, wrapper-skipping and git-verb parser
+  (`gitSubcommand`), so they cannot drift, and the denial still carries the marker verbatim: the canary is denied by the `l2` role too,
+  so a lane that starts is a lane whose guard works. Consequence, stated in the L2's own footer: a read-only shell cannot append its
+  `REPORT`/`DONE` line, so the report is a tier-3 spawn whose whole task is that line. **(2) the L2's MCP lists the spawner, not the
+  lane menu**: which tools `autoos_agent_mcp` registers is now a profile picked from its own environment (`AUTOOS_AGENT_LAYER=L2`,
+  which `tools/oc_l1_render.py` renders into the MCP server's env from the lane's `agent_layer`). Profile `l2` registers `spawn`,
+  `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — no lane tool, no `cancel` of a foreign run, no `respond`
+  to a question this lane did not ask — and an unknown profile falls back to that narrowest list, never to the full one. The
+  function-level fence stays: those five lane tools still answer `refused: true` on `L2`, because the same code is reachable from the
+  CLI and a hidden tool is not a permitted call. `serve()` became `build_server(profile=None)` + run so the pin drives real
+  registration (`build_server(...).list_tools()`). **(3) an L2 spawns tier-3 workers only**: `l2_spawn_refusal` is checked in
+  `build_argv`, where the tier is known AFTER routing, so `--tier 2`, a card that routes to tier 2, and a `role: orchestrate` card are
+  all refused before a run dir exists — below tier 3 is a session that holds its own editor, which is the thing the lane exists to
+  prevent (the full ROLE-GATE is a later lane). Tests: `tests/test_opencode_bash_guard.py` (+16, the `l2` role, the canary under it,
+  no leakage into `orchestrator`), `tests/test_oc_l2.py` (the rendered role, the dispatch site in the plugin, the marker in the MCP
+  env), new `tests/test_agent_mcp_tool_profile.py` (21: profile selection, the registered tool set per profile, the renderer marking
+  the server it starts, the spawn tier gate); the brief's verify set is 291 green and the wider lane set 1791, with one failure this
+  diff does not reach: `test_a_real_spawn_runs_in_its_scope` skips when run alone on this host (no user manager, so
+  `scope_supported()` is false), trips only when `tests.test_autoos_spawner` runs as a module — on this host and at the lane tip
+  before these three commits alike — and none of the three gates touches the scope path.
+  Docs: `docs/ai/opencode-fleet.md` (the layer fence, the rendered L2 lane), `tools/oc_l2.py`, `tools/autoos_agent_mcp.py`.
 - L2LAUNCH-REJECT (2026-10-08, lane AO-L2-LAUNCH, Sonnet final REJECT of the D-665 launch work): seven findings, one commit and one
   failing-first test each. **(F1, HIGH)** `permission.task: deny` alone left the renderer's `edit: allow` standing, so an L2 — whose
   whole job is to coordinate — could write files with its own editor tools; `tools/oc_l2.py` now denies every file-mutating and

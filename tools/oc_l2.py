@@ -129,9 +129,11 @@ ROLE_LINES = (
     "`patch`, `task`) is denied and the shell guard runs in `l2` role, which "
     "leaves your shell a closed read-only list (`git status|log|diff|show`, "
     "ls, cat, rg, head, tail, wc, pwd) with no redirection at all. Every "
-    "change goes through the `autoos-agent` MCP: "
-    "spawn tier-3 runs (writer, then a cross-family reviewer) and judge their "
-    "reports.",
+    "change goes through the `autoos-agent` MCP, and the only spawn it answers "
+    "for an L2 is a tier-3 worker (`read_only`, or a review card) - tier 1, "
+    "tier 2 and a `role: orchestrate` card are refused before a run starts. "
+    "Spawn the work that way (writer, then a cross-family reviewer), judge "
+    "their reports, and report upward.",
     "Report to the L1 inbox at `%s`: append one line per milestone prefixed "
     "`REPORT` and a final line prefixed `DONE` (or `BLOCKED`), each opened by "
     "a UTC `%%Y-%%m-%%dT%%H:%%M:%%SZ` timestamp - that stamp is what the reader "

@@ -9,8 +9,9 @@ spec 9 ask-back). Which of those a client can even LIST is a profile
 (MCP_TOOL_PROFILES): a server whose environment marks it as running inside an L2
 lane (`AUTOOS_AGENT_LAYER=L2`, rendered by oc_l1_render) registers the spawner's
 tools - spawn, status, result, ps, list_clients, route, context, heartbeat - and
-nothing else. spawn is
-asynchronous: it validates the request (card ->
+nothing else, and inside that profile a `spawn` is a tier-3 worker only
+(L2_SPAWN_TIER).
+spawn is asynchronous: it validates the request (card ->
 combo through autoos_routing.select_combo, the same function the CLI uses;
 the depth budget; client rules), starts a detached runner and returns a run
 id at once. Each run lives in <repo>/logs/agents/<id>/ (git-ignored;
@@ -216,6 +217,40 @@ def tool_names_for(profile: str) -> tuple:
     """The tool names `profile` registers. An unknown profile gets the
     NARROWEST list: a typo in a lane config must not hand back the full menu."""
     return MCP_TOOL_PROFILES.get(profile) or MCP_TOOL_PROFILES[NARROWEST_PROFILE]
+
+
+# The one tier an L2 lane may start a worker at (AO-L2-LAUNCH merge criterion 3).
+L2_SPAWN_TIER = 3
+
+
+def l2_spawn_refusal(run_tier: int, card: dict | None, env=None):
+    """D-665 (AO-L2-LAUNCH criterion 3): the tier gate a spawn from profile `l2`
+    passes through; None when this server is not an L2's, or the spawn is a worker.
+
+    An L2 lane coordinates: its shell is a closed read-only list and its editor is
+    denied, so the only thing it can legitimately start is a tier-3 worker that
+    does the writing in its own clone. A tier below that is a session holding an
+    editor and a checkout of the main tree, and a `role: orchestrate` card is the
+    L1's own seat reached through the resolver instead of through `--tier` - both
+    are an L2 climbing out of its lane. The check reads the TIER THE REQUEST
+    RESOLVES TO, not the flag the caller typed, so a card that routes to tier 2 is
+    refused exactly as `--tier 2` is.
+
+    This is the minimal gate; the full ROLE-GATE (which role may spawn which) is a
+    later lane.
+    """
+    if mcp_tool_profile(env) != NARROWEST_PROFILE:
+        return None
+    role = (card or {}).get("role")
+    if int(run_tier) >= L2_SPAWN_TIER and role != "orchestrate":
+        return None
+    why = ("a role=orchestrate card is an L1's own seat"
+           if role == "orchestrate" else
+           "below tier %d is a session that holds its own editor and a checkout "
+           "of the main tree" % L2_SPAWN_TIER)
+    return ("l2 lane: an L2 spawns tier-%d workers only, this request is tier %d "
+            "and %s. Report the work to the L1 inbox and let the L1 start the "
+            "tier." % (L2_SPAWN_TIER, int(run_tier), why))
 
 
 _LANE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
@@ -676,6 +711,15 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # D-665 (AO-L2-LAUNCH criterion 3): a spawn that resolves below tier 3 is not
+    # a worker an L2 may start. Checked here, at the one place the tier is known
+    # after routing (a flag, or whatever combo a card selected), so the caller's
+    # own `--tier` cannot talk its way past a card that routes to tier 2 - and a
+    # dry run is refused too, because a preview an agent would believe is the same
+    # lie as the launch.
+    l2_refusal = l2_spawn_refusal(run_tier, gate_card)
+    if l2_refusal is not None:
+        raise ValueError(l2_refusal)
     # T2-RECORD-PIN item 4: review-only tier 3 does not run an implement task.
     # The CLI's own helper, so both entry points read one rule; a dry run only
     # previews it (the server's preflight IS a dry run), and every non-dry
@@ -1634,6 +1678,15 @@ def build_server(profile: str | None = None):
         privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
         does not unlock it — routing.select_combo is explicit that the flag is
         inert there; it only waives the privacy check on an explicit --model).
+
+        L2 SPAWN GATE (D-665, AO-L2-LAUNCH criterion 3): when this server's own
+        environment marks it as running inside an L2 lane (`AUTOOS_AGENT_LAYER=L2`
+        — the same marker that lists only the spawner's tools), a spawn is a
+        tier-3 worker only. Tier 1, tier 2 and any `role: orchestrate` card are
+        refused before a run dir exists, whatever the request typed: the gate
+        reads the tier the request RESOLVES to, and below tier 3 is a session that
+        holds its own editor, which is what an L2 exists not to have. An L2 that
+        needs one reports to the L1 inbox and the L1 starts the tier.
 
         claude_reason: this spawn's own Claude-budget declaration, for a `model`
         that answers with Claude (CLAUDEBUDGET-d). Set it on the one call that

@@ -145,10 +145,14 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
   so a missing variable is diagnosable instead of silent.
 - **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same four lane tools are on it, so
   without a fence an L2 could start, stop or nudge lanes — relaunch its own supervisor, or switch off a phase it does not own. The
-  L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env, which opencode passes to the MCP
-  server it starts), and `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` answer `refused: true` when they read `L2`
-  back. `l2_status` and `oc_status` stay open: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1
-  inbox.
+  L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env AND in the MCP server's own rendered
+  env), and that one marker does two things. It picks the server's TOOL PROFILE: an L2 registers the spawner and its read-only
+  companions — `spawn`, `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — and lists no lane tool, no
+  `cancel`, no `respond` at all (an unknown profile falls back to this narrowest list, never to the full one). And it fences what
+  remains: `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they read `L2` back,
+  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-3
+  worker only (tier 1, tier 2 and any `role: orchestrate` card are refused before a run dir exists). `l2_status` and `oc_status`
+  stay open for a caller that can see them: watching one's own lane is ordinary L2 work, and upward reporting goes to the L1 inbox.
 - The child's stderr is appended to `<scratch_dir>/opencode.log`, created 0600 with the scratch tree 0700 — the modes are applied
   at creation, so there is no window in which the log sits world-readable next to a child environment that carries the password:
   the guard's fail-open notes are written there, and
@@ -191,12 +195,18 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
   directories share a name are two lanes, while one project spelled two ways (`AutoOS CI`, `autoos-ci`) is still one lane;
   model = the gateway combo (`l2-orchestrator` by default), with the context and output **from the
   registry route's own `surfaces.omniroute`** so a 1M lane cannot be clamped to 128k;
-- `mcp: ["autoos-agent"]` — the spawner is the only enabled server: no editor, no filesystem MCP, no second spawner;
+- `mcp: ["autoos-agent"]` — the spawner is the only enabled server: no editor, no filesystem MCP, no second spawner; and because the
+  lane renders `AUTOOS_AGENT_LAYER=L2` into that server's own environment, the spawner answers it with the L2 tool profile (above),
+  not with the full menu;
 - `permission` merged over the L1 defaults with every file-mutating and spawn key denied (`edit`, `write`, `patch`, `apply_patch`,
-  `task`, `subagent`; `read` and `bash` stay allowed, `bash` fenced by the guard), plus the bash-guard plugin with
-  `guard_role: "orchestrator"`;
-- the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 through
-  the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox), and the launcher's hint line.
+  `task`, `subagent`; `read` and `bash` stay allowed), plus the bash-guard plugin with `guard_role: "l2"` — a role of its own, not
+  the orchestrator's scoped write: an L2's shell is a CLOSED READ-ONLY list (`git status|log|diff|show`, `ls`, `cat`, `rg`, `head`,
+  `tail`, `wc`, `pwd`), with no output redirection, no stdin redirection, no here-document and no command substitution, and anything
+  else is denied with `bash-guard: DENIED - l2 read-only: …`. The canary command is denied by this role too, so a lane that starts
+  is a lane whose guard works;
+- the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn tier-3 workers —
+  and only tier-3 — through the `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox as a tier-3 spawn, since a read-only
+  shell cannot append), and the launcher's hint line.
 
 **Where the reports land.** The child env carries `AUTOOS_L1_INBOX` (lane key `inbox_file`), resolved from `--inbox` or that
 variable and refused when neither names one — a report that goes nowhere is a phase that silently never finishes. The L2 appends
