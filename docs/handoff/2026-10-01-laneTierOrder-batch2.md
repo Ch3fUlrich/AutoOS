@@ -37,10 +37,14 @@ is NOT what makes an unreachable leg slow (it is queue wait, not per-leg).
 ## (2) Vertex credential (documentation only)
 
 - Canonical credential: full content of
-  `configuration/vertex-credentials-autoos-510210-9fdf2297df6f.json`
+  `configuration/vertex-credentials-<gcp-project>-<keyid>.json`
   (GCP service-account JSON, NOT a plain API key; git-ignored per
   `.gitignore` `configuration/vertex-credentials-*.json` (L1-alpha CREDIGNORE);
-  expected at that path in the checkout; worktree absent, main present).
+  expected at that path in the checkout; worktree absent, main present). The
+  project id and key id are written as placeholders since 2026-10-08 — the
+  repository is public and a real project id names the account and the
+  credential file to look for (AGENTS Hard Rule 1); read them off the
+  git-ignored file in the operator's own checkout.
   Documented in `catalog/ai-registry.json` `providers.vertex_ai.$comment`
   (B2-VERTEX) + `apply.ps1`/`apply.sh` headers.
 - L0 probed vertex works (gemini combo acked via vertex; direct 200 at 08:46:52Z).
