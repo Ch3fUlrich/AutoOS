@@ -303,27 +303,48 @@ class LaneTest(unittest.TestCase):
         out2 = oc_l2.cmd_stop(result["lane"])
         self.assertTrue(out2["stopped"])
 
+    def _lane_with_foreign_pid(self, name, pid):
+        """A lane whose state file names a PID stop must not accept."""
+        lane = oc_l2.build_lane(name, self.proj, "p1", self.brief,
+                                "l2-orchestrator", self.l1_inbox,
+                                opencode_bin=self.bin_,
+                                password_env=PW_ENV, port=self.srv.port)
+        Path(lane["scratch_dir"]).mkdir(parents=True, exist_ok=True)
+        Path(lane["state_file"]).write_text(json.dumps({
+            "name": name, "session_id": "ses_x", "port": self.srv.port,
+            "pid": pid, "started_utc": oc_l2._now_ts()}), encoding="utf-8")
+        oc_l2.write_config(lane)
+        return lane
+
     def test_stop_refuses_a_pid_that_is_not_the_lane(self):
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         try:
             name = self._lane_name()
-            lane = oc_l2.build_lane(name, self.proj, "p1", self.brief,
-                                    "l2-orchestrator", self.l1_inbox,
-                                    opencode_bin=self.bin_,
-                                    password_env=PW_ENV, port=self.srv.port)
-            scratch = Path(lane["scratch_dir"])
-            scratch.mkdir(parents=True, exist_ok=True)
+            lane = self._lane_with_foreign_pid(name, sleeper.pid)
             sf = Path(lane["state_file"])
-            sf.write_text(json.dumps({"name": name, "session_id": "ses_x",
-                                      "port": self.srv.port, "pid": sleeper.pid,
-                                      "started_utc": oc_l2._now_ts()}),
-                          encoding="utf-8")
-            oc_l2.write_config(lane)
             out = oc_l2.cmd_stop(name)
             self.assertIsNone(sleeper.poll(), "stop killed a process that is not the lane")
             self.assertIs(out["stopped"], False)
             self.assertTrue(out["orphan"])
             self.assertTrue(sf.is_file(), "a refused stop must keep the state file")
+        finally:
+            sleeper.kill()
+            sleeper.wait()
+
+    def test_stop_refuses_a_recycled_pid_that_only_mentions_the_word(self):
+        # The identity match is per argv TOKEN, not over the whole command line:
+        # a recycled PID running a grep, a tail or an editor over a path that
+        # happens to contain the binary's name is not the lane, and killing its
+        # process group would be the kill-by-name this tool forbids.
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                                    "--pattern=fake_opencode serve"])
+        try:
+            name = self._lane_name()
+            lane = self._lane_with_foreign_pid(name, sleeper.pid)
+            out = oc_l2.cmd_stop(name)
+            self.assertIsNone(sleeper.poll(), "stop killed a recycled PID")
+            self.assertIs(out["stopped"], False)
+            self.assertTrue(Path(lane["state_file"]).is_file())
         finally:
             sleeper.kill()
             sleeper.wait()

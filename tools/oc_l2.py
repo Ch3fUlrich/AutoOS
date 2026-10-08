@@ -360,23 +360,35 @@ def live_session(lane):
 # --- stop / inbox ------------------------------------------------------------
 
 
-def _child_cmdline(pid):
-    """What that PID actually is, so a recycled PID is never killed. POSIX
-    only - Windows has no /proc, and there oc_l1's own taskkill /T /PID is the
-    path (the state file is written 0600 by the launcher alone)."""
+def _child_argv(pid):
+    """The PID's argv, token by token. POSIX only - Windows has no /proc, and
+    there oc_l1's own taskkill /T /PID is the path (the state file is written
+    0600 by the launcher alone)."""
     try:
         raw = Path("/proc/%d/cmdline" % pid).read_bytes()
     except (OSError, ValueError):
         return None
-    parts = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
-    return " ".join(parts) if parts else None
+    return [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p] or None
 
 
 def _looks_like_the_lane(pid, lane):
-    cmd = _child_cmdline(pid)
-    if cmd is None:
-        return True  # unreadable (Windows, or already gone): no evidence to refuse on
-    return lane.get("opencode_bin", "") in cmd or "opencode" in cmd
+    """Identity check before a kill: the recorded PID (never a name lookup) and
+    a token of its argv that IS the lane's binary - either the exact path, or
+    the same name with the extension dropped, because an `exec` chain replaces
+    the wrapper's image (`fake_opencode.sh` becomes `fake_opencode.py`). A
+    recycled PID only mentioning the word is refused: `grep opencode serve` and
+    `tail notes-about-opencode.md` carry no such token. A heuristic against the
+    common recycling case, not a proof; unreadable (Windows, already gone) is no
+    evidence to refuse on."""
+    argv = _child_argv(pid)
+    if argv is None:
+        return True
+    bin_ = lane.get("opencode_bin") or ""
+    stem = os.path.splitext(os.path.basename(bin_))[0]
+    for token in argv:
+        if token == bin_ or (stem and os.path.splitext(os.path.basename(token))[0] == stem):
+            return True
+    return False
 
 
 def _pgid(pid):
