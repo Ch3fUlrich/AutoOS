@@ -1,66 +1,5 @@
 {
-  "$comment": [
-    "Single source of truth for the OpenHands gateway tier profiles",
-    "(omniroute-t*-*.json + litellm-t*-*.json): the selectable models.",
-    "IDS RENAMED 2026-09-23: tier1 -> l1-orchestrator, tier2 -> l2-worker,",
-    "tier3 -> l3-driver, rag -> t4-rag. Delete the retired profile files",
-    "from ~/.openhands/profiles on next start (sync only writes).",
-    "OmniRoute tiers address combos on :20128 with the openai/ LiteLLM",
-    "transport prefix OpenHands requires (without it: provider-not-provided).",
-    "LiteLLM tiers address the static fallback on :4000 by its tier",
-    "model_names; they ALSO carry the openai/ prefix, which the OpenHands",
-    "litellm client stack strips before the HTTP call (measured 2026-09-22:",
-    "bare openai/l2-worker to the gateway 401s as an unknown provider, while",
-    "the proven openai/l1-orchestrator profile round-trips - so the wire",
-    "always carries the bare tier name the :4000 proxy defines). base_url is",
-    "container-side (host.docker.internal); the installer substitutes the",
-    "host-side URL nowhere - these profiles only ever run inside the container.",
-    "Costs stay 0: billing happens at the gateway, not per profile.",
-    "NO KEYS HERE: api_key is injected at install/start time from env",
-    "(AUTOOS_OMNIROUTE_KEY for omniroute-*, LITELLM_MASTER_KEY or",
-    "AUTOOS_LITELLM_API_KEY for litellm-*) or configuration/api-keys.yml",
-    "(omniroute:) / configuration/litellm/.env (master key).",
-    "Consumers: lib/**/install.* embedded setup (reads this file, never",
-    "inlines tiers), tools/sync-openhands-profiles.py (regenerates user",
-    "profiles; run by start-stack on every openhands start), both suites.",
-    "max_input_tokens / max_output_tokens of the omniroute-/litellm- tiers are",
-    "rendered from catalog/ai-registry.json via",
-    "`python3 tools/registry.py render openhands` (or `render ide --out",
-    "catalog/ide-models.json` then python3 tools/sync-ide-models.py), not a",
-    "copy of the single source ide-models.json: edit the registry and",
-    "re-render. sync-ide-models also checks that this spec and the catalog's",
-    "openhands surface list the same models.",
-    "",
-    "NOTE: OmniRoute gateway combos (omniroute-*) do NOT expose the full",
-    "reasoning effort variant ladder (minimal/low/medium/high/xhigh) because",
-    "the metadata (supportedThinkingEfforts) is absent from the gateway.",
-    "Use the direct OpenRouter profile (openrouter-muse-spark-1.3-contributor)",
-    "for full effort control. Requires OPENROUTER_API_KEY.",
-    "",
-    "ORDER IS THE PUSH PRIORITY (reordered 2026-09-25): the OpenHands app keeps",
-    "at most 10 profiles and tools/sync-openhands-profiles.py --push-url fills",
-    "them in this order, removing lower-ranked AutoOS profiles to make room",
-    "and deleting retired ones. The top 10: the t1 -> t2 -> t3 hierarchy",
-    "(t1 first: it seeds the app settings and every agent profile's",
-    "llm_profile_ref), l2-orchestrator (small-scope orchestration), the",
-    "no-training -clean worker and driver (t1-clean's leg trains, so these two",
-    "are the privacy picks), t4-rag (grounded QA - nothing else does it),",
-    "opus-4-6 (frontier reasoning), gemini-3.8-flash (fast, free-first) and",
-    "l2-worker-free-only (zero spend). Below the line: deepseek (already a",
-    "t2 leg), t3-free-only, t1-clean and spark (MUSEAPI 2026-09-27: spark and",
-    "t1 share the meta_api contributor leg, which answers, plus the zen",
-    "promo the gateway 403s), the direct",
-    "OpenRouter spark (needs its own key; OpenHands pins one effort, so the",
-    "ladder buys nothing), the LiteLLM fallbacks, and last the two",
-    "t1-free-only profiles: red by design outside OpenCode (their only leg is",
-    "the zen free promo, which answers 403 there).",
-    "",
-    "retired_ids: profile ids this spec listed before the 2026-09-23 rename",
-    "(git log of this file), pushed before the sync kept a record of the",
-    "names it pushed. The push deletes an app profile only when it is in",
-    "that record (profiles/.autoos-pushed.json) or in retired_ids - never",
-    "because its name merely starts with omniroute-/litellm-/openrouter-."
-  ],
+  "$comment": "generated from catalog/ai-registry.json - do not edit",
   "gateway_base_url": "http://host.docker.internal:20128/v1",
   "litellm_base_url": "http://host.docker.internal:4000/v1",
   "retired_ids": [
@@ -115,14 +54,14 @@
     {
       "id": "omniroute-l2-worker",
       "model": "openai/l2-worker",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
     },
     {
       "id": "omniroute-l3-driver",
       "model": "openai/l3-driver",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
     },
@@ -155,13 +94,6 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-opus-5-5",
-      "model": "openai/opus-5-5",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
       "id": "omniroute-gemini-3.8-flash",
       "model": "openai/gemini-3.8-flash",
       "max_input_tokens": 1048576,
@@ -176,13 +108,6 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-deepseek-v4.1-flash",
-      "model": "openai/deepseek-v4.1-flash",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 393216,
-      "reasoning": true
-    },
-    {
       "id": "omniroute-l3-driver-free-only",
       "model": "openai/l3-driver-free-only",
       "max_input_tokens": 131072,
@@ -190,19 +115,10 @@
       "reasoning": false
     },
     {
-      "id": "omniroute-spark-1.3-contributor",
-      "model": "openai/spark-1.3-contributor",
+      "id": "omniroute-l1-orchestrator-clean",
+      "model": "openai/l1-orchestrator-clean",
       "max_input_tokens": 1000000,
       "max_output_tokens": 32768,
-      "reasoning": true
-    },
-    {
-      "id": "openrouter-muse-spark-1.3-contributor",
-      "gateway": "openrouter",
-      "model": "openrouter/meta/muse-spark-1.3-contributor",
-      "base_url": "https://openrouter.ai/api/v1",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 131072,
       "reasoning": true
     },
     {
@@ -217,7 +133,7 @@
       "id": "litellm-l2-worker",
       "gateway": "litellm",
       "model": "openai/l2-worker",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 131072,
       "max_output_tokens": 32768,
       "reasoning": false
     },
@@ -225,7 +141,7 @@
       "id": "litellm-l3-driver",
       "gateway": "litellm",
       "model": "openai/l3-driver",
-      "max_input_tokens": 128000,
+      "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
     },
