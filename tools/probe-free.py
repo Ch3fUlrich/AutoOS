@@ -23,6 +23,12 @@ call failed or names no such field - measured nothing, never "does not cache".
 ``model, gateway, ack, tool, cache, ack_ms, served, error``, flushed per leg so
 an interrupted run keeps what it measured.
 
+A 429/503/504 is retried on RETRY_DELAYS_S, with two ways not to wait:
+``--no-retry`` sends each call once (a run on a deadline measures every leg and
+reports what it saw), and a 429 whose own body states a reset further away than
+RESET_GIVE_UP_S is not retried even with retrying on - the backoff cannot reach
+the window's end, so the refusal is the finding.
+
 The client key is read in-memory from AUTOOS_OMNIROUTE_KEY or the checkout's
 configuration/api-keys.yml (tools/autoos-agent.py:client_key) and is never
 printed, logged or written anywhere.
@@ -32,6 +38,7 @@ Usage:
     python tools/probe-free.py --model groq/openai/gpt-oss-120b [...]
     python tools/probe-free.py --legs-file legs.txt --cache \
         --tsv logs/probe-2026-10-08.tsv --gateway-label central
+    python tools/probe-free.py --legs-file legs.txt --no-retry --cache
     python tools/probe-free.py            # probes the built-in candidate list
 """
 from __future__ import annotations
@@ -57,6 +64,22 @@ MODELS = GATEWAY + "/v1/models"
 
 RETRY_STATUSES = (429, 503, 504)
 RETRY_DELAYS_S = (60, 120)
+# A 429 that counts itself out further than the whole backoff can wait is not
+# transient for this run: sleeping 60 then 120 against "resets 110h47m" buys two
+# more refusals and three minutes the next leg could have used. The spawner's
+# `parse_reset` (tools/autoos-agent.py) turns the same text into a routing
+# `unavailable_until`; this one only decides to skip the sleep, and reads the
+# compound window ("110h47m") the spawner's pattern does not match.
+RESET_GIVE_UP_S = 300
+_RESET_MENTION_RE = re.compile(
+    r"\b(?:reset(?:s)?(?:\s+(?:in|after))?|try again in|retry(?:\s+(?:after|in)?))"
+    r"\s*~?\s*")
+# One number and the unit that follows it: "59.250991496s", "110h", "47m".
+_RESET_STEP_RE = re.compile(r"(\d+)(?:\.\d+)?\s*([a-z]+)")
+_RESET_UNITS = {"s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
+                "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
+                "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
+                "d": 86400, "day": 86400, "days": 86400}
 
 ACK_MAX_TOKENS = 16
 # A reply counts as an ack only with one of these as a word of its own.
@@ -179,12 +202,55 @@ def post(key, body, url=CHAT, timeout=180):
     return {"status": status, "ms": ms, "parsed": parsed, "err": None, "body": ""}
 
 
-def post_retry(key, body, url=CHAT):
-    delays = list(RETRY_DELAYS_S)
+def reset_window_s(text):
+    """The seconds a refusal counts itself out for, or None when it names none.
+
+    Consecutive number+unit groups sum, so "resets 110h47m" is one window of
+    110 h 47 min and not a 110-hour window that lost its minutes. The run stops
+    at the first thing that is not a number+unit pair, which is what keeps a
+    trailing timestamp ("... resets 110h47m at 2026-09-26T19:17Z") out of the
+    total. An unknown unit reads as no window rather than as a guess at seconds,
+    and a mention that yields nothing moves on to the next one in the body.
+    """
+    lowered = (text or "").lower()
+    for mention in _RESET_MENTION_RE.finditer(lowered):
+        position = mention.end()
+        window = None
+        while True:
+            step = _RESET_STEP_RE.match(lowered, position)
+            if not step:
+                break
+            unit = _RESET_UNITS.get(step.group(2))
+            if unit is None:
+                window = None
+                break
+            amount = int(step.group(1))
+            window = amount * unit if window is None else window + amount * unit
+            position = step.end()
+        if window is not None:
+            return window
+    return None
+
+
+def post_retry(key, body, url=CHAT, retry=True):
+    """One call, retried on a transient status -- unless told not to.
+
+    `retry=False` (the CLI's ``--no-retry``) never sleeps: a run on a deadline
+    measures every leg once and reports what it saw. A 429 that states its own
+    reset further away than RESET_GIVE_UP_S is returned unretried even with
+    `retry=True`, because the backoff cannot reach the window's end.
+    """
+    delays = list(RETRY_DELAYS_S) if retry else []
     while True:
         result = post(key, body, url)
         if result["status"] not in RETRY_STATUSES or not delays:
             return result
+        if result["status"] == 429:
+            window = reset_window_s(result.get("body") or "")
+            if window is not None and window > RESET_GIVE_UP_S:
+                log("no retry: 429 states a reset of %ds (over %ds)"
+                    % (window, RESET_GIVE_UP_S))
+                return result
         delay = delays.pop(0)
         log("backoff %ds status=%s" % (delay, result["status"]))
         time.sleep(delay)
@@ -287,11 +353,13 @@ def cache_result(parsed):
     return "false", "cached tokens 0"
 
 
-def probe_cache(key, leg, url, max_tokens):
+def probe_cache(key, leg, url, max_tokens, retry=True):
     """The two-call prompt-cache probe's record fields - the second call decides."""
     prefix = cache_prefix()
-    first = post_retry(key, cache_body(leg, prefix, CACHE_TURN_FIRST, max_tokens), url)
-    second = post_retry(key, cache_body(leg, prefix, CACHE_TURN_SECOND, max_tokens), url)
+    first = post_retry(key, cache_body(leg, prefix, CACHE_TURN_FIRST, max_tokens),
+                       url, retry)
+    second = post_retry(key, cache_body(leg, prefix, CACHE_TURN_SECOND, max_tokens),
+                        url, retry)
     rec = {"cache_first_status": first["status"], "cache_status": second["status"],
            "cache_ms": second["ms"], "cache_error": second["err"],
            "cache_served": served_of(second["parsed"])}
@@ -307,9 +375,10 @@ def probe_cache(key, leg, url, max_tokens):
     return rec
 
 
-def probe(key, leg, url=CHAT, ack_max_tokens=ACK_MAX_TOKENS, do_cache=False):
+def probe(key, leg, url=CHAT, ack_max_tokens=ACK_MAX_TOKENS, do_cache=False,
+          retry=True):
     rec = {"leg": leg, "at": now_iso()}
-    ack = post_retry(key, ack_body(leg, ack_max_tokens), url)
+    ack = post_retry(key, ack_body(leg, ack_max_tokens), url, retry)
     rec["ack_status"] = ack["status"]
     rec["ack_ms"] = ack["ms"]
     rec["ack_error"] = ack["err"]
@@ -324,7 +393,7 @@ def probe(key, leg, url=CHAT, ack_max_tokens=ACK_MAX_TOKENS, do_cache=False):
         rec["ack_note"] = ack["err"]
         rec["ack_body"] = ack.get("body", "")[:400]
 
-    tool = post_retry(key, tool_body(leg), url)
+    tool = post_retry(key, tool_body(leg), url, retry)
     rec["tool_status"] = tool["status"]
     rec["tool_ms"] = tool["ms"]
     rec["tool_error"] = tool["err"]
@@ -342,13 +411,19 @@ def probe(key, leg, url=CHAT, ack_max_tokens=ACK_MAX_TOKENS, do_cache=False):
         rec["tool_body"] = tool.get("body", "")[:400]
 
     if do_cache:
-        rec.update(probe_cache(key, leg, url, ack_max_tokens))
+        rec.update(probe_cache(key, leg, url, ack_max_tokens, retry))
     return rec
 
 
 def tsv_cell(value):
-    """One cell: never a tab or newline, so one leg stays one line."""
-    return str(value if value not in (None, "") else "-").replace("\t", " ").replace("\n", " ")
+    """One cell: never a tab, CR or newline, so one leg stays one line.
+
+    A provider error body is read only to classify the failure, and it can
+    carry CRLF inside its own message, where a bare CR would still end the row
+    for anything that reads the TSV line-wise.
+    """
+    return str(value if value not in (None, "") else "-").replace(
+        "\t", " ").replace("\r", " ").replace("\n", " ")
 
 
 def tsv_row(rec, gateway_label):
@@ -451,6 +526,9 @@ def main(argv=None) -> int:
                     help="budget of the ack call and the cache probe's calls")
     ap.add_argument("--cache", action="store_true",
                     help="run the two-call prompt-cache probe per leg")
+    ap.add_argument("--no-retry", action="store_true",
+                    help="one call per request: never wait out RETRY_DELAYS_S "
+                         "on a 429/503/504")
     ap.add_argument("--tsv", default="", help="write the results as TSV to PATH")
     args = ap.parse_args(argv)
 
@@ -482,7 +560,8 @@ def main(argv=None) -> int:
         tsv.flush()
     try:
         for leg in legs:
-            rec = probe(key, leg, chat, args.ack_max_tokens, args.cache)
+            rec = probe(key, leg, chat, args.ack_max_tokens, args.cache,
+                        retry=not args.no_retry)
             print(json.dumps(rec), flush=True)
             if tsv is not None:
                 tsv.write(tsv_row(rec, args.gateway_label) + "\n")

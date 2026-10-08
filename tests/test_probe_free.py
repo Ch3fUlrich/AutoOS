@@ -5,8 +5,11 @@ No test here reaches a real gateway or reads a real key: the network side is a
 fake OpenAI-shape chat server on a real loopback socket (stdlib http.server -
 `post()` is never mocked, so the retry, the JSON decode and the HTTPError path
 are the probe's own), and the key is a fake value put in AUTOOS_OMNIROUTE_KEY
-for the subprocess. A scripted leg answers 500, never 429/503/504: those are
-the probe's backoff statuses and would sleep for minutes.
+for the subprocess. A scripted leg answers 500, not 429/503/504: those are the
+probe's backoff statuses and would sleep for minutes. Where a case does script
+a 429 it is the backoff's own rule under test - a stated long reset or
+``--no-retry`` must keep it from sleeping at all, and a slept 60 s there is the
+failure this file is written to catch.
 
 Run from the repo root:
 
@@ -201,6 +204,129 @@ class TsvTests(unittest.TestCase):
         self.assertEqual(len(row.split("\t")), 8)
         self.assertNotIn("\n", row)
 
+    def test_a_bare_cr_ends_the_row_for_a_line_wise_reader(self):
+        """A provider body that spells its own newlines CRLF leaves a \r behind
+        once \n is stripped, and `readline()`-style readers stop there."""
+        rec = {"leg": "l/x", "ack": "fail",
+               "ack_error": "HTTP 429\r\nIndividual quota reached\r"}
+        row = probe_free.tsv_row(rec, "central")
+        self.assertEqual(len(row.split("\t")), 8)
+        for bad in ("\r", "\n"):
+            self.assertNotIn(bad, row)
+        self.assertEqual(row.split("\t")[7], "HTTP 429  Individual quota reached ")
+
+
+class ResetWindowTests(unittest.TestCase):
+    """The body-side rule that decides whether a 429 is worth waiting on."""
+
+    def test_reads_the_window_a_refusal_states(self):
+        for text, seconds in (
+                ("Individual quota reached, resets 110h47m at 2026-09-26T19:17Z",
+                 110 * 3600 + 47 * 60),
+                ("Rate limit exceeded, resets in 5 minutes", 300),
+                ("Please retry in 59.250991496s.", 59),
+                ("quota window: retry after 12h", 12 * 3600),
+                ("reset after 51s", 51),
+                ("Resets in ~1h2m3s", 3723),
+                ("try again in 2h30m", 2 * 3600 + 30 * 60)):
+            self.assertEqual(probe_free.reset_window_s(text), seconds, text)
+
+    def test_no_window_and_an_unknown_unit_answer_none(self):
+        for text in ("Too many requests", "HTTP 429", "resets in 3 windows", "",
+                     None):
+            self.assertIsNone(probe_free.reset_window_s(text), repr(text))
+
+    def test_a_mention_that_yields_nothing_falls_to_the_next(self):
+        text = "Rate limit: resets hourly, try again in 1h"
+        self.assertEqual(probe_free.reset_window_s(text), 3600)
+
+
+class RetryDecisionTests(unittest.TestCase):
+    """post_retry's two ways not to sleep: ``--no-retry``, and a 429 whose own
+    body counts itself out beyond the backoff's reach. `post` and `time` are
+    swapped for the duration of the test, so no case waits or reaches a socket -
+    the slept list is the assertion, and a non-empty one means the old behaviour
+    (always sleeping RETRY_DELAYS_S) is back."""
+
+    def setUp(self):
+        self.real_post = probe_free.post
+        self.real_time = probe_free.time
+        self.real_log = probe_free.log
+        self.calls = []
+        self.slept = []
+        self.notes = []
+        test = self
+
+        class _Clock:
+            def sleep(self, seconds):
+                test.slept.append(seconds)
+
+            def monotonic(self):
+                return 0.0
+
+        probe_free.time = _Clock()
+        probe_free.log = self.notes.append
+        self.addCleanup(setattr, probe_free, "time", self.real_time)
+        self.addCleanup(setattr, probe_free, "post", self.real_post)
+        self.addCleanup(setattr, probe_free, "log", self.real_log)
+
+    def feed(self, *results):
+        queued = list(results)
+
+        def post(key, body, url=None, timeout=180):
+            self.calls.append(body)
+            return queued.pop(0)
+
+        probe_free.post = post
+        return self.calls
+
+    @staticmethod
+    def refusal(status, body=""):
+        return {"status": status, "ms": 1, "parsed": None,
+                "err": "HTTP %s" % status, "body": body}
+
+    def test_no_retry_calls_once_and_sleeps_nothing(self):
+        self.feed(self.refusal(429), self.refusal(200))
+        result = probe_free.post_retry("k", {"model": "l/x"}, retry=False)
+        self.assertEqual(result["status"], 429)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.slept, [])
+        self.assertEqual(self.notes, [])
+
+    def test_a_reset_beyond_the_backoff_is_not_retried(self):
+        self.feed(self.refusal(429, "Individual quota reached, resets 110h47m"),
+                  self.refusal(200))
+        result = probe_free.post_retry("k", {"model": "l/x"})
+        self.assertEqual(result["status"], 429)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.slept, [])
+        self.assertEqual(len(self.notes), 1, self.notes)
+        self.assertIn("no retry", self.notes[0])
+        self.assertIn("398820", self.notes[0])
+
+    def test_a_window_the_backoff_can_reach_is_still_retried(self):
+        self.feed(self.refusal(429, "Please retry in 30s."), self.refusal(200))
+        result = probe_free.post_retry("k", {"model": "l/x"})
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.slept, [probe_free.RETRY_DELAYS_S[0]])
+        self.assertIn("backoff 60s status=429", self.notes)
+
+    def test_a_429_that_states_nothing_is_still_retried(self):
+        self.feed(self.refusal(429, "Rate limit exceeded"), self.refusal(503),
+                  self.refusal(200))
+        result = probe_free.post_retry("k", {"model": "l/x"})
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(self.slept, list(probe_free.RETRY_DELAYS_S))
+
+    def test_the_reset_rule_is_429_only(self):
+        """A 503's body may mention a window, and load shedding is still worth
+        a second call - only the rate limit speaks of its own reset."""
+        self.feed(self.refusal(503, "resets 110h47m"), self.refusal(200))
+        result = probe_free.post_retry("k", {"model": "l/x"})
+        self.assertEqual(result["status"], 200)
+        self.assertEqual(self.slept, [probe_free.RETRY_DELAYS_S[0]])
+
 
 class LiveProbeTests(unittest.TestCase):
     """The whole CLI against the fake gateway - the real post(), sockets, TSV."""
@@ -215,7 +341,12 @@ class LiveProbeTests(unittest.TestCase):
                  "--model", "l/x", "--cache", "--tsv", self.tsv, *extra],
                 capture_output=True, text=True, timeout=120, env=run_env, cwd=str(ROOT))
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.records = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+            # The record stream and the probe's own notes (backoff, no-retry)
+            # share stdout - the same tolerance tools/matrix.py applies to the
+            # run's logs/probe-free-*.jsonl, whose 43 records sit among 8
+            # backoff lines.
+            self.records = [json.loads(line) for line in proc.stdout.splitlines()
+                            if line.strip().startswith("{")]
             self.stdout = proc.stdout
             with open(self.tsv, encoding="utf-8") as fh:
                 self.rows = [line.split("\t") for line in fh.read().splitlines()]
@@ -282,6 +413,38 @@ class LiveProbeTests(unittest.TestCase):
             gateway.stop()
         self.assertEqual(self.records[0]["ack"], "empty")
         self.assertEqual(self.rows[1][2], "empty")
+
+    def test_a_429_that_states_a_long_reset_is_measured_once(self):
+        """The whole CLI, retrying on: a refusal that counts itself out past the
+        backoff is the finding, so the run moves to the next call instead of
+        sleeping 60 s and 120 s against a 110-hour window."""
+        gateway = FakeGateway(default=(429, {"error": {
+            "message": "Individual quota reached, resets 110h47m"}}))
+        url = gateway.start()
+        try:
+            self.run_probe(url)
+        finally:
+            gateway.stop()
+        self.assertEqual(len(gateway.requests), 4)
+        self.assertEqual(self.records[0]["prompt_cache"], "unknown")
+        self.assertEqual(self.rows[1][7], "HTTP 429")
+        # the skip is announced, not silent: 110h47m is 398820 s
+        self.assertIn("no retry: 429 states a reset of 398820s", self.stdout)
+
+    def test_no_retry_sends_one_call_per_request(self):
+        """``--no-retry``: even a 429 that states no window at all is reported,
+        not waited on - four calls, no backoff."""
+        gateway = FakeGateway(
+            default=(429, {"error": {"message": "Too many requests"}}))
+        url = gateway.start()
+        try:
+            self.run_probe(url, extra=("--no-retry",))
+        finally:
+            gateway.stop()
+        self.assertEqual(len(gateway.requests), 4)
+        self.assertEqual([self.records[0][k] for k in ("ack", "tool", "prompt_cache")],
+                         ["fail", "fail", "unknown"])
+        self.assertEqual(self.rows[1][7], "HTTP 429")
 
     def test_legs_file_names_the_legs_and_ignores_comments(self):
         gateway = FakeGateway()
