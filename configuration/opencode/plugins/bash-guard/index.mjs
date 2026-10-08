@@ -539,14 +539,22 @@ function checkCopyMove(cmd, args) {
 function gitSubcommand(args) {
   // git's subcommand and the arguments after it, skipping the global options
   // that carry a value (`git -C dir status`). Null when no subcommand follows.
+  // The skipped option tokens travel back as `opts`: a caller whose rule is
+  // "these verbs are read-only" must also see `-c` / `-C`, which are how a
+  // read-only verb is handed a program to run (`git -c core.fsmonitor=... status`).
   const n = args.length;
   let i = 0;
+  const opts = [];
   while (i < n) {
     const a = args[i];
     if (a === "--") break;
     if (a.startsWith("-")) {
+      opts.push(a);
       const bare = a.split("=")[0];
-      if (["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--exec-path"].includes(bare)) {
+      const takesValue = ["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--exec-path"].includes(bare);
+      // `--git-dir=x` carries its own value; only the bare spelling eats the
+      // next token.
+      if (takesValue && !a.includes("=")) {
         i += 2;
       } else {
         i += 1;
@@ -555,13 +563,13 @@ function gitSubcommand(args) {
     }
     break;
   }
-  if (i >= n) return null;
-  return { sub: args[i], rest: args.slice(i + 1) };
+  if (i >= n) return { sub: null, rest: [], opts };
+  return { sub: args[i], rest: args.slice(i + 1), opts };
 }
 
 function checkGit(args) {
   const g = gitSubcommand(args);
-  if (g === null) return null;
+  if (g === null || g.sub === null) return null;
   const sub = g.sub;
   const rest = g.rest;
   if (ORCH_GIT_DENY.has(sub)) {
@@ -923,6 +931,60 @@ const L2_READ_HEADS = new Set(["ls", "cat", "rg", "head", "tail", "wc", "pwd"]);
 const L2_GIT_SUBCOMMANDS = new Set(["status", "log", "diff", "show"]);
 const L2_LIST_TEXT = "git status|log|diff|show, ls, cat, rg, head, tail, wc, pwd";
 
+// Sonnet final REJECT (criterion b): the head list proves WHICH program runs,
+// never WHAT IT RUNS. These are the switches that hand a read-only command a
+// program, a repository or an environment of the caller's choosing:
+//
+// - git global options (the tokens before the subcommand, which `gitSubcommand`
+//   used to walk past and throw away): `-c` / `--config-env` write config that
+//   git then acts on (`core.fsmonitor`, `core.pager`, `credential.helper`),
+//   `-C` / `--git-dir` / `--work-tree` / `--exec-path` / `--namespace` /
+//   `--super-prefix` point the read at another repo or another git binary, and
+//   `-p` / `--paginate` pipes the output through a shell (`core.pager`).
+//   Matched on the option NAME before any `=`, so `--no-pager` stays allowed.
+// - git per-verb switches in the rest: `--ext-diff` (and its short `-x`) runs
+//   the external diff driver, `--textconv` (`-a`) runs the textconv filter,
+//   `--no-index` compares two working-tree paths - arbitrary files.
+// - rg: `--pre` / `--pre-glob` pipe every file through a program,
+//   `--hostname-bin` runs a binary, `--search-zip` / `-z` decompress with it.
+// - /proc/self/*, /proc/<pid>/*, /proc/*/environ: the lane's own environment -
+//   server password, gateway keys - is readable there, so no read head may
+//   name one. `/proc/cpuinfo` and friends stay readable.
+// - an environment-assignment prefix (`GIT_PAGER=x git log`) reaches the same
+//   knobs with no flag at all: the prefix IS the payload.
+const L2_GIT_GLOBAL_DENY = new Set([
+  "-c", "--config-env", "-C", "--git-dir", "--work-tree", "--exec-path",
+  "--namespace", "--super-prefix", "--paginate", "-p",
+]);
+const L2_GIT_REST_DENY = new Set([
+  "--ext-diff", "--textconv", "--no-index", "-x", "-a",
+]);
+const L2_RG_DENY = new Set([
+  "--pre", "--pre-glob", "--hostname-bin", "--search-zip", "-z",
+]);
+const L2_PROC_RE = /(^|\/)proc\/(self|thread-self|[0-9]+|\*)\//;
+
+function l2OptionDenial(tokens, deny, label) {
+  for (const t of tokens) {
+    const bare = t.split("=")[0];
+    if (deny.has(bare)) {
+      return `${label} ${t} hands the read-only command a program, a repository or a pager to run`;
+    }
+  }
+  return null;
+}
+
+function l2ProcDenial(tokens, head) {
+  for (const t of tokens) {
+    if (t.startsWith("-")) continue;
+    if (L2_PROC_RE.test(t)) {
+      return `${head} ${t} reads a live process entry - the lane's own environment (` +
+             "server password, gateway keys) is readable there";
+    }
+  }
+  return null;
+}
+
 function stdinOrSubstitutionReason(command) {
   // One pass outside quotes for the operators a head list cannot approve:
   // `<` (any stdin redirection), a backtick, `$(`, and `>(`.
@@ -980,23 +1042,48 @@ function l2ReadOnlyDenialReason(command) {
   for (const seg of collectSegments(command)) {
     const words = tokenizeSegment(seg);
     const idx = skipLeading(words, 0);
+    // A VAR=value prefix is the payload, not a wrapper: GIT_PAGER, GIT_DIR and
+    // GIT_CONFIG_ENV reach git's config knobs with no git flag at all, so an
+    // assignment that `skipLeading` walked past must never become a pass.
+    for (let k = 0; k < idx; k++) {
+      if (ORCH_ENV_ASSIGN.test(words[k])) {
+        return `the environment assignment ${words[k]} sets what the read-only command runs; an L2 may not configure its own tools`;
+      }
+    }
     if (idx >= words.length) continue;
     const head = baseName(words[idx]);
     if (head === "git") {
       const args = words.slice(idx + 1);
       const g = gitSubcommand(args);
-      if (g === null) return "git without a subcommand may run any verb";
+      // The global options live BEFORE the subcommand and git acts on them
+      // however read-only the verb looks: `-c` writes config the verb then
+      // executes (core.fsmonitor, core.pager, credential.helper), `-C` and
+      // friends choose another repository or git binary.
+      const globalReason = l2OptionDenial(g.opts, L2_GIT_GLOBAL_DENY, "git");
+      if (globalReason) return globalReason;
+      if (g.sub === null || g.sub === undefined) {
+        return "git without a subcommand may run any verb";
+      }
       if (!L2_GIT_SUBCOMMANDS.has(g.sub)) {
         return `git ${g.sub} is not on the read-only list (${L2_LIST_TEXT})`;
       }
       // `git log --output=f` is a file write wearing a read-only verb.
       const out = g.rest.find((a) => a === "--output" || a.startsWith("--output="));
       if (out) return `git ${g.sub} ${out} writes a file; an L2 may not write anywhere`;
+      const restReason = l2OptionDenial(g.rest, L2_GIT_REST_DENY, `git ${g.sub}`);
+      if (restReason) return restReason;
       continue;
     }
     if (!L2_READ_HEADS.has(head)) {
       return `${head} is not on the read-only list (${L2_LIST_TEXT})`;
     }
+    const args = words.slice(idx + 1);
+    if (head === "rg") {
+      const rgReason = l2OptionDenial(args, L2_RG_DENY, "rg");
+      if (rgReason) return rgReason;
+    }
+    const procReason = l2ProcDenial(args, head);
+    if (procReason) return procReason;
   }
   return null;
 }

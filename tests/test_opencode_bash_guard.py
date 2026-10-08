@@ -548,6 +548,80 @@ class TestL2ReadOnlyRole(unittest.TestCase):
         self.assertFalse(res["allowed"], "the legacy incident rule still applies")
         self.assertIn("heredoc", (res["error"] or "").lower())
 
+    # ------------------------------------------------------------------
+    # Sonnet final REJECT (criterion b): a read-only HEAD is not a read-only
+    # command. `git status` is on the list, but `git -c core.fsmonitor='touch
+    # /tmp/p' status` runs that fsmonitor as a shell; `rg` is on the list, but
+    # `rg --pre 'sh -c id'` pipes every file through that program; `cat` is on
+    # the list, but `/proc/self/environ` holds the lane's server password. The
+    # flags that turn an inspection command into a program runner are denied
+    # whatever head they hang off, and so is an environment-assignment prefix,
+    # which reaches the same config knobs (`GIT_PAGER=x git log`) without any
+    # flag at all.
+    # ------------------------------------------------------------------
+
+    def test_git_config_injecting_global_options_denied(self):
+        for cmd in ("git -c core.fsmonitor='touch /tmp/p' status",
+                    "git -c core.pager=x log",
+                    "git -c gpg.format=x show HEAD",
+                    "git --config-env=credential.helper=ENV:CRED_HELPER status",
+                    "git -C /tmp/other-repo status",
+                    "git --git-dir=/tmp/evil.git log",
+                    "git --work-tree=/etc status",
+                    "git --exec-path=/tmp/bins log",
+                    "git -p log", "git --paginate log"):
+            self._l2_denied(cmd, "git")
+
+    def test_git_output_driving_subcommand_flags_denied(self):
+        for cmd in ("git diff --ext-diff", "git show --ext-diff HEAD",
+                    "git show --textconv", "git diff --textconv HEAD~1",
+                    "git diff --no-index a b", "git log --output=/tmp/f",
+                    "git diff --output=/tmp/patch.diff"):
+            self._l2_denied(cmd, "git")
+
+    def test_git_read_only_flags_kept(self):
+        for cmd in ("git log", "git log --oneline -5", "git status --short",
+                    "git diff --no-ext-diff HEAD", "git show --no-textconv HEAD",
+                    "git --no-pager log", "git --no-pager diff"):
+            self._l2_allowed(cmd)
+
+    def test_rg_program_running_flags_denied(self):
+        for cmd in ("rg --pre 'sh -c id' x .", "rg --pre /bin/sh x .",
+                    "rg --pre=unzip x .", "rg --pre-glob '*.gz' x .",
+                    "rg --hostname-bin /bin/sh .", "rg --search-zip x .",
+                    "rg -z x ."):
+            self._l2_denied(cmd, "rg")
+
+    def test_rg_plain_search_kept(self):
+        for cmd in ("rg foo", "rg --ignore-file .gitignore pattern .",
+                    "rg -i --hidden TODO ."):
+            self._l2_allowed(cmd)
+
+    def test_proc_per_process_reads_denied(self):
+        for cmd in ("cat /proc/self/environ", "cat /proc/123/environ",
+                    "cat /proc/*/environ", "head -1 /proc/self/cmdline",
+                    "tail -f /proc/thread-self/status", "cat /proc/self/maps",
+                    "cat proc/self/environ"):
+            self._l2_denied(cmd, "proc")
+
+    def test_proc_static_reads_kept(self):
+        self._l2_allowed("cat /proc/cpuinfo")
+        self._l2_allowed("cat /proc/meminfo")
+        self._l2_allowed("head -3 /proc/version")
+
+    def test_env_assignment_prefix_denied(self):
+        # `FOO=x <head>` sets the environment of a command the list approved,
+        # which is how GIT_PAGER / GIT_DIR / GIT_CONFIG_ENV reach git without a
+        # single git flag. The prefix is the payload; the head is a disguise.
+        for cmd in ("GIT_PAGER=x git log", "FOO=1 git status",
+                    "env GIT_DIR=/tmp/evil git log", "LINES=1 rg foo",
+                    "git log; FOO=1 ls", "export FOO=1"):
+            self._l2_denied(cmd)
+
+    def test_wrapper_of_read_only_head_without_assignment_still_kept(self):
+        self._l2_allowed("timeout 5 ls")
+        self._l2_allowed("nice ls")
+
 
 if __name__ == "__main__":
     unittest.main()
