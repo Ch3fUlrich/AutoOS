@@ -200,10 +200,11 @@ TIER_ORDER = {"trial": 0, "free": 1, "credit": 2, "paid": 3, "subscription": 3}
 ORCHESTRATOR_ID_PREFIXES = ("l0-", "l1-", "l2-")
 CACHEABLE_VERDICTS = ("true", "documented")
 
-# A credit/paid grant with no price row cannot be costed at all: the resolver
+# A credit/paid leg with no price row cannot be costed at all: the resolver
 # refuses it (schema `price_source`), so a combo that declares it is a combo
-# whose tail leg bills $0 while it drains.
-PRICE_GATE_PROVIDER_TIERS = ("credit", "paid")
+# whose tail leg bills $0 while it drains. Compared against the leg's EFFECTIVE
+# tier, the same reading rule (b) uses.
+PRICE_GATE_TIERS = ("credit", "paid")
 
 # §7b: the Qoder PAT in OmniRoute does not work, so qoder/* answers only as the
 # spawner's own client — a gateway leg of a combo can never serve.
@@ -309,7 +310,7 @@ def check_price_gate(registry, combo_id, legs):
             continue                      # rule (c) reports an unresolvable leg
         pid, mid = resolved
         tier = leg_tier(registry, leg)
-        if tier not in PRICE_GATE_PROVIDER_TIERS:
+        if tier not in PRICE_GATE_TIERS:
             continue
         model = models.get(mid) or {}
         row = (model.get("provider_prices") or {}).get(pid) or model
