@@ -1340,16 +1340,20 @@ def sandbox_branch_for(source: str, run_id: str) -> str:
     return "%s/%s" % (sandbox_repo_slug(source), run_id)
 
 
-def _isolate_build(root: str, path: str, source_sha: str, allowed: list) -> None:
+def _isolate_build(root: str, path: str, source_sha: str, allowed: list, agentignore: list, review_base=None) -> None:
     """Materialise the allowed HEAD entries and commit them as the base sha.
 
     Runs inside isolate_clone's cleanup, so a raise at any step of it leaves no
-    sandbox directory at all (I11).
+    sandbox directory at all (I11). A `review_base` pair rides base..head in too.
     """
     subprocess.run(["git", "init", "-q", path], check=True, stdin=subprocess.DEVNULL)
     _isolate_materialise(root,
                          _isolate_batch_entries(root, source_sha, allowed), path)
     subprocess.run(["git", "-C", path, "add", "-A"], check=True, stdin=subprocess.DEVNULL)
+    if review_base is not None:
+        write_review_diff(root, path, review_base, agentignore)
+        subprocess.run(["git", "-C", path, "add", "-f", "--", REVIEW_DIFF_FILE], check=True,
+                       stdin=subprocess.DEVNULL)
     subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
                     "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
                     "sandbox base (source %s)" % source_sha], check=True, stdin=subprocess.DEVNULL)
@@ -1398,7 +1402,42 @@ def take_it_hint(sandbox_path: str, branch: str, base_sha: str = "") -> str:
     return line
 
 
-def isolate_clone(root: str, path: str, branch: str) -> str:
+# AO-L2-SEAT-INTEGRITY P1 (measured, greatwiki): the --isolate seat is ONE commit, so
+# `git diff A B` inside it names nothing; `run --review-base` rides that diff in as this.
+REVIEW_DIFF_FILE = "REVIEW-DIFF.patch"
+
+
+class ReviewBaseRefused(ValueError):
+    """--review-base named no commit the seat can diff from."""
+
+
+def resolve_review_base(root: str, base):
+    """`(base_sha, head_sha)` full shas, or None when `base` names no commit in the
+    parent - the seat's snapshot IS the parent's HEAD, so the parent names it."""
+    if not str(base or "").strip() or str(base).startswith("-"):
+        return None
+    proc = subprocess.run(["git", "-C", root, "rev-parse", "%s^{commit}" % base,
+                           "HEAD^{commit}"], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    return tuple(proc.stdout.split()) if proc.returncode == 0 else None
+
+
+def write_review_diff(root: str, path: str, pair, agentignore: list) -> None:
+    """Ride base..head into the sandbox as REVIEW-DIFF.patch, minus the paths isolation
+    keeps out (S2: a patch with a plaintext secret in it is itself the leak)."""
+    rng = "%s..%s" % pair
+    names = subprocess.run(["git", "-C", root, "diff", "--name-only", "-z", rng], capture_output=True,
+                           check=True, stdin=subprocess.DEVNULL).stdout.split(b"\0")
+    kept = [p for p in (n.decode("utf-8", "surrogateescape") for n in names)
+            if p and not _isolate_path_excluded(p, agentignore)]
+    with io.open(os.path.join(path, REVIEW_DIFF_FILE), "wb") as fh:
+        for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
+            # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
+            subprocess.run(["git", "-C", root, "diff", rng, "--"] + kept[i:i + 200],
+                           stdout=fh, check=True, stdin=subprocess.DEVNULL)
+
+
+def isolate_clone(root: str, path: str, branch: str, review_base=None) -> str:
     """Create the --isolate sandbox and return its base sha.
 
     DESIGN (T2-ISOLATE-SECRETS S2, revised after the cross-family review) -
@@ -1450,10 +1489,13 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
     if os.path.lexists(path):
         raise FileExistsError("sandbox destination already exists: %s" % path)
     isolate_preflight_refuse(root)
-    source_sha, allowed, _agentignore = _isolate_allowed_files(root)
+    source_sha, allowed, agentignore = _isolate_allowed_files(root)
+    if review_base is not None and review_base[1] != source_sha:
+        raise ReviewBaseRefused("review-base: parent HEAD moved %s -> %s, re-run"
+                                % (review_base[1], source_sha))
     os.makedirs(path, exist_ok=True)
     try:
-        _isolate_build(root, path, source_sha, allowed)
+        _isolate_build(root, path, source_sha, allowed, agentignore, review_base)
         # The orchestrator still fetches from the sandbox path (unchanged); every
         # remote's push URL is disabled and a pre-push hook is installed, so an
         # unplanned `git push` - to origin or to the parent's absolute path the
@@ -2173,7 +2215,7 @@ def fence_sandbox_push(sandbox: str) -> None:
     os.chmod(path, 0o755)
 
 
-def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, base_line: str = "") -> str:
     """The lines prepended to the task text of an --isolate run.
 
     SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
@@ -2182,6 +2224,7 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -
 
     Item 4 adds the third line a research run needs: an edit is not the
     deliverable, and a worker that is never told so will helpfully make one.
+    P1: a review seat is pointed at that file - its own history cannot resolve shas.
     """
     lines = ("Your working directory %s is your only writable checkout; "
              "never cd, git -C or write into %s or any other path outside it.\n"
@@ -2192,6 +2235,11 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -
         lines += ("\nThis run is read-only: its deliverable is its REPORT, and "
                   "changing nothing is success - do not edit, commit or "
                   "reorganise anything; read and report.")
+    if base_line:
+        lines += ("\n%s\nThe change under review is written to %s - read that file; "
+                  "`git diff`/`git show` on those shas name nothing here: this seat "
+                  "is a one-commit snapshot."
+                  % (base_line, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
     return lines
 
 
@@ -5765,6 +5813,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
                                                    os.environ.get("AUTOOS_TASK_DIR"))
+    if sandbox is None and getattr(args, "review_base", None):
+        raise ReviewBaseRefused("--review-base needs --isolate: the diff lands in the "
+                                "sandbox, not in a shared checkout")
     if sandbox is not None:
         # The fence denies opencode's file tools outside the clone, but a
         # worker told (or shown) an absolute parent path can still cd, git -C
@@ -5773,8 +5824,17 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
         sandbox.setdefault("source", isolate_source())
+        # a fallthrough re-plan passes this dict again: resolve once, so the stamp holds
+        if getattr(args, "review_base", None) and not sandbox.get("review_base"):
+            pair = resolve_review_base(sandbox["source"], args.review_base)
+            if pair is None:
+                raise ReviewBaseRefused("--review-base %s is not a reachable commit "
+                                        "in %s" % (args.review_base, sandbox["source"]))
+            sandbox["review_base"] = pair
+            sandbox["base_line"] = "sandbox base: %s HEAD %s" % pair
         cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
-                                     read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
+                                      read_only=bool(route.get("read_only")),
+                                      base_line=sandbox.get("base_line", "")) + "\n" + cmd[-1]
     if client.name == "opencode":
         # WSLSHELL (SB-B): opencode's own config schema carries a top-level
         # `shell` ("Default shell to use for terminal"), which its resolver
@@ -6046,14 +6106,23 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
         session = session_header_value(plan.get("session_tag") or "", plan.get("run_id")) \
             if plan.get("session_tag") else None
         found = gateway_writer(session, gateway=gateway, key=key, fetch=fetch)
-        if found is None:
+        # AO-L2-SEAT-INTEGRITY P1 (measured: L2 children recorded `unresolved` although the
+        # caller pinned a model). A pin names the ask; what a caller typed is its weakest
+        # witness (FAMILYFENCE-b: `pinned` is never a proof, so REJECT 3 keeps holding).
+        pin = _writer_named(plan.get("model")) if not found and plan.get("model_source") == WRITER_SOURCE_PIN else None
+        if found is None and pin is None:
             return {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
                     "family": None, "source": WRITER_UNRESOLVED,
                     "family_reason": "the gateway call log named no model for "
                                      "this run"}
-        provider, model = found
-        served_id = model
-        source = WRITER_SOURCE_GATEWAY
+        if found is None:
+            provider = free_provider(pin) or plan.get("client") or WRITER_UNRESOLVED
+            model = pin.rpartition("/")[2]
+            served_id, source = pin, WRITER_SOURCE_PIN
+        else:
+            provider, model = found
+            served_id = model
+            source = WRITER_SOURCE_GATEWAY
     else:
         asked = plan.get("model") or None
         if asked == PLAN_MODEL_UNNAMED:
@@ -10288,6 +10357,7 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
+        "sandbox_base": (plan.get("sandbox") or {}).get("base_line", ""),
         "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0],
         "parent_run_id": parent,
         "host": socket.gethostname(),
@@ -10979,7 +11049,8 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse(str(exc), EXIT_NO_OTHER_FAMILY)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
-    except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused) as exc:  # plan's / PRIV3's / D-255's own
+    except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused,
+            ReviewBaseRefused) as exc:  # plan's / PRIV3's / D-255's / P1's own
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
@@ -11276,8 +11347,8 @@ def cmd_run(args, cfg: dict) -> int:
         # so a denied card leaves no ~/fleet directory in the operator's home.
         try:
             sandbox_root_prepare(source, sb["path"])
-            isolate_clone(source, sb["path"], sb["branch"])
-        except PrivacyRefused as exc:
+            isolate_clone(source, sb["path"], sb["branch"], sb.get("review_base"))
+        except (PrivacyRefused, ReviewBaseRefused) as exc:
             # HOSTADMISSION-RACE: the one exit between the claim and this run's
             # worker record, so it is the one place that gives the host slot back
             # by hand instead of at the handover.
@@ -12049,6 +12120,10 @@ def _parser_run(sub):
                           "denied. Mandatory for every spawned tier (%s): a clone holds "
                           "committed files only, so no git-ignored key file is in the tree it "
                           "greps" % ", ".join(str(t) for t in ISOLATE_TIERS))
+    run.add_argument("--review-base", dest="review_base", metavar="SHA",
+                     help="with --isolate: ride the parent's `git diff SHA..HEAD` into the "
+                          "sandbox as %s, stamp \"sandbox base: <sha> HEAD <sha>\" in the seat "
+                          "prompt and record, refuse an unknown SHA (rc 2)" % REVIEW_DIFF_FILE)
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",

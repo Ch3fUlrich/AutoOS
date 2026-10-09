@@ -22043,5 +22043,102 @@ class HostAdmissionTests(unittest.TestCase):
                          "a client worker never inherits the escape")
 
 
+class P1ReviewBaseSeatTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P1 (measured, greatwiki): the one-commit --isolate seat cannot
+    resolve `git diff <base> HEAD`; --review-base rides that diff in as REVIEW-DIFF.patch."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid"]
+
+    def _out(self, *args):
+        return subprocess.run(["git"] + list(args), capture_output=True, text=True, check=True).stdout.strip()
+
+    def _repo(self):
+        """The fixture's two commits plus a third touching keep.txt AND secrets-generated/."""
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "secrets-generated"))
+        for name, text in (("keep.txt", "two\n"), ("secrets-generated/leak.txt", "LEAK")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"], check=True)
+        return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
+
+    def test_the_seat_holds_the_diff_as_a_file_in_its_one_commit(self):
+        cli, root, base, head = self.cli, *self._repo()
+        self.assertEqual(cli.resolve_review_base(root, base[:8]), (base, head))
+        self.assertIsNone(cli.resolve_review_base(root, "deadbeefdeadbeef"))
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1rb", (base, head))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+two", patch)
+            self.assertNotIn("FAKE-PLAINTEXT", patch, "a secret-bearing patch is the leak")
+            self.assertEqual(self._out("-C", dest, "rev-list", "--all", "--count"), "1",
+                             "the patch rides IN the base commit: a clean seat tree")
+            self.assertEqual(self._out("-C", dest, "status", "--short"), "")
+            # a parent that moved would have the seat diff a tree it does not hold
+            with self.assertRaises(cli.ReviewBaseRefused):
+                cli.isolate_clone(root, dest + "-2", "agent/p1rb2", (base, base))
+
+    def _args(self, review_base):
+        return argparse.Namespace(client="opencode", tier=2, card=None, auto=True,
+                                  task="review the diff", free=False, isolate=True,
+                                  joinable=False, model=None, clean=False, title=None,
+                                  allow_training=False, max_depth=None, lean=False,
+                                  review_base=review_base, free_model=self.cli.DEFAULT_FREE_MODEL)
+
+    def test_build_plan_stamps_prompt_and_record_and_refuses_an_unknown_base(self):
+        agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                                "providers": {"omniroute": {"models": {"x": {}}}}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            with self.assertRaises(agent.ReviewBaseRefused):
+                agent.build_plan(self._args("deadbeefdeadbeef"), cfg)
+            plan = agent.build_plan(self._args("HEAD"), cfg)
+            head = self._out("-C", agent.ROOT, "rev-parse", "HEAD")
+            stamp = "sandbox base: %s HEAD %s" % (head, head)
+            self.assertEqual(plan["sandbox"]["review_base"], (head, head))
+            self.assertIn(stamp, plan["cmd"][-1])
+            self.assertIn(os.path.join(plan["sandbox"]["path"], agent.REVIEW_DIFF_FILE),
+                          plan["cmd"][-1])
+            _wid, record = agent._worker_record_start(plan, self._args("HEAD"), tmp)
+            self.assertEqual(record.get("sandbox_base"), stamp)
+
+
+class P1PinnedWriterFamilyTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the
+    gateway log could not be read, although the caller HAD named a model with --model.
+    A pin names the ask but `pinned` is never a proof (FAMILYFENCE-b) - REJECT 3 holds."""
+
+    def _log_named_nothing(self, agent, **extra):
+        plan = {"session_tag": "lane-x", "run_id": "20261009-000000-p1-abcdef",
+                "client": "opencode", "model": "omniroute/l2-worker"}
+        plan.update(extra)
+        with mock.patch.object(agent, "manage_key", lambda env=None: None):
+            return agent.resolved_writer(plan, True, registry={"models": {
+                "gemini-3.8-flash": {"family": "google"}}})
+
+    def test_a_pinned_model_keeps_its_family_when_the_log_names_nothing(self):
+        agent = load_agent()
+        writer = self._log_named_nothing(agent, model="vertex/gemini-3.8-flash",
+                                         model_source=agent.WRITER_SOURCE_PIN)
+        self.assertEqual((writer["provider"], writer["model"]),
+                         ("vertex", "gemini-3.8-flash"))
+        self.assertEqual(writer["family"], "google")
+        self.assertEqual(writer["source"], agent.WRITER_SOURCE_PIN)
+        self.assertEqual(writer["family_source"], agent.FAMILY_SOURCE_PLANNED)
+        self.assertFalse(agent.writer_is_proven(writer), "a pin is never a witness")
+
+    def test_a_run_that_named_no_model_still_answers_unresolved(self):
+        agent = load_agent()
+        writer = self._log_named_nothing(agent)
+        self.assertEqual(writer["source"], agent.WRITER_UNRESOLVED)
+        self.assertIsNone(writer["family"])
+
+
 if __name__ == "__main__":
     unittest.main()
