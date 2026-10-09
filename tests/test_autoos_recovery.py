@@ -122,19 +122,21 @@ def trailer_lines(path=SB, branch=BRANCH):
 
 
 def spawner_lines(path=SB, branch=BRANCH, report=None):
-    """A whole completed run's tail: header, worker stream, closing block, REPORT.
+    """A whole completed run's tail: header, worker stream, REPORT, closing block.
 
-    The report sits behind a blank line on purpose: under the block rule
-    `_report_view` applies (P4c-fixes D1), a bare line right after the
-    '> thinking' marker is that quote block's lazy continuation, and a genuine
-    REPORT in a real transcript is its own paragraph after the quoted stream
-    ends.
+    The REPORT is the worker's own last word, so it sits ABOVE the closing block —
+    `tools/autoos-agent.py`'s cmd_run prints that trailer only after the child exits,
+    and `_has_report` reads no heading under it (P4c-fixes4 rule 5). The report also
+    sits behind a blank line on purpose: under the block rule `_report_view` applies
+    (P4c-fixes D1), a bare line right after the '> thinking' marker is that quote
+    block's lazy continuation, and a genuine REPORT in a real transcript is its own
+    paragraph after the quoted stream ends.
     """
-    out = header_lines(path, branch) + worker_lines("thinking") + trailer_lines(path, branch)
+    out = header_lines(path, branch) + worker_lines("thinking")
     if report:
         out.append("\n")
         out.append(report_body())
-    return out
+    return out + trailer_lines(path, branch)
 
 
 def report_body(run_id=RUN):
@@ -695,6 +697,121 @@ class ReportDetection(TempCase):
                                           report_body()],
                                          state=self.other_state())["has_report"])
 
+    # P4c-fixes4 (A/B): the reader is an ALLOWLIST, not a blacklist of the markdown
+    # construct this round's probe happened to find. A claim is the LAST column-0
+    # heading of the worker's own lines, BEFORE the spawner's closing block — so an
+    # indented line, an HTML block's payload, and anything under a forged trailer are
+    # not claims at all, whatever rc the record carries.
+    INDENTED = ("    ", "\t", "        ", "   \t")
+
+    def test_an_indented_report_is_not_a_report(self):
+        """The re-seat probe's exact shape: 'worker text\\n\\n    REPORT <id> · OK'
+        with rc 0 used to read completed / action none / exit 0."""
+        claim = "REPORT %s · OK · green\n" % RUN
+        for indent in self.INDENTED:
+            out = self.classified(["worker text\n", "\n", indent + claim],
+                                  state=self.other_state())
+            self.assertFalse(out["has_report"], repr(indent))
+            self.assertEqual(out["state"], "died", repr(indent))
+            self.assertEqual(r.next_action(0, out["state"]), "rerun", repr(indent))
+
+    def test_eight_spaces_after_a_list_item_is_no_heading(self):
+        """Not a code block (no blank line precedes the run) and not a heading
+        either: it is indented, and rule 1 refuses it on the column alone."""
+        self.assertFalse(self.classified(["- step one\n",
+                                          "        REPORT %s · OK · green\n" % RUN],
+                                         state=self.other_state())["has_report"])
+
+    def test_a_report_inside_an_html_block_is_not_a_report(self):
+        claim = "REPORT %s · OK · green\n" % RUN
+        for opener in ("<pre>\n", "<PRE>\n", "<script>\n", "<SCRIPT>\n", "<style>\n",
+                       "<textarea>\n", "<details>\n", "<div>\n", "<DIV>\n", "<p>\n",
+                       "<!DOCTYPE html>\n", "<?xml version=\"1.0\"?>\n"):
+            out = self.classified(["worker text\n", "\n", opener, claim],
+                                  state=self.other_state())
+            self.assertFalse(out["has_report"], opener)
+            self.assertEqual(out["state"], "died", opener)
+            self.assertEqual(r.next_action(0, out["state"]), "rerun", opener)
+
+    def test_an_unclosed_pre_swallows_the_rest(self):
+        """The raw-text tags end on their closing tag, not on a blank line: an
+        unclosed `<pre>` is an inert tail, and the report under it says nothing."""
+        self.assertFalse(self.classified(["<pre>\n", report_body(), "\n",
+                                          report_body()],
+                                         state=self.other_state())["has_report"])
+
+    def test_a_leading_angle_bracket_is_no_heading(self):
+        """'<REPORT …' is not a heading — and it opens an HTML block besides."""
+        for line in ("<REPORT %s · OK · green\n" % RUN,
+                     "<b>REPORT %s · OK</b>\n" % RUN):
+            self.assertFalse(self.classified([line], state=self.other_state())
+                             ["has_report"], line)
+
+    def test_an_html_block_closed_by_a_blank_line_leaves_a_report_counting(self):
+        self.assertTrue(self.classified(["<div>\n", "  <p>html note</p>\n", "\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+
+    def test_a_report_after_an_unrelated_html_block_counts(self):
+        """Fail closed is not fail always: a block that ended — its own closing tag,
+        or a blank line — hands the tail back to the worker's own lines."""
+        self.assertTrue(self.classified(["<pre>$ pytest -q\n", "4 passed\n", "</pre>\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+        self.assertTrue(self.classified(["<div>notes</div>\n", "\n", report_body()],
+                                        state=self.other_state())["has_report"])
+        self.assertTrue(self.classified(["<pre>x</pre>\n", "\n", report_body()],
+                                        state=self.other_state())["has_report"])
+
+    def test_a_report_under_a_trailer_line_is_not_the_workers_claim(self):
+        """cmd_run prints `writer:` / `scope:` / `sandbox changes` after the child
+        exits, so nothing below them is a heading the worker printed — and a worker
+        that forges one loses the claim under it (one wasted leg, no false 0)."""
+        claim = "REPORT %s · OK · green\n" % RUN
+        for head in ("writer: nvidia/muse-spark (nvidia) source=witnessed\n",
+                     "scope: /repo/tools/x.py (unit=file)\n",
+                     "sandbox changes (uncommitted):\n"):
+            self.assertFalse(self.classified(["worker text\n", head, claim],
+                                             state=self.other_state())["has_report"], head)
+
+    def test_a_genuine_report_above_the_trailer_still_completes(self):
+        info = self.classified(["worker text\n", "\n", report_body()] + trailer_lines())
+        self.assertTrue(info["has_report"])
+        self.assertEqual(info["state"], "completed")
+
+    def test_only_the_last_column_zero_heading_decides(self):
+        """A transcript whose LAST claim names another run is not this run's report,
+        whichever heading came before it."""
+        self.assertFalse(self.classified(["worker text\n", "\n",
+                                          "REPORT %s · OK · green\n" % RUN, "\n",
+                                          "REPORT %s · OK · green\n" % OTHER_RUN],
+                                         state=self.other_state())["has_report"])
+        self.assertTrue(self.classified(["worker text\n", "\n",
+                                         "REPORT %s · OK · green\n" % OTHER_RUN, "\n",
+                                         "REPORT %s · OK · green\n" % RUN],
+                                         state=self.other_state())["has_report"])
+
+    def test_the_parser_never_grants_a_claim_the_view_dropped(self):
+        """`autoos_report.parse_report` alone reads the fenced block below and says
+        a run reported; the module hands it only the surviving lines, and the heading
+        is what makes a report at all."""
+        self.assertIsNotNone(r.report_parser.parse_report(report_body()))
+        fenced = ["```sh\n", report_body(), "```\n"]
+        self.assertFalse(self.classified(fenced, state=self.other_state())["has_report"])
+        indented = ["worker text\n", "\n",
+                    "    " + report_body().replace("\n", "\n    ")]
+        self.assertFalse(self.classified(indented, state=self.other_state())["has_report"])
+        html = ["<pre>\n", report_body(), "</pre>\n"]
+        self.assertFalse(self.classified(html, state=self.other_state())["has_report"])
+
+    def test_the_parser_and_the_heading_must_agree_on_who_reported(self):
+        """The last heading is this run's bare contract line, but the LAST block the
+        parser can read names another run: two readers, two answers, no report."""
+        out = self.classified(["REPORT %s · OK\n" % OTHER_RUN, "\n", "# REPORT\n",
+                               "status: done\n"], state=self.other_state())
+        self.assertFalse(out["has_report"])
+        self.assertEqual(out["state"], "died")
+
     def test_empty_output_has_no_report(self):
         self.assertFalse(self.classified("")["has_report"])
 
@@ -739,6 +856,33 @@ class SuspectRecords(TempCase):
             info = self.healthy_job(**over)
             self.assertTrue(info["record_suspect"], over)
             self.assertEqual(info["state"], "unknown", over)
+
+    def test_a_non_finite_time_field_is_a_damaged_record_not_a_clock(self):
+        """P4c-fixes4 (C): `started` and `ended` are read out of a record a writer
+        can rewrite. NaN and infinity ARE floats, so the old type check accepted
+        them — and every comparison with them is False. A record that carries one
+        is suspect: no 'completed', no stall decision, escalate."""
+        for bad in (float("nan"), float("inf"), float("-inf"), 1e999):
+            info = self.healthy_job(started=bad)
+            self.assertTrue(info["record_suspect"], bad)
+            self.assertEqual(info["state"], "unknown", bad)
+
+    def test_a_non_finite_ended_in_exit_json_is_suspect_too(self):
+        for bad in (float("nan"), float("inf"), float("-inf"), 1e999, "1800000000"):
+            st = self.other_state()
+            root = make_record(st, exit_json={"rc": 0, "ended": bad},
+                                output=[report_body()])
+            info = classify(root, probe=dead)
+            self.assertTrue(info["record_suspect"], bad)
+            self.assertEqual(info["state"], "unknown", bad)
+
+    def test_a_finite_ended_is_no_suspect(self):
+        st = self.other_state()
+        root = make_record(st, exit_json={"rc": 0, "ended": NOW},
+                           output=[report_body()])
+        info = classify(root, probe=dead)
+        self.assertFalse(info["record_suspect"])
+        self.assertEqual(info["state"], "completed")
 
     def test_a_string_rc_is_no_zero_but_is_not_a_suspect_shape(self):
         """rc is type-checked before use (it never reads as 0), and the record
@@ -1306,6 +1450,49 @@ class RunIdsAndDirs(TempCase):
         root = make_record(self.state)
         self.assertEqual(r.classify_run(root, pid_probe=alive)["last_output_age"], 0.0)
 
+    # P4c-fixes4 (C): `stall <= 0` cannot refuse NaN — and `age <= nan` is False, so
+    # an unusable clock is not a harmless default, it is the verdict 'stalled' for a
+    # writer that is alive and the plan 'rerun' beside it. One bound, two ends.
+    UNUSABLE_CLOCKS = (float("nan"), float("inf"), float("-inf"), 1e999,
+                       604800.1, 604801, 10 ** 12)
+
+    def test_the_stall_clock_is_bounded_on_both_ends(self):
+        root = make_record(self.state)
+        for bad in self.UNUSABLE_CLOCKS + (0, -5, 0.5, True, "900"):
+            with self.assertRaises(r.RecoveryError):
+                r.classify_run(root, now=NOW, stall_secs=bad, pid_probe=alive)
+        for ok in (1, 1.0, 60, 900, 604800):
+            info = r.classify_run(root, now=NOW, stall_secs=ok, pid_probe=alive)
+            self.assertEqual(info["state"], "running", ok)
+
+    def test_a_non_finite_now_is_refused(self):
+        root = make_record(self.state)
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(r.RecoveryError):
+                r.classify_run(root, now=bad, pid_probe=alive)
+
+    def test_a_non_finite_mtime_is_no_age_at_all(self):
+        """The stall clock reads a filesystem mtime. A NaN there says nothing about
+        age, and 'nothing' is 'unknown' — never `age <= stall` on a NaN, which is
+        False and would answer 'stalled' for a live pid."""
+        root = make_record(self.state)
+        real = os.stat
+
+        class DamagedStat(object):
+            st_mode = stat.S_IFDIR | 0o700       # keep os.path.isdir working
+            st_mtime = float("nan")
+
+        os.stat = lambda *a, **k: DamagedStat()
+        try:
+            self.assertIsNone(r._output_age(root, NOW))
+            info = classify(root, probe=alive)
+            self.assertIsNone(info["last_output_age"])
+            self.assertEqual(info["state"], "unknown")
+            self.assertEqual(r.next_action(0, info["state"]), "escalate")
+        finally:
+            os.stat = real
+        self.assertEqual(classify(root, probe=alive)["state"], "running")
+
 
 class Plan(TempCase):
     KEYS = {"run_id", "lane_key", "action", "state", "attempts", "rc", "has_report",
@@ -1489,6 +1676,33 @@ class Cli(TempCase):
         code, text, _ = self.cli(["plan", RUN, "--stall-secs", "120"])
         self.assertEqual((code, json.loads(text)["action"]), (0, "wait"))
 
+    def test_a_stall_clock_that_is_not_a_number_exits_two(self):
+        """P4c-fixes4 (C): `plan --stall-secs nan` on a LIVE fresh writer answered
+        stalled / rerun / 3 — the plan that starts a second writer beside the first.
+        An unusable clock is a usage error (exit 2) and the writer keeps waiting."""
+        make_record(self.state, pid=os.getpid(), mtime=NOW,
+                    output=spawner_lines(self.sb()))
+        for arg in ("nan", "inf", "-inf", "1e999", "0", "-1", "604801", "0.5"):
+            # `--opt=-1`: the space-separated form makes argparse read the leading
+            # dash as another option, which is its own usage error, not this one.
+            code, text, err = self.cli(["plan", RUN, "--stall-secs=%s" % arg])
+            self.assertEqual(code, 2, arg)
+            self.assertIn("autoos_recovery:", err)
+            self.assertNotIn('"action": "rerun"', text)
+        code, text, _ = self.cli(["plan", RUN, "--stall-secs", "120"])
+        self.assertEqual((code, json.loads(text)["action"]), (0, "wait"))
+
+    def test_a_stall_clock_that_is_not_a_float_is_argparse_s_usage_error(self):
+        """The text never reaches the module: float() has no hex and no empty
+        string, and argparse answers the usage exit (2) itself."""
+        make_record(self.state)
+        for arg in ("0x10", "", "five"):
+            with self.assertRaises(SystemExit) as caught:
+                self.cli(["plan", RUN, "--stall-secs", arg])
+            self.assertEqual(caught.exception.code, 2, arg)
+        # ' 5' IS a float (5.0) and inside the band, so it is a usable clock.
+        self.assertEqual(self.cli(["plan", RUN, "--stall-secs", " 5"])[0], 3)
+
     def test_bad_input_exits_two(self):
         make_record(self.state)
         for argv in (["plan", "../etc"], ["plan", "a" * 200],
@@ -1521,6 +1735,36 @@ class Cli(TempCase):
         self.assertEqual((code, out["action"], out["record_suspect"]), (4, "escalate", True))
         self.assertIn("wrong type", err)
         self.assertNotIn("Traceback", err)
+
+    def test_an_indented_claim_with_rc_zero_exits_three_not_zero(self):
+        """The (A) case end to end (P4c-fixes4): rc 0 and a REPORT the worker only
+        pasted, indented as markdown code — died / rerun / 3, never none / 0."""
+        make_record(self.state, exit_json={"rc": 0},
+                    output="worker text\n\n    REPORT %s · OK · green\n" % RUN)
+        code, text, err = self.cli(["plan", RUN, "--lane", LANE])
+        out = json.loads(text)
+        self.assertEqual((code, out["action"], out["state"], out["has_report"]),
+                         (3, "rerun", "died", False))
+
+    def test_an_html_blocked_claim_with_rc_zero_exits_three_not_zero(self):
+        """The (B) case end to end: the same claim inside a `<pre>` block."""
+        for wrapper in ("<pre>\n", "<script>\n", "<details>\n", "<div>\n"):
+            st = self.other_state()
+            os.environ["AUTOOS_STATE_DIR"] = st
+            make_record(st, exit_json={"rc": 0},
+                        output="worker text\n\n%sREPORT %s · OK · green\n"
+                               % (wrapper, RUN))
+            code, text, _ = self.cli(["plan", RUN, "--lane", LANE])
+            out = json.loads(text)
+            self.assertEqual((code, out["action"], out["state"], out["has_report"]),
+                             (3, "rerun", "died", False), wrapper)
+
+    def test_a_genuine_column_zero_report_still_exits_zero(self):
+        make_record(self.state, exit_json={"rc": 0},
+                    output=spawner_lines(self.sb(), report=True))
+        code, text, _ = self.cli(["plan", RUN, "--lane", LANE])
+        self.assertEqual((code, json.loads(text)["action"], json.loads(text)["state"]),
+                         (0, "none", "completed"))
 
     # P4c-fixes3 (3): corrupt / contested / non-regular / unwritable lane state
     # is an ESCALATION (exit 4), not a usage error (exit 2); 2 stays only for

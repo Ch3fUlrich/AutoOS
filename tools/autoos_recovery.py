@@ -60,25 +60,37 @@ Residuals, stated rather than hidden:
 * a run the operator cancelled is ``exit.json`` with ``cancelled: true`` and no
   rc, which reads here as 'died' — deliberate (a cancelled writer never
   reported), but the L1 that cancelled on purpose must not ask for a plan.
-* report detection reuses tools/autoos_report.py's parser on the output tail and
-  falls back to a REPORT heading line, both read over only the worker's own
-  lines (fences, HTML comment regions — a REPORT inside `<!--` ... `-->` is not
-  a claim and an unclosed `<!--` swallows the rest, whole block-quote blocks — a
-  quote continues lazily over every following non-blank line, marker or no
-  marker, where a blank line is ONLY ' ' and '\t' (CommonMark's own rule:
-  `str.strip()` also empties U+00A0, \x0b, \x0c, U+0085, U+2028, U+3000, so a
-  separator line may never close a quote) and lines are cut on '\n' ONLY (never
-  `splitlines()`, which invents line breaks at those same characters), and the
-  task's echoed text excluded, see `_report_view`). Any separator/control
-  character that still reaches the report view — any Zs other than ' ', any
-  Zl/Zp, any Cc other than '\t' — makes the WHOLE report suspect: has_report
-  False, fail closed (P4c-fixes3). A heading that carries a run id must name
-  THIS run, so a
-  heading naming something else — including prose like ``REPORT: the field
-  list`` — is not believed: the cost is one needless continuation leg on a run
-  that wrote an unusual heading, never a false 'completed'. The strict protocol
-  gate belongs to `ready`, not to recovery; a false 'completed' needs rc==0 on
-  top of it.
+* report detection is an ALLOWLIST of shapes, not a blacklist of markdown constructs
+  (P4c-fixes4: rounds 1-3 chased one construct per round — fence, quote, comment,
+  separator character — and each new one was a fresh false 'completed'). A claim is
+  the heading, and a heading counts only when it is at COLUMN 0 with no leading
+  whitespace at all, is the LAST such heading of the worker's own output and BEFORE
+  the spawner's closing block, names this run or no run, and has no further
+  column-0 ``REPORT <id>`` heading of another run under it; and it only counts on a
+  line that survived `_report_view`: fences, HTML comment regions (a REPORT inside
+  `<!--` ... `-->` is not a claim and an unclosed `<!--` swallows the rest), whole
+  block-quote blocks (a quote continues lazily over every following non-blank line,
+  marker or no marker, where a blank line is ONLY ' ' and '\t' — CommonMark's own
+  rule: `str.strip()` also empties U+00A0, \x0b, \x0c, U+0085, U+2028, U+3000, so a
+  separator line may never close a quote — and lines are cut on '\n' ONLY, never
+  `splitlines()`, which invents line breaks at those same characters), INDENTED CODE
+  BLOCKS (a run of lines indented by a tab or four or more spaces, opened after a
+  blank line or the start of the text), HTML BLOCKS (from the line that, after at
+  most three spaces, starts `<` and a letter, '/', '!' or '?' to the next blank line
+  — or, for `pre`/`script`/`style`/`textarea`, to the line carrying the matching
+  closing tag, an unclosed one swallowing the rest), and the task's echoed text.
+  `tools/autoos_report.py`'s parser is never asked about the unfiltered tail: it
+  reads the same rebuilt text and can only REFUSE, never grant — the block it finds
+  must name the run the heading named. Any separator/control character that still
+  reaches the report view — any Zs other than ' ', any Zl/Zp, any Cc other than '\t'
+  — makes the WHOLE report suspect: has_report False, fail closed (P4c-fixes3). A
+  heading that carries a run id must name THIS run, so a heading naming something
+  else — including prose like ``REPORT: the field list`` — is not believed: the cost
+  is one needless continuation leg on a run that wrote an unusual heading, never a
+  false 'completed'. So is every other refusal above: a writer that reported from
+  inside an indented block, an HTML block or under a forged `writer:` trailer loses
+  its claim and buys a leg. The strict protocol gate belongs to `ready`, not to
+  recovery; a false 'completed' needs rc==0 on top of it.
 * a sandbox path inside a trusted root is accepted on the spawner's word alone.
   A worker that could both create a directory under ``<state>/sandboxes`` and
   forge the header line could name that directory instead of its own; it cannot
@@ -94,7 +106,12 @@ Residuals, stated rather than hidden:
   4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
   unwritable recovery state raises `RecoveryStateError`, which `main` answers
   with the one-line escalate message. Exit 2 stays ONLY for a usage error: an
-  argparse failure or a run id / lane key the caller passed in the wrong shape.
+  argparse failure or a run id / lane key / `--stall-secs` the caller passed in a
+  shape this module refuses to touch — the stall clock is bounded (finite,
+  1 .. 7 days) because an unusable one is not a harmless default: NaN compared
+  against any age is False, so `plan --stall-secs nan` read a LIVE writer as
+  'stalled' and answered 'rerun', which is the plan that starts a second writer
+  beside the first (P4c-fixes4 C).
 """
 from __future__ import annotations
 
@@ -119,6 +136,14 @@ import autoos_report as report_parser
 # "continue from current diff" legs before the lane escalates.
 STALL_SECS = 900
 MAX_ATTEMPTS = 2
+# `--stall-secs` is the one number that decides whether a LIVE writer gets a second
+# writer running beside it, so it is bounded, not merely positive: a comparison with
+# NaN is always False (`nan <= 0` included), so `stall <= 0` cannot refuse it and
+# `age <= nan` then answers "not running" — a stalled/rerun verdict for a writer that
+# is alive. Infinity and a span longer than a week of silence are the same kind of
+# caller mistake. (P4c-fixes4 C.)
+STALL_SECS_MIN = 1
+STALL_SECS_MAX = 7 * 24 * 60 * 60
 # The output tail read (a whole run's log is never loaded), and the cap on the
 # ORIGINAL task in a continuation brief — the footer always survives, the task
 # does not.
@@ -130,6 +155,7 @@ LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
 PATH_MAX_CHARS = 4096
 BRANCH_MAX_CHARS = 200
+_INF = float("inf")          # the bound `_is_finite` compares against, no math import
 
 STATES = ("running", "completed", "died", "stalled", "unknown")
 # One path component, no separators, no leading dot: neither `..` nor `/` can
@@ -163,12 +189,21 @@ LOCK_RETRIES = 200
 LOCK_RETRY_SECS = 0.01
 # The one open mode every record, log and state file is read with.
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-# The return contract's heading, markdown-wrapped or not, as tools/autoos-agent.py's
-# REPORT_HEADING_RE reads it: the `(?![\w.])` keeps "REPORTED" and "REPORT.md" out.
-# `tail` is whatever follows the word — the protocol puts the run id there, and a
-# heading that names anything else there is not this run's report.
+# The return contract's heading, markdown-wrapped or not, read the way
+# tools/autoos-agent.py's REPORT_HEADING_RE reads the word — the `(?![\w.])` keeps
+# "REPORTED" and "REPORT.md" out. `tail` is whatever follows the word: the protocol
+# puts the run id there, and a heading that names anything else there is not this
+# run's report.
+# P4c-fixes4 (A/B): NO leading whitespace. A markdown heading that claims a report
+# starts at column 0, and every construct that INDENTS a line (an indented code
+# block, a list item's body, an HTML block's payload) is exactly where the spawner's
+# trailer, a quoted example and a pasted transcript put a REPORT they did not mean.
+# The reader is an allowlist now: this line is the shape a claim must have.
 _REPORT_HEADING_RE = re.compile(
-    r"^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])[ \t]*:?[ \t]*(?P<tail>.*)$")
+    r"^(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])[ \t]*:?[ \t]*(?P<tail>.*)$")
+# The heading `tools/autoos_report.py`'s parser reads a block from — kept here only
+# so the body under an accepted heading can be checked against it (rule 5).
+_BLOCK_HEAD_RE = re.compile(r"^REPORT\s+(?P<id>\S+)")
 _TAKE_RE = re.compile(r"^take it:[ \t]+git fetch[ \t]+")
 _REVIEW_RE = re.compile(r"^review:[ \t]+git -C[ \t]+")
 _SANDBOX_RE = re.compile(r"^sandbox:[ \t]+(?P<path>\S+)[ \t]+\(branch (?P<branch>\S+)\)$")
@@ -181,6 +216,20 @@ _BLANK_STRIP = " \t"
 # silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
 # a real line legitimately carries; every other member makes a report suspect.
 _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
+# P4c-fixes4 (A/B): markdown constructs that INDENT text and are therefore no place
+# for a claim. An indented code block is a run of lines indented by a tab or by this
+# many spaces, and a run only becomes code when a blank line (or the start of the
+# text) precedes it — an indented continuation of a paragraph is not a code block,
+# but it is indented, and rule 1 of the allowlist refuses it as a heading anyway.
+_CODE_INDENT = " " * 4
+# An HTML block: a line that, after at most three spaces, starts with '<' followed by
+# a letter, '/', '!' or '?'. It swallows its lines until the next blank line — except
+# the raw-text tags below, which swallow until their matching closing tag, and except
+# `<!--`, which is the comment region `_comment_scan` already owns (rule 4).
+_HTML_BLOCK_RE = re.compile(r"^ {0,3}<(?P<rest>[A-Za-z/?!][^\n]*)$")
+_HTML_TAG_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*")
+_SWALLOW_TAGS = ("pre", "script", "style", "textarea")
+_SWALLOW_END_RES = {t: re.compile(r"</" + t, re.IGNORECASE) for t in _SWALLOW_TAGS}
 
 
 class RecoveryError(ValueError):
@@ -292,10 +341,48 @@ def _check_key(key):
     return key
 
 
+def _is_finite(value):
+    """Whether a number can be used in time arithmetic at all.
+
+    NaN and both infinities answer False, and they do it WITHOUT a `math` import:
+    every comparison with NaN is False, and nothing but ±inf sits outside
+    `-inf < x < inf`. A record field or a clock reading that is one of them says
+    nothing about when anything happened — and `age <= nan` is False, which is
+    exactly how a live pid used to be read as 'stalled' (P4c-fixes4 C).
+    """
+    return -_INF < float(value) < _INF
+
+
+def _is_time_number(value):
+    """A value that may be used as epoch seconds: a real number (never a bool,
+    which IS an int in Python) and a FINITE one. Every time this module reads comes
+    from a file a writer could have written — `started`, `ended`, an mtime — and a
+    NaN or an infinity in one is a damaged record, not a clock."""
+    return (type(value) is not bool and isinstance(value, (int, float))
+            and _is_finite(value))
+
+
 def _check_time(value, name):
     if type(value) is bool or not isinstance(value, (int, float)):
         raise RecoveryError("%s: epoch seconds, got %r" % (name, value))
+    if not _is_finite(value):
+        raise RecoveryError("%s: a finite number of seconds, got %r" % (name, value))
     return float(value)
+
+
+def _check_stall(value):
+    """`stall_secs` as a usable stall clock: finite and 1 .. 7 days.
+
+    Bounded on both ends by ONE comparison, which is what makes it refuse what
+    `stall <= 0` could not: NaN fails every comparison, so `plan --stall-secs nan`
+    is a usage error (exit 2) instead of 'stalled' for a live writer — and 'stalled'
+    there is the answer that starts a SECOND writer beside the first one."""
+    num = _check_time(value, "stall_secs")
+    if not STALL_SECS_MIN <= num <= STALL_SECS_MAX:
+        raise RecoveryError("stall_secs: a finite number of seconds between %d and "
+                            "%d (7 days), got %r"
+                            % (STALL_SECS_MIN, STALL_SECS_MAX, value))
+    return num
 
 
 def run_dir_for(run_id, state=None):
@@ -594,29 +681,61 @@ def _parse_sandbox(tail, state=None):
     return sandbox, None
 
 
-def _report_view(tail, task):
-    """The tail's lines that are the worker's OWN words.
+def _html_opener(line):
+    """The HTML block `line` opens — ('blank', None) to the next blank line, or
+    ('tag', name) to the matching closing tag — or None when it opens nothing.
 
-    Dropped before any REPORT is looked for: fence markup and everything inside a
-    fence — ONE shared rule with the `ready` guards
+    The raw-text tags (`pre`, `script`, `style`, `textarea`, case-insensitive) are
+    the ones that hold a pasted transcript, a rendered log excerpt or a copied HTML
+    page, and a REPORT inside one is data, not a claim: their region lasts to
+    `</tag>`, and an unclosed one swallows the rest of the tail. Every other block
+    (`<div>`, `<details>`, `</p>`, `<!DOCTYPE`, `<?xml`) lasts to the next blank
+    line. A line starting `<!--` answers None HERE, because the comment region owns
+    it and its end condition is `-->`, not a blank line — HTML comments keep
+    behaving exactly as before (rule 4)."""
+    m = _HTML_BLOCK_RE.match(line)
+    if m is None:
+        return None
+    rest = m.group("rest")
+    if rest.startswith("!--"):
+        return None
+    tag = _HTML_TAG_RE.match(rest)
+    if tag is not None and tag.group(0).lower() in _SWALLOW_TAGS:
+        return "tag", tag.group(0).lower()
+    return "blank", None
+
+
+def _report_view(tail, task):
+    """The tail's lines that may carry a claim — an ALLOWLIST of shapes, not a list
+    of the constructs that once went wrong.
+
+    A line survives only when it is the worker's own prose at its own indentation.
+    Dropped is everything inside: a fence — ONE shared rule with the `ready` guards
     (`autoos_ready_guards._Fences`: a fence opens on 3+ of the same ` or ~ after at
     most three leading spaces and closes only on the same character at least as
     long with nothing after it, so a fence that is never closed swallows the rest
-    of the tail); HTML comment regions — every line any part of which lies inside
-    a `<!--` ... `-->` comment is dropped on the same exclusion path (an unclosed
-    `<!--` swallows the rest, and a `<!--` inside a fence stays code: the fence
-    owns its lines and wins); WHOLE block-quote blocks, because a quote is not a
-    claim — a block starts at a line that, once stripped of its leading blanks
-    (spaces or tabs; CommonMark's own rule is at most three spaces), begins with
-    '>', and it continues over EVERY following non-blank line until the first
-    blank one, marked or not: a REPORT line sitting under a '>' line with no
-    blank between is a lazy continuation of the quote, not a claim of its own.
+    of the tail); an HTML comment region — every line any part of which lies inside
+    a `<!--` ... `-->` comment (an unclosed `<!--` swallows the rest, and a `<!--`
+    inside a fence stays code: the fence owns its lines and wins); a block-quote
+    block, because a quote is not a claim — a block starts at a line that, once
+    stripped of its leading blanks (spaces or tabs; CommonMark's own rule is at most
+    three spaces), begins with '>', and it continues over EVERY following non-blank
+    line until the first blank one, marked or not: a REPORT line sitting under a '>'
+    line with no blank between is a lazy continuation of the quote, not a claim of
+    its own; an INDENTED CODE BLOCK — a run of lines indented by a tab or by four or
+    more spaces, opened right after a blank line or the start of the text (P4c-fixes4
+    A: '    REPORT …' is a transcript pasted into the log, and a heading a reader has
+    to indent is not the return contract); an HTML BLOCK — from the line that opens
+    it to the blank line that ends it, or, for `pre`/`script`/`style`/`textarea`, to
+    the line carrying its closing tag, an unclosed one swallowing the rest
+    (P4c-fixes4 B: `<pre>` … REPORT … `</pre>` is quoted output); and every line that
+    also occurs in the task — a client that cats its brief back has echoed the return
+    contract's own REPORT line, and that is the brief's text, not a report on the
+    work.
     A blank line here means ONLY ' ' and '\\t' (`_is_blank`), and both inputs are
     cut on '\\n' only (`_lines`): a U+00A0/\\x0b/\\x0c/U+0085/U+2028/U+3000 line
     neither closes the quote nor breaks a line, so the quoted REPORT stays quoted
-    (P4c-fixes3); and every line that also occurs in the task — a client that
-    cats its brief back has echoed the return contract's own REPORT line, and
-    that is the brief's text, not a report on the work.
+    (P4c-fixes3).
     """
     echoed = {line.strip(_BLANK_STRIP) for line in _lines(task)
               if not _is_blank(line)}
@@ -624,6 +743,10 @@ def _report_view(tail, task):
     out = []
     in_quote = False
     in_comment = False
+    html = None                 # the open HTML block, if any (see `_html_opener`)
+    in_indent_run = False       # the previous line was indented (a tab or 4 spaces)
+    code_run = False            # and the run that line belongs to is a code block
+    prev_blank = True           # the start of the text counts as a blank line
     for raw in _lines(tail):
         # The tracker must see EVERY line: its state is the fence structure, and
         # skipping a line here would re-open a block that is still shut.
@@ -633,12 +756,43 @@ def _report_view(tail, task):
         else:
             in_comment, in_comment_here = _comment_scan(raw, in_comment)
         line = raw.strip(_BLANK_STRIP)
-        if not line:
+        blank = line == ""
+        if blank:
             in_quote = False       # a blank line is what closes a quote block
-            continue
-        if not fenced and line.startswith(">"):
+        elif not fenced and line.startswith(">"):
             in_quote = True        # '>' inside a fence is code text, not a marker
-        if fenced or in_comment_here or in_quote or line in echoed:
+        # The indented-code run: it opens on an indented line that a blank line (or
+        # the start of the text) precedes, and every line of the run is code.
+        if blank:
+            in_indent_run = code_run = False
+        elif raw.startswith("\t") or raw.startswith(_CODE_INDENT):
+            if not in_indent_run:
+                code_run, in_indent_run = prev_blank, True
+        else:
+            in_indent_run = code_run = False
+        prev_blank = blank
+        # The HTML block region: inert from its opening line to the line that ends
+        # it, and a fence or a comment owns a line before it can open anything.
+        if html is not None:
+            inert_html = True
+            if html[0] == "tag":
+                if _SWALLOW_END_RES[html[1]].search(raw):
+                    html = None
+            elif blank:
+                html = None
+        else:
+            inert_html = False
+            if not fenced and not in_comment_here and not blank:
+                opened = _html_opener(raw)
+                if opened is not None:
+                    inert_html = True
+                    html = opened
+                    # `<pre>…</pre>` on one line: the block is complete here, so only
+                    # this line is inert — a report under it is the worker's own.
+                    if opened[0] == "tag" and _SWALLOW_END_RES[opened[1]].search(raw):
+                        html = None
+        if (blank or fenced or in_comment_here or in_quote or code_run or inert_html
+                or line in echoed):
             continue
         out.append(raw)
     return out
@@ -656,36 +810,76 @@ def _names_this_run(declared, run_id):
     return not declared or declared == run_id
 
 
-def _has_report(tail, task, run_id):
-    """Whether the run printed its REPORT.
+def _last_heading(lines):
+    """(index, match) of the LAST column-0 REPORT heading in `lines`, or (None, None).
 
-    Two readers over `_report_view`'s lines, the spawner's first:
-    tools/autoos_report.py's parser finds the last ``REPORT <id>`` block, and a
-    heading that parser cannot read (``# REPORT``, ``**REPORT**``) still counts,
-    because the return contract IS a heading. Either way a run id the heading
-    carries must be this run's. A block inside a fence, inside an HTML comment,
-    inside a quote, or copied out of the task never reaches either reader — and
-    any view line carrying a separator or control character the line rules are
-    built on (any Zs other than ' ', any Zl/Zp, any Cc other than '\\t') makes
-    the WHOLE report suspect: has_report False, fail closed, because a text
-    another reader could split or strip differently is not a claim to believe.
+    LAST, not first and not 'any': a transcript that quotes an older run's report and
+    then prints its own ends with its own, and a text that prints a claim for this run
+    and a claim for another one below it ends with the other one — which is the one
+    this reader must believe, and refusing it is the fail-closed answer (P4c-fixes4
+    rule 5).
+    """
+    for i in range(len(lines) - 1, -1, -1):
+        m = _REPORT_HEADING_RE.match(lines[i])
+        if m:
+            return i, m
+    return None, None
+
+
+def _body_claims_another_run(lines, run_id):
+    """Whether the report body under the accepted heading holds a further column-0
+    ``REPORT <id>`` heading of ANOTHER run — the shape of a text whose last word is
+    somebody else's report, whatever the heading above it said."""
+    for line in lines:
+        m = _BLOCK_HEAD_RE.match(line)
+        if m and not _names_this_run(m.group("id"), run_id):
+            return True
+    return False
+
+
+def _has_report(tail, task, run_id):
+    """Whether the run printed its REPORT — decided by an allowlist, never by asking
+    a markdown reader to spot the one construct this week's probe found.
+
+    The claim is the heading, and a heading counts only when it survived
+    `_report_view` (no fence, no HTML comment, no quote, no task echo, no indented
+    code block, no HTML block), sits at COLUMN 0 with no leading whitespace and no
+    markdown indent, is the LAST such heading of the worker's own output BEFORE the
+    spawner's closing block (`tools/autoos-agent.py` prints that trailer after the
+    child exits, so a REPORT the worker printed under a line starting `writer:` /
+    `scope:` / `sandbox changes` is not this run's report — and a worker that forges
+    such a line loses its own claim, which costs one leg and never a false
+    'completed'), names this run or no run at all, and is followed by a body holding
+    no further column-0 ``REPORT <id>`` heading of another run.
+
+    `tools/autoos_report.py`'s parser then reads the SAME rebuilt text: it never gets
+    the unfiltered tail, and it can only ever refuse, never grant — a block it finds
+    must name this run too, so the two readers cannot disagree about who reported.
+    A parser that answers None is no obstacle (``# REPORT`` and ``**REPORT**`` are
+    headings the protocol allows and the parser does not read). And any view line
+    carrying a separator or control character the line rules are built on (any Zs
+    other than ' ', any Zl/Zp, any Cc other than '\\t') makes the WHOLE report
+    suspect: has_report False, fail closed, because a text another reader could split
+    or strip differently is not a claim to believe.
     """
     lines = _report_view(tail, task)
     if not lines:
         return False
     if any(_suspect_line(line) for line in lines):
         return False
+    trailer = _trailer_start(lines)
+    if trailer is not None:
+        lines = lines[:trailer]
+    at, heading = _last_heading(lines)
+    if heading is None or not _names_this_run(_heading_id(heading), run_id):
+        return False
+    if _body_claims_another_run(lines[at + 1:], run_id):
+        return False
     try:
         parsed = report_parser.parse_report("\n".join(lines))
     except Exception:  # noqa: BLE001 - a block the parser chokes on is no block
         parsed = None
-    if parsed is not None and _names_this_run(str(parsed.get("id") or ""), run_id):
-        return True
-    for line in lines:
-        m = _REPORT_HEADING_RE.match(line)
-        if m and _names_this_run(_heading_id(m), run_id):
-            return True
-    return False
+    return parsed is None or _names_this_run(str(parsed.get("id") or ""), run_id)
 
 
 def _output_age(run_dir, now):
@@ -693,12 +887,17 @@ def _output_age(run_dir, now):
 
     ``output.log``'s mtime is the answer. Before a worker writes at all the
     newest thing in the record is ``job.json``, so a run that has only just
-    started is 'running' and not 'stalled'.
+    started is 'running' and not 'stalled'. A filesystem that reports a NaN or an
+    infinity for mtime says nothing about age — the file is skipped, and 'no age'
+    is 'unknown', which escalates; `age <= stall` on a NaN would answer 'stalled'
+    for a live writer, which starts a second one (P4c-fixes4 C).
     """
     for name in ("output.log", "job.json"):
         try:
             mtime = os.stat(os.path.join(run_dir, name)).st_mtime
         except OSError:
+            continue
+        if not _is_time_number(mtime):
             continue
         return max(0.0, now - mtime)
     return None
@@ -713,7 +912,9 @@ def _job_record_suspect(job):
     a record that misuses a field it is supposed to carry is 'suspect': too
     damaged to answer 'completed', so it classifies 'unknown' and escalates.
     Absent fields are not suspect (a missing job.json is an unfinished record,
-    judged elsewhere); a present-but-wrong-typed one is.
+    judged elsewhere); a present-but-wrong-typed one is. `started` is judged by
+    `_is_time_number`, so a NaN or an infinity there is a damaged record and not a
+    clock reading (P4c-fixes4 C).
     """
     if job is None:
         return False
@@ -722,10 +923,20 @@ def _job_record_suspect(job):
             return True
     if "pid" in job and (type(job["pid"]) is bool or not isinstance(job["pid"], int)):
         return True
-    if ("started" in job and (type(job["started"]) is bool
-                              or not isinstance(job["started"], (int, float)))):
+    if "started" in job and not _is_time_number(job["started"]):
         return True
     return False
+
+
+def _exit_record_suspect(ex):
+    """Whether a present exit.json carries a time field nothing may do arithmetic
+    with: `ended` is the runner's own stamp, and a NaN or infinity in it is a record
+    damaged after the fact — the same refusal `_job_record_suspect` gives `started`
+    (P4c-fixes4 C). A wrong-typed `rc` is not suspect: it is type-checked where it
+    is read and simply never reads as 0."""
+    if ex is None:
+        return False
+    return "ended" in ex and not _is_time_number(ex["ended"])
 
 
 def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
@@ -735,13 +946,19 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     `state` is one of STATES and 'unknown' is fail-closed: a record this cannot
     read is never 'completed'. A job.json field of the wrong type sets
     `record_suspect` and holds the state at 'unknown' — a record that misuses its
-    own fields cannot attest to anything, not even an exit 0 with a REPORT. With
-    no ``exit.json`` the run is judged on its pid
-    and its output age: a live pid quiet past `stall_secs` is 'stalled', a dead
-    pid is 'died', a pid this host cannot probe is 'unknown'. With an
-    ``exit.json`` it takes rc==0 AND a REPORT to be 'completed'; anything else
-    that ended is 'died', including an exit 0 that said nothing (that is the
-    exit-without-REPORT case writer-ops.md §5 names).
+    own fields cannot attest to anything, not even an exit 0 with a REPORT. With no
+    ``exit.json`` the run is judged on its pid and its output age: a live pid quiet
+    past `stall_secs` is 'stalled', a dead pid is 'died', a pid this host cannot
+    probe is 'unknown'. `stall_secs` must be a FINITE number of seconds between 1
+    and 7 days — a NaN passed every one-sided comparison, and `age <= nan` is False,
+    so `--stall-secs nan` answered 'stalled' for a writer that was alive and 'rerun'
+    for a lane that was running; anything unusable is a `RecoveryError` (the CLI's
+    usage exit 2), never a verdict. A time field a record carries that is not finite
+    (`job.json`'s `started`, `exit.json`'s `ended`) makes the record suspect the same
+    way a wrong type does, and an mtime that is not finite says no age at all —
+    'unknown'. With an ``exit.json`` it takes rc==0 AND a REPORT to be 'completed';
+    anything else that ended is 'died', including an exit 0 that said nothing (that
+    is the exit-without-REPORT case writer-ops.md §5 names).
 
     `run_dir` is the record directory itself (what `run_dir_for` returns);
     `pid_probe` is the liveness hook, injectable so a test can name a pid that is
@@ -755,9 +972,7 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     if not os.path.isdir(path):
         raise RecoveryError("no run dir %r" % (path,))
     ref = _check_time(_now() if now is None else now, "now")
-    stall = _check_time(stall_secs, "stall_secs")
-    if stall <= 0:
-        raise RecoveryError("stall_secs: a positive number of seconds, got %r" % (stall_secs,))
+    stall = _check_stall(stall_secs)
     probe = pid_alive if pid_probe is None else pid_probe
     if not callable(probe):
         raise RecoveryError("pid_probe must be callable")
@@ -776,7 +991,8 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     task = (job or {}).get("task") if job_ok else None
     if type(task) is not str:
         task = ""
-    suspect = bool(job_ok) and _job_record_suspect(job)
+    suspect = ((bool(job_ok) and _job_record_suspect(job))
+               or (bool(ex_ok) and _exit_record_suspect(ex)))
     out = {"state": "unknown", "rc": None,
            "has_report": _has_report(tail, task, os.path.basename(path)),
            "sandbox": sandbox, "branch": branch, "record_suspect": suspect,
@@ -1121,7 +1337,9 @@ def main(argv=None):
     p.add_argument("--lane", dest="lane", default=None,
                    help="lane key sharing the attempt budget (default: the run's task, hashed)")
     p.add_argument("--stall-secs", dest="stall_secs", type=float, default=STALL_SECS,
-                   help="quiet for this long is stalled (default %d)" % STALL_SECS)
+                   help="quiet for this long is stalled, a finite number of seconds "
+                        "between %d and %d (default %d)"
+                        % (STALL_SECS_MIN, STALL_SECS_MAX, STALL_SECS))
     r = sub.add_parser("record", help="record one continuation leg for a lane "
                                       "(exit 0; 4 when the lane state is corrupt "
                                       "or contested — escalate)")
