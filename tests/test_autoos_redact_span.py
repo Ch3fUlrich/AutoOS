@@ -31,6 +31,15 @@ reaches its caller, and a PUBLIC label is not a secret marker), and
 closes: base64url is not PEM, and a worker's own ``VERDICT:`` line is never
 swallowed even when it carries key text.
 
+AO-REDACT-SPAN P4 closed the last two shapes that printed key material in the
+clear from a single line: a marker **glued** to base64 (no whitespace between the
+body and the `-----`) — the END line under an open BEGIN kept everything in front
+of its marker, and a BEGIN kept whatever text sat in front of it — and a line
+carrying **more than one** complete BEGIN..END pair, of which only the first was
+masked. `PemGluedMarkerTests` and `PemMultiPairTests` pin both; the cost of the
+fail-closed END line (prose on that line is masked with the key) is pinned in
+`PemLeakTests`.
+
     python3 tests/test_autoos_redact_span.py
 """
 import sys
@@ -83,6 +92,18 @@ END_PGP_PUBLIC = "-----END" + " PGP PUBLIC KEY BLOCK-----"
 PGP_VERSION_HEADER = "Version: GnuPG v2"
 PGP_COMMENT_HEADER = "Comment: a synthetic shape, not a key"
 PGP_CRC_LINE = "=" + "aB3d"
+
+# AO-REDACT-SPAN P4 — the other key labels a report carries, so the glued-marker
+# and multi-pair tests are not pinned to RSA alone.
+BEGIN_EC = "-----BEGIN" + " EC PRIVATE KEY-----"
+END_EC = "-----END" + " EC PRIVATE KEY-----"
+BEGIN_PKCS8 = "-----BEGIN" + " PRIVATE KEY-----"
+END_PKCS8 = "-----END" + " PRIVATE KEY-----"
+# Base64 with NO whitespace in front of the `-----` it is glued to: what the last
+# body line of a key looks like when a copy-paste (or a one-line log record)
+# wraps, and what used to print in the clear. Split like every other shape here.
+GLUED_BODY = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldY" + "WVo="
+GLUED_BODY2 = "d29ybGR0aGF0c2Vjb25kYmxvY2tp" + "c25vdGhlcmU="
 
 
 def pgp_key_lines(*extra_body):
@@ -158,11 +179,16 @@ class PemLeakTests(unittest.TestCase):
         self._assert_key_gone(whole, "after the keys")
         self.assertIn("VERDICT: ACCEPT", whole)
 
-    def test_an_end_marker_inside_prose_is_still_masked(self):
+    def test_a_line_that_closes_an_open_begin_is_masked_in_full(self):
+        # P4, fail closed: an END line under an open BEGIN is part of the key's
+        # own text — its last body line is routinely glued straight onto the
+        # marker — so the WHOLE line is masked, prose in front of the marker
+        # included. A lost report line is recoverable, a printed key is not.
         out, _red = stream(BEGIN, body_line(1), "and the key closes with " + END,
                            "tail of the report")
         self._assert_key_gone(out)
-        self.assertIn("and the key closes with ", out)
+        self.assertNotIn("and the key closes with", out,
+                         "the line that closes the block is masked in full")
 
     def test_indented_pem_encryption_headers_are_swallowed(self):
         red = redact.Redactor()
@@ -235,6 +261,119 @@ class PgpArmorTests(unittest.TestCase):
         self.assertIn(body_line(1), out)
         self.assertIn("the report goes on", out)
         self.assertEqual(red.count, 0, out)
+
+
+class PemGluedMarkerTests(unittest.TestCase):
+    """AO-REDACT-SPAN P4 (REAL LEAK): a marker GLUED to key text — no whitespace
+    between the base64 and the `-----` — printed that text in the clear. The END
+    line under an open BEGIN kept everything in front of its marker (so the last
+    body line of a wrapped key rode through), and a BEGIN glued behind text kept
+    that text as its "prefix". Both now fail closed: the mask covers the whole
+    line where the block closes, and reaches back over the key-alphabet run in
+    front of any marker."""
+
+    def test_a_body_line_glued_to_the_end_marker_is_masked_in_full(self):
+        for begin, end in ((BEGIN, END), (BEGIN_EC, END_EC),
+                           (BEGIN_PKCS8, END_PKCS8), (BEGIN_PGP, END_PGP)):
+            with self.subTest(label=end):
+                out, _red = stream(begin, body_line(1), GLUED_BODY + end,
+                                   "tail of the report")
+                self.assertNotIn(GLUED_BODY, out,
+                                 "key body glued to the END marker leaked:\n" + out)
+                self.assertNotIn(end, out, "the closing marker leaked:\n" + out)
+                self.assertNotIn(begin, out)
+                self.assertIn("tail of the report", out)
+
+    def test_a_glued_end_line_with_key_text_after_the_marker_is_masked_in_full(self):
+        # a one-line log record: the next block starts on the same line the
+        # previous one closed, so text on BOTH sides of the marker is key body.
+        out, _red = stream(BEGIN, GLUED_BODY + END + GLUED_BODY2,
+                           "tail of the report")
+        self.assertEqual(out, MASK + "\n" + MASK + "\ntail of the report\n", out)
+        self.assertNotIn(GLUED_BODY2, out)
+
+    def test_text_glued_before_a_begin_marker_is_masked_too(self):
+        out, red = stream(GLUED_BODY + BEGIN + GLUED_BODY2, "tail of the report")
+        self.assertEqual(out, MASK + "\n" + "tail of the report\n", out)
+        self.assertNotIn(GLUED_BODY2, out, "the body glued after the marker goes too")
+        self.assertEqual(red.count, 1, "one open key counts once")
+
+    def test_a_complete_pair_glued_to_a_prefix_masks_from_that_prefix(self):
+        out, red = stream(GLUED_BODY + BEGIN + " " + GLUED_BODY2 + " " + END + " tail")
+        self.assertNotIn(GLUED_BODY, out)
+        self.assertNotIn(GLUED_BODY2, out)
+        self.assertNotIn(END, out)
+        self.assertIn("tail", out, "prose separated by whitespace still survives")
+        self.assertEqual(red.count, 1)
+
+    def test_a_stray_end_marker_glued_to_base64_outside_pem_mode_is_masked(self):
+        # the block was closed by a VERDICT, or the stream started mid-key: an END
+        # line nobody is waiting for still cannot print the text glued to it.
+        out, _red = stream("a prose line", GLUED_BODY + END, "VERDICT: ACCEPT")
+        self.assertNotIn(GLUED_BODY, out, "the run glued to a stray END leaked:\n" + out)
+        self.assertIn("a prose line", out)
+        self.assertIn("VERDICT: ACCEPT", out)
+
+    def test_a_line_that_closes_one_key_and_opens_the_next_keeps_swallowing(self):
+        # the fail-closed END line masks the whole line, and a BEGIN behind that
+        # marker still opens its block: the key it started goes on underneath and
+        # must not print because the line that opened it was masked.
+        line = GLUED_BODY + END + " " + BEGIN_EC
+        out, red = stream(BEGIN, body_line(1), line, body_line(2), END_EC,
+                          "tail of the report")
+        for probe in (GLUED_BODY, body_line(1), body_line(2), BEGIN_EC, END_EC, END):
+            self.assertNotIn(probe, out, "leaked:\n" + out)
+        self.assertIn("tail of the report", out)
+        self.assertEqual(red.count, 2, "the closed key and the one it opened")
+
+    def test_prose_in_front_of_a_begin_marker_still_keeps_its_prefix(self):
+        # closing the glued leak must not eat a fixture list that quotes a marker:
+        # whitespace in front of the `-----` says the text before it is prose.
+        out, _red = stream("the fixture reads ['" + BEGIN, "next line of the report",
+                           "VERDICT: ACCEPT")
+        self.assertTrue(out.startswith("the fixture reads ['" + MASK), out)
+        self.assertIn("next line of the report", out)
+        self.assertIn("VERDICT: ACCEPT", out)
+
+
+class PemMultiPairTests(unittest.TestCase):
+    """AO-REDACT-SPAN P4 item 2: only the FIRST BEGIN..END pair on a line was
+    masked, so a second complete block on the same line — one JSON log record of
+    two keys, a copy-paste that lost its newlines — printed in the clear."""
+
+    def test_two_complete_blocks_on_one_line_are_both_masked(self):
+        line = ("a " + BEGIN + " " + GLUED_BODY + " " + END
+                + " b " + BEGIN_EC + " " + GLUED_BODY2 + " " + END_EC + " c")
+        out, red = stream(line)
+        self.assertEqual(out, "a " + MASK + " b " + MASK + " c\n", out)
+        self.assertNotIn(GLUED_BODY2, out, "the second block printed in the clear")
+        self.assertEqual(red.count, 2, "two keys count twice")
+
+    def test_three_complete_blocks_on_one_line_are_all_masked(self):
+        line = ("x " + BEGIN + " " + GLUED_BODY + " " + END
+                + " y " + BEGIN_PKCS8 + " " + GLUED_BODY2 + " " + END_PKCS8
+                + " z " + BEGIN_PGP + " " + GLUED_BODY + " " + END_PGP + " end")
+        out, red = stream(line)
+        self.assertEqual(out, "x " + MASK + " y " + MASK + " z " + MASK + " end\n", out)
+        self.assertEqual(red.count, 3)
+
+    def test_a_pair_and_an_open_begin_on_the_same_line_mask_and_open(self):
+        line = "x " + BEGIN + " " + GLUED_BODY + " " + END + " y " + BEGIN_PGP
+        out, red = stream(line, body_line(1), GLUED_BODY + END_PGP,
+                          "tail of the report")
+        self.assertTrue(out.startswith("x " + MASK + " y " + MASK), out)
+        for probe in (GLUED_BODY, GLUED_BODY2, body_line(1), BEGIN_PGP, END_PGP):
+            self.assertNotIn(probe, out, "leaked:\n" + out)
+        self.assertIn("tail of the report", out)
+        self.assertEqual(red.count, 2, "the pair and the open keyring")
+
+    def test_whole_and_stepwise_streams_agree_on_a_multi_pair_line(self):
+        lines = ["a " + BEGIN + " " + GLUED_BODY + " " + END + " b",
+                 BEGIN_PGP, body_line(1), GLUED_BODY + END_PGP, "after"]
+        whole = redact.Redactor().text("".join(ln + "\n" for ln in lines))
+        stepwise, _red = stream(*lines)
+        self.assertEqual(whole, stepwise)
+        self.assertNotIn(GLUED_BODY, whole)
 
 
 class PemSurvivalTests(unittest.TestCase):

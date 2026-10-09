@@ -1562,6 +1562,9 @@ class ResumeTest(unittest.TestCase):
         self.assertIs(out.get("restarted"), False, out)
         self.assertIs(out.get("restart_refused"), True, out)
         self.assertTrue(out.get("probe", "").startswith(probe_prefix), out)
+        self.assertIn(probe_prefix, out["detail"], out)
+        self.assertNotIn("%s", out["detail"],
+                         "an unfilled %%s rode out to the caller: %r" % (out["detail"],))
         self.assertNotIn("stop", out, "an unknown probe stopped the lane")
         self.assertNotIn("start", out, "an unknown probe restarted the lane")
         self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before,

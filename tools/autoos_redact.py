@@ -128,6 +128,19 @@ _PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
 # that a base64url-encoded key handed over under an open marker is masked only
 # by the per-line value patterns, never by the span.
 _PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]*")
+# One scan for both markers, built from the two grammars above so a label
+# widened later is widened in the scan and in the pair walk at once. Named
+# groups say which kind matched; the patterns have no groups of their own.
+_PEM_MARKER_RE = re.compile("(?P<begin>%s)|(?P<end>%s)"
+                            % (_PEM_BEGIN_RE.pattern, _PEM_END_RE.pattern))
+# The characters RFC 7468 permits in a PEM body — what a key's own text is made
+# of, and therefore what may never sit unmasked in front of a marker. `-` and `_`
+# are NOT here: limit (A) says base64url is not PEM, and a hyphen is what prose
+# and a quoted marker have in common ("not-a-key-----BEGIN"), while a run that
+# reaches back over a hyphen would eat the sentence.
+_PEM_ALPHABET_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                "0123456789+/=")
+
 # `Version:`/`Comment:`/`MessageID:`/`SessionKey:`/`Label:`/`Arc:` are the
 # RFC 4880 armour headers a secret keyring puts between its BEGIN line and its
 # body, one blank line ahead of it (a blank line is body-shaped already, so the
@@ -140,6 +153,21 @@ def _is_pem_body_line(line: str) -> bool:
     """True for a line that is base64 body, blank, or whitespace-only — see
     ``_PEM_BODY_RE`` for the shape and the reason it is not one regex."""
     return _PEM_BODY_RE.fullmatch(line.strip(" \t")) is not None
+
+
+def _glue_start(line: str, pos: int, floor: int) -> int:
+    """Start of the PEM-alphabet run that ends at ``pos`` (a marker glued to key
+    text), never before ``floor`` — AO-REDACT-SPAN P4.
+
+    Returns ``pos`` when the character in front of the marker is whitespace or
+    not key material: prose that quotes a marker is separated from it, so what
+    sits in front of the ``-----`` is not body and stays visible. Walking from
+    ``pos`` with a monotonic floor keeps the runs of one line non-overlapping, so
+    the whole line still costs one linear pass."""
+    i = pos
+    while i > floor and line[i - 1] in _PEM_ALPHABET_CHARS:
+        i -= 1
+    return i
 
 
 # A worker's verdict is how the caller learns the outcome; it is never swallowed
@@ -267,12 +295,16 @@ class Redactor:
     """Line-oriented redactor for a stream the caller reads as it arrives.
 
     ``text()`` may be fed a whole report or one line at a time; a PEM block or a
-    PGP armored one that spans lines is masked as it passes: the BEGIN..END
-    *span* becomes the marker (the prose around it on that line survives), and
-    the lines under an open BEGIN are swallowed while they look like key body —
-    base64, blank, indented, a PEM encryption header or a PGP armour header —
-    until the END line, the first line that is not, ``PEM_BODY_CAP`` lines, or a
-    VERDICT line. A report that merely mentions a BEGIN marker therefore still
+    PGP armored one that spans lines is masked as it passes: every BEGIN..END
+    *span* on the line becomes the marker (a second and third block on the same
+    line are masked too), the key-alphabet text GLUED in front of a marker goes
+    with it, and the lines under an open BEGIN are swallowed while they look like
+    key body — base64, blank, indented, a PEM encryption header or a PGP armour
+    header — until the END line, the first line that is not, ``PEM_BODY_CAP``
+    lines, or a VERDICT line. A line that closes an open BEGIN is masked in full
+    (fail closed): under an open marker there is no safe way to tell prose from
+    the key's own last body line, and a lost line is recoverable while a printed
+    key is not. A report that merely mentions a BEGIN marker therefore still
     reaches the caller, verdict included
     (AO-REDACT-SPAN; the body shape itself is the rework — a short last line, a
     blank or an indent inside a real key used to end the block early and print
@@ -324,10 +356,54 @@ class Redactor:
         self.count += hits + n
         return masked
 
-    def _mask_span(self, line: str, start: int, end: int) -> str:
-        """Replace ``line[start:end]`` with the marker, keep both sides, and
-        mask the survivors like any other line."""
-        return self._masked(line[:start] + TEXT_MASK + line[end:])
+    def _mask_markers(self, line: str):
+        """Mask every marker shape ``line`` carries, in one left-to-right walk
+        (AO-REDACT-SPAN P4). Returns the masked text, or ``None`` when the line
+        holds no marker at all and the caller masks it as ordinary text.
+
+        * a complete ``BEGIN..END`` pair masks from the marker to the end of the
+          closing marker — and the walk keeps going, so a second and third block
+          on the same line are masked too; the old single search stopped at the
+          first pair and printed the rest of the line's keys in the clear;
+        * an unclosed ``BEGIN`` masks to the end of the line and opens the
+          body-only swallow;
+        * key text GLUED in front of any marker (no whitespace between the
+          base64 and the ``-----``) is masked with it, from the start of that
+          run — which for a line that begins with body means the whole line.
+
+        Each pair and each open BEGIN counts one key; a stray ``END`` nobody is
+        waiting for masks its own glued run without counting, since the BEGIN it
+        closes was never in this stream.
+        """
+        out: list[str] = []
+        pos = 0
+        opened = False
+        for marker in _PEM_MARKER_RE.finditer(line):
+            if marker.start() < pos:
+                continue                      # inside a span already masked
+            start = _glue_start(line, marker.start(), pos)
+            if marker.group("begin") is not None:
+                self.count += 1
+                closing = _PEM_END_RE.search(line, marker.end())
+                if closing:
+                    stop = closing.end()
+                else:
+                    stop = len(line)          # the rest of the line may be body
+                    opened = True
+            else:
+                stop = marker.end()
+            out.append(line[pos:start])
+            out.append(TEXT_MASK)
+            pos = stop
+            if opened:
+                break
+        if pos == 0:
+            return None
+        out.append(line[pos:])
+        if opened:
+            self._in_pem = True
+            self._pem_bodies = 0
+        return self._masked("".join(out))
 
     def _one_line(self, line: str) -> str:
         if _VERDICT_LINE_RE.match(line):
@@ -348,29 +424,33 @@ class Redactor:
             self._exit_pem()
             return self._masked(line)
         if self._in_pem:
-            end = _PEM_END_RE.search(line)
-            if end:
+            closing = _PEM_END_RE.search(line)
+            if closing:
+                # Fail closed (AO-REDACT-SPAN P4): a line that closes an open
+                # BEGIN is part of the key's own text, and the last body line of
+                # a wrapped or single-line key sits GLUED to this marker with no
+                # whitespace to tell it from prose — so the whole line is masked
+                # and the text that marker was glued to cannot ride through. One
+                # lost report line is recoverable; one printed key is not.
                 self._exit_pem()
-                return self._mask_span(line, end.start(), end.end())
+                end = closing.end()
+                while (nxt := _PEM_END_RE.search(line, end)):
+                    end = nxt.end()          # the rightmost END on the line
+                if _PEM_BEGIN_RE.search(line, end):
+                    # A line that closes this key and opens the NEXT one (a
+                    # one-line log record of two keys) is still masked in full,
+                    # but the second key's body goes on underneath, so the
+                    # swallow has to restart rather than print its tail.
+                    self._in_pem = True
+                    self.count += 1
+                return TEXT_MASK
             if (self._pem_bodies < PEM_BODY_CAP
                     and (_is_pem_body_line(line) or _PEM_HEADER_RE.match(line))):
                 self._pem_bodies += 1
                 return ""
             self._exit_pem()              # not key body: this line is a normal line
-        begin = _PEM_BEGIN_RE.search(line)
-        if begin:
-            # A whole key on one line (a log record of it) is masked in place;
-            # an open BEGIN masks from the marker to the end of the line — the
-            # rest of that line may already be base64 body — and starts the
-            # body-only swallow.
-            self.count += 1
-            end = _PEM_END_RE.search(line, begin.end())
-            if end:
-                return self._mask_span(line, begin.start(), end.end())
-            self._in_pem = True
-            self._pem_bodies = 0
-            return self._masked(line[:begin.start()] + TEXT_MASK)
-        return self._masked(line)
+        masked = self._mask_markers(line)
+        return self._masked(line) if masked is None else masked
 
 
 # ─── argv (hostexec's stored form) ─────────────────────────────────────────

@@ -996,9 +996,9 @@ def cmd_resume(name):
         # condition being probed - a dead lane out of an unreadable one.
         return {"lane": name, "resumed": False, "restarted": False,
                 "restart_refused": True, "probe": reason, "exit_code": 2,
-                "detail": "the session probe could not be read (%s) - the lane is "
-                          "left running and NOT restarted on an unknown; set the "
-                          "credential and ask again"}
+                "detail": ("the session probe could not be read (%s) - the lane is "
+                           "left running and NOT restarted on an unknown; set the "
+                           "credential and ask again" % reason)}
     if state is None:
         # F3: a session that is PROVABLY gone - the serve answers for nothing
         # (404 or a dead outcome) or is not listening at all - cannot take a
