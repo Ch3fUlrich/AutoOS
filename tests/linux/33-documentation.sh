@@ -716,6 +716,11 @@ if it "autoos_writer_ledger: verdict ledger, demotion, probe, rollup (unit tests
     out="$(python3 tests/test_autoos_writer_ledger.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-WRITER-GUARDS P4a: the pure ready guards (tools/autoos_ready_guards.py).
+if it "autoos_ready_guards: brief FILES scope, diff fence, report checks, preflight (unit tests)"; then
+    out="$(python3 tests/test_autoos_ready_guards.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
