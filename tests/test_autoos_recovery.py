@@ -1847,13 +1847,28 @@ class InvisiblePrefixFooter(TempCase):
         "\ufeff",                 # BOM
         "\u200c",                 # zero-width non-joiner
         "\xad",                   # soft hyphen (Cf)
-        "\x00", "\x01",           # C0 controls
         "\u202e",                 # bidi override
         "\u2028",                 # line separator (Zl) — splitslines() bait
         "\xa0",                   # no-break space (Zs)
         "\u200b\x00\ufeff ",      # several prefix characters at once
         " \t\u200b\n",            # a tab/space mix around an invisible
         "\n \t\xa0\t \n",         # whitespace only, no invisible
+        # D1 (P4c): the WHOLE Cc range, not a two-character sample. ESC is in it,
+        # and an ANSI strip that runs BEFORE the heading check eats the 'C' of
+        # the heading — the check must run on raw text where ESC is just a Cc.
+    ) + tuple(chr(c) for c in range(0x20)) + ("\x7f",) + (
+        "\x1b[", "\x1b]", "\x1bC", "\x1bc", "\x1bZ", "\x1bP",
+        "\x1b\u200b", "\u200b\x1b\ufeff", "\x1b\ufeff\x1b[",
+    )
+
+    # The ESC shapes that used to defeat the check specifically: the Fe class
+    # `\x1b[@-Z\\^_=>0-9]` eats ESC + 'C'/'c'/'Z'/'P', and `_ANSI_CSI` eats the
+    # unterminated-looking `\x1b[C` — every one of them deleted the heading's
+    # first letter when `_normalise_output` ran before the heading check (D1).
+    ESC_SHAPES = (
+        "\x1b",                   # lone ESC — the reported repro
+        "\x1b[", "\x1b]", "\x1bC", "\x1bc", "\x1bZ", "\x1bP",
+        "\x1b\u200b", "\u200b\x1b\ufeff", "\x1b\ufeff\x1b[",
     )
 
     def repro(self, prefix):
@@ -1894,6 +1909,37 @@ class InvisiblePrefixFooter(TempCase):
         printed = out.getvalue() + err.getvalue()
         self.assertNotIn("CONTINUE FROM CURRENT DIFF", printed)
 
+    def test_an_esc_that_swallows_the_first_letter_is_no_better(self):
+        """D1: `_usable_task` ran `_normalise_output` BEFORE `_heading_form`, and
+        the Fe pattern ate ESC + the 'C' of 'CONTINUE'. The stripped head then no
+        longer CONTAINED the heading form, the footer-only task was judged usable,
+        and the plan reran (exit 3) with TWO stacked footers. The heading check
+        runs on the raw head now, where ESC is just another Cc: refused."""
+        for prefix in self.ESC_SHAPES:
+            task = self.repro(prefix)
+            self.assertIsNone(r._usable_task({"task": task}, True), repr(task))
+            st = self.other_state()
+            make_record(st, task=task, exit_json={"rc": 1})
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual((p["action"], p["state"], p["record_suspect"]),
+                             ("escalate", "unknown", True), repr(task))
+            self.assertIsNone(p["continue_task"], repr(task))
+
+    def test_an_esc_prefixed_footer_exits_4_through_the_cli(self):
+        """The same shapes through the full CLI: exit 4, and no footer in
+        anything it prints."""
+        for prefix in self.ESC_SHAPES:
+            shutil.rmtree(os.path.join(self.state, "agents", RUN),
+                          ignore_errors=True)
+            make_record(self.state, task=self.repro(prefix), exit_json={"rc": 1})
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = r.main(["plan", RUN, "--lane", LANE])
+            self.assertEqual(code, 4, repr(prefix))
+            printed = out.getvalue() + err.getvalue()
+            self.assertNotIn("CONTINUE FROM CURRENT DIFF", printed, repr(prefix))
+        shutil.rmtree(os.path.join(self.state, "agents", RUN), ignore_errors=True)
+
     def test_an_invisible_character_inside_the_heading_is_no_better(self):
         """The class strip is not a prefix rule: an invisible woven into the heading
         still leaves a footer-only record in front of no brief at all."""
@@ -1914,25 +1960,91 @@ class InvisiblePrefixFooter(TempCase):
         self.assertEqual(out["continue_task"].count("CONTINUE FROM CURRENT DIFF"), 1)
         self.assertEqual(out["continue_task"], r.continuation_task(task, 1, sb))
 
-    def test_real_text_before_an_invisible_corrupted_footer_is_untouched(self):
-        """A brief with real text ahead of a footer whose blank line was lost is NOT
-        refused — the visible text before the match says it names work. It keeps the
-        literal-cut rule: the exact marker is the only thing `original_task` cuts at,
-        so the prose is passed through as it was written."""
+    def test_real_text_before_a_line_head_footer_gets_exactly_one(self):
+        """D2 (P4c): a brief whose stored footer lost its blank line is NOT
+        refused — the visible text ahead of the heading says it names work — and
+        the cut now finds that footer through the heading form, so the rebuilt
+        brief carries ONE footer, not the stored one plus a new one."""
         task = "Fix the widget.\nCONTINUE FROM CURRENT DIFF (recovery attempt 1/2): x"
         self.assertIsNotNone(r._usable_task({"task": task}, True))
-        self.assertEqual(r.original_task(task), task.rstrip())
+        self.assertEqual(r.original_task(task), "Fix the widget.")
 
-    def test_prose_mentioning_the_phrase_is_untouched(self):
+    def test_prose_mentioning_the_phrase_mid_line_is_untouched(self):
         """A real brief that merely spells the heading out mid-line is usable and
         its text survives verbatim in the continuation, with exactly the new footer
-        added."""
-        task = ("Fix the widget.\nCONTINUE FROM CURRENT DIFF (recovery attempt 1/2) "
-                "is what the docs call the footer — do not print one yourself.\n")
+        added. A heading that BEGINS a line is a footer; inside a line it is
+        prose."""
+        task = ("Fix the widget.\nThe docs call CONTINUE FROM CURRENT DIFF (recovery "
+                "attempt 1/2) the footer — do not print one yourself.\n")
         self.assertIsNotNone(r._usable_task({"task": task}, True))
         sb = self.sb()
         cont = r.continuation_task(task, 1, sb)
         self.assertTrue(cont.startswith(task.rstrip()))
+        self.assertEqual(cont.count("\n\n" + r.CONTINUE_HEADING), 1)
+
+
+class StackedFooterVariants(TempCase):
+    """P4c D2 (Sonnet residual): `original_task` cut only at the literal
+    '\\n\\nCONTINUE FROM CURRENT DIFF (recovery attempt ' marker. A stored footer
+    whose separator was broken — preceded by ZWSP/BOM/NBSP/tab, written with a CRLF
+    blank line, or with the blank line lost entirely — survived the cut, and
+    `continuation_task` appended a SECOND footer onto a brief that already was
+    one. The cut now finds the heading through `_heading_form`, maps the match
+    back through `origins` to its source index, and cuts at the FIRST match that
+    begins a line after optional invisible characters; a mention with real visible
+    text ahead of it on the same line stays prose."""
+
+    FOOT = r.CONTINUE_HEADING + "1/2): older footer\n"
+    TASKS = (
+        "do X\n\n​" + FOOT,          # ZWSP ate the separator
+        "do X\n\n\ufeff" + FOOT,        # BOM
+        "do X\n\n\xa0" + FOOT,          # no-break space
+        "do X\n\n\t" + FOOT,            # tab
+        "do X\r\n\r\n" + FOOT,          # a CRLF blank line
+        "do X\r\n\r\n​" + FOOT,   # CRLF blank line + ZWSP
+        "do X\n" + FOOT,                # the blank line lost entirely
+        "do X\n\t" + FOOT,              # and with a tab prefix
+    )
+
+    def test_each_variant_is_still_a_usable_brief(self):
+        for task in self.TASKS:
+            self.assertIsNotNone(r._usable_task({"task": task}, True), repr(task))
+
+    def test_one_rebuilt_brief_carries_exactly_one_footer(self):
+        for task in self.TASKS:
+            self.assertEqual(r.original_task(task), "do X", repr(task))
+            cont = r.continuation_task(task, 1, SB)
+            self.assertEqual(cont.count("CONTINUE FROM CURRENT DIFF"), 1, repr(task))
+            self.assertEqual(cont, r.continuation_task("do X", 1, SB), repr(task))
+
+    def test_the_second_stacked_leg_still_carries_exactly_one_footer(self):
+        for task in self.TASKS:
+            cont = r.continuation_task(task, 1, SB)
+            again = r.continuation_task(cont, 2, SB)
+            self.assertEqual(again.count("CONTINUE FROM CURRENT DIFF"), 1, repr(task))
+            self.assertIn("recovery attempt 2/2", again, repr(task))
+            self.assertNotIn("recovery attempt 1/2", again, repr(task))
+
+    def test_the_plan_rebuilds_one_footer_for_every_variant(self):
+        for task in self.TASKS:
+            st = self.other_state()
+            make_record(st, task=task, exit_json={"rc": 1})
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual(p["action"], "rerun", repr(task))
+            self.assertIsNotNone(p["continue_task"], repr(task))
+            self.assertEqual(p["continue_task"].count("CONTINUE FROM CURRENT DIFF"),
+                             1, repr(task))
+
+    def test_a_mid_line_mention_survives_the_cut(self):
+        """Real text that merely spells the heading out inside a line keeps every
+        word: one footer is appended, the mention is preserved."""
+        task = ("Fix the widget. The docs call CONTINUE FROM CURRENT DIFF (recovery "
+                "attempt 1/2) the footer — never print one yourself.\n")
+        self.assertEqual(r.original_task(task), task.rstrip())
+        cont = r.continuation_task(task, 1, SB)
+        self.assertTrue(cont.startswith(task.rstrip()), repr(cont))
+        self.assertIn("The docs call CONTINUE FROM CURRENT DIFF (recovery "
+                      "attempt 1/2) the footer", cont)
         self.assertEqual(cont.count("\n\n" + r.CONTINUE_HEADING), 1)
 
 

@@ -196,18 +196,21 @@ TASK_MAX_BYTES = 200 * 1024
 # The one place the continuation footer's shape is written down (P4c-fixes7): the
 # blank line plus the heading up to the attempt number, which is the only part that
 # is the same on every leg. `continuation_task` appends text starting with exactly
-# this, and cuts the task at the first occurrence of it before appending — so a
-# leg's own brief, which is what the next leg's job.json task holds (original plus
-# one footer), is fed back in without stacking a second footer. The leading
-# "\n\n" is load-bearing: a task that merely mentions the heading inside a line of
-# prose is not cut there.
+# this, and cuts the task at its first footer before appending — the literal
+# marker is the canonical shape of the cut `_footer_line_start` makes through the
+# heading form (P4c D2), so a leg's own brief, which is what the next leg's
+# job.json task holds (original plus one footer), is fed back in without stacking a
+# second footer. The leading "\n\n" is load-bearing: a task that merely mentions
+# the heading INSIDE a line of prose is not cut there.
 CONTINUE_MARKER = "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt "
 # The same footer without the blank line that separates it from a brief — the shape
-# a record wears when the separator is lost. Only used to RECOGNISE a footer-only
-# task as naming no work (`_usable_task`), never to cut a brief (P4c-fixes8). It is
-# recognised through `_heading_form`, the same invisible/whitespace character class
-# `_has_visible_text` refuses on, so a separator lost AND a heading preceded by a
-# zero-width character is still the same footer.
+# a record wears when the separator is lost. Used to RECOGNISE a footer-only task as
+# naming no work (`_usable_task`, P4c-fixes8) AND to cut a brief at a footer whose
+# separator was broken by an invisible character or a CRLF (P4c D2,
+# `_footer_line_start`). It is recognised through `_heading_form`, the same
+# invisible/whitespace character class `_has_visible_text` refuses on, so a
+# separator lost AND a heading preceded by a zero-width character or an ESC is
+# still the same footer.
 CONTINUE_HEADING = CONTINUE_MARKER.lstrip("\n")
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
@@ -1137,8 +1140,63 @@ def _heading_form(text):
 
 # The heading in that form, computed once. `_usable_task` refuses a task whose form
 # CONTAINS this with nothing visible ahead of the match — `startswith` on the form
-# is the at-position-0 case of the same rule.
+# is the at-position-0 case of the same rule. `original_task` cuts at the FIRST
+# such match that BEGINS a line (P4c D2).
 CONTINUE_HEADING_FORM = _heading_form(CONTINUE_HEADING)[0]
+
+
+def _footer_prefix_invisible(prefix):
+    """Whether what precedes a heading match on ITS OWN LINE names nothing a writer
+    could be shown: whitespace, members of `_INVISIBLE_CATS`, a complete ANSI
+    sequence's residue (`_has_visible_text` already judged those), and the bytes of
+    an UNTERMINATED escape attempt — ESC, its parameter/intermediate run, and one
+    final byte. P4c D1: the Fe class eats ESC + the 'C' of 'CONTINUE' in
+    '\\x1bCONTINUE FROM ...', and a CSI introducer does it to '\\x1b[CONTINUE FROM
+    ...' — both before any strip could run — so that ESC run is damage the footer
+    carries, not the brief it hides."""
+    if not _has_visible_text(prefix):
+        return True
+    i = 0
+    n = len(prefix)
+    while i < n:
+        ch = prefix[i]
+        if ch == "\x1b":
+            i += 1
+            while i < n and "\x20" <= prefix[i] <= "\x3f":
+                i += 1
+            if i < n and "\x40" <= prefix[i] <= "\x7e":
+                i += 1
+            continue
+        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+            i += 1
+            continue
+        return False
+    return True
+
+
+def _footer_line_start(task):
+    """Where the continuation footer that this task ENDS with begins in the source,
+    or None when it holds no such footer (P4c D2).
+
+    The heading is found through `_heading_form`, and the match is mapped back
+    through `origins` to its source index: the first match that BEGINS a line —
+    preceded by a line break or the start of the text, with only whitespace and
+    invisible characters between — is the footer. Cutting at the LINE start also
+    drops those invisible characters, which is what the literal `CONTINUE_MARKER`
+    could not: a stored footer wearing a ZWSP, a BOM, a NBSP, a tab, a CRLF
+    separator, or no separator at all survived the literal cut, and the rebuilt
+    brief stacked a second footer on it. A match with real visible text ahead of
+    it on the same line is prose that merely spells the heading out, is skipped,
+    and the search continues to the next match."""
+    form, origins = _heading_form(task)
+    at = form.find(CONTINUE_HEADING_FORM)
+    while at >= 0:
+        start = origins[at]
+        line_start = task.rfind("\n", 0, start) + 1
+        if _footer_prefix_invisible(task[line_start:start]):
+            return line_start
+        at = form.find(CONTINUE_HEADING_FORM, at + 1)
+    return None
 
 
 def _usable_task(job, job_ok):
@@ -1155,10 +1213,14 @@ def _usable_task(job, job_ok):
     either (P4c-fixes8) — including the variant where the heading is preceded by
     invisible characters, which only a character-class comparison recognises.
     Beyond the exact cut, a task is refused when its heading form CONTAINS the
-    footer's heading form anywhere AND nothing visible comes before that match:
-    same content-free record, whatever survived `original_task`'s literal cut. A
-    task with real text before the heading is never refused on a match — prose
-    that merely spells the footer out stays a brief and is cut by the exact
+    footer's heading form anywhere AND nothing visible comes before that match —
+    the check runs on the RAW head, before `_normalise_output` (P4c D1): the ANSI
+    Fe class eats ESC + the 'C' of 'CONTINUE', so a strip-first check let
+    '\\x1bCONTINUE FROM ...' read as a brief. ESC is a Cc; to `_heading_form` it
+    is just one more invisible character. Same content-free record, whatever
+    survived the cut `original_task` now makes through the heading form. A task
+    with real text before the heading is never refused on a match — prose that
+    merely spells the footer out stays a brief and is cut by the exact
     marker alone.
 
     A continuation brief needs a brief: without a usable task the only text that
@@ -1170,12 +1232,12 @@ def _usable_task(job, job_ok):
     task = (job or {}).get("task")
     if type(task) is not str or not task:
         return None
-    head = _normalise_output(original_task(task))
-    if not _has_visible_text(head):
-        return None
+    head = original_task(task)
     form, origins = _heading_form(head)
     at = form.find(CONTINUE_HEADING_FORM)
-    if at >= 0 and not _has_visible_text(head[:origins[at]]):
+    if at >= 0 and _footer_prefix_invisible(head[:origins[at]]):
+        return None
+    if not _has_visible_text(head):
         return None
     return task
 
@@ -1340,17 +1402,24 @@ def original_task(task):
     A recovery leg's ``job.json`` task is the previous leg's brief, which is the
     original text plus one footer (P4c-fixes7), so `continuation_task` cuts here
     before appending the next one — feeding a leg's own brief back in replaces its
-    footer instead of stacking a second one. Cutting at the FIRST marker also
+    footer instead of stacking a second one. Cutting at the FIRST footer also
     collapses the nested footers a chain of legs stacks.
 
-    A task that only mentions the heading inside a line of prose keeps it: the
-    marker begins with the blank line that separates the footer from the brief, so
-    mid-line text does not match. A worker that forges the marker early in its own
+    The footer is found through `_heading_form`, not only through the literal
+    `CONTINUE_MARKER` (P4c D2): the literal cut left every footer whose blank line
+    was broken — a ZWSP, BOM, NBSP or tab in front of the heading, a CRLF
+    separator, or the separator lost entirely — in the brief, and the rebuilt one
+    stacked on top of it. `_footer_line_start` returns the equivalent literal
+    result and these variants alike.
+
+    A task that only mentions the heading INSIDE a line of prose keeps it: the
+    footer must begin its line. A worker that forges the marker early in its own
     task is cut there, and the rebuilt brief then depends on that prefix alone.
     """
     if type(task) is not str:
         raise RecoveryError("task: str, got %s" % type(task).__name__)
-    return task.split(CONTINUE_MARKER, 1)[0].rstrip()
+    at = _footer_line_start(task)
+    return task.rstrip() if at is None else task[:at].rstrip()
 
 
 def continuation_task(task_text, attempt, sandbox=None, max_attempts=MAX_ATTEMPTS):
