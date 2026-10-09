@@ -9855,6 +9855,33 @@ class ReadyCommandTests(unittest.TestCase):
         os.environ["AUTOOS_STATE_DIR"] = self.store_dir
         self.addCleanup(shutil.rmtree, self.store_dir, True)
         self.addCleanup(self._restore_state)
+        # AO-WRITER-GUARDS P4b (HERMETIC, D-852): the writer-guards gate reads the
+        # lane's diff through `lane_diff_paths` on EVERY ready, so this ONE shared
+        # patch — installed in setUp, asserted again by `ready()` below — is what
+        # keeps every ready test in this class and its subclasses off real git.
+        self.stub_lane_diff()
+
+    def stub_lane_diff(self, paths=(), added="", error=None):
+        """Install the recording stub for `lane_diff_paths` (see setUp).
+
+        The stub answers the two facts the gate needs — the path list and the
+        added lines — plus the call it recorded, so a test can assert `--base`
+        reached git. It carries `lane_diff_stub` as its own mark: `ready()`
+        refuses a run where the mark is missing, which is what makes "this test
+        would shell out to git" fail loudly instead of passing slowly.
+        """
+        calls = []
+
+        def stub(repo, base, sha):
+            calls.append((repo, base, sha))
+            return list(paths), added, error
+
+        stub.lane_diff_stub = True
+        patch = mock.patch.object(self.agent, "lane_diff_paths", stub)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.lane_diff_calls = calls
+        return stub
 
     def _restore_state(self):
         if self._old_state is None:
@@ -9928,6 +9955,11 @@ class ReadyCommandTests(unittest.TestCase):
 
     def ready(self, record, repo, sha, inbox, extra=()):
         """Run the real CLI. `repo=None` means let it default to the cwd."""
+        if not getattr(self.agent.lane_diff_paths, "lane_diff_stub", False):
+            raise AssertionError(
+                "ready test would run real git: the writer-guards gate reads "
+                "lane_diff_paths, so patch it with stub_lane_diff() (setUp does "
+                "it for every test in this class)")
         argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha, "--inbox", inbox]
         if repo is not None:
             argv += ["--repo", repo]
@@ -10372,6 +10404,335 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(len(text.splitlines()), 1, text)
         self.assertNotIn("\n2026-01-01", text.rstrip("\n"))
 
+    def test_a_ready_test_that_forgets_the_diff_stub_cannot_run_real_git(self):
+        # HERMETIC (D-852) guard, the other half of stub_lane_diff's mark: a NEW
+        # ready test that forgets the patch — or restores the real reader — fails
+        # here naming the function, instead of shelling out to git and passing
+        # slowly on whatever the machine happens to hold. The real reader comes
+        # from a freshly loaded module and is never invoked: the driver refuses
+        # before the CLI runs, which is exactly what this asserts.
+        fresh = load_agent()
+        inbox = self.make_inbox("")
+        with mock.patch.object(self.agent, "lane_diff_paths", fresh.lane_diff_paths):
+            with self.assertRaises(AssertionError) as ctx:
+                self.ready(self.write_record(*self.READY_RECORD),
+                           "/lane/checkout", self.NOT_PUSHED_SHA, inbox)
+        self.assertIn("lane_diff_paths", str(ctx.exception))
+        self.assertEqual(self.read_inbox(inbox), "")
+
+
+class ReadyWriterGuardsTests(unittest.TestCase):
+    """AO-WRITER-GUARDS P4b: the `writer-guards` gate inside `ready` (P4a helpers
+    in tools/autoos_ready_guards.py, wired at the pushed-sha/CI seam).
+
+    The gate asks the DIFF, not the card: ops work is decided from the real path
+    list and added lines, so a `docs`-labelled lane that touched a playbook is
+    held to the brief and the report like any other ops lane. When it fires it
+    fences the diff against the brief's canonical FILES line (`scope-fence`) and,
+    for ops, requires the REPORT's CHECK 1-6 evidence (`report-checks`); a lane
+    that clears it rides the inbox line as ` guards=ok` (` ops=1` too for ops).
+    A lane that triggers nothing carries no new field.
+
+    HERMETIC (D-852): every outside read is stubbed at the module attribute —
+    `lane_diff_paths`, `remote_branch_tip`, `prepush_mod.local_green`,
+    `main_ci_status` — so nothing here runs git, gh, docker, curl, ssh or
+    systemctl; the only real files are the record, the registry, the brief and
+    the report under a temp dir. `ReadyCommandTests` (above) keeps its own
+    real-repo fixtures untouched, which is what `stub_lane_diff` in its setUp is
+    for; the driver here installs the same stub itself and prints the diff facts
+    per test.
+    """
+
+    BRANCH = "lane/work"
+    SHA = "a" * 40
+    REPO = "/lane/checkout"
+    BRIEF = ("TASK: fix the inventory playbook\n"
+             "FILES (only these; <= 3 files, <= 200 lines changed):"
+             " playbooks/x.yml, inventory.yml. Do not touch other lines/files.\n")
+
+    def setUp(self):
+        self.agent = load_agent()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(_reviewer_registry(), fh)
+        fd, self.record = tempfile.mkstemp(suffix=".md")
+        self.addCleanup(os.unlink, self.record)
+        with io.open(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)) + "\n")
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.inbox = os.path.join(self.work, "L1.md")
+        with io.open(self.inbox, "w", encoding="utf-8") as fh:
+            fh.write("")
+
+    def write_text(self, name, body):
+        path = os.path.join(self.work, name)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    def inbox_text(self):
+        with io.open(self.inbox, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _stub(self, name, value):
+        patch = mock.patch.object(self.agent, name, value)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def report_text(self, missing=()):
+        return "".join("CHECK %d: PASS ran the tool, %d lines of evidence\n" % (n, n)
+                       for n in range(1, 7) if n not in missing)
+
+    def ready(self, diff_paths=(), diff_added="", diff_error=None, extra=(),
+              brief=None, report=None):
+        """Drive the real CLI with every outside read replaced.
+
+        Returns (rc, out, err, inbox_text, diff_calls). `brief=True` hands the
+        gate the canonical ops brief above; a string is that text instead;
+        `brief=None` types the command the way a non-ops lane does — no `--brief`
+        at all. `report` is the REPORT text, or None for no `--report`.
+        """
+        calls = []
+
+        def lane_diff(repo, base, sha):
+            calls.append((repo, base, sha))
+            return list(diff_paths), diff_added, diff_error
+        lane_diff.lane_diff_stub = True
+        self._stub("lane_diff_paths", lane_diff)
+        self._stub("remote_branch_tip", lambda repo, branch: (self.SHA, None))
+        self._stub("main_ci_status",
+                   lambda repo=None, runner=None: ("success", "999", None))
+        # D-110's record read is a runner-private store lookup; this class tests
+        # the guard seam, not that gate, so it answers green.
+        patch = mock.patch.object(self.agent.prepush_mod, "local_green",
+                                  lambda sha, repo=None, **kw: True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        argv = ["ready", self.record, "--branch", self.BRANCH, "--sha", self.SHA,
+                "--inbox", self.inbox, "--repo", self.REPO,
+                "--registry", self.registry_path, *extra]
+        if brief is not None:
+            argv += ["--brief", self.write_text(
+                "brief.md", self.BRIEF if brief is True else brief)]
+        if report is not None:
+            argv += ["--report", self.write_text("report.md", report)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue(), err.getvalue(), self.inbox_text(), calls
+
+    # --- ops detection comes from the real diff -----------------------------
+
+    def test_an_ops_lane_without_a_brief_is_refused(self):
+        rc, out, err, inbox, calls = self.ready(diff_paths=["playbooks/x.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards: ops lane without --brief", out + err)
+        self.assertEqual(inbox, "")
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_mislabelled_docs_card_on_a_playbook_diff_still_needs_brief_and_report(self):
+        # The label is only a FLOOR: the diff decides, so `--task-type docs` buys
+        # nothing on a playbook edit. No brief -> named. Brief but no report ->
+        # the second refusal, so an ops lane cannot clear one half and skip the
+        # other.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --brief", out + err)
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"), brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --report", out + err)
+        self.assertEqual(inbox, "")
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"),
+            brief=True, report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+
+    def test_an_ops_lane_judged_from_the_added_lines_not_the_path_list(self):
+        # A path that names nothing ops (and a `code` label) still reaches the
+        # guards through the diff BODY: `requires_ops_guards` is handed the added
+        # lines too, so a lane that wrote a password line is an ops lane.
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["notes.txt"], extra=("--task-type", "code"),
+            diff_added="password: rotate-it-by-hand\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --brief", out + err)
+
+    # --- the brief's FILES line fences the diff -----------------------------
+
+    def test_a_path_outside_the_briefs_files_is_refused_naming_every_one(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml", "lib/linux/extra.sh", "setup.sh"],
+            brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("scope-fence", out + err)
+        self.assertIn("lib/linux/extra.sh", out + err)
+        self.assertIn("setup.sh", out + err)
+        self.assertNotIn("playbooks/x.yml", out + err)  # allowed: not a violation
+        self.assertEqual(inbox, "")
+
+    def test_a_code_lane_that_was_given_a_brief_is_still_fenced(self):
+        # `--brief` alone turns the fence on, ops or not — a caller who hands the
+        # gate the brief cannot un-ask for it by calling the card code.
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--task-type", "code"), brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("scope-fence", out + err)
+        self.assertIn("tools/a.py", out + err)
+
+    def test_a_brief_the_guards_module_refuses_is_exit_1_not_a_crash(self):
+        # GuardError fails closed: a FILES line that is not the canonical one is
+        # unusable, and an unusable allow-list is a refusal, never an allow.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"],
+            brief="TASK: x\nFILES: playbooks/x.yml\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards", out + err)
+        self.assertEqual(inbox, "")
+
+    # --- the report's CHECK evidence ---------------------------------------
+
+    def test_a_report_missing_check_4_is_refused_naming_it(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True,
+            report=self.report_text(missing=(4,)))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("report-checks", out + err)
+        self.assertIn("missing CHECK 4", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_failed_and_an_input_required_check_are_each_named(self):
+        bad = self.report_text().replace("CHECK 2: PASS", "CHECK 2: FAIL")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True, report=bad)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("failed CHECK 2", out + err)
+        need = self.report_text().replace("CHECK 6: PASS", "CHECK 6: INPUT_REQUIRED")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True, report=need)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("input_required CHECK 6", out + err)
+
+    # --- the line the orchestrator parses ----------------------------------
+
+    def test_an_all_good_ops_lane_is_appended_with_guards_and_ops(self):
+        rc, out, err, inbox, calls = self.ready(
+            diff_paths=["playbooks/x.yml", "inventory.yml"], brief=True,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(inbox.splitlines()), 1, inbox)
+        self.assertTrue(inbox.rstrip("\n").endswith(" guards=ok ops=1"), inbox)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_non_ops_lane_without_a_brief_is_unchanged(self):
+        # Every ready reads the diff (ops detection needs it), but a lane that
+        # triggers no guard carries no new field — existing inbox lines parse as
+        # they did before P4b.
+        rc, out, err, inbox, calls = self.ready(diff_paths=["tools/a.py"],
+                                                diff_added="print(1)\n")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(calls), 1, calls)
+        line = inbox.rstrip("\n")
+        self.assertNotIn("guards=", line)
+        self.assertNotIn("ops=", line)
+
+    def test_a_briefed_code_lane_carries_guards_but_no_ops_flag(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--task-type", "code"),
+            brief="TASK: touch one file\nFILES (only these; <= 3 files,"
+                  " <= 200 lines changed): tools/a.py."
+                  " Do not touch other lines/files.\n")
+        self.assertEqual(rc, 0, out + err)
+        line = inbox.rstrip("\n")
+        self.assertTrue(line.endswith(" guards=ok"), line)
+        self.assertNotIn(" ops=", line)
+
+    # --- the gate could not run --------------------------------------------
+
+    def test_a_diff_the_gate_cannot_read_is_exit_2(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_error="fatal: bad revision 'origin/main...%s'" % self.SHA)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("cannot read diff", err)
+        self.assertIn("bad revision", err)
+        self.assertEqual(inbox, "")
+
+    def test_an_unreadable_brief_or_report_is_exit_2(self):
+        missing = os.path.join(self.work, "no-such-brief.md")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--brief", missing))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no-such-brief.md", err)
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True,
+            extra=("--report", os.path.join(self.work, "no-such-report.md")))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no-such-report.md", err)
+
+    def test_the_gate_diffs_the_named_base_against_the_lanes_repo_and_sha(self):
+        # `--base` and `--repo` reach git as one range at the merge base, the way
+        # the risk gate does: a lane whose base is not origin/main is judged
+        # against the base it says, not against a default.
+        _rc, _out, _err, _inbox, calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--base", "origin/master"))
+        self.assertEqual(calls, [(self.REPO, "origin/master", self.SHA)], calls)
+        _rc, _out, _err, _inbox, calls = self.ready(diff_paths=["tools/a.py"])
+        self.assertEqual(calls, [(self.REPO, "origin/main", self.SHA)], calls)
+
+
+class PreflightCommandTests(unittest.TestCase):
+    """AO-WRITER-GUARDS P4b: `preflight` — the guard tools, checked and never
+    installed. The lookup is injected (HERMETIC, D-852): the command reads no
+    host state and starts no process, and a missing tool ends the run
+    `input_required` (exit 3) carrying the documented install step for a human.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def run_preflight(self, present):
+        seen = set(present)
+
+        def which(tool):
+            return "/usr/local/bin/%s" % tool if tool in seen else None
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.agent.cmd_preflight(argparse.Namespace(), which=which)
+        return rc, out.getvalue()
+
+    def test_a_missing_tool_ends_input_required_naming_it_and_how_to_install(self):
+        present = [t for t in self.agent.ready_guards.REQUIRED_TOOLS if t != "gitleaks"]
+        rc, printed = self.run_preflight(present)
+        self.assertEqual(rc, 3, printed)
+        data = json.loads(printed)
+        self.assertEqual(data["state"], "input_required")
+        self.assertEqual(data["missing"], ["gitleaks"])
+        self.assertIn("pipx install", data["message"])
+        self.assertIn("gitleaks", data["message"])
+
+    def test_every_tool_present_exits_0_with_no_missing(self):
+        rc, printed = self.run_preflight(self.agent.ready_guards.REQUIRED_TOOLS)
+        self.assertEqual(rc, 0, printed)
+        data = json.loads(printed)
+        self.assertEqual(data["state"], "ok")
+        self.assertEqual(data["missing"], [])
+
+    def test_preflight_starts_no_process_and_is_registered_with_no_arguments(self):
+        self.assertIn("preflight", self.agent.VERB_PARSERS)
+        self.assertIn("preflight", self.agent.VERB_HANDLERS)
+        ap = argparse.ArgumentParser()
+        sub = ap.add_subparsers(dest="cmd")
+        self.agent._parser_preflight(sub)
+        args = ap.parse_args(["preflight"])
+        self.assertIsNone(args.which)
+        boom = mock.Mock(side_effect=AssertionError("preflight ran a command"))
+        with mock.patch.object(self.agent.subprocess, "run", boom):
+            rc, _printed = self.run_preflight(self.agent.ready_guards.REQUIRED_TOOLS)
+        self.assertEqual(rc, 0)
+        boom.assert_not_called()
 
 class CIRunStatusTests(unittest.TestCase):
     """`ci_run_status` reads one fact off GitHub Actions with `gh`, through an

@@ -87,6 +87,29 @@ class MainCiFreezeTests(unittest.TestCase):
         os.environ["AUTOOS_STATE_DIR"] = self.store_dir
         self.addCleanup(shutil.rmtree, self.store_dir, True)
         self.addCleanup(self._restore_state)
+        # AO-WRITER-GUARDS P4b (HERMETIC, D-852): the writer-guards gate reads the
+        # lane's diff through `lane_diff_paths` on EVERY ready — the same shared
+        # patch tests/test_autoos_spawner.py's ReadyCommandTests.setUp installs
+        # (stub_lane_diff there, stub_lane_diff here, one per class) — so no ready
+        # test in this file or its subclasses shells out to git.
+        self.stub_lane_diff()
+
+    def stub_lane_diff(self, paths=(), added="", error=None):
+        """Install the recording stub for `lane_diff_paths` (see setUp); the
+        sibling of ReadyCommandTests.stub_lane_diff, marked so `ready()` below
+        refuses a run whose stub is missing."""
+        calls = []
+
+        def stub(repo, base, sha):
+            calls.append((repo, base, sha))
+            return list(paths), added, error
+
+        stub.lane_diff_stub = True
+        patch = mock.patch.object(self.agent, "lane_diff_paths", stub)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.lane_diff_calls = calls
+        return stub
 
     def _restore_state(self):
         if self._old_state is None:
@@ -143,6 +166,11 @@ class MainCiFreezeTests(unittest.TestCase):
         return repo, sha
 
     def ready(self, record, repo, sha, inbox, extra=()):
+        if not getattr(self.agent.lane_diff_paths, "lane_diff_stub", False):
+            raise AssertionError(
+                "ready test would run real git: the writer-guards gate reads "
+                "lane_diff_paths, so patch it with stub_lane_diff() (setUp does "
+                "it for every test in this class)")
         argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha,
                 "--inbox", inbox, "--repo", repo,
                 "--registry", self.registry_path, *extra]
