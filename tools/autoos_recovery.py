@@ -47,10 +47,10 @@ forever. Fail closed everywhere: an unreadable record, a corrupt attempt file, a
 job.json field of the wrong type (`record_suspect` — the file is worker-writable,
 so every field is type-checked before use and a misshapen record never answers
 'completed'), a record with no usable job.json task — absent, unreadable, not an
-object, or empty after the type guard (there is no brief to continue and no task to
-hash a default lane key from, so `plan` needs an explicit `--lane`), or
+object, or empty after the type guard (there is no brief to continue) — or
 a pid this host cannot probe is 'unknown', and 'unknown' is 'escalate'. It is
-never 'completed'.
+never 'completed'. The lane key is ALWAYS caller-supplied (D-914): `plan` needs
+`--lane` exactly like `record` does, and without it is a usage error (exit 2).
 
 Residuals, stated rather than hidden:
 
@@ -131,18 +131,18 @@ Residuals, stated rather than hidden:
   lane blocked, and the lock file itself stays put. What neither gives is a wait:
   a lock still contested after ``LOCK_RETRIES`` tries is refused, and a refused
   record escalates the lane instead of running an unrecorded leg.
-* the default lane key is hashed from the CANONICAL ORIGINAL task, with every
-  continuation footer cut before the hash (`original_task`, P4c-fixes7). A leg's
-  ``job.json`` task is its predecessor's brief — original plus footer — so hashing
-  it as it stands gives each leg a new key, each key reads attempts 0, and the
-  ``MAX_ATTEMPTS`` cap is bypassable: three dead writers and no escalation. What a
-  worker forges inside its own task text is cut the same way, so the key depends on
-  the prefix alone and the cap still holds. Because the key is the ORIGINAL's hash,
-  usability is judged on the ORIGINAL too (`_original_is_usable`, P4c-fixes8): a
-  footer-only record has an empty original, and hashing it would put every such
-  record on the fleet onto one sha256-of-'' budget — one unrelated death moving
-  another lane's counter. Such a record names no work: 'unknown' + suspect, which
-  escalates, and the default key is refused unless the caller names `--lane`.
+* the lane key is ALWAYS caller-supplied (D-914). Rounds 7-9 of isolated seats
+  found a chain of defects all rooted in deriving that key from free task text —
+  key drift across continuation legs (each leg's brief carries the previous
+  footer, so each leg read attempts 0 and the ``MAX_ATTEMPTS`` cap was
+  bypassable), footer-only tasks collapsing onto one sha256-of-'' budget shared
+  by unrelated runs, and Cf/Cc-prefixed footers moving the key again. The ship
+  decision was to delete the derivation, not to patch it: `plan` refuses without
+  a `--lane` (usage exit 2), the same validation `record` already applies, and a
+  caller that wants a stable lane names one. The continuation footer is still cut
+  before a brief is rebuilt (`original_task`, used by `continuation_task`), so a
+  chain of legs never stacks footers, and a task that is nothing but a footer
+  still names no work: 'unknown' + suspect, which escalates.
 * the CLI's exit contract (P4c-fixes3): 0 none/wait and a recorded leg, 3 rerun,
   4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
   unwritable recovery state raises `RecoveryStateError`, which `main` answers
@@ -190,19 +190,18 @@ STALL_SECS_MAX = 7 * 24 * 60 * 60
 # does not.
 TAIL_BYTES = 256 * 1024
 TASK_MAX_BYTES = 200 * 1024
-# The head of the ORIGINAL task the default lane key is hashed from.
-KEY_TASK_CHARS = 2000
 # The one place the continuation footer's shape is written down (P4c-fixes7): the
 # blank line plus the heading up to the attempt number, which is the only part that
 # is the same on every leg. `continuation_task` appends text starting with exactly
-# this, and `original_task` cuts the task at the first occurrence of it — so a lane
-# key, which is a hash of the task, stays the SAME key across the whole recovery
-# chain instead of drifting one key per leg. The leading "\n\n" is load-bearing: a
-# task that merely mentions the heading inside a line of prose is not cut there.
+# this, and cuts the task at the first occurrence of it before appending — so a
+# leg's own brief, which is what the next leg's job.json task holds (original plus
+# one footer), is fed back in without stacking a second footer. The leading
+# "\n\n" is load-bearing: a task that merely mentions the heading inside a line of
+# prose is not cut there.
 CONTINUE_MARKER = "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt "
 # The same footer without the blank line that separates it from a brief — the shape
 # a record wears when the separator is lost. Only used to RECOGNISE a footer-only
-# task as naming no work (`_original_is_usable`), never to cut a key (P4c-fixes8).
+# task as naming no work (`_usable_task`), never to cut a brief (P4c-fixes8).
 CONTINUE_HEADING = CONTINUE_MARKER.lstrip("\n")
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
@@ -1102,41 +1101,34 @@ def _has_visible_text(task):
     return False
 
 
-def _original_is_usable(task):
-    """Whether a task says anything once its continuation footer is cut.
-
-    The judgement runs on `original_task`, not the raw text, because that is what
-    the default lane key is hashed from: a task that IS nothing but the footer has
-    an EMPTY original, so every footer-only record on the fleet would hash to
-    sha256 of the empty string and share one attempt budget — one unrelated run's
-    death would move another lane's counter. A footer that lost the blank line
-    separating it from its brief is the same record with the marker's prefix
-    instead of its separator, and names no work either (P4c-fixes8)."""
-    head = original_task(task)
-    if not _has_visible_text(head):
-        return False
-    return not _normalise_output(head).lstrip().startswith(CONTINUE_HEADING)
-
-
 def _usable_task(job, job_ok):
     """The task a record can be continued from, or None when it cannot say what
-    it ran: no readable ``job.json`` (absent, unreadable, not an object) or no task
-    whose ORIGINAL part — what `original_task` keeps once the footer is cut — holds
-    anything a writer could act on (absent, not a str, or nothing but whitespace,
-    control characters and escapes, or a bare footer).
+    it ran.
 
-    A continuation brief needs a brief. Without a task the only text that would
-    reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer, and every
-    such run would additionally hash to the same default lane key — sha256 of the
-    empty string — so unrelated runs would share one attempt budget. Both are
-    answered the same way: 'unknown' with `record_suspect`, which escalates (P4c-
-    fixes6, the empty-original half closed by P4c-fixes8)."""
+    ONE minimal check (D-914): ``job.json`` is a readable dict and its `task` is
+    a str that still holds at least one visible character once the continuation
+    footer is cut (`original_task`) and the ANSI strip and the Zs/Zl/Zp/Cc/Cf/
+    whitespace removal of `_has_visible_text` have run — three spaces, an ANSI
+    reset and a bare footer are all truthy strings that name no work (P4c-fixes7).
+    A footer that lost the blank line separating it from its brief is the same
+    record with the marker's prefix instead of its separator, and names no work
+    either (P4c-fixes8).
+
+    A continuation brief needs a brief: without a usable task the only text that
+    would reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer.
+    Such a record is 'unknown' with `record_suspect`, which escalates
+    (P4c-fixes6) — the same answer whether or not the caller names `--lane`."""
     if not job_ok:
         return None
     task = (job or {}).get("task")
     if type(task) is not str or not task:
         return None
-    return task if _original_is_usable(task) else None
+    head = original_task(task)
+    if not _has_visible_text(head):
+        return None
+    if _normalise_output(head).lstrip().startswith(CONTINUE_HEADING):
+        return None
+    return task
 
 
 def _job_record_suspect(job):
@@ -1297,17 +1289,15 @@ def original_task(task):
     footer, with the whitespace the footer left behind stripped.
 
     A recovery leg's ``job.json`` task is the previous leg's brief, which is the
-    original text plus one footer (P4c-fixes7): hashing it as it stands gives every
-    leg a DIFFERENT default lane key, so each leg reads attempts 0 and the
-    ``MAX_ATTEMPTS`` cap never closes — three dead runs and no escalation. Cutting
-    at the FIRST marker collapses the nested footers a chain of legs stacks, which
-    is what puts all of them back on one key.
+    original text plus one footer (P4c-fixes7), so `continuation_task` cuts here
+    before appending the next one — feeding a leg's own brief back in replaces its
+    footer instead of stacking a second one. Cutting at the FIRST marker also
+    collapses the nested footers a chain of legs stacks.
 
     A task that only mentions the heading inside a line of prose keeps it: the
     marker begins with the blank line that separates the footer from the brief, so
     mid-line text does not match. A worker that forges the marker early in its own
-    task is cut there, and the key then depends on that prefix alone — the cap
-    still holds, because every leg of the lane carries the same prefix.
+    task is cut there, and the rebuilt brief then depends on that prefix alone.
     """
     if type(task) is not str:
         raise RecoveryError("task: str, got %s" % type(task).__name__)
@@ -1315,7 +1305,7 @@ def original_task(task):
 
 
 def continuation_task(task_text, attempt, sandbox=None, max_attempts=MAX_ATTEMPTS):
-    """The task text for one recovery leg: the original brief plus the footer.
+    """The task text for one recovery leg: the original brief plus ONE footer.
 
     The original task is capped so the footer always arrives, and the sandbox
     path lands in the text only after the same validation the reader used — a
@@ -1347,19 +1337,6 @@ def continuation_task(task_text, attempt, sandbox=None, max_attempts=MAX_ATTEMPT
     # `task` is `original_task`'s output, already free of trailing whitespace, so
     # the marker's own blank line is the only separator the brief gets.
     return task + footer + "\n"
-
-
-def lane_key_for_task(task):
-    """The default lane key: sha256 over the ORIGINAL task's first 2000 characters.
-
-    The footer is cut before the hash (P4c-fixes7) so a leg's brief and the leg it
-    continues share one key, and one attempt budget. The cut happens BEFORE the
-    2000-character head is taken: for a task longer than the head the footer sits
-    past the cut anyway, and for a shorter one it is already gone, so both map all
-    legs of the chain onto the same lane."""
-    if type(task) is not str:
-        raise RecoveryError("task: str, got %s" % type(task).__name__)
-    return hashlib.sha256(original_task(task)[:KEY_TASK_CHARS].encode("utf-8")).hexdigest()
 
 
 def path_of(key, state=None):
@@ -1568,28 +1545,24 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
 
     {action, state, attempts, sandbox, branch, continue_task, spawn_hint, rc,
     has_report, last_output_age, lane_key, state_corrupt, record_suspect,
-    run_id}. Without
-    `lane_key` the lane is the run's own task, hashed; with one, every writer on
-    that lane shares the budget. A run whose record cannot supply a task — none, or
-    nothing but a continuation footer, whose ORIGINAL part is empty — has no
-    derivable lane either: hashing that empty original would hand every such run
-    sha256 of the empty string and one shared budget. It is refused with a
-    `RecoveryStateError` (the CLI's escalate exit 4) unless the caller names
-    `--lane`; with an explicit lane the record is still suspect, so the plan
-    escalates rather than continuing a footer. `spawn_hint.cwd` is the kept worktree
-    for the L2/L1 to hand to `spawn` — this module never calls it.
+    run_id}. The lane key is ALWAYS caller-supplied (D-914): `lane_key` must name
+    the lane whose attempt budget the run belongs to, validated exactly like
+    `record` validates `--lane`. Without one this raises `RecoveryError` — the
+    CLI's usage exit 2 — because the lane is never derived from free task text.
+    A record whose job.json cannot supply a usable task (absent, unreadable, or
+    nothing but a continuation footer) is suspect whatever its lane: an explicit
+    `lane_key` buys it a budget to count on, never a brief to continue, so the
+    plan escalates rather than continuing a footer. `spawn_hint.cwd` is the kept
+    worktree for the L2/L1 to hand to `spawn` — this module never calls it.
     """
+    if lane_key is None:
+        raise RecoveryError(
+            "plan: a lane key is required — the lane is never derived from the "
+            "run's task text (pass --lane)")
+    key = _check_key(lane_key)
     path = run_dir_for(run_id, state)
     job, job_ok = _read_json_dict(os.path.join(path, "job.json"))
     task = _usable_task(job, job_ok)
-    if lane_key is None:
-        if task is None:
-            raise RecoveryStateError(
-                "run %r has no usable job.json task: need --lane — the default "
-                "lane key is never derived from an empty task" % (run_id,))
-        key = lane_key_for_task(task)
-    else:
-        key = _check_key(lane_key)
     info = classify_run(path, now=now, stall_secs=stall_secs, pid_probe=pid_probe)
     cur = read_attempts(key, state)
     action = next_action(cur["attempts"], info["state"],
@@ -1623,8 +1596,9 @@ def main(argv=None):
     p = sub.add_parser("plan", help="print the recovery plan for RUN_ID as JSON "
                                     "(exit 0 none/wait, 3 rerun, 4 escalate)")
     p.add_argument("run_id")
-    p.add_argument("--lane", dest="lane", default=None,
-                   help="lane key sharing the attempt budget (default: the run's task, hashed)")
+    p.add_argument("--lane", dest="lane", required=True,
+                   help="lane key sharing the attempt budget (required: the lane "
+                        "is never derived from the task text)")
     p.add_argument("--stall-secs", dest="stall_secs", type=float, default=STALL_SECS,
                    help="quiet for this long is stalled, a finite number of seconds "
                         "between %d and %d (default %d)"

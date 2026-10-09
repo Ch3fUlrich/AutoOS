@@ -11,7 +11,6 @@ Run directly:
 """
 import ast
 import contextlib
-import hashlib
 import io
 import json
 import os
@@ -1347,33 +1346,50 @@ class SuspectRecords(TempCase):
         root = make_record(st, job_json=json.dumps({"task": "x"}), output="thinking\n")
         info = classify(root, probe=dead)
         self.assertEqual((info["state"], info["record_suspect"]), ("died", False))
-        p = r.plan(RUN, state=st, now=NOW, pid_probe=dead)
-        self.assertEqual(p["lane_key"], r.lane_key_for_task("x"))
+        p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+        self.assertEqual(p["lane_key"], LANE)
         self.assertEqual(p["action"], "rerun")
         self.assertTrue(p["continue_task"].startswith("x\n\n"))
 
 
-class NoUsableTaskPlan(TempCase):
-    """P4c-fixes6: the default lane key is a hash of the task, so an unusable task
-    would hand every such run sha256("") — one shared budget between unrelated
-    runs. `plan` refuses to invent that key; the caller names --lane or escalates."""
+class LaneKeyRequired(TempCase):
+    """D-914 (P4c removal delta): the lane key is ALWAYS caller-supplied. Every
+    defect rounds 7-9 found was rooted in deriving it from free task text, so the
+    derivation is gone: `plan` without `--lane` is a usage error (exit 2), library
+    and CLI alike, whatever the record holds — the refusal reads nothing."""
 
     def broken(self, state=None, job=SKIP):
         st = state or self.state
         make_record(st, exit_json={"rc": 1}, job_json=job)
         return st
 
-    def test_a_missing_job_json_never_hashes_to_the_empty_lane_key(self):
-        self.broken()
-        with self.assertRaises(r.RecoveryStateError) as caught:
+    def test_plan_without_a_lane_key_is_a_usage_error(self):
+        # A healthy record and a damaged one: the same refusal, before any read.
+        for st in (self.other_state(), self.broken(self.other_state())):
+            with self.assertRaises(r.RecoveryError) as caught:
+                r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+            self.assertIn("--lane", str(caught.exception))
+        # RecoveryError IS a ValueError: a library caller catching either sees it.
+        make_record(self.state, exit_json={"rc": 1})
+        with self.assertRaises(ValueError):
             r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        self.assertIn("--lane", str(caught.exception))
-        self.assertIn("empty task", str(caught.exception))
-        # A second unrelated run in a second state tree: the same refusal, so no
-        # lane of sha256("") is ever shared between them.
+
+    def test_the_cli_exits_two_for_plan_without_lane(self):
+        self.broken()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as caught:
+                r.main(["plan", RUN])
+        self.assertEqual(caught.exception.code, 2)   # argparse: --lane is required
+        self.assertEqual(out.getvalue(), "")
+
+    def test_no_lane_record_is_written_for_a_refused_plan(self):
+        self.broken()
+        before = sorted(os.listdir(self.state))
         with self.assertRaises(r.RecoveryError):
-            r.plan(RUN, state=self.broken(self.other_state()), now=NOW,
-                   pid_probe=dead)
+            r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertEqual(sorted(os.listdir(self.state)), before)
+        self.assertNotIn("recovery", before)
 
     def test_an_explicit_lane_still_escalates_a_record_with_no_task(self):
         for job in (SKIP, "{}", "{oops", json.dumps({"task": ""})):
@@ -1385,29 +1401,6 @@ class NoUsableTaskPlan(TempCase):
             self.assertIsNone(p["continue_task"], job)
             self.assertIsNone(p["spawn_hint"], job)
             self.assertEqual(p["lane_key"], LANE, job)
-
-    def test_a_usable_task_still_gets_its_own_default_lane(self):
-        make_record(self.state, exit_json={"rc": 1})
-        p = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        self.assertEqual(p["lane_key"], r.lane_key_for_task(TASK))
-        self.assertEqual(p["action"], "rerun")
-
-    def test_the_cli_exits_four_and_names_no_lane(self):
-        self.broken()
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = r.main(["plan", RUN])
-        self.assertEqual(code, 4)
-        self.assertEqual(out.getvalue(), "")
-        self.assertIn("need --lane", err.getvalue())
-        self.assertNotIn("Traceback", err.getvalue())
-
-    def test_no_spawner_lane_record_is_written_for_a_refused_plan(self):
-        self.broken()
-        before = sorted(os.listdir(self.state))
-        with self.assertRaises(r.RecoveryError):
-            r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        self.assertEqual(sorted(os.listdir(self.state)), before)
 
 
 class PidBounds(TempCase):
@@ -1575,44 +1568,30 @@ class ContinuationTask(TempCase):
 
 
 class LaneKeys(TempCase):
-    def test_the_default_key_is_the_hash_of_the_task_head(self):
-        # P4c-fixes7: the head is taken from the ORIGINAL task, so the trailing
-        # whitespace a brief ends on is not part of the key.
-        self.assertEqual(r.lane_key_for_task(TASK),
-                         hashlib.sha256(TASK.rstrip().encode("utf-8")).hexdigest())
-        head = "y" * (r.KEY_TASK_CHARS + 500)
-        self.assertEqual(r.lane_key_for_task(head),
-                         hashlib.sha256(head[:r.KEY_TASK_CHARS].encode("utf-8")).hexdigest())
+    """The key is ONLY ever caller-supplied (D-914): what survives is the shape
+    the caller's --lane must wear, and the fact that no key names a path."""
 
-    def test_a_continuation_footer_never_moves_the_key(self):
-        for task in (TASK, "x" * (r.KEY_TASK_CHARS + 500) + "\n", "brief"):
-            with_footer = r.continuation_task(task, 1, SB)
-            self.assertEqual(r.lane_key_for_task(with_footer),
-                             r.lane_key_for_task(task), task[:12])
+    def test_a_leg_s_own_brief_is_cut_to_one_footer_when_the_next_is_built(self):
+        """The cut that keeps footers from stacking: a leg's job.json task is the
+        previous brief — original plus footer — and the rebuilt brief replaces the
+        footer instead of appending a second one."""
+        text = r.continuation_task("Fix the widget.", 1, SB)
+        again = r.continuation_task(text, 2, SB)
+        self.assertEqual(again.count("CONTINUE FROM CURRENT DIFF"), 1)
+        self.assertIn("recovery attempt 2/2", again)
+        self.assertNotIn("recovery attempt 1/2", again)
+        self.assertTrue(again.startswith("Fix the widget.\n\n"))
+        # A nested chain cuts at the FIRST marker, however many legs stack.
+        nested = r.continuation_task(r.continuation_task(text, 2, SB), 1, SB)
+        self.assertEqual(nested.count("CONTINUE FROM CURRENT DIFF"), 1)
 
-    def test_nested_footers_all_collapse_to_one_key(self):
-        text = TASK
-        keys = set()
-        for attempt in (1, 2):
-            text = r.continuation_task(text, attempt, SB)
-            keys.add(r.lane_key_for_task(text))
-        self.assertEqual(keys, {r.lane_key_for_task(TASK)})
-        # ...and the brief itself carries exactly ONE footer, not one per leg.
-        self.assertEqual(text.count("CONTINUE FROM CURRENT DIFF"), 1)
-        self.assertIn("recovery attempt 2/2", text)
-        self.assertNotIn("recovery attempt 1/2", text)
-
-    def test_tasks_that_differ_only_past_the_head_share_a_lane(self):
-        a = "x" * r.KEY_TASK_CHARS + "\nfirst tail"
-        b = "x" * r.KEY_TASK_CHARS + "\nsecond tail"
-        self.assertEqual(r.lane_key_for_task(a), r.lane_key_for_task(b))
-        self.assertNotEqual(r.lane_key_for_task("x" * r.KEY_TASK_CHARS),
-                            r.lane_key_for_task("y" * r.KEY_TASK_CHARS))
-
-    def test_the_task_must_be_text(self):
-        for bad in (None, 7, b"x", ["x"]):
-            with self.assertRaises(r.RecoveryError):
-                r.lane_key_for_task(bad)
+    def test_a_marker_phrase_inside_a_line_does_not_cut_the_task(self):
+        """Prose about the footer is not a footer: the marker begins with the blank
+        line that separates a footer from its brief, so mid-line text survives."""
+        prose = ("Document that a brief may contain the words CONTINUE FROM CURRENT "
+                 "DIFF (recovery attempt 1/2) on a line of its own prose.\n")
+        self.assertEqual(r.original_task(prose), prose.rstrip())
+        self.assertEqual(r.original_task("line\n" + r.CONTINUE_MARKER + "x"), "line")
 
     def test_accepted_lane_key_shapes(self):
         for key in ("lane-a", "a/b/c", "wg.p4c_1", "x" * r.LANE_KEY_MAX_CHARS, "x"):
@@ -1636,16 +1615,16 @@ class LaneKeys(TempCase):
                              r"^[0-9a-f]{64}\.lock$")
 
 
-class CrossLegLaneDrift(TempCase):
-    """P4c-fixes7 (the real defect, found on an isolated seat): a leg's job.json
-    task is the previous leg's brief — ORIGINAL PLUS THE FOOTER — so hashing it
-    as it stood gave every leg a different default lane key, each fresh key read
-    attempts 0, and three dead writers in a row never escalated. All legs must
-    resolve to ONE key derived from the canonical original task."""
+class CrossLegChain(TempCase):
+    """D-914 (P4c removal delta), the behaviour the default key used to be needed
+    for, now on an explicit lane: a leg's job.json task is the previous leg's
+    brief — ORIGINAL PLUS THE FOOTER — so the chain must still walk attempts
+    0 -> 1 -> 2 and escalate on the third leg, with each leg's continue_task fed
+    as the next leg's task and footers never stacking."""
 
     RUNS = (RUN, LEG1, LEG2)          # one per leg of the chain
 
-    def chain(self, task, lane=None, expect_key=None):
+    def chain(self, task, lane=LANE):
         """Run the plan for each death, hand each leg the brief the plan of the
         leg before it returned, and return the (attempts, action, key) triples."""
         sb = self.sb()
@@ -1668,17 +1647,21 @@ class CrossLegLaneDrift(TempCase):
             if i < len(self.RUNS) - 1:
                 task = p["continue_task"]
                 r.record_attempt(key, self.RUNS[i + 1], self.state)
-        if expect_key is not None:
-            self.assertEqual(key, expect_key)
         return seen, key
 
-    def test_three_deaths_on_one_default_lane_escalate(self):
-        """The probe: a 68-character brief. attempts 0 -> 1 -> 2 and the third leg
-        is the lane, not a fourth rerun."""
-        task = "Fix the widget and run the suite."
-        self.assertLess(len(task), r.KEY_TASK_CHARS)
-        seen, key = self.chain(task, expect_key=hashlib.sha256(
-            task.encode("utf-8")).hexdigest())
+    def test_three_deaths_on_one_lane_escalate(self):
+        """The probe: attempts 0 -> 1 -> 2 and the third leg is the lane, not a
+        fourth rerun — the cap the drifting derived keys used to bypass."""
+        seen, key = self.chain("Fix the widget and run the suite.")
+        self.assertEqual(key, LANE)
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+
+    def test_a_task_longer_than_the_footer_still_walks_the_chain(self):
+        """3000 chars of brief: the task cap and the footer cut survive a task far
+        longer than the old key head ever was, and the chain still closes."""
+        seen, key = self.chain("z" * 3000)
+        self.assertEqual(key, LANE)
         self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
         self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
 
@@ -1686,47 +1669,23 @@ class CrossLegLaneDrift(TempCase):
         sb = self.sb()
         make_record(self.state, task="Fix the widget.", output=header_lines(sb),
                     exit_json={"rc": 1})
-        first = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        first = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
         second_task = first["continue_task"]
-        r.record_attempt(first["lane_key"], LEG1, self.state)
+        r.record_attempt(LANE, LEG1, self.state)
         make_record(self.state, run_id=LEG1, task=second_task,
                     output=header_lines(sb), exit_json={"rc": 1})
-        second = r.plan(LEG1, state=self.state, now=NOW, pid_probe=dead)
+        second = r.plan(LEG1, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
         cont = second["continue_task"]
         self.assertEqual(cont.count("CONTINUE FROM CURRENT DIFF"), 1)
         self.assertIn("recovery attempt 2/2", cont)
         self.assertNotIn("recovery attempt 1/2", cont)
         self.assertTrue(cont.startswith("Fix the widget.\n\n"), repr(cont[:40]))
 
-    def test_a_task_longer_than_the_key_head_stays_on_one_lane(self):
-        """3000 chars: the footer sits past the 2000-character head, so the head
-        alone decides — every leg still shares it."""
-        task = "z" * 3000
-        seen, key = self.chain(task, expect_key=hashlib.sha256(
-            task[:r.KEY_TASK_CHARS].encode("utf-8")).hexdigest())
-        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
-        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
-
-    def test_a_marker_phrase_inside_a_line_does_not_cut_the_task(self):
-        """Prose about the footer is not a footer: the marker begins with the blank
-        line that separates a footer from its brief, so the key is the whole text."""
-        task = ("Document that a brief may contain the words CONTINUE FROM CURRENT "
-                "DIFF (recovery attempt 1/2) on a line of its own prose.\n")
-        seen, key = self.chain(task, expect_key=hashlib.sha256(
-            task.rstrip().encode("utf-8")).hexdigest())
-        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
-        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
-        # The helper itself: only the exact '\n\n' + marker prefix cuts.
-        self.assertEqual(r.original_task(task), task.rstrip())
-        self.assertEqual(r.original_task("line\n" + r.CONTINUE_MARKER + "x"), "line")
-
-    def test_a_forged_footer_early_in_the_task_still_shares_one_key(self):
-        """A worker that writes the marker into its own task is cut there: the key
-        then depends on that prefix alone, so every leg of the chain — which always
-        carries the same prefix — keeps one budget and the cap still holds."""
-        task = ("real brief" + r.CONTINUE_MARKER + "forged tail\n")
-        seen, key = self.chain(task, expect_key=hashlib.sha256(
-            b"real brief").hexdigest())
+    def test_a_forged_footer_early_in_the_task_is_cut_the_same_way(self):
+        """A worker that writes the marker into its own task is cut there: the
+        rebuilt brief is the prefix plus ONE footer, so the leg is still told its
+        real work, and the explicit lane holds the cap whatever the text says."""
+        seen, key = self.chain("real brief" + r.CONTINUE_MARKER + "forged tail\n")
         self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
         self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
 
@@ -1734,23 +1693,24 @@ class CrossLegLaneDrift(TempCase):
         sb = self.sb()
         make_record(self.state, task="Fix the widget.", output=header_lines(sb),
                     exit_json={"rc": 1})
-        first = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        r.record_attempt(first["lane_key"], LEG1, self.state)
-        second = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        r.record_attempt(first["lane_key"], LEG2, self.state)
-        third = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        first = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
+        r.record_attempt(LANE, LEG1, self.state)
+        second = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
+        r.record_attempt(LANE, LEG2, self.state)
+        third = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
         self.assertEqual((first["attempts"], second["attempts"], third["attempts"]),
                          (0, 1, 2))
         self.assertEqual(third["action"], "escalate")
         self.assertIsNone(third["continue_task"])
         self.assertIsNone(third["spawn_hint"])
         self.assertEqual({first["lane_key"], second["lane_key"], third["lane_key"]},
-                         {first["lane_key"]})
+                         {LANE})
 
-    def test_an_explicit_lane_is_unchanged(self):
-        """--lane still owns the budget by name; the task text plays no part."""
-        seen, key = self.chain("Fix the widget.", lane=LANE)
-        self.assertEqual(key, LANE)
+    def test_the_lane_key_never_changes_with_the_task_text(self):
+        """The one property the derived key could not keep: the task plays no part
+        in naming the lane, so no leg of any chain can move the budget."""
+        seen, key = self.chain("Fix the widget.", lane="lane/other")
+        self.assertEqual(key, "lane/other")
         self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
         self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
 
@@ -1773,8 +1733,9 @@ class ContentFreeTask(TempCase):
             self.assertEqual(r.next_action(0, info["state"],
                                            record_suspect=info["record_suspect"]),
                              "escalate", repr(task))
-            with self.assertRaises(r.RecoveryStateError, msg=repr(task)):
-                r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual(p["action"], "escalate", repr(task))
+            self.assertIsNone(p["continue_task"], repr(task))
 
     def test_visible_tasks_are_usable(self):
         for task in ("x", "42", "\u4f60\u597d", "\u2764", "\xff0d\u5e38",
@@ -1790,20 +1751,16 @@ class ContentFreeTask(TempCase):
         make_record(self.state, task="\u00a0\u00a0", exit_json={"rc": 1})
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = r.main(["plan", RUN])
+            code = r.main(["plan", RUN, "--lane", LANE])
         self.assertEqual(code, 4)
 
 
-EMPTY_ORIGINAL_KEY = hashlib.sha256(b"").hexdigest()
-
-
 class FooterOnlyTask(TempCase):
-    """P4c-fixes8 DEFECT: `_usable_task` judged visibility on the RAW task, but the
-    default lane key is hashed from `original_task(task)` — the task cut at its
-    continuation footer. A record whose task IS the footer therefore read as usable
-    while its original was the empty string, so every such record on the fleet fell
-    onto one sha256-of-'' budget: one unrelated run's death moved another lane's
-    counter, and a second one escalated a lane that had lost nothing."""
+    """P4c-fixes8, kept through the D-914 key removal: a record whose task IS the
+    continuation footer names no work. `original_task` cuts it to the empty string,
+    so the single usability check refuses it; the loss-of-separator shape is
+    recognised the same way. Such a record escalates — an explicit --lane buys it a
+    budget to count on, never a brief to continue, and no leg is spent on a footer."""
 
     FOOTERS = (
         "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt 1/2): AAAA",   # marker at 0
@@ -1826,9 +1783,11 @@ class FooterOnlyTask(TempCase):
             self.assertEqual(r.next_action(0, info["state"],
                                            record_suspect=info["record_suspect"]),
                              "escalate", repr(task))
-            with self.assertRaises(r.RecoveryStateError, msg=repr(task)) as cm:
-                r.plan(RUN, state=st, now=NOW, pid_probe=dead)
-            self.assertIn("need --lane", str(cm.exception))
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual((p["action"], p["state"], p["record_suspect"]),
+                             ("escalate", "unknown", True), repr(task))
+            self.assertIsNone(p["continue_task"], repr(task))
+            self.assertFalse(os.path.exists(r.path_of(LANE, st)), repr(task))
 
     def test_the_forgotten_separator_is_recognised_as_a_footer(self):
         """The heading with its blank line lost names no brief either; prose that
@@ -1839,40 +1798,9 @@ class FooterOnlyTask(TempCase):
             {"task": "Fix the widget.\nCONTINUE FROM CURRENT DIFF for the recovery "
                      "attempt is spelled out in this prose."}, True))
 
-    def test_an_empty_original_key_is_never_derived(self):
-        """The hash itself still answers sha256('') for a bare footer — that is the
-        hazard — so the refusal has to happen before any lane is consulted. A
-        footer wearing a decoration or one that lost its blank line hashes to that
-        prefix instead: still no brief, so the record is refused all the same."""
-        for task in self.FOOTERS:
-            if not r.original_task(task):
-                self.assertEqual(r.lane_key_for_task(task), EMPTY_ORIGINAL_KEY,
-                                 repr(task))
-            st = self.other_state()
-            make_record(st, task=task, exit_json={"rc": 1})
-            with self.assertRaises(r.RecoveryStateError, msg=repr(task)):
-                r.plan(RUN, state=st, now=NOW, pid_probe=dead)
-            self.assertFalse(os.path.exists(r.path_of(EMPTY_ORIGINAL_KEY, st)),
-                             repr(task))
-
-    def test_two_unrelated_footer_only_records_never_share_one_budget(self):
-        """The exact repro: a recorded death of run A must not make run B — a
-        different footer-only record — read attempts 1 or escalate."""
-        make_record(self.state, run_id=RUN, task=r.CONTINUE_MARKER + "1/2): AAAA",
-                    exit_json={"rc": 1})
-        make_record(self.state, run_id=LEG1, task=r.CONTINUE_MARKER + "1/2): BBBB",
-                    exit_json={"rc": 1})
-        self.assertEqual(r.record_attempt(LANE, RUN, self.state)["attempts"], 1)
-        with self.assertRaises(r.RecoveryStateError) as cm:
-            r.plan(LEG1, state=self.state, now=NOW, pid_probe=dead)
-        self.assertIn("need --lane", str(cm.exception))
-        self.assertEqual(r.read_attempts(LANE, self.state)["attempts"], 1)
-        self.assertEqual(r.read_attempts(EMPTY_ORIGINAL_KEY, self.state)["attempts"], 0)
-        self.assertFalse(os.path.exists(r.path_of(EMPTY_ORIGINAL_KEY, self.state)))
-
     def test_a_brief_before_the_footer_is_still_usable(self):
         """The documented collapse stays: a non-empty original cut at the marker is
-        one lane, and the leg continues it."""
+        still a brief, and the leg continues it."""
         sb = self.sb()
         task = "Fix the widget." + r.CONTINUE_MARKER + "2/2): older footer\n"
         make_record(self.state, task=task, output=header_lines(sb),
@@ -1880,10 +1808,10 @@ class FooterOnlyTask(TempCase):
         info = classify(os.path.join(self.state, "agents", RUN), probe=dead)
         self.assertFalse(info["record_suspect"])
         self.assertEqual(info["state"], "died")
-        out = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
-        self.assertEqual(out["lane_key"], hashlib.sha256(b"Fix the widget.").hexdigest())
+        out = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
         self.assertEqual(out["action"], "rerun")
         self.assertTrue(out["continue_task"].startswith("Fix the widget." + r.CONTINUE_MARKER))
+        self.assertEqual(out["continue_task"].count("CONTINUE FROM CURRENT DIFF"), 1)
 
     def test_an_explicit_lane_plans_but_still_escalates(self):
         """--lane buys the record a lane to count on, never a brief to continue: it
@@ -2281,10 +2209,10 @@ class Plan(TempCase):
             "sandbox", "branch", "last_output_age", "state_corrupt", "record_suspect",
             "continue_task", "spawn_hint"}
 
-    def plan(self, state=None, **over):
+    def plan(self, state=None, lane_key=LANE, **over):
         kw = {"state": state or self.state, "now": NOW, "pid_probe": dead}
         kw.update(over)
-        return r.plan(RUN, **kw)
+        return r.plan(RUN, lane_key=lane_key, **kw)
 
     def test_a_dead_writer_gets_one_continuation_leg(self):
         sb = self.sb()
@@ -2300,9 +2228,12 @@ class Plan(TempCase):
         self.assertFalse(p["record_suspect"])
         self.assertEqual(p["lane_key"], LANE)
 
-    def test_the_default_lane_is_the_runs_own_task_hash(self):
+    def test_plan_without_a_lane_key_is_refused(self):
+        """D-914: the lane is never derived from the task — a plan with no named
+        lane is a usage error, whatever the record says."""
         make_record(self.state)
-        self.assertEqual(self.plan()["lane_key"], r.lane_key_for_task(TASK))
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
 
     def test_the_budget_is_shared_by_every_writer_on_the_lane(self):
         make_record(self.state, output=spawner_lines(self.sb()))
@@ -2376,6 +2307,8 @@ class Plan(TempCase):
         with self.assertRaises(r.RecoveryError):
             self.plan(lane_key="bad key")
         with self.assertRaises(r.RecoveryError):
+            r.plan("../etc", lane_key=LANE, state=self.state)
+        with self.assertRaises(r.RecoveryError):
             r.plan("../etc", state=self.state)
 
     def test_a_missing_run_is_refused(self):
@@ -2425,14 +2358,14 @@ class Cli(TempCase):
 
     def test_wait_and_none_exit_zero(self):
         make_record(self.state, pid=os.getpid())            # this pid is alive
-        code, text, _ = self.cli(["plan", RUN])
+        code, text, _ = self.cli(["plan", RUN, "--lane", LANE])
         self.assertEqual((code, json.loads(text)["state"], json.loads(text)["action"]),
                          (0, "running", "wait"))
         st = self.other_state()
         os.environ["AUTOOS_STATE_DIR"] = st
         make_record(st, exit_json={"rc": 0},
                     output=spawner_lines(self.sb(state=st), report=True))
-        code, text, _ = self.cli(["plan", RUN])
+        code, text, _ = self.cli(["plan", RUN, "--lane", LANE])
         self.assertEqual((code, json.loads(text)["action"]), (0, "none"))
 
     def test_escalate_exits_four(self):
@@ -2454,8 +2387,10 @@ class Cli(TempCase):
     def test_stall_secs_reaches_the_plan(self):
         make_record(self.state, pid=os.getpid(), mtime=NOW - 60,
                     output=spawner_lines(self.sb()))
-        self.assertEqual(self.cli(["plan", RUN, "--stall-secs", "30"])[0], 3)
-        code, text, _ = self.cli(["plan", RUN, "--stall-secs", "120"])
+        self.assertEqual(self.cli(["plan", RUN, "--lane", LANE,
+                                   "--stall-secs", "30"])[0], 3)
+        code, text, _ = self.cli(["plan", RUN, "--lane", LANE,
+                                  "--stall-secs", "120"])
         self.assertEqual((code, json.loads(text)["action"]), (0, "wait"))
 
     def test_a_stall_clock_that_is_not_a_number_exits_two(self):
@@ -2467,11 +2402,13 @@ class Cli(TempCase):
         for arg in ("nan", "inf", "-inf", "1e999", "0", "-1", "604801", "0.5"):
             # `--opt=-1`: the space-separated form makes argparse read the leading
             # dash as another option, which is its own usage error, not this one.
-            code, text, err = self.cli(["plan", RUN, "--stall-secs=%s" % arg])
+            code, text, err = self.cli(
+                ["plan", RUN, "--lane", LANE, "--stall-secs=%s" % arg])
             self.assertEqual(code, 2, arg)
             self.assertIn("autoos_recovery:", err)
             self.assertNotIn('"action": "rerun"', text)
-        code, text, _ = self.cli(["plan", RUN, "--stall-secs", "120"])
+        code, text, _ = self.cli(["plan", RUN, "--lane", LANE,
+                                  "--stall-secs", "120"])
         self.assertEqual((code, json.loads(text)["action"]), (0, "wait"))
 
     def test_a_stall_clock_that_is_not_a_float_is_argparse_s_usage_error(self):
@@ -2480,17 +2417,19 @@ class Cli(TempCase):
         make_record(self.state)
         for arg in ("0x10", "", "five"):
             with self.assertRaises(SystemExit) as caught:
-                self.cli(["plan", RUN, "--stall-secs", arg])
+                self.cli(["plan", RUN, "--lane", LANE, "--stall-secs", arg])
             self.assertEqual(caught.exception.code, 2, arg)
         # ' 5' IS a float (5.0) and inside the band, so it is a usable clock.
-        self.assertEqual(self.cli(["plan", RUN, "--stall-secs", " 5"])[0], 3)
+        self.assertEqual(self.cli(["plan", RUN, "--lane", LANE,
+                                   "--stall-secs", " 5"])[0], 3)
 
     def test_bad_input_exits_two(self):
         make_record(self.state)
-        for argv in (["plan", "../etc"], ["plan", "a" * 200],
+        for argv in (["plan", "../etc", "--lane", LANE],
+                     ["plan", "a" * 200, "--lane", LANE],
                      ["plan", RUN, "--lane", "bad key"],
                      ["record", RUN, "--lane", "bad key"],
-                     ["plan", RUN, "--stall-secs", "0"]):
+                     ["plan", RUN, "--lane", LANE, "--stall-secs", "0"]):
             code, _, err = self.cli(argv)
             self.assertEqual(code, 2, argv)
             self.assertIn("autoos_recovery:", err)
@@ -2633,7 +2572,7 @@ class Cli(TempCase):
 
         r.plan = boom
         try:
-            code, _, err = self.cli(["plan", RUN])
+            code, _, err = self.cli(["plan", RUN, "--lane", LANE])
         finally:
             r.plan = real_plan
         self.assertEqual(code, 4)
@@ -2649,12 +2588,14 @@ class Cli(TempCase):
             r.plan = raiser
             try:
                 with self.assertRaises(exc):
-                    self.cli(["plan", RUN])
+                    self.cli(["plan", RUN, "--lane", LANE])
             finally:
                 r.plan = real_plan
 
     def test_usage_errors_exit_two(self):
-        for argv in (["record", RUN], ["plan"], []):
+        for argv in (["record", RUN], ["plan"], [],
+                     # D-914: --lane is required for `plan` too — no key, no plan.
+                     ["plan", RUN], ["plan", RUN, "--lane"]):
             with self.assertRaises(SystemExit) as caught:
                 self.cli(argv)
             self.assertEqual(caught.exception.code, 2)
