@@ -208,7 +208,7 @@ priority chains hop past by design.
 ## Re-running this
 
 ```bash
-./configuration/omniroute/apply.sh --probe
+./configuration/omniroute/apply.sh --probe --go <ref> --go-sha "$(git rev-parse HEAD)"
 opencode run --model omniroute/l3-driver "Reply with exactly: ack"
 ```
 

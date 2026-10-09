@@ -17,18 +17,82 @@
 
 .PARAMETER DryRun
   Print what would be applied and exit without writing.
+
+.PARAMETER Go
+  Fleet rule D-825: a judge GO naming this change — a judge run id
+  (YYYYMMDD-HHMMSS-...), a decision id (D-<n>) or an OS-<n> item. Required for
+  any run that is not -DryRun; the live PATCH refuses without it. The ref must
+  name an artefact that EXISTS, not merely look like one (see -GoOffline).
+
+.PARAMETER GoSha
+  'git rev-parse HEAD' of this checkout. Must equal the checkout's HEAD so the
+  GO names the exact code being applied. Required with -Go on a live run.
+
+.PARAMETER GoOffline
+  Proceed although this machine cannot read the artefact the GO names (a missing
+  or unreadable routing dir, no worker record on disk). The run logs
+  'GO-OFFLINE: <ref> unverified' as its first line; -GoSha is still verified.
 #>
 [CmdletBinding()]
 param(
     [string]$Gateway = 'http://127.0.0.1:20128',
-    [switch]$DryRun
+    [switch]$DryRun,
+    [string]$Go = '',
+    [string]$GoSha = '',
+    [switch]$GoOffline
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Split-Path -Parent (Split-Path -Parent $Here)
 $OverridesFile = Join-Path $Here 'capability-overrides.json'
+
+# --- Fleet rule D-825: a live gateway change runs only on an explicit GO ---
+# This script PATCHes /api/model-capability-overrides on the live gateway (the
+# standalone twin of apply.sh's override step), so a run that is not -DryRun
+# refuses without -Go <ref> and -GoSha <sha> equal to this checkout's git HEAD.
+# -DryRun needs none and is unchanged; a -Go there is echoed only. The reference's
+# shape and its EXISTENCE are decided by one implementation, the same
+# infra/mcp-servers/scripts/_go_gate.py the bash gates and the Python tools call,
+# reached through invoke-go-gate.ps1 — a GO that looks right but names no decision,
+# no OS item and no worker record is refused, and so is a source this machine
+# cannot read unless -GoOffline declared it.
+if (-not $DryRun) {
+    if (-not $Go) {
+        $ErrorActionPreference = 'Continue'
+        [Console]::Error.WriteLine('apply-capability-overrides.ps1: refusing to change live gateway state without -Go <ref> (fleet rule D-825).')
+        [Console]::Error.WriteLine("  Pass -Go <ref> -GoSha <sha> (a judge run id YYYYMMDD-HHMMSS-..., D-<n> or OS-<n>, and 'git rev-parse HEAD' of this checkout); use -DryRun to inspect.")
+        exit 2
+    }
+    if (-not $GoSha) {
+        $ErrorActionPreference = 'Continue'
+        [Console]::Error.WriteLine('apply-capability-overrides.ps1: refusing to change live gateway state without -GoSha <sha> (fleet rule D-825).')
+        exit 2
+    }
+    $CheckoutHead = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+    if ($CheckoutHead) { $CheckoutHead = "$CheckoutHead".Trim() }
+    $ErrorActionPreference = 'Continue'
+    if (-not $CheckoutHead) {
+        [Console]::Error.WriteLine("apply-capability-overrides.ps1: cannot read this checkout's HEAD (git rev-parse failed in $Root) - refusing to mutate.")
+        exit 2
+    }
+    if ($GoSha -ne $CheckoutHead) {
+        [Console]::Error.WriteLine("apply-capability-overrides.ps1: -GoSha '$GoSha' is not this checkout's HEAD '$CheckoutHead'.")
+        exit 2
+    }
+    $goVerdict = & (Join-Path $Root 'infra\mcp-servers\scripts\invoke-go-gate.ps1') `
+        -Tool 'apply-capability-overrides.ps1' -Ref $Go -Root $Root -Offline:$GoOffline
+    foreach ($goLine in $goVerdict.Err) { [Console]::Error.WriteLine($goLine) }
+    if ($goVerdict.Code -ne 0) { exit 2 }
+    foreach ($goLine in $goVerdict.Out) { Write-Host $goLine }
+    $ErrorActionPreference = 'Stop'
+    Write-Host "GO: $Go sha=$CheckoutHead"
+} elseif ($Go) {
+    $goShaShown = if ($GoSha) { $GoSha } else { 'none' }
+    Write-Host "GO: $Go sha=$goShaShown (read-only run - no gate applies)"
+}
 
 # The management API accepts the machine loopback token the local CLI sends
 # (omniroute docs/security/CLI_TOKEN.md): HMAC-SHA256 of the machine id, keyed by that
