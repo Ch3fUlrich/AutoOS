@@ -23112,6 +23112,43 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
         cli._review_expansion_refuse(root, (base, head), kept)
         self.assertIn("keep.txt", kept)
 
+    # P1-FIX6 (cross-family attacker; both tests below FAIL on 2730f06d).
+
+    def test_a_vanished_blob_refuses_instead_of_tracebacking(self):
+        # H1: the name-only passes answer from TREES and survive a missing blob; the
+        # patch write needs the bytes, and no handler turned that into rc2 (I11 too).
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-BASE\n")
+        base = self._commit("base")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-HEAD\n")
+        head = self._commit("head")
+        for sha in (base, head):
+            oid = self._out("-C", self.root, "rev-parse", "%s:keep.txt" % sha)
+            os.remove(os.path.join(self.root, ".git", "objects", oid[:2], oid[2:]))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f6a", (base, head))
+            self.assertFalse(os.path.lexists(tmp + "/s"))
+
+    @unittest.skipIf(os.name == "nt", "a backslash is a separator there")
+    def test_an_unsafe_path_regular_file_never_rides_the_patch(self):
+        # H2: `accepted` short-circuited on the mode, so the shared PATH predicate
+        # never ran for a regular file the materialiser refuses by name.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "back\\slash.txt"), "w").write("BACKSLASH-BASE\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-BASE\n")
+        base = self._commit("base")
+        io.open(os.path.join(self.root, "back\\slash.txt"), "w").write("BACKSLASH-HEAD\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-HEAD\n")
+        head = self._commit("head")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f6b", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertNotIn("BACKSLASH-", patch, "the seat cannot hold the file")
+            self.assertIn("+KEEP-HEAD", patch, "no collateral damage")
+
 
 class P1PinnedWriterFamilyTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the

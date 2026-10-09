@@ -1496,9 +1496,10 @@ def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
     symlink blobs are read: the refused target string itself is the leak."""
     entries = _isolate_batch_entries(root, sha, paths)
     blobs = _isolate_batch_blobs(root, [e for e in entries if e[0] == "120000"])
-    accepted = {path for mode, blob, path in entries if mode != "120000"
-                or (blobs.get(blob) is not None and _isolate_entry_refusal(
-                    path, mode, blobs[blob].decode("utf-8", "surrogateescape")) is None)}
+    # P1-FIX6 H2: the PATH predicate is not symlink-only - an unsafe regular name rode the patch.
+    accepted = {path for mode, blob, path in entries if _isolate_entry_refusal(
+        path, mode, (blobs.get(blob) or b"\0").decode("utf-8", "surrogateescape")
+        if mode == "120000" else "") is None}
     return {e[2] for e in entries}, accepted
 
 
@@ -1589,10 +1590,17 @@ def write_review_diff(root: str, path: str, pair, allowed) -> None:
             # `*`, `secrets-*` or `:(glob)**`, and an INTERPRETED pathspec globs it
             # over the whole range - pulling paths the filter just dropped, secrets
             # included, back into the patch. Names are literal, always.
-            # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
-            subprocess.run(["git", "-C", root, "--literal-pathspecs",
-                            "diff", "--no-renames", rng, "--"] + kept[i:i + 200],
-                           stdout=fh, check=True, stdin=subprocess.DEVNULL)
+            # P1-FIX6 H1 (D3, unmapped): a vanished base/head BLOB — the name-only
+            # passes read TREES and survive it, this needs the bytes: the siblings' rc2.
+            try:
+                # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
+                subprocess.run(["git", "-C", root, "-c", "core.quotepath=false",
+                                "--literal-pathspecs", "diff", "--no-renames",
+                                rng, "--"] + kept[i:i + 200],
+                               stdout=fh, check=True, stdin=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as exc:
+                raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                        % (pair[0][:8], root, exc.returncode)) from None
 
 
 def isolate_clone(root: str, path: str, branch: str, review_base=None) -> str:
