@@ -44,10 +44,58 @@ def _r3_hit(text):
     return bool(_R3.search(text) or _R3.search(_CAMEL_BOUND.sub("_", text)))
 
 
+#: Lines that are diff bookkeeping rather than file content, and only ever seen
+#: between a 'diff --git ' line and that file's first '@@ ' hunk header.
+_DIFF_HEADERS = ("--- ", "+++ ", "index ", "new file mode", "deleted file mode",
+                 "similarity index", "rename from", "rename to",
+                 "old mode", "new mode", "Binary files")
+
+
+def _diff_lines(diff_text):
+    """The diff's lines, split on '\\n' ONLY.
+
+    str.splitlines() also breaks on '\\r', '\\x0b', '\\x0c', '\\x1c'-'\\x1e',
+    '\\x85', U+2028 and U+2029 — and git emits those raw *inside* an added line,
+    so '+\\x0cpassword: x' became the lines '+' and 'password: x', and the second
+    lost its '+', was not read as added content, and a secrets lane judged R0.
+    One trailing '\\r' per line is dropped, which is all a CRLF diff adds.
+    """
+    lines = str(diff_text or "").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [l[:-1] if l.endswith("\r") else l for l in lines]
+
+
 def _added(diff_text):
-    lines = (diff_text or "").splitlines()
-    plus = [l[1:] for l in lines if l.startswith("+") and not l.startswith("+++ ")]
-    return plus if plus or any(l.startswith(("@@", "diff ", "---")) for l in lines) else lines
+    """The added lines of a raw diff, '+' stripped.
+
+    Structure decides what is a header: a marker line is bookkeeping only while
+    no '@@ ' hunk header has been seen since the last 'diff --git ' line. After
+    that first hunk EVERY '+'-prefixed line is content — including a genuine
+    '++ password: x', which renders as '+++ password: x', and '+--- ' or
+    '+diff --git ...' — until the next 'diff --git ' resets the state.
+    Text with no diff structure at all is what the already-stripped callers pass:
+    every '+'-prefixed line is content there too, and a body with no '+' line at
+    all is already-stripped added text, so every line counts.
+    """
+    lines = _diff_lines(diff_text)
+    if not any(l.startswith("diff --git ") or l.startswith("@@") for l in lines):
+        plus = [l[1:] for l in lines if l.startswith("+")]
+        return plus if plus else lines
+    added = []
+    in_hunk = False
+    for line in lines:
+        if line.startswith("diff --git "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk and line.startswith(_DIFF_HEADERS):
+            continue
+        if line.startswith("+"):
+            added.append(line[1:])
+    return added
 
 
 def _checked(task_type, r_level=None):

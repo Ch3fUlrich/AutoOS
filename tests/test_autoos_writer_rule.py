@@ -116,6 +116,148 @@ class RequiredLevelTests(unittest.TestCase):
         self.assertEqual(rule.required_r_level("code", ["a.py"], "+++b/auth.py\n"), "R3")
 
 
+class AddedDiffTests(unittest.TestCase):
+    """`_added` reads a RAW `git diff` body: line structure decides what is a
+    header, and a line is split only at '\\n'. Both halves were defects (found
+    by an isolated deepseek seat on the P4b ops-detection path)."""
+
+    DOC_PATHS = ["docs/x.md"]
+
+    def level(self, diff):
+        return rule.required_r_level("docs", self.DOC_PATHS, diff)
+
+    def test_control_chars_inside_an_added_line_do_not_swallow_it(self):
+        # git emits these raw *inside* a line; str.splitlines() broke the line
+        # there, the tail lost its '+', and the secret was not counted as added.
+        for ch in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85",
+                   "\u2028", "\u2029"):
+            diff = ("diff --git a/docs/x.md b/docs/x.md\n"
+                    "@@ -0,0 +1 @@\n"
+                    "+" + ch + "password: x\n")
+            with self.subTest(ch="\\x%02x" % ord(ch) if ord(ch) < 256
+                              else "\\u%04x" % ord(ch)):
+                self.assertEqual(rule._added(diff), [ch + "password: x"])
+                self.assertEqual(self.level(diff), "R3")
+
+    def test_a_line_whose_own_text_is_a_marker_is_content_after_a_hunk(self):
+        # '++ password: x' renders as '+++ password: x'; '+--- ' and
+        # '+diff --git ...' likewise. None of them is a header once a hunk
+        # header has been seen.
+        for body, want in (("+--- \n", ["--- "]),
+                           ("+diff --git a/forged b/forged\n",
+                            ["diff --git a/forged b/forged"]),
+                           ("+@@ -1 +1 \n", ["@@ -1 +1 "])):
+            diff = ("diff --git a/docs/x.md b/docs/x.md\n"
+                    "@@ -0,0 +1 @@\n" + body)
+            with self.subTest(body=body.strip()):
+                self.assertEqual(rule._added(diff), want)
+        secret = ("diff --git a/docs/x.md b/docs/x.md\n"
+                  "--- a/docs/x.md\n"
+                  "+++ b/docs/x.md\n"
+                  "@@ -0,0 +1 @@\n"
+                  "+++ password: x\n")
+        self.assertEqual(rule._added(secret), ["++ password: x"])
+        self.assertEqual(self.level(secret), "R3")
+
+    def test_header_lines_before_a_hunk_contribute_nothing(self):
+        # A path in a header is not diff content — the path list is judged
+        # separately, from the `paths` argument.
+        for diff in ("diff --git a/docs/auth.md b/docs/auth.md\n"
+                     "--- a/docs/auth.md\n"
+                     "+++ b/docs/auth.md\n"
+                     "@@ -0,0 +1,1 @@\n"
+                     "+# hello\n",
+                     "diff --git a/docs/auth.py b/docs/auth.py\n"
+                     "new file mode 100644\n"
+                     "index 0000000..1111111\n"
+                     "--- /dev/null\n"
+                     "+++ b/docs/auth.py\n"
+                     "@@ -0,0 +1,1 @@\n"
+                     "+print(1)\n",
+                     "diff --git a/docs/a.md b/docs/b.md\n"
+                     "similarity index 99%\n"
+                     "rename from docs/a.md\n"
+                     "rename to docs/b.md\n"
+                     "index 1111..2222 100644\n"
+                     "--- a/docs/a.md\n"
+                     "+++ b/docs/b.md\n"
+                     "@@ -1 +1 @@\n"
+                     "-old\n"
+                     "+new\n"):
+            with self.subTest(diff=diff.splitlines()[0]):
+                self.assertEqual(self.level(diff), "R0")
+
+    def test_a_second_diff_section_resets_the_header_state(self):
+        head = ("diff --git a/docs/a.md b/docs/a.md\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                "+hello\n")
+        second = ("diff --git a/docs/b.md b/docs/b.md\n"
+                  "index 0000000..1111111\n"
+                  "--- /dev/null\n"
+                  "+++ b/docs/auth.md\n")
+        self.assertEqual(self.level(head + second + "@@ -0,0 +1,1 @@\n+# hi\n"), "R0")
+        self.assertEqual(self.level(head + second + "@@ -0,0 +1,1 @@\n"
+                                    "+++ password: x\n"), "R3")
+
+    def test_a_crlf_diff_reads_as_the_lf_one_does(self):
+        lf = ("diff --git a/docs/x.md b/docs/x.md\n"
+              "--- a/docs/x.md\n"
+              "+++ b/docs/x.md\n"
+              "@@ -1 +1 @@\n"
+              "-old\n"
+              "++ password: x\n")
+        crlf = lf.replace("\n", "\r\n")
+        self.assertEqual(rule._added(crlf), ["+ password: x"])
+        self.assertEqual(self.level(crlf), "R3")
+        # A CRLF header must not leak its path either.
+        header = ("diff --git a/docs/auth.md b/docs/auth.md\r\n"
+                  "--- a/docs/auth.md\r\n"
+                  "+++ b/docs/auth.md\r\n"
+                  "@@ -0,0 +1,1 @@\r\n"
+                  "+# hello\r\n")
+        self.assertEqual(self.level(header), "R0")
+
+    def test_a_multi_file_diff_keeps_every_hunk(self):
+        diff = ("diff --git a/docs/a.md b/docs/a.md\n"
+                "@@ -1 +1,2 @@\n"
+                "+api_key: leaked\n"
+                " context\n"
+                "diff --git a/docs/b.md b/docs/b.md\n"
+                "--- a/docs/b.md\n"
+                "+++ b/docs/b.md\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                "+nothing risky\n")
+        self.assertEqual(rule._added(diff), ["api_key: leaked", "nothing risky"])
+        self.assertEqual(self.level(diff), "R3")
+
+    def test_plain_added_text_without_any_diff_structure(self):
+        # What a caller that already holds added lines passes in.
+        self.assertEqual(rule._added("+token: x\n+--- \n"), ["token: x", "--- "])
+        self.assertEqual(self.level("+token: x\n"), "R3")
+        self.assertEqual(self.level("+password: x\n+print(1)\n"), "R3")
+        # No '+' line at all: the body is already stripped, so every line counts.
+        self.assertEqual(self.level("password: x\nprint(1)\n"), "R3")
+        self.assertEqual(rule._added("print(1)\n"), ["print(1)"])
+        # A '+++' header-looking line that carries no space counts as added
+        # (the rule the no-space test above pins, on the unstructured branch).
+        self.assertEqual(self.level("+++b/auth.py\n"), "R3")
+
+    def test_the_module_carries_no_size_cap(self):
+        # Callers cap the diff (LANE_DIFF_MAX_BYTES); the judge truncates nothing.
+        self.assertFalse([n for n in dir(rule) if n.endswith("MAX_BYTES")
+                          or n.endswith("MAX_LINES")])
+        filler = "+# " + ("x" * 100) + "\n"
+        big = "diff --git a/docs/x.md b/docs/x.md\n@@ -0,0 +1 @@\n" + filler * 25_000
+        self.assertGreater(len(big), 2 * 1024 * 1024)
+        self.assertEqual(self.level(big + "+password: x\n"), "R3")
+        self.assertEqual(self.level(big), "R0")
+        self.assertEqual(self.level(""), "R0")
+        self.assertEqual(rule._added(""), [])
+        self.assertEqual(rule._added(None), [])
+
+
 class WriterAllowedTests(unittest.TestCase):
     def test_sub40_stays_at_r0_r1(self):
         regd = reg()

@@ -9834,7 +9834,9 @@ class ReadyCommandTests(unittest.TestCase):
     Real temp git repos (a bare `origin` plus a clone, as the --isolate
     containment tests use) and the real parser / main entry: this is a CLI
     contract, so a test that called cmd_ready directly could pass a command nobody
-    can type.
+    can type. The one thing NOT run for real is the diff — AO-WRITER-GUARDS P4b's
+    `lane_diff_paths` is stubbed in setUp for the whole class, because the guard
+    reads it on every `ready` and a fixture repo has no `origin/main` to diff.
     """
 
     BRANCH = "lane/work"
@@ -9855,6 +9857,33 @@ class ReadyCommandTests(unittest.TestCase):
         os.environ["AUTOOS_STATE_DIR"] = self.store_dir
         self.addCleanup(shutil.rmtree, self.store_dir, True)
         self.addCleanup(self._restore_state)
+        # AO-WRITER-GUARDS P4b (HERMETIC, D-852): the writer-guards gate reads the
+        # lane's diff through `lane_diff_paths` on EVERY ready, so this ONE shared
+        # patch — installed in setUp, asserted again by `ready()` below — is what
+        # keeps every ready test in this class and its subclasses off real git.
+        self.stub_lane_diff()
+
+    def stub_lane_diff(self, paths=(), added="", error=None):
+        """Install the recording stub for `lane_diff_paths` (see setUp).
+
+        The stub answers the two facts the gate needs — the path list and the
+        added lines — plus the call it recorded, so a test can assert `--base`
+        reached git. It carries `lane_diff_stub` as its own mark: `ready()`
+        refuses a run where the mark is missing, which is what makes "this test
+        would shell out to git" fail loudly instead of passing slowly.
+        """
+        calls = []
+
+        def stub(repo, base, sha):
+            calls.append((repo, base, sha))
+            return list(paths), added, error
+
+        stub.lane_diff_stub = True
+        patch = mock.patch.object(self.agent, "lane_diff_paths", stub)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.lane_diff_calls = calls
+        return stub
 
     def _restore_state(self):
         if self._old_state is None:
@@ -9928,6 +9957,11 @@ class ReadyCommandTests(unittest.TestCase):
 
     def ready(self, record, repo, sha, inbox, extra=()):
         """Run the real CLI. `repo=None` means let it default to the cwd."""
+        if not getattr(self.agent.lane_diff_paths, "lane_diff_stub", False):
+            raise AssertionError(
+                "ready test would run real git: the writer-guards gate reads "
+                "lane_diff_paths, so patch it with stub_lane_diff() (setUp does "
+                "it for every test in this class)")
         argv = ["ready", record, "--branch", self.BRANCH, "--sha", sha, "--inbox", inbox]
         if repo is not None:
             argv += ["--repo", repo]
@@ -10372,6 +10406,729 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(len(text.splitlines()), 1, text)
         self.assertNotIn("\n2026-01-01", text.rstrip("\n"))
 
+    def test_a_ready_test_that_forgets_the_diff_stub_cannot_run_real_git(self):
+        # HERMETIC (D-852) guard, the other half of stub_lane_diff's mark: a NEW
+        # ready test that forgets the patch — or restores the real reader — fails
+        # here naming the function, instead of shelling out to git and passing
+        # slowly on whatever the machine happens to hold. The real reader comes
+        # from a freshly loaded module and is never invoked: the driver refuses
+        # before the CLI runs, which is exactly what this asserts.
+        fresh = load_agent()
+        inbox = self.make_inbox("")
+        with mock.patch.object(self.agent, "lane_diff_paths", fresh.lane_diff_paths):
+            with self.assertRaises(AssertionError) as ctx:
+                self.ready(self.write_record(*self.READY_RECORD),
+                           "/lane/checkout", self.NOT_PUSHED_SHA, inbox)
+        self.assertIn("lane_diff_paths", str(ctx.exception))
+        self.assertEqual(self.read_inbox(inbox), "")
+
+
+#: An added secret (`token:`) plus added lines whose own text reads as a diff
+#: marker — `--- `, `@@ -1 +1 ` and `diff --git ...`. A markdown horizontal rule,
+#: a patch pasted into a file and a diff-stat table are exactly this shape, which
+#: is why the pre-stripped body hid the secret from the risk judge (P4b-fixes D1):
+#: `_added` saw marker lines, concluded the text WAS a diff, and kept only its
+#: '+'-subset — empty, once the reader had eaten the real '+' itself.
+LANE_MARKER_BODY = (
+    "diff --git a/notes.txt b/notes.txt\n"
+    "--- a/notes.txt\n"
+    "+++ b/notes.txt\n"
+    "@@ -0,0 +1,4 @@\n"
+    "+token: rotate-this-by-hand\n"
+    "+--- \n"
+    "+@@ -1 +1 \n"
+    "+diff --git a/forged b/forged\n")
+
+
+class ReadyWriterGuardsTests(unittest.TestCase):
+    """AO-WRITER-GUARDS P4b: the `writer-guards` gate inside `ready` (P4a helpers
+    in tools/autoos_ready_guards.py, wired at the pushed-sha/CI seam).
+
+    The gate asks the DIFF, not the card: ops work is decided from the real path
+    list and the RAW diff body (P4b-fixes D1 — the reader no longer pre-strips the
+    '+' the judge strips itself), so a `docs`-labelled lane that touched a playbook
+    is held to the brief and the report like any other ops lane. When it fires it
+    fences the diff against the brief's canonical FILES line (`scope-fence`) and,
+    for ops, requires the REPORT's CHECK 1-6 evidence (`report-checks`); a lane
+    that clears it rides the inbox line as ` guards=ok` (` ops=1` too for ops).
+    A lane that triggers nothing carries no new field.
+
+    HERMETIC (D-852): every outside read is stubbed at the module attribute —
+    `lane_diff_paths`, `remote_branch_tip`, `prepush_mod.local_green`,
+    `main_ci_status` — so nothing here runs git, gh, docker, curl, ssh or
+    systemctl; the only real files are the record, the registry, the brief and
+    the report under a temp dir. `ReadyCommandTests` (above) keeps its own
+    real-repo fixtures untouched, which is what `stub_lane_diff` in its setUp is
+    for; the driver here installs the same stub itself and prints the diff facts
+    per test.
+    """
+
+    BRANCH = "lane/work"
+    SHA = "a" * 40
+    REPO = "/lane/checkout"
+    BRIEF = ("TASK: fix the inventory playbook\n"
+             "FILES (only these; <= 3 files, <= 200 lines changed):"
+             " playbooks/x.yml, inventory.yml. Do not touch other lines/files.\n")
+
+    def setUp(self):
+        self.agent = load_agent()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(_reviewer_registry(), fh)
+        fd, self.record = tempfile.mkstemp(suffix=".md")
+        self.addCleanup(os.unlink, self.record)
+        with io.open(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)) + "\n")
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.inbox = os.path.join(self.work, "L1.md")
+        with io.open(self.inbox, "w", encoding="utf-8") as fh:
+            fh.write("")
+
+    def write_text(self, name, body):
+        path = os.path.join(self.work, name)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    def inbox_text(self):
+        with io.open(self.inbox, encoding="utf-8") as fh:
+            return fh.read()
+
+    def _stub(self, name, value):
+        patch = mock.patch.object(self.agent, name, value)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def report_text(self, missing=()):
+        return "".join("CHECK %d: PASS ran the tool, %d lines of evidence\n" % (n, n)
+                       for n in range(1, 7) if n not in missing)
+
+    def ready(self, diff_paths=(), diff_raw="", diff_error=None, diff_refusal=None,
+              extra=(), brief=None, report=None):
+        """Drive the real CLI with every outside read replaced.
+
+        Returns (rc, out, err, inbox_text, diff_calls). `brief=True` hands the
+        gate the canonical ops brief above; a string is that text instead;
+        `brief=None` types the command the way a non-ops lane does — no `--brief`
+        at all. `report` is the REPORT text, or None for no `--report`.
+
+        `diff_raw` is the second fact the reader returns: the RAW `git diff -U0
+        --no-color` body (P4b-fixes D1) — the judge strips the '+' itself, so a
+        test that pre-stripped it here would test the bug, not the gate.
+        `diff_error` is git failing to answer (exit 2); `diff_refusal` is a
+        refusal the reader raised instead (P4b-fixes D2: base not a strict
+        ancestor, empty lane diff), which is the lane failing the gate (exit 1).
+        """
+        calls = []
+
+        def lane_diff(repo, base, sha):
+            calls.append((repo, base, sha))
+            if diff_refusal is not None:
+                raise self.agent.LaneDiffRefusal(diff_refusal)
+            return list(diff_paths), diff_raw, diff_error
+        lane_diff.lane_diff_stub = True
+        self._stub("lane_diff_paths", lane_diff)
+        self._stub("remote_branch_tip", lambda repo, branch: (self.SHA, None))
+        self._stub("main_ci_status",
+                   lambda repo=None, runner=None: ("success", "999", None))
+        # D-110's record read is a runner-private store lookup; this class tests
+        # the guard seam, not that gate, so it answers green.
+        patch = mock.patch.object(self.agent.prepush_mod, "local_green",
+                                  lambda sha, repo=None, **kw: True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        argv = ["ready", self.record, "--branch", self.BRANCH, "--sha", self.SHA,
+                "--inbox", self.inbox, "--repo", self.REPO,
+                "--registry", self.registry_path, *extra]
+        if brief is not None:
+            argv += ["--brief", self.write_text(
+                "brief.md", self.BRIEF if brief is True else brief)]
+        if report is not None:
+            argv += ["--report", self.write_text("report.md", report)]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue(), err.getvalue(), self.inbox_text(), calls
+
+    # --- ops detection comes from the real diff -----------------------------
+
+    def test_an_ops_lane_without_a_brief_is_refused(self):
+        rc, out, err, inbox, calls = self.ready(diff_paths=["playbooks/x.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards: ops lane without --brief", out + err)
+        self.assertEqual(inbox, "")
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_mislabelled_docs_card_on_a_playbook_diff_still_needs_brief_and_report(self):
+        # The label is only a FLOOR: the diff decides, so `--task-type docs` buys
+        # nothing on a playbook edit. No brief -> named. Brief but no report ->
+        # the second refusal, so an ops lane cannot clear one half and skip the
+        # other.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --brief", out + err)
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"), brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --report", out + err)
+        self.assertEqual(inbox, "")
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--task-type", "docs"),
+            brief=True, report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+
+    def test_an_ops_lane_judged_from_the_added_lines_not_the_path_list(self):
+        # A path that names nothing ops (and a `code` label) still reaches the
+        # guards through the diff BODY: `requires_ops_guards` is handed the added
+        # lines too, so a lane that wrote a password line is an ops lane.
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["notes.txt"], extra=("--task-type", "code"),
+            diff_raw="+password: rotate-it-by-hand\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --brief", out + err)
+
+    # --- the body the judge reads is the RAW diff (P4b-fixes D1) -------------
+
+    NOTES_BRIEF = ("TASK: note the rotation\n"
+                   "FILES (only these; <= 3 files, <= 200 lines changed):"
+                   " notes.txt. Do not touch other lines/files.\n")
+
+    def test_added_lines_that_read_as_diff_markers_do_not_hide_the_secret(self):
+        # The attacker's REJECT (deepseek seat, P4b round 1): `lane_diff_paths`
+        # used to strip the leading '+' itself and hand the ALREADY-stripped text
+        # to `requires_ops_guards` -> `autoos_writer_rule._added`, which is written
+        # for RAW diff text and strips again. On stripped text one line starting
+        # with '--- ' / '@@' / 'diff ' makes `_added` conclude the body IS a diff
+        # and return only its '+'-subset — empty there — so `token:` never reached
+        # the risk scan, the lane read R1, and `ready` exited 0 with no ops guard.
+        # Measured on the pre-fix reader: `_added` [] and level R1. The composition
+        # of that reader with that judge is pinned in LaneDiffPathsTests below.
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["notes.txt"], extra=("--task-type", "docs"),
+            diff_raw=LANE_MARKER_BODY)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ops lane without --brief", out + err)
+
+    def test_the_marker_body_still_reaches_the_line_as_an_ops_lane(self):
+        # The other half: ops_required True is not just the missing-brief
+        # refusal — notes.txt is inside the brief, so the only ops signal in the
+        # run is the diff body, and a cleared ops lane says so on the line.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["notes.txt"], extra=("--task-type", "docs"),
+            diff_raw=LANE_MARKER_BODY, brief=self.NOTES_BRIEF,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertTrue(inbox.rstrip("\n").endswith(" guards=ok ops=1"), inbox)
+
+    # --- the brief's FILES line fences the diff -----------------------------
+
+    def test_a_path_outside_the_briefs_files_is_refused_naming_every_one(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml", "lib/linux/extra.sh", "setup.sh"],
+            brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("scope-fence", out + err)
+        self.assertIn("lib/linux/extra.sh", out + err)
+        self.assertIn("setup.sh", out + err)
+        self.assertNotIn("playbooks/x.yml", out + err)  # allowed: not a violation
+        self.assertEqual(inbox, "")
+
+    def test_a_code_lane_that_was_given_a_brief_is_still_fenced(self):
+        # `--brief` alone turns the fence on, ops or not — a caller who hands the
+        # gate the brief cannot un-ask for it by calling the card code.
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--task-type", "code"), brief=True)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("scope-fence", out + err)
+        self.assertIn("tools/a.py", out + err)
+
+    def test_a_brief_the_guards_module_refuses_is_exit_1_not_a_crash(self):
+        # GuardError fails closed: a FILES line that is not the canonical one is
+        # unusable, and an unusable allow-list is a refusal, never an allow.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"],
+            brief="TASK: x\nFILES: playbooks/x.yml\n")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards", out + err)
+        self.assertEqual(inbox, "")
+
+    # --- the report's CHECK evidence ---------------------------------------
+
+    def test_a_report_missing_check_4_is_refused_naming_it(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True,
+            report=self.report_text(missing=(4,)))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("report-checks", out + err)
+        self.assertIn("missing CHECK 4", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_failed_and_an_input_required_check_are_each_named(self):
+        bad = self.report_text().replace("CHECK 2: PASS", "CHECK 2: FAIL")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True, report=bad)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("failed CHECK 2", out + err)
+        need = self.report_text().replace("CHECK 6: PASS", "CHECK 6: INPUT_REQUIRED")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True, report=need)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("input_required CHECK 6", out + err)
+
+    # --- the line the orchestrator parses ----------------------------------
+
+    def test_an_all_good_ops_lane_is_appended_with_guards_and_ops(self):
+        rc, out, err, inbox, calls = self.ready(
+            diff_paths=["playbooks/x.yml", "inventory.yml"], brief=True,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(inbox.splitlines()), 1, inbox)
+        self.assertTrue(inbox.rstrip("\n").endswith(" guards=ok ops=1"), inbox)
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_a_non_ops_lane_without_a_brief_is_unchanged(self):
+        # Every ready reads the diff (ops detection needs it), but a lane that
+        # triggers no guard carries no new field — existing inbox lines parse as
+        # they did before P4b.
+        rc, out, err, inbox, calls = self.ready(diff_paths=["tools/a.py"],
+                                                diff_raw="+print(1)\n")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(calls), 1, calls)
+        line = inbox.rstrip("\n")
+        self.assertNotIn("guards=", line)
+        self.assertNotIn("ops=", line)
+
+    def test_a_briefed_code_lane_carries_guards_but_no_ops_flag(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--task-type", "code"),
+            brief="TASK: touch one file\nFILES (only these; <= 3 files,"
+                  " <= 200 lines changed): tools/a.py."
+                  " Do not touch other lines/files.\n")
+        self.assertEqual(rc, 0, out + err)
+        line = inbox.rstrip("\n")
+        self.assertTrue(line.endswith(" guards=ok"), line)
+        self.assertNotIn(" ops=", line)
+
+    # --- the gate could not run --------------------------------------------
+
+    def test_a_diff_the_gate_cannot_read_is_exit_2(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_error="fatal: bad revision 'origin/main...%s'" % self.SHA)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("cannot read diff", err)
+        self.assertIn("bad revision", err)
+        self.assertEqual(inbox, "")
+
+    def test_a_refused_range_is_exit_1_naming_the_base_rule(self):
+        # P4b-fixes D2: a reader that REFUSED the range is the lane failing the
+        # gate (exit 1, `writer-guards`), not a gate that could not run (exit 2) —
+        # `--base` == `--sha` used to reach neither, because the empty diff simply
+        # said "nothing risky here" and the lane exited 0.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_refusal="writer-guards: --base must be a strict ancestor of "
+                         "--sha (abc123 and abc123 are both abc123)")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("--base must be a strict ancestor of --sha", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_an_empty_lane_diff_is_exit_1(self):
+        # The same walk-through by another door: a base that IS an ancestor but
+        # carries no change is not a lane that is ready — it is a lane with no
+        # work in it, and the guards have nothing to judge.
+        rc, out, err, inbox, _calls = self.ready(
+            diff_refusal="writer-guards: empty lane diff -- origin/main is a strict "
+                         "ancestor of abc123 and nothing changed between them")
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards: empty lane diff", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_an_unreadable_brief_or_report_is_exit_2(self):
+        missing = os.path.join(self.work, "no-such-brief.md")
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], extra=("--brief", missing))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no-such-brief.md", err)
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["playbooks/x.yml"], brief=True,
+            extra=("--report", os.path.join(self.work, "no-such-report.md")))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("no-such-report.md", err)
+
+    def test_the_gate_diffs_the_named_base_against_the_lanes_repo_and_sha(self):
+        # `--base` and `--repo` reach git as one range at the merge base, the way
+        # the risk gate does: a lane whose base is not origin/main is judged
+        # against the base it says, not against a default.
+        _rc, _out, _err, _inbox, calls = self.ready(
+            diff_paths=["tools/a.py"], extra=("--base", "origin/master"))
+        self.assertEqual(calls, [(self.REPO, "origin/master", self.SHA)], calls)
+        _rc, _out, _err, _inbox, calls = self.ready(diff_paths=["tools/a.py"])
+        self.assertEqual(calls, [(self.REPO, "origin/main", self.SHA)], calls)
+
+
+class LaneDiffPathsTests(unittest.TestCase):
+    """`lane_diff_paths` (AO-WRITER-GUARDS P4b) reads the lane's diff through the
+    injectable `subprocess.run` — the same shape `ci_run_status` uses, because
+    `ready`'s tests must not run real git (HERMETIC, D-852).
+
+    Three shapes come back from it, and they are not interchangeable:
+    `(paths, raw_diff, None)` is an answer; a non-None `error` is "git could not
+    be read", which `ready` exits 2 on; a raised `LaneDiffRefusal` is "the diff
+    answered and the lane failed it" — base not a strict ancestor of sha, or a
+    range with nothing in it — which `ready` exits 1 on (P4b-fixes D2). The second
+    value is the RAW `git diff -U0 --no-color` body, stripped by nobody, because
+    the judge that reads it strips the '+' itself (P4b-fixes D1), and git is run
+    in bytes mode with a lenient decode because a lane diff is not guaranteed to
+    be UTF-8 (P4b-fixes D3).
+
+    The file list comes back as git's ``-z`` records, NUL-separated and unquoted
+    (``-c core.quotepath=false``), because the default ``--name-only`` rendering
+    QUOTES a name it cannot print — P4b-fixes D4. The fakes below therefore hand
+    over bytes with ``\\x00`` separators, which is the real shape of ``-z`` output,
+    never the ``\\n`` shape the old reader split on."""
+
+    BASE_OID = "1" * 40
+    SHA_OID = "2" * 40
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def proc(self, stdout=b"", rc=0, stderr=b""):
+        """One git answer — BYTES, like a real `capture_output` git, because the
+        reader decodes them itself (P4b-fixes D3)."""
+        return subprocess.CompletedProcess(["git"], rc, stdout=stdout, stderr=stderr)
+
+    def seq(self, paths=b"a.py\x00", body=b"+x\n", base_oid=None, sha_oid=None,
+            base_rc=0, sha_rc=0, ancestor_rc=0):
+        """The five procs git answers, in call order: `rev-parse --verify` base,
+        `rev-parse --verify` sha, `merge-base --is-ancestor`, `diff -z --name-only`
+        (NUL-terminated records, like the real `-z` answer), `diff -U0 --no-color`."""
+        return [self.proc(("%s\n" % (base_oid or self.BASE_OID)).encode(), rc=base_rc),
+                self.proc(("%s\n" % (sha_oid or self.SHA_OID)).encode(), rc=sha_rc),
+                self.proc(b"", rc=ancestor_rc),
+                self.proc(paths),
+                self.proc(body)]
+
+    def runner(self, procs, calls):
+        def run(argv, **kw):
+            calls.append((list(argv), kw))
+            return procs[len(calls) - 1]
+        return run
+
+    def read(self, procs, exc=None, exc_at=0, base="origin/main", sha="abc"):
+        """One reader run. `exc` is raised at call number `exc_at` (0 = the
+        first). Returns ((paths, raw, error), git calls made)."""
+        calls = []
+
+        def runner(argv, **kw):
+            calls.append((list(argv), kw))
+            if exc is not None and len(calls) == exc_at + 1:
+                raise exc
+            return procs[len(calls) - 1]
+
+        with mock.patch.object(self.agent.subprocess, "run", runner):
+            res = self.agent.lane_diff_paths("/repo", base, sha)
+        return res, calls
+
+    def refuse(self, procs, base="origin/main", sha="abc"):
+        """The reader's refusal: (message, git calls made before it)."""
+        calls = []
+        with mock.patch.object(self.agent.subprocess, "run",
+                               self.runner(procs, calls)):
+            with self.assertRaises(self.agent.LaneDiffRefusal) as ctx:
+                self.agent.lane_diff_paths("/repo", base, sha)
+        return "%s" % ctx.exception, calls
+
+    def test_it_asks_git_for_the_ancestor_check_then_the_two_reads(self):
+        (_p, _r, err), seen = self.read(self.seq())
+        self.assertIsNone(err)
+        self.assertEqual([argv for argv, _kw in seen], [
+            ["git", "-C", "/repo", "rev-parse", "--verify", "origin/main^{commit}"],
+            ["git", "-C", "/repo", "rev-parse", "--verify", "abc^{commit}"],
+            ["git", "-C", "/repo", "merge-base", "--is-ancestor",
+             self.BASE_OID, self.SHA_OID],
+            ["git", "-C", "/repo", "-c", "core.quotepath=false", "diff", "-z",
+             "--name-only", "--no-renames", "origin/main...abc"],
+            ["git", "-C", "/repo", "-c", "core.quotepath=false", "diff", "-U0",
+             "--no-color", "origin/main...abc"]])
+        for _argv, kw in seen:
+            self.assertLessEqual(kw.get("timeout", 10 ** 9), 120)
+            self.assertIn("stdin", kw)
+            # P4b-fixes D3: bytes mode. `text=True` is what made a non-UTF-8 lane
+            # diff raise UnicodeDecodeError inside subprocess.run — a ValueError
+            # the gate's except never names, so the caller got a traceback.
+            self.assertFalse(kw.get("text") or kw.get("encoding")
+                             or kw.get("errors"), "%r ran git in text mode" % _argv)
+
+    def test_it_returns_the_raw_diff_body_stripped_by_nobody(self):
+        # P4b-fixes D1: the '+' belongs to `autoos_writer_rule._added`, not here.
+        # Pre-stripping it turned one added line that reads as a diff marker into
+        # a body the judge saw as empty, and an ops lane cleared with no guards.
+        body = ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n"
+                "+password: rotate\n-not-this\n+--- \n")
+        paths, raw, err = self.read(self.seq(
+            paths=b"playbooks/x.yml\x00inventory.yml\x00",
+            body=body.encode()))[0]
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["playbooks/x.yml", "inventory.yml"])
+        self.assertEqual(raw, body)
+
+    def test_this_readers_own_output_still_calls_the_lane_ops(self):
+        # P4b-fixes D1 composed end to end: what `lane_diff_paths` actually
+        # returns, handed to the guards module exactly the way `cmd_ready` hands
+        # it. On the pre-fix reader the second value was the '+'-stripped body,
+        # and `requires_ops_guards("docs", ["notes.txt"], that)` measured False —
+        # a lane that had just added a `token:` line was waved through with no
+        # brief, no report and no scope fence at all.
+        paths, raw, err = self.read(self.seq(paths=b"notes.txt\x00",
+                                             body=LANE_MARKER_BODY.encode()))[0]
+        self.assertIsNone(err)
+        self.assertTrue(self.agent.ready_guards.requires_ops_guards(
+            "docs", paths=paths, diff_text=raw))
+        self.assertFalse(self.agent.ready_guards.requires_ops_guards(
+            "docs", paths=["notes.txt"], diff_text="+print(1)\n"))
+
+    def test_a_base_that_is_the_sha_itself_refuses_before_the_diff(self):
+        # `git diff abc...abc` is empty, empty reads "touched nothing risky", and
+        # the lane walked the gate. The oid comparison is what stops it — and a
+        # commit IS its own ancestor, so is-ancestor alone would not have.
+        msg, seen = self.refuse(self.seq(base_oid=self.SHA_OID))
+        self.assertIn("writer-guards: --base must be a strict ancestor of --sha", msg)
+        self.assertEqual(len(seen), 2, seen)
+
+    def test_a_base_that_is_not_behind_the_sha_refuses_before_the_diff(self):
+        msg, seen = self.refuse(self.seq(ancestor_rc=1))
+        self.assertIn("writer-guards: --base must be a strict ancestor of --sha", msg)
+        self.assertEqual(len(seen), 3, seen)
+
+    def test_an_empty_lane_diff_refuses_the_lane(self):
+        # A lane with no change in it is not a lane that is ready, and an empty
+        # path list is the same open door the `--base` == `--sha` case came in
+        # through — so it refuses here, after git answered, as exit 1. git's `-z`
+        # answer for an empty range is no bytes at all; a lone terminating NUL is
+        # the same answer, and neither may read as one path named "".
+        for paths in (b"", b"\x00"):
+            with self.subTest(paths=paths):
+                msg, seen = self.refuse(self.seq(paths=paths))
+                self.assertIn("writer-guards: empty lane diff", msg)
+                self.assertEqual(len(seen), 5, seen)
+
+    def test_a_base_that_does_not_resolve_is_a_cannot_read_error(self):
+        # Not a refusal: an unfetched `origin/main` is the gate not running, which
+        # is `ready`'s exit 2 shape ("the check never ran"), never an allow.
+        procs = self.seq()
+        procs[0] = self.proc(b"", rc=128,
+                             stderr=b"fatal: ambiguous argument "
+                                    b"'origin/main^{commit}'")
+        (_p, _r, err), seen = self.read(procs)
+        self.assertIn("ambiguous argument", err)
+        self.assertEqual([argv[3] for argv, _kw in seen], ["rev-parse", "rev-parse"],
+                         seen)
+
+    def test_a_merge_base_that_cannot_answer_is_a_cannot_read_error(self):
+        procs = self.seq()
+        procs[2] = self.proc(b"", rc=128, stderr=b"fatal: not a valid object name")
+        (_p, _r, err), seen = self.read(procs)
+        self.assertIn("not a valid object name", err)
+        self.assertEqual([argv[3] for argv, _kw in seen],
+                         ["rev-parse", "rev-parse", "merge-base"], seen)
+
+    def test_a_git_that_refuses_is_an_error_not_an_empty_diff(self):
+        procs = self.seq()
+        procs[3] = self.proc(b"", rc=128,
+                             stderr=b"fatal: bad revision 'origin/main...abc'")
+        (_p, _r, err), _seen = self.read(procs)
+        self.assertIn("bad revision", err)
+
+    def test_a_diff_bigger_than_the_cap_is_too_large_to_judge(self):
+        huge = b"x" * (self.agent.LANE_DIFF_MAX_BYTES + 1)
+        (_p, _r, err), _seen = self.read(self.seq(paths=huge))
+        self.assertIn("diff too large to judge", err)
+        self.assertIn("over the", err)
+        self.assertIn("limit", err)
+        huge_body = b"diff --git a/x b/x\n" + b"+y" * (self.agent.LANE_DIFF_MAX_BYTES)
+        (_p, _r, err), _seen = self.read(self.seq(body=huge_body))
+        self.assertIn("diff too large to judge", err)
+
+    def test_a_git_that_cannot_start_or_times_out_is_an_error(self):
+        for exc in (OSError("No such file or directory"),
+                    subprocess.TimeoutExpired(["git"], 60)):
+            for stage, names in ((0, "git rev-parse"), (4, "git diff")):
+                with self.subTest(exc=type(exc).__name__, stage=stage):
+                    (_p, _r, err), _seen = self.read(self.seq(), exc=exc,
+                                                     exc_at=stage)
+                    self.assertIn(names, err)
+                    self.assertIn("%s" % exc, err)
+
+    def test_a_non_utf8_path_survives_instead_of_raising(self):
+        # P4b-fixes D3: an invalid byte is a NAME, so it must not be renamed into
+        # a match or a miss — surrogateescape keeps it, and the scope fence
+        # compares the same bytes back. Fed as git's own `-z` bytes (D4), not as a
+        # bare line: the pre-fix fake handed over the raw byte where the real
+        # unquoted `--name-only` answer would have carried a quote, which is how
+        # the quoting bug stayed invisible.
+        (paths, _raw, err), _seen = self.read(
+            self.seq(paths=b"docs/\xffunfriendly.md\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["docs/\udcffunfriendly.md"])
+        self.assertEqual([p.encode("utf-8", "surrogateescape") for p in paths],
+                         [b"docs/\xffunfriendly.md"])
+
+    def test_the_quotepath_knob_and_the_z_splitter_are_never_dropped_from_the_argv(self):
+        # P4b-fixes D4, pinned on the recorded argv because the symptom is silent:
+        # without `-z` git quotes a name carrying a tab, newline, quote or
+        # backslash (quotepath=false does not cover control characters), and
+        # without the knob it C-quotes a non-ASCII one into
+        # '"ops/caf\303\251.yml"'. Neither spelling matches the ops regex, so the
+        # lane reads docs/R1 and `ready` skips the whole writer-guards block.
+        (_p, _r, err), seen = self.read(self.seq())
+        self.assertIsNone(err)
+        self.assertEqual(len(seen), 5, seen)
+        named, body = seen[3][0], seen[4][0]
+        self.assertEqual(named, ["git", "-C", "/repo", "-c", "core.quotepath=false",
+                                 "diff", "-z", "--name-only", "--no-renames",
+                                 "origin/main...abc"])
+        self.assertEqual(body, ["git", "-C", "/repo", "-c", "core.quotepath=false",
+                                "diff", "-U0", "--no-color", "origin/main...abc"])
+        # The knob is git's own `-c` (before the subcommand), and the refused
+        # dash-leading revs never reach it: the range stays one trailing
+        # positional argument.
+        for argv in (named, body):
+            self.assertEqual(argv[:5], ["git", "-C", "/repo", "-c",
+                                        "core.quotepath=false"], argv)
+            self.assertEqual(argv[-1], "origin/main...abc", argv)
+
+    def test_a_non_ascii_ops_path_is_the_name_the_ops_regex_sees(self):
+        # The defect this round closes: a lane that added `ops/café.yml` printed
+        # '"ops/caf\303\251.yml"' through `--name-only`, `(?:^|/)ops/` and
+        # `\.ya?ml$` matched neither, `required_r_level("docs", paths)` answered
+        # R1, `requires_ops_guards` answered False, and an ops lane was certified
+        # with no brief, no report and no scope fence. The `-z` bytes ARE the name.
+        utf8_name = "ops/café.yml".encode("utf-8")
+        (paths, _raw, err), _seen = self.read(self.seq(paths=utf8_name + b"\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/café.yml"])
+        guards = self.agent.ready_guards
+        self.assertTrue(guards.requires_ops_guards("docs", paths=paths))
+        allowed = guards.brief_files("TASK: x\n"
+                                     "FILES (only these; <= 3 files, <= 200 lines "
+                                     "changed): tools/a.py. Do not touch other "
+                                     "lines/files.\n")
+        self.assertEqual(guards.scope_fence(paths, allowed), ["ops/café.yml"])
+
+    def test_a_non_utf8_ops_path_still_reads_as_ops(self):
+        # The same name in bytes the filesystem may hold and UTF-8 does not: one
+        # surrogateescape char, still an `ops/` path, still R2, and the fence names
+        # the exact bytes back (a non-ASCII path can never equal an ASCII allowed
+        # entry, so it is always a violation — never a silent fold).
+        (paths, _raw, err), _seen = self.read(self.seq(paths=b"ops/caf\xe9.yml\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/caf\udce9.yml"])
+        self.assertEqual([p.encode("utf-8", "surrogateescape") for p in paths],
+                         [b"ops/caf\xe9.yml"])
+        guards = self.agent.ready_guards
+        self.assertTrue(guards.requires_ops_guards("docs", paths=paths))
+
+    def test_a_name_with_a_newline_or_a_quote_is_one_record(self):
+        # Splitting on '\n' used to cut `ops/nl<LF>name.yml` into two paths, and
+        # the surviving half matched nothing; `-z` delimits with a byte no path can
+        # contain, so each name arrives whole — and a quoted-looking one is git's
+        # content, never git's quoting, because quoting is off by construction.
+        (paths, _raw, err), _seen = self.read(
+            self.seq(paths=b'ops/nl\nname.yml\x00ops/we"ird.yml\x00'))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/nl\nname.yml", 'ops/we"ird.yml'])
+        self.assertTrue(self.agent.ready_guards.requires_ops_guards("docs",
+                                                                    paths=paths))
+
+    def test_the_terminating_nul_is_not_an_empty_path(self):
+        # git terminates the LAST record with a NUL too, so a naive split leaves a
+        # trailing '' that would reach the fence as a path that was never there —
+        # and an empty name is not a change, which is why '' is dropped rather than
+        # kept.
+        (paths, _raw, err), _seen = self.read(
+            self.seq(paths=b"a.py\x00tools/b.py\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["a.py", "tools/b.py"])
+
+    def test_a_non_utf8_diff_body_is_replaced_not_a_traceback(self):
+        # The body is only ever pattern-matched for risk tokens, so a lossy
+        # decode is acceptable — a UnicodeDecodeError escaping to the caller is
+        # not: it exited 1 with a traceback instead of judging the lane.
+        (paths, raw, err), _seen = self.read(
+            self.seq(body=b"diff --git a/x b/x\n+token: \xff\xfe\n"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["a.py"])
+        self.assertIn("\ufffd", raw)
+        self.assertIn("+token:", raw)
+
+    def test_a_base_or_sha_that_reads_as_an_option_is_refused_before_git(self):
+        # Git takes the range as one positional argument; a value starting with
+        # `-` would be parsed as an option, so it is refused here instead.
+        seen = []
+        with mock.patch.object(self.agent.subprocess, "run",
+                               lambda *a, **kw: seen.append(a)):
+            for base, sha in (("-b", "abc"), ("origin/main", ""),
+                              ("origin/main", " a "),
+                              ("origin/main", "--output=/tmp/pwn")):
+                paths, _raw, err = self.agent.lane_diff_paths("/repo", base, sha)
+                self.assertIsNone(paths)
+                self.assertIn("plain rev tokens", err)
+        self.assertEqual(seen, [], "a refused range still asked git")
+
+
+class PreflightCommandTests(unittest.TestCase):
+    """AO-WRITER-GUARDS P4b: `preflight` — the guard tools, checked and never
+    installed. The lookup is injected (HERMETIC, D-852): the command reads no
+    host state and starts no process, and a missing tool ends the run
+    `input_required` (exit 3) carrying the documented install step for a human.
+    """
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def run_preflight(self, present):
+        seen = set(present)
+
+        def which(tool):
+            return "/usr/local/bin/%s" % tool if tool in seen else None
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.agent.cmd_preflight(argparse.Namespace(), which=which)
+        return rc, out.getvalue()
+
+    def test_a_missing_tool_ends_input_required_naming_it_and_how_to_install(self):
+        present = [t for t in self.agent.ready_guards.REQUIRED_TOOLS if t != "gitleaks"]
+        rc, printed = self.run_preflight(present)
+        self.assertEqual(rc, 3, printed)
+        data = json.loads(printed)
+        self.assertEqual(data["state"], "input_required")
+        self.assertEqual(data["missing"], ["gitleaks"])
+        self.assertIn("pipx install", data["message"])
+        self.assertIn("gitleaks", data["message"])
+
+    def test_every_tool_present_exits_0_with_no_missing(self):
+        rc, printed = self.run_preflight(self.agent.ready_guards.REQUIRED_TOOLS)
+        self.assertEqual(rc, 0, printed)
+        data = json.loads(printed)
+        self.assertEqual(data["state"], "ok")
+        self.assertEqual(data["missing"], [])
+
+    def test_preflight_starts_no_process_and_is_registered_with_no_arguments(self):
+        self.assertIn("preflight", self.agent.VERB_PARSERS)
+        self.assertIn("preflight", self.agent.VERB_HANDLERS)
+        ap = argparse.ArgumentParser()
+        sub = ap.add_subparsers(dest="cmd")
+        self.agent._parser_preflight(sub)
+        args = ap.parse_args(["preflight"])
+        self.assertIsNone(args.which)
+        boom = mock.Mock(side_effect=AssertionError("preflight ran a command"))
+        with mock.patch.object(self.agent.subprocess, "run", boom):
+            rc, _printed = self.run_preflight(self.agent.ready_guards.REQUIRED_TOOLS)
+        self.assertEqual(rc, 0)
+        boom.assert_not_called()
 
 class CIRunStatusTests(unittest.TestCase):
     """`ci_run_status` reads one fact off GitHub Actions with `gh`, through an

@@ -301,6 +301,7 @@ import autoos_resolver as resolver  # noqa: E402
 import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green gate)
+import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b: the ready gate)
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
@@ -5100,10 +5101,196 @@ def main_ci_status(repo=None, runner=None):
     return conclusion, str(run_id), None
 
 
+LANE_DIFF_MAX_BYTES = 2 << 20  # 2 MiB of git output; more is not a lane diff
+
+
+class LaneDiffRefusal(Exception):
+    """The lane diff ANSWERED the gate and the answer was no (P4b-fixes D2).
+
+    ``lane_diff_paths`` *returns* an ``error`` when git could not be read at all
+    -- which is `ready`'s exit 2, "the check never ran" -- and raises this when
+    the check ran and the lane failed it, which is exit 1: a ``--base`` that is
+    not a strict ancestor of ``--sha`` (the same commit included), and a range
+    with nothing in it. Both read as an empty diff, and an empty diff read as
+    "touched nothing risky", which is how ``--base == --sha`` walked a lane
+    straight past the writer guards."""
+
+
+def _git_out(raw, errors):
+    """Decode one git buffer, leniently (P4b-fixes D3).
+
+    git runs in bytes mode here on purpose. With ``text=True`` a lane diff that
+    carries a non-UTF-8 path or any binary-adjacent line makes CPython raise
+    UnicodeDecodeError *inside* ``subprocess.run`` -- a ValueError this gate's
+    ``except`` does not name -- so the caller got a traceback where it was owed a
+    verdict. ``surrogateescape`` is for the path list, so an odd byte is a NAME
+    that survives to the scope fence instead of being renamed into a match or a
+    miss (``lane_diff_paths`` asks git for it unquoted -- ``-z`` plus
+    ``core.quotepath=false`` -- because a plain ``--name-only`` C-quotes it into
+    ``"ops/caf\\303\\251.yml"``, a string of literal quotes and octal escapes no
+    path regex matches); ``replace`` is enough for the diff body, which is only
+    ever pattern-matched for risk tokens. git's
+    own buffers are bytes, so a runner injected by a test hands bytes too.
+    """
+    return (raw or b"").decode("utf-8", errors)
+
+
+def _diff_range(base, sha):
+    """The one rev-range argument git will read, or None when either side is not
+    a plain rev token. Git takes it as a single POSITIONAL argument, never
+    through a shell, so the only live risk is a value that starts with `-` and is
+    parsed as an option instead of a revision; empty, dash-leading and
+    whitespace/control-carrying values are refused here rather than handed down.
+    """
+    for side in (base, sha):
+        if (not isinstance(side, str) or not side or side.startswith("-")
+                or side != side.strip() or any(ord(c) < 0x21 or c == "\x7f" for c in side)):
+            return None
+    return "%s...%s" % (base, sha)
+
+
+def lane_diff_paths(repo, base, sha):
+    """``(paths, raw_diff, error)`` -- what the lane's own diff changed.
+
+    The reads of one range, in this order, each of them fail-closed:
+
+      1. ``git rev-parse --verify <base>^{commit}`` and the same for ``<sha>``
+         -- both sides have to name a commit;
+      2. ``git merge-base --is-ancestor <base-oid> <sha-oid>`` -- the base has to
+         sit BEHIND the sha, and (P4b-fixes D2) the two oids must differ, because
+         a commit is its own ancestor: ``--base`` equal to ``--sha`` makes
+         ``<sha>...<sha>`` empty, an empty diff means ``ops_required`` False, and
+         the lane clears a gate it never stood in front of. A range that is not
+         an ancestor, or is empty, raises LaneDiffRefusal (exit 1); a git that
+         cannot answer is an ``error`` (exit 2);
+      3. ``git -c core.quotepath=false diff -z --name-only --no-renames
+         <base>...<sha>`` for the file list -- ``--no-renames`` so a rename
+         arrives as both of its paths and the scope fence sees each half, and
+         ``-z`` (P4b-fixes D4) because the default ``--name-only`` answer is a
+         *quoted* rendering, not the name: git C-quotes a non-ASCII path into
+         ``"ops/caf\\303\\251.yml"`` and a path with a tab, newline, quote or
+         backslash into an escaped, quoted string -- and neither spelling matches
+         the ops pattern, so a lane that added ``ops/café.yml`` was measured
+         ``docs``/R1 and never stood in front of the writer guards. ``-z`` makes
+         every record the exact path bytes, NUL-terminated, quoting off by
+         construction (``core.quotepath=false`` is what keeps the same bytes
+         unquoted in the body's headers);
+      4. ``git -c core.quotepath=false diff -U0 --no-color <base>...<sha>`` for
+         the RAW body, handed back verbatim (P4b-fixes D1).
+
+    That last point is the whole reason the body is not reduced here:
+    ``autoos_writer_rule._added``, which decides the risk level, is written for
+    RAW ``git diff`` text and strips the leading '+' itself -- and a text whose
+    lines *already* had the '+' stripped is read as a diff whose only added lines
+    are the ones that happen to start with '+', '--- ', '@@' or 'diff '. So a real
+    added line ``token: x`` sitting under one such source line disappeared from
+    the judge's view entirely and an ops lane was waved through as docs. The
+    ``--no-color`` keeps escape sequences out of the same text.
+
+    Fail closed like every other unreadable gate: a git that errors, times out,
+    cannot start, or prints more than LANE_DIFF_MAX_BYTES returns a non-None
+    ``error`` (exit 2 at the caller, reading "cannot read diff" / "diff too large
+    to judge") and never a half-read allow-list. The argvs are written out
+    literally, not built in a loop, because the spawner's own subprocess audit
+    (FF1b item 6) only exempts a *literal* ``git`` call as plumbing -- a variable
+    called argv is not git, and this reads the operator's own checkout as the
+    operator, like ``remote_branch_tip`` does. Injectable -- and REQUIRED to be
+    injected in tests (HERMETIC, D-852): the ready tests stub it exactly as they
+    stub ``remote_branch_tip`` and ``main_ci_status``, so no cmd_ready test ever
+    shells out.
+    """
+    rng = _diff_range(base, sha)
+    if rng is None:
+        return None, None, ("cannot build a diff range from base %r and sha %r "
+                            "(both must be plain rev tokens)" % (base, sha))
+    try:
+        resolves_base = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                                        "%s^{commit}" % base], capture_output=True,
+                                       timeout=60, stdin=subprocess.DEVNULL)
+        resolves_sha = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                                        "%s^{commit}" % sha], capture_output=True,
+                                       timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git rev-parse: %s" % exc
+    for label, proc in (("base", resolves_base), ("sha", resolves_sha)):
+        if proc.returncode != 0:
+            return None, None, ((_git_out(proc.stderr, "replace").strip())
+                                or "git rev-parse --verify %s exited %d"
+                                   % (label, proc.returncode))
+    base_oid = _git_out(resolves_base.stdout, "surrogateescape").strip()
+    sha_oid = _git_out(resolves_sha.stdout, "surrogateescape").strip()
+    if not base_oid or not sha_oid:
+        return None, None, ("git rev-parse --verify answered with no commit id "
+                            "for base %r / sha %r" % (base, sha))
+    if base_oid == sha_oid:
+        raise LaneDiffRefusal(
+            "writer-guards: --base must be a strict ancestor of --sha (%s and %s "
+            "are both %s; an empty range fences nothing)"
+            % (base, sha, sha_oid[:12]))
+    try:
+        ancestor = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor",
+                                   base_oid, sha_oid], capture_output=True,
+                                  timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git merge-base: %s" % exc
+    if ancestor.returncode not in (0, 1):
+        return None, None, ((_git_out(ancestor.stderr, "replace").strip())
+                            or "git merge-base --is-ancestor exited %d"
+                               % ancestor.returncode)
+    if ancestor.returncode == 1:
+        raise LaneDiffRefusal(
+            "writer-guards: --base must be a strict ancestor of --sha (%s is not "
+            "behind %s)" % (base, sha))
+    try:
+        named = subprocess.run(["git", "-C", repo, "-c", "core.quotepath=false",
+                                "diff", "-z", "--name-only",
+                                "--no-renames", rng], capture_output=True,
+                               timeout=60, stdin=subprocess.DEVNULL)
+        body = subprocess.run(["git", "-C", repo, "-c", "core.quotepath=false",
+                               "diff", "-U0", "--no-color", rng],
+                              capture_output=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git diff: %s" % exc
+    for label, proc in (("-z --name-only", named), ("-U0", body)):
+        if proc.returncode != 0:
+            return None, None, ((_git_out(proc.stderr, "replace").strip())
+                                or "git diff %s exited %d" % (label, proc.returncode))
+        size = len(proc.stdout or b"")
+        if size > LANE_DIFF_MAX_BYTES:
+            return None, None, ("diff too large to judge: git diff %s printed %d "
+                                "bytes, over the %d limit"
+                                % (label, size, LANE_DIFF_MAX_BYTES))
+    # P4b-fixes D4: NUL is the separator, so a name with a newline in it is one
+    # record, not two. git terminates the last record with a NUL too, which leaves
+    # one trailing empty string -- dropped, like every empty record.
+    paths = [p for p in _git_out(named.stdout, "surrogateescape").split("\x00") if p]
+    if not paths:
+        raise LaneDiffRefusal(
+            "writer-guards: empty lane diff -- %s is a strict ancestor of %s and "
+            "nothing changed between them; a lane with no change is not ready"
+            % (base, sha))
+    return paths, _git_out(body.stdout, "replace"), None
+
+
+def read_guards_text(path):
+    """``(text, error)`` -- one brief or report file, read whole or refused.
+
+    A file the gate cannot read (missing, a directory, undecodable bytes) is the
+    exit-2 shape, the same as an unreadable record: the caller has to know the
+    check never ran, not that it passed.
+    """
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            return fh.read(), None
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, "%s" % exc
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
-    Six gates, in this order, each naming itself when it fails: the record
+    Seven gates, in this order, each naming itself when it fails: the record
     carries both reviews (``review_status``), ``--sha`` is what ``origin`` holds
     for ``--branch``, and — when ``--ci-run`` names one — that GitHub Actions run
     finished ``success`` with ``headSha`` equal to ``--sha``, so the line cannot
@@ -5135,7 +5322,31 @@ def cmd_ready(args) -> int:
 
     Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
     met, 2 a gate could not be read (unreadable record, git or gh failure,
-    unwritable inbox)."""
+    unwritable inbox).
+
+    WRITER-GUARDS (AO-WRITER-GUARDS P4b) sits between the pushed-sha gate and the
+    CI gate and reads the lane's own diff (`lane_diff_paths`, injected from
+    `--base`, default `origin/main`) rather than trusting the card: ops work is
+    decided by `requires_ops_guards` from the real path list and the RAW diff text
+    (`git diff -U0 --no-color`, handed over unstripped — P4b-fixes D1: the risk
+    judge strips the leading '+' itself, and pre-stripping it let one source line
+    starting with '+', '--- ', '@@' or 'diff ' hide every other added line from the
+    check), so a `docs`/`code` label cannot skip it. `--base` must resolve to a
+    commit that is a STRICT ancestor of `--sha` (P4b-fixes D2): the same commit, a
+    base that does not sit behind the sha, or a range that changed nothing is
+    refused at exit 1 as `writer-guards: --base must be a strict ancestor of --sha`
+    / `writer-guards: empty lane diff` — an empty diff otherwise reads as "touched
+    nothing risky" and clears the gate. When the diff says ops, `--brief` and
+    `--report` are required; whenever `--brief` is given the brief's canonical
+    FILES line becomes the allow-list and `scope_fence` refuses any touched path
+    outside it, naming every violation. An ops lane's REPORT must carry CHECK
+    1-6 with a PASS verdict and evidence (`report_checks`). A GuardError from any
+    helper refuses (exit 1, fail closed); a diff or brief/report file the gate
+    cannot read — including a diff over the 2 MiB cap, which reads `diff too large
+    to judge` — is exit 2. A lane that clears the guards appends ` guards=ok` to
+    the ready line (` ops=1` too for an ops lane); a lane that triggers nothing
+    appends no new field, and `preflight` (the same module's tool check, exit 3 on
+    input_required) tells the operator whether the guard tools exist at all."""
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
@@ -5160,6 +5371,86 @@ def cmd_ready(args) -> int:
               % (args.branch, tip, args.sha))
         return 1
     ci_field = ""
+    # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, helpers in
+    # tools/autoos_ready_guards.py; the gate is documented in this function's
+    # docstring): ops work is decided from the DIFF, not from the card's label --
+    # a `docs` card that edited `playbooks/x.yml` is an ops lane. git failing to
+    # answer the diff, or an unreadable --brief/--report file, is exit 2 like
+    # every other unreadable gate: "the check never ran" is not "the lane failed
+    # it", and a writer that cannot be judged must not be allowed. A range the
+    # reader refuses (P4b-fixes D2: `--base` not a strict ancestor of `--sha`, or
+    # an empty diff) is the lane failing it -- exit 1, never exit 0.
+    guards_fields = ""
+    brief_arg = getattr(args, "brief", None)
+    report_arg = getattr(args, "report", None)
+    base = getattr(args, "base", None) or "origin/main"
+    task_type = getattr(args, "task_type", None) or "code"
+    try:
+        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
+                                                           base, args.sha)
+    except LaneDiffRefusal as exc:
+        print("ready: not appended -- %s" % exc, file=sys.stderr)
+        return 1
+    if diff_error:
+        print("ready: cannot read diff: %s" % diff_error, file=sys.stderr)
+        return 2
+    try:
+        # P4b-fixes D1: the RAW diff body, not the added lines pre-stripped of
+        # their '+'. `requires_ops_guards` -> `required_r_level` -> `_added` reads
+        # diff text and does that strip itself.
+        ops_required = ready_guards.requires_ops_guards(task_type, paths=diff_paths,
+                                                        diff_text=diff_raw)
+    except (ready_guards.GuardError, ValueError) as exc:
+        print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
+        return 1
+    if brief_arg or ops_required:
+        if not brief_arg:
+            print("ready: not appended -- writer-guards: ops lane without --brief; "
+                  "the diff reaches R2, so the rendered brief is what names the "
+                  "files this lane was allowed to touch")
+            return 1
+        brief_text, brief_error = read_guards_text(brief_arg)
+        if brief_error:
+            print("ready: cannot read --brief %s: %s" % (brief_arg, brief_error),
+                  file=sys.stderr)
+            return 2
+        try:
+            allowed = ready_guards.brief_files(brief_text)
+            violations = ready_guards.scope_fence(diff_paths, allowed)
+            if violations:
+                print("ready: not appended -- writer-guards scope-fence: the diff "
+                      "touched files outside the brief's FILES line: %s"
+                      % ", ".join(violations))
+                return 1
+        except ready_guards.GuardError as exc:
+            print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
+            return 1
+        guards_fields = " guards=ok"
+        if ops_required:
+            if not report_arg:
+                print("ready: not appended -- writer-guards: ops lane without "
+                      "--report; the REPORT is where the CHECK evidence lives")
+                return 1
+            report_text, report_error = read_guards_text(report_arg)
+            if report_error:
+                print("ready: cannot read --report %s: %s" % (report_arg, report_error),
+                      file=sys.stderr)
+                return 2
+            try:
+                checks = ready_guards.report_checks(report_text)
+                if not checks["ok"]:
+                    def named(ids):
+                        return ", ".join(str(n) for n in ids) or "none"
+                    print("ready: not appended -- writer-guards report-checks: "
+                          "missing CHECK %s; failed CHECK %s; input_required "
+                          "CHECK %s" % (named(checks["missing"]),
+                                        named(checks["failed"]),
+                                        named(checks["input_required"])))
+                    return 1
+            except ready_guards.GuardError as exc:
+                print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
+                return 1
+            guards_fields += " ops=1"
     if getattr(args, "ci_run", None):
         conclusion, head_sha, ci_error = ci_run_status(args.ci_run)
         if ci_error:
@@ -5265,11 +5556,11 @@ def cmd_ready(args) -> int:
     else:
         print("note: --fixes-main -- %s declares it fixes main, "
               "so the main-ci-red gate is waived" % fixes_waiver)
-    line = "%s ready %s %s reviews: %s | %s%s%s%s" % (
+    line = "%s ready %s %s reviews: %s | %s%s%s%s%s" % (
         _iso_zulu(datetime.datetime.now(datetime.timezone.utc)),
         args.branch, args.sha,
         report["cross_family"]["detail"], report["final"]["detail"], ci_field,
-        unverified_field, fixes_field)
+        unverified_field, fixes_field, guards_fields)
     if args.dry_run:
         print("ready: --dry-run, nothing appended to %s" % args.inbox)
         print("  %s" % line)
@@ -5282,6 +5573,25 @@ def cmd_ready(args) -> int:
     print("ready: appended to %s" % args.inbox)
     print("  %s" % line)
     return 0
+
+
+def cmd_preflight(args, which=None) -> int:
+    """Say whether the guard tools exist -- and install nothing.
+
+    The operator's own check (AO-WRITER-GUARDS P4b, writer-ops.md §5): a ready
+    gate that refuses for a missing tool is worthless if the lane then "fixes" it
+    by skipping the check, so the answer carries the documented install step and
+    the run ends `input_required` (exit 3) for a human to act on. Exit 0 when
+    every required tool is on PATH, 3 when one is not, never anything else.
+    ``which`` is injectable (the parsed args may carry it) so a test never looks
+    at the host (HERMETIC, D-852); the lookup itself lives in
+    tools/autoos_ready_guards.py.
+    """
+    which = which or getattr(args, "which", None) or shutil.which
+    missing = ready_guards.tool_preflight(which=which)
+    report = ready_guards.preflight_report(missing)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["state"] == "ok" else 3
 
 
 def reviewer_run_override(review, client, cfg, tier, model, override, free,
@@ -12337,6 +12647,38 @@ def _parser_ready(sub):
                               "main freezes every lane; with it the lane is allowed "
                               "onto a red main and one note logs the <lane>@<sha> "
                               "and the inbox line carries fixes_main=\"<lane>@<sha>\"")
+    ready_p.add_argument("--brief", metavar="PATH",
+                         help="the rendered ops brief the writer was given (AO-WRITER-GUARDS "
+                              "P4b): its canonical FILES line is the allow-list the lane's "
+                              "diff is fenced against. Required when the DIFF reaches R2, "
+                              "even for a card labelled code or docs; a lane that touches a "
+                              "file outside it is refused naming every violating path "
+                              "(scope-fence)")
+    ready_p.add_argument("--report", metavar="PATH",
+                         help="the writer's REPORT text: an ops lane must carry it and its "
+                              "CHECK 1-6 evidence must be present and PASS, else the lane is "
+                              "refused naming what is missing, failed or input_required "
+                              "(report-checks)")
+    ready_p.add_argument("--base", default="origin/main",
+                         help="the diff's other end for the writer-guards gate, compared at "
+                             "its merge base with --sha (default: %(default)s). Must resolve "
+                             "to a commit that is a STRICT ancestor of --sha: the same commit, "
+                             "a base that is not behind --sha, or a range that changed "
+                             "nothing is refused")
+    ready_p.add_argument("--task-type", dest="task_type", default="code",
+                         choices=("ops", "code", "docs", "infra"),
+                         help="what the card claimed (default: %(default)s). Only ever a "
+                              "FLOOR: the guard is raised by what the diff actually touched")
+
+
+def _parser_preflight(sub):
+    preflight_p = sub.add_parser(
+        "preflight", help="check that the writer-guard tools (yamllint, ansible-playbook, "
+                          "ansible-lint, gitleaks, pre-commit) are on PATH and print the "
+                          "report as JSON (AO-WRITER-GUARDS P4b): exit 0 all present, exit 3 "
+                          "input_required with the documented install step. Installs nothing")
+    # No CLI arguments: the lookup is injectable for tests only (HERMETIC, D-852).
+    preflight_p.set_defaults(which=None)
 
 
 def _parser_inbox(sub):
@@ -12383,6 +12725,7 @@ VERB_PARSERS = {
     "risk": _parser_risk,
     "review-status": _parser_review_status,
     "ready": _parser_ready,
+    "preflight": _parser_preflight,
     "inbox": _parser_inbox,
     "card": _parser_card,
 }
@@ -12400,6 +12743,7 @@ VERB_HANDLERS = {
     "list": lambda args, cfg: cmd_list(cfg),
     "ps": lambda args, cfg: cmd_ps(args),
     "ready": lambda args, cfg: cmd_ready(args),
+    "preflight": lambda args, cfg: cmd_preflight(args),
     "review-status": lambda args, cfg: cmd_review_status(args),
     "route": lambda args, cfg: cmd_route(args),
     "risk": lambda args, cfg: cmd_risk(args),
