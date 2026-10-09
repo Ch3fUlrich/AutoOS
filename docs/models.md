@@ -134,7 +134,10 @@ generated table above already shows it):
   and the paid legs (operator order: trial → free → credits → paid):
   `ovh/gpt-oss-120b` (agentic), `ovh/Qwen3-Coder-30B-A3B-Instruct` (cheap code),
   `ovh/Qwen3.8-27B` (fast). All three probed ACK+TOOL+RT at max_tokens=512 through
-  the gateway. `deepseek/deepseek-flash` remains the paid fallback leg.
+  the gateway. OVHCODER-DROP 2026-10-08: the `Qwen3-Coder-30B-A3B-Instruct` leg was
+  dropped — OVH withdrew the id upstream (HTTP 404 'does not exist'), so it rides
+  no route and its single-leg combo is retired. `deepseek/deepseek-flash` remains
+  the paid fallback leg.
   ORQWEN-DEAD 2026-10-06: the `openrouter/qwen/qwen3.8-27b:free` slug was
   withdrawn upstream (live 404) and dropped from every band.
 - **`l2-worker-free-only`**: the same free band as `l2-worker` with no
@@ -148,7 +151,9 @@ generated table above already shows it):
   a downgrade path.
 - **`l3-driver`**: OVHLEGS 2026-09-30: same three OVH credit-tier legs as `l2-worker`
   (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
-  inserted after the free legs and before the paid legs. `deepseek/deepseek-flash`
+  inserted after the free legs and before the paid legs. OVHCODER-DROP 2026-10-08:
+  `Qwen3-Coder-30B-A3B-Instruct` was dropped (OVH withdrew the id upstream, HTTP 404),
+  so it rides no route. `deepseek/deepseek-flash`
   remains the paid fallback. Since L1-CLEAN (2026-10-05) the `-clean` twins also
   carry the OVH credit legs plus vertex.
 - **`l3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
