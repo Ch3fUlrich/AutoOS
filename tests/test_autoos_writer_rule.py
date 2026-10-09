@@ -269,6 +269,45 @@ class DemotionHookTests(unittest.TestCase):
     def test_unreadable_ledger_fails_closed(self):
         self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), tempfile.mkdtemp()))
 
+    def test_symlink_broken_link_and_directory_deny(self):
+        good = self._ledger(["rejected", "rejected"])
+        room = tempfile.mkdtemp()
+        link = os.path.join(room, "link.jsonl")
+        os.symlink(good, link)
+        self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), link))
+        broken = os.path.join(room, "broken.jsonl")
+        os.symlink(os.path.join(room, "absent.jsonl"), broken)
+        self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), broken))
+        self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), tempfile.mkdtemp()))
+
+    def test_unreadable_file_denies(self):
+        import builtins
+
+        target = self._ledger(["accepted"])
+        real = builtins.open
+
+        def boom(*args, **kwargs):
+            raise PermissionError("denied")
+
+        builtins.open = boom
+
+        try:
+            self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), target))
+        finally:
+            builtins.open = real
+
+    def test_canonical_spelling_demoted_denies(self):
+        target = os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
+
+        for i, served in enumerate(("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                                    "nemotron-3-super")):
+            item = {"run_id": "n%d" % i, "verdict": "rejected", "failure_class": "syntax",
+                    "writer_client": "openrouter", "writer_model_served": served,
+                    "task_type": "code", "reviewer": "t3"}
+            ledger.record(item, path=target)
+
+        self.assertFalse(rule.writer_allowed("NEMOTRON-3-SUPER", "R1", "code", reg(), target))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

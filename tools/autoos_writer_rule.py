@@ -161,18 +161,25 @@ def writer_allowed(model_id, r_level, task_type, registry, ledger_path=None):
     request and every ops request is denied.
 
     With ledger_path given, a model demoted() flags for this task_type is
-    denied at every r_level; an existing-but-unreadable ledger also denies.
+    denied at every r_level. The path itself fails closed: a symlink
+    (broken or not), a directory (or any non-file), or an unreadable file
+    denies; only a path that does not exist at all reads as an empty
+    (not-demoted) ledger.
     """
     _checked(task_type, r_level)
     if ledger_path is not None:
         import os as _os
         try:
-            if _os.path.exists(ledger_path):
+            if not _os.path.lexists(ledger_path):
+                pass  # absent path: empty ledger, not demoted
+            elif _os.path.islink(ledger_path) or not _os.path.isfile(ledger_path):
+                return False  # symlink (broken or not), directory, ...: deny
+            else:
                 with open(ledger_path, "rb"):
-                    pass
-            import autoos_writer_ledger as _ledger
-            if _ledger.demoted(model_id, task_type, path=ledger_path):
-                return False
+                    pass  # readability probe: unreadable denies
+                import autoos_writer_ledger as _ledger
+                if _ledger.demoted(model_id, task_type, path=ledger_path):
+                    return False
         except Exception:
             return False
     writers = _writers(registry)
