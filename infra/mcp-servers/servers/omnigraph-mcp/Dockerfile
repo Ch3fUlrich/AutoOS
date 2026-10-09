@@ -7,8 +7,8 @@
 #           -e OMNIGRAPH_BASE_URL=http://omnigraph-server:8080 \
 #           -e OMNIGRAPH_GRAPH_ID=memory -e OMNIGRAPH_TOKEN=<token> omnigraph-mcp:latest
 FROM node:20-slim
-# 0.8.0 is the newest published bridge (0.8.1 was never released) and is verified
-# against omnigraph-server v0.8.1.
+# 0.8.0 = newest bridge verified against omnigraph-server v0.8.1
+# (0.8.1 never published; 0.9+ untested).
 RUN npm install -g @modernrelay/omnigraph-mcp@0.8.0 \
     && npm cache clean --force
 ENTRYPOINT ["omnigraph-mcp"]
