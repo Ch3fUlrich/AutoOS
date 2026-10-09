@@ -220,9 +220,16 @@ stall stays wakeable. The marker belongs to the session that wrote it: `start` c
 `last_wake_*` key from the heartbeat the canary merged forward (and a restart goes through `start`), because a new session reading
 its predecessor's marker would report its first stall of the same key `already-woken` and never be woken. Only the markers go — the
 turn count merges forward and the canary record stays.
-A RESTART is for a lane that cannot take a prompt at all (F3): the
-session is gone (`live_session` answers nothing, or ended `failed`/`interrupted`) or the connection itself failed, and then `resume`
-stops and starts the lane from its stored config and reports `restarted`. A lane whose process is already gone counts as stopped —
+A RESTART is for a lane that cannot take a prompt at all (F3), and the session probe names which of
+three it is (`probe_session` → `live` / `gone` / `unknown`): the session is PROVABLY gone (`live_session`
+answers nothing because nothing listens, the session replies 404, or it ended `failed`/`interrupted`) or
+the connection itself failed, and then `resume` stops and starts the lane from its stored config and
+reports `restarted`. An unreadable probe is not a gone session: the password env unset, a 401/403/5xx or
+a reply that will not parse answers `restart_refused` with the `probe` reason and exit 2 while touching
+nothing at all — the stop it would have run needs no password and the `start` after it is refused for that
+same missing password, so an unknown read would kill a working lane and leave it dead. `stalled` answers
+`probe-unknown` for the same case, so an unreadable lane never becomes a restart trigger off a poll.
+A lane whose process is already gone counts as stopped —
 nothing to kill, the state file goes, the start brings it back. A stop that was REFUSED (R-coord-10: a pid it cannot prove is the
 lane, a state file that would not go) leaves the old server holding the port, so no start is attempted: the answer is
 `restart_failed: stop refused (<cmd_stop's detail>)` with exit 2, not `start`'s `already running`. An HTTP status that is merely a refusal (409 busy is the
@@ -233,7 +240,10 @@ of its own. The five are MCP tools on the `autoos-agent` server (`l2_start`, `l2
 L1 coordinates phases without leaving its own session.
 
 `stalled` judges exactly one turn of the transcript: the newest progress item, decided by its timestamp (`order=desc` position only
-breaks a tie), so an errored turn the lane already spoke past is history, not a stall. The `status` and `inbox` polls treat a stall
+breaks a tie), so an errored turn the lane already spoke past is history, not a stall. An exited child
+is likewise not a stall while the newest message is an assistant turn that has not ended (no `finish`,
+no completed time): the lane is mid-turn, not quiet, and the turn that reads the result is the one it is
+writing. The `status` and `inbox` polls treat a stall
 probe and a heartbeat merge as decoration: what the lane state can legitimately fail with (`L2Error`, `ServerDown`, `OSError`,
 `ValueError`) is named in the answer as `stalled_error` / `activity_error` and the poll carries on with its ordinary verdict, while
 anything else raises — a bug in the probe is not reported as a lane that is simply not stalled.

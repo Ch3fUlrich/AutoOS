@@ -1551,6 +1551,156 @@ class ResumeTest(unittest.TestCase):
         self.srv.session_outcome = "succeeded"
         oc_l2.cmd_stop(result["lane"])
 
+    # (2e4) AO-L2-RESUME (Sonnet final, MED): an UNKNOWN probe is not a gone
+    # session. `live_session` answered None for "the password env is not set"
+    # and for "the server said 401/403/5xx" exactly as it did for "nothing is
+    # listening" - and resume acted on the None by stopping the lane, then
+    # starting it again with the same missing credential: a working lane left
+    # dead. Only a probe that PROVES the session is gone may restart.
+    def _assert_probe_unknown(self, out, result, before, probe_prefix):
+        self.assertIs(out.get("resumed"), False, out)
+        self.assertIs(out.get("restarted"), False, out)
+        self.assertIs(out.get("restart_refused"), True, out)
+        self.assertTrue(out.get("probe", "").startswith(probe_prefix), out)
+        self.assertNotIn("stop", out, "an unknown probe stopped the lane")
+        self.assertNotIn("start", out, "an unknown probe restarted the lane")
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before,
+                         "a lane whose probe could not be read got a prompt")
+        self.assertTrue(pid_alive(result["pid"]),
+                        "an unreadable lane was killed: %s" % out)
+        self.assertTrue(Path(oc_l2.read_config(result["lane"])["state_file"]).is_file(),
+                        "the unreadable lane lost its state file")
+
+    def _stalled_lane(self):
+        """A started lane that reads stalled today (an exited child, no new
+        turn), so `resume` has a reason to act."""
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child()
+        return result
+
+    def _with_password_env(self, value):
+        prev = os.environ.get(PW_ENV)
+        if value is None:
+            os.environ.pop(PW_ENV, None)
+        else:
+            os.environ[PW_ENV] = value
+        self.addCleanup(lambda: (os.environ.pop(PW_ENV, None) if prev is None
+                                 else os.environ.__setitem__(PW_ENV, prev)))
+
+    def _request_that_answers(self, session_status=None, session_down=False):
+        """`_request` that answers only the session probe badly and delegates
+        every other call to the real one."""
+        real = oc_l2._request
+
+        def hooked(port, method, path, body=None, password=""):
+            if method == "GET" and path.endswith("/api/session/" + FAKE_SESSION_ID):
+                if session_down:
+                    from oc_l1_http import ServerDown
+                    raise ServerDown("connection refused")
+                return session_status, None
+            return real(port, method, path, body=body, password=password)
+
+        return hooked
+
+    def test_resume_with_the_password_env_unset_never_stops_the_lane(self):
+        result = self._stalled_lane()
+        self._with_password_env(None)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self._assert_probe_unknown(out, result, before, "password-env-unset")
+
+    def test_resume_against_a_401_answer_never_stops_the_lane(self):
+        # the wrong credential: the server answers, and answers for nobody.
+        result = self._stalled_lane()
+        self._with_password_env(PW_VALUE + "-wrong")
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self._assert_probe_unknown(out, result, before, "http-401")
+        self.assertTrue([r for r in self.srv.requests if r["method"] == "GET"
+                         and r["auth_ok"] is False],
+                        "the probe never reached the server")
+
+    def test_resume_against_a_503_answer_never_stops_the_lane(self):
+        result = self._stalled_lane()
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        with mock.patch.object(oc_l2, "_request",
+                               side_effect=self._request_that_answers(
+                                   session_status=503)):
+            out = oc_l2.cmd_resume(result["lane"])
+        self._assert_probe_unknown(out, result, before, "http-503")
+
+    def test_resume_still_restarts_on_a_connection_refused_probe(self):
+        # The other side of the same line: nothing is listening, which IS a gone
+        # session, and the phase only continues through a restart.
+        result = self._stalled_lane()
+        with mock.patch.object(oc_l2, "_request",
+                               side_effect=self._request_that_answers(
+                                   session_down=True)):
+            out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["restarted"], out)
+        self.assertNotIn("restart_refused", out, out)
+        self.assertIn("stop", out, out)
+        self._pids.append(out["start"]["pid"])
+        oc_l2.cmd_stop(result["lane"])
+
+    def test_resume_still_restarts_on_a_404_session(self):
+        result = self._stalled_lane()
+        with mock.patch.object(oc_l2, "_request",
+                               side_effect=self._request_that_answers(
+                                   session_status=404)):
+            out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["restarted"], out)
+        self.assertNotIn("restart_refused", out, out)
+        self.assertIn("no live session", out["detail"], out)
+        self._pids.append(out["start"]["pid"])
+        oc_l2.cmd_stop(result["lane"])
+
+    def test_an_unreadable_probe_is_not_a_stall_and_not_a_restart_trigger(self):
+        # stalled() must answer the same way resume does, so a poll of a lane it
+        # cannot read never becomes the reason to tear it down.
+        result = self._stalled_lane()
+        self._with_password_env(None)
+        info = oc_l2.stalled(result["lane"])
+        self.assertIs(info["stalled"], False, info)
+        self.assertEqual(info["reason"], "probe-unknown")
+        self.assertTrue(info["probe"].startswith("password-env-unset"), info)
+        out, src = oc_l2.cmd_status(result["lane"])
+        self.assertNotEqual(out["verdict"], "stalled", out)
+        self.assertEqual(src, out["exit_code"], out)
+
+    def test_the_cli_resume_of_an_unreadable_lane_exits_2(self):
+        result = self._stalled_lane()
+        self._with_password_env(None)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = oc_l2.main(["resume", "--lane", result["lane"]])
+        self.assertEqual(rc, 2, buf.getvalue())
+        self.assertTrue(json.loads(buf.getvalue())["restart_refused"], buf.getvalue())
+
+    # (2g) an exited child is a stall only when the lane is actually quiet: a
+    # turn still streaming has not gone silent, it is mid-way through the very
+    # step that will read the result.
+    def _streaming_item(self, ts):
+        return {"type": "assistant", "time": {"created": int(ts)},
+                "content": [{"type": "text", "text": "working"}]}
+
+    def test_an_exited_child_during_a_streaming_turn_is_not_a_stall(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        ended = time.time() - 60
+        self._spawn_child(rc=0, ended=ended)
+        self.srv.items = [self._streaming_item(ended - 300)]
+        info = oc_l2.stalled(result["lane"])
+        self.assertIs(info["stalled"], False, info)
+        self.assertEqual(info["reason"], "ok")
+        # the same transcript with the turn FINISHED is the stall again
+        self.srv.items = [dict(self._streaming_item(ended - 300), finish="stop")]
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "child-exited")
+
     # (2f) F6: what another process recorded cannot reformat the wake line
     def test_the_wake_text_is_one_printable_line_whatever_the_record_held(self):
         # the run id comes out of a spawner record and the error out of the

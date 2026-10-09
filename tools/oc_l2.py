@@ -61,8 +61,11 @@ Subcommands (each prints one JSON object on stdout):
   stop   --lane l2-<repo>-<checkout-tag>-<phase>
   inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
   resume --lane l2-<repo>-<checkout-tag>-<phase>
-     one wake prompt per stall; restarts the lane when its session is gone and
-     leaves a lane that merely refused the prompt (HTTP 409 busy) alone. A
+     one wake prompt per stall; restarts the lane when its session is PROVABLY
+     gone (nothing listens, 404, or a dead outcome) and leaves a lane that merely
+     refused the prompt (HTTP 409 busy) alone. A probe that could not be read at
+     all - password env unset, 401/403/5xx, an unparsable reply - is NOT a gone
+     session: `restart_refused` with the `probe` reason, and nothing stopped. A
      restart whose stop was refused reports `restart_failed` and starts nothing.
 
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
@@ -466,28 +469,57 @@ def run_oc_l1(subcommand, name, cfg_path):
     return rc, buf.getvalue()
 
 
-def live_session(lane):
-    """The lane's state file when it names a session the server still answers
-    for - the same liveness test oc_l1's own idempotence branch runs."""
+# The session probe answers three different questions, and only the middle one
+# licenses a restart (AO-L2-RESUME, Sonnet final): `gone` is a session that
+# provably is not there (nothing listens, a 404, a dead outcome), `unknown` is a
+# probe that could not read anything at all (no credential in the environment,
+# a 401/403/5xx, a reply that will not parse). Reading `unknown` as `gone` kills
+# a working lane over a missing password, and the restart that follows is
+# refused for that same password - so an unreadable lane is left exactly as it
+# was and the answer says why.
+PROBE_LIVE = "live"
+PROBE_GONE = "gone"
+PROBE_UNKNOWN = "unknown"
+
+
+def probe_session(lane):
+    """(kind, state, reason) for the lane's session probe; `kind` is one of
+    PROBE_LIVE / PROBE_GONE / PROBE_UNKNOWN. The state is the lane's own only
+    when the server still answers for the session it names."""
     state = _read_state(lane.get("state_file") or "")
     if not isinstance(state, dict):
-        return None
+        return PROBE_GONE, None, "no-state-file"
     sid, port = state.get("session_id"), state.get("port")
     if not isinstance(sid, str) or not sid or not port:
-        return None
+        return PROBE_GONE, None, "no-session-id"
     password = os.environ.get(lane.get("password_env") or ENV_PW)
     if not password:
-        return None
+        return PROBE_UNKNOWN, None, "password-env-unset: %s" \
+            % (lane.get("password_env") or ENV_PW)
     try:
         status, payload = _request(port, "GET", "/api/session/%s" % sid,
                                    password=password)
-    except ServerDown:
-        return None
-    if status != 200 or not isinstance(_data(payload), dict):
-        return None
-    if _data(payload).get("outcome") in oc_l1_serve.DEAD_OUTCOMES:
-        return None
-    return state
+    except ServerDown as e:
+        return PROBE_GONE, None, "server-unreachable: %s" % e
+    if status == 404:
+        return PROBE_GONE, None, "session-404"
+    if status != 200:
+        return PROBE_UNKNOWN, None, "http-%d" % status
+    data = _data(payload)
+    if not isinstance(data, dict):
+        return PROBE_UNKNOWN, None, "unparsable-session-reply"
+    if data.get("outcome") in oc_l1_serve.DEAD_OUTCOMES:
+        return PROBE_GONE, None, "session-outcome-%s" % data.get("outcome")
+    return PROBE_LIVE, state, "live"
+
+
+def live_session(lane):
+    """The lane's state file when it names a session the server still answers
+    for - the same liveness test oc_l1's own idempotence branch runs. Nothing
+    can be concluded from the None it answers for a probe it could not read;
+    `probe_session` names which of the two it was."""
+    kind, state, _ = probe_session(lane)
+    return state if kind == PROBE_LIVE else None
 
 
 # --- AO-L2-RESUME (P1): activity heartbeat, stall detection, resume -----------
@@ -691,18 +723,19 @@ def _already_woken(heartbeat, info, newest):
     return (time.time() - ts) < _WAKE_COOLDOWN_S
 
 
-def _newest_progress_item(items):
-    """The transcript's NEWEST progress item, or None when it holds none.
+def _newest_item(items, only_progress=False):
+    """The transcript's NEWEST item (of progress items only when asked), or None
+    when it holds none.
 
-    `_session_messages` asks the server for `order=desc`, so the first progress
-    item is the newest and that position is the tie-break - exactly what
+    `_session_messages` asks the server for `order=desc`, so the first candidate
+    is the newest and that position is the tie-break - exactly what
     `oc_l1_serve._newest_progress_ts` assumes. Where the items do carry
     timestamps the largest wins even if the transcript came back oldest-first:
     `stalled()` reads the newest turn out of `_turn_activity` the same way, and
     the two must name one and the same turn."""
     chosen, chosen_ts = None, None
     for item in items:
-        if not oc_l1_serve._is_progress(item):
+        if only_progress and not oc_l1_serve._is_progress(item):
             continue
         ts = oc_l1_serve._item_ts(item)
         if chosen is None:
@@ -710,6 +743,11 @@ def _newest_progress_item(items):
         elif ts is not None and (chosen_ts is None or ts > chosen_ts):
             chosen, chosen_ts = item, ts
     return chosen
+
+
+def _newest_progress_item(items):
+    """The transcript's NEWEST progress item, or None when it holds none."""
+    return _newest_item(items, only_progress=True)
 
 
 def _last_turn_error(items):
@@ -743,18 +781,44 @@ def _last_turn_error(items):
     return False, ""
 
 
+def _turn_in_progress(items):
+    """Is the transcript's newest message an assistant turn that has not ended?
+
+    A child exiting while this turn is still open is not a stalled lane: the
+    turn is the step that will read the result. The item is finished when it
+    names a `finish` or has a completed time; either one says the lane spoke
+    its last word and went quiet."""
+    item = _newest_item(items)
+    if not isinstance(item, dict):
+        return False
+    info = item.get("info") if isinstance(item.get("info"), dict) else {}
+    if (item.get("type") or item.get("role") or info.get("role")) != "assistant":
+        return False
+    if item.get("finish") or info.get("finish"):
+        return False
+    for holder in (item.get("time"), info.get("time")):
+        if isinstance(holder, dict) and holder.get("completed"):
+            return False
+    return True
+
+
 def stalled(name):
     """Is the lane stuck? `last-turn-error`, `child-exited`, or not stalled.
 
     A dead server is `dead`, not stuck - status already says so. A stall that
     was already woken for is not stalled either (F2): it reads `already-woken`
     until the lane moves or the wake cooldown passes, so one wake covers one
-    stall however often status or resume is polled in between."""
+    stall however often status or resume is polled in between. A probe that
+    could not read the session at all answers `probe-unknown`: not stalled, and
+    never a reason to restart (AO-L2-RESUME)."""
     name = check_lane(name)
     lane = read_config(name)
     if lane is None:
         return {"lane": name, "stalled": False, "reason": "absent"}
-    state = live_session(lane)
+    kind, state, reason = probe_session(lane)
+    if kind == PROBE_UNKNOWN:
+        return {"lane": name, "stalled": False, "reason": "probe-unknown",
+                "probe": reason}
     if state is None:
         return {"lane": name, "stalled": False, "reason": "not-live"}
     base = {"lane": name, "session_id": state.get("session_id"),
@@ -772,8 +836,8 @@ def stalled(name):
         kids = _lane_children(lane)
         kid = kids[-1] if kids else None
         ex = child_exited(kid["run_dir"]) if kid else {"exited": False}
-        if kid and ex["exited"] and (newest is None or ex["ended"] is None
-                                     or newest <= ex["ended"]):
+        if kid and ex["exited"] and not _turn_in_progress(items) and \
+                (newest is None or ex["ended"] is None or newest <= ex["ended"]):
             verdict = {"reason": "child-exited", "run_id": kid["run_id"],
                        "run_dir": kid["run_dir"], "rc": ex["rc"],
                        "cancelled": ex["cancelled"]}
@@ -914,20 +978,32 @@ def _restart_lane(name, lane, why):
 def cmd_resume(name):
     """Wake a stalled lane once with its next action, or restart it.
 
-    One prompt per stall (F2), and the answer separates the three things that
-    can happen: a wake landed, the lane was refused (a healthy lane that is busy
-    is left alone, F3), or the session was gone and the lane restarted from its
-    stored config."""
+    One prompt per stall (F2), and the answer separates the things that can
+    happen: a wake landed, the lane was refused (a healthy lane that is busy is
+    left alone, F3), the session was PROVABLY gone and the lane restarted from its
+    stored config, or the probe could not read the session at all and nothing
+    was touched (AO-L2-RESUME)."""
     name = check_lane(name)
     lane = read_config(name)
     if lane is None:
         raise L2Error("no lane config at %s for '%s'" % (config_path(name), name))
     info = stalled(name)
-    state = live_session(lane)
+    kind, state, reason = probe_session(lane)
+    if kind == PROBE_UNKNOWN:
+        # A missing credential or a 401/5xx says nothing about the session. The
+        # stop this refuses to run needs no password, so going on would kill a
+        # working lane and the restart would then be refused for the very
+        # condition being probed - a dead lane out of an unreadable one.
+        return {"lane": name, "resumed": False, "restarted": False,
+                "restart_refused": True, "probe": reason, "exit_code": 2,
+                "detail": "the session probe could not be read (%s) - the lane is "
+                          "left running and NOT restarted on an unknown; set the "
+                          "credential and ask again"}
     if state is None:
-        # F3: a session that is gone - whether the serve still answers for
-        # nothing or is dead entirely - cannot take a wake. Restarting from the
-        # stored config is the only way the phase continues.
+        # F3: a session that is PROVABLY gone - the serve answers for nothing
+        # (404 or a dead outcome) or is not listening at all - cannot take a
+        # wake. Restarting from the stored config is the only way the phase
+        # continues. This is the only trigger `_restart_lane` is given.
         return _restart_lane(
             name, lane, "the lane has no live session (status %s)"
                         % info.get("reason"))
@@ -947,6 +1023,7 @@ def cmd_resume(name):
             body={"text": _wake_text(info)},
             password=os.environ.get(lane.get("password_env") or ENV_PW))
     except ServerDown as e:
+        # The connection itself failed mid-wake: that is `gone`, not `unknown`.
         return _restart_lane(name, lane,
                              "the wake prompt did not reach the server (%s)" % e)
     if status != 200:
