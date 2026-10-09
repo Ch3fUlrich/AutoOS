@@ -558,6 +558,82 @@ class Shapes(unittest.TestCase):
             self.assertEqual(0, proc.returncode, f"{chunk}: {proc.stderr[:500]}")
 
 
+# The v3 guard is a transform on an *array* at every compiled site (the merge
+# function's output), so the shapes below never reach it through a real call.
+# They are defence in depth (D-908): v3 dereferences a turn's `parts`, which v2
+# never did, so a raw malformed body must be no worse under v3 than under v2.
+# Evaluated against the patcher's own `_v3_inner` text, not a copy of it.
+RAW_JS_TEMPLATE = (
+    "const guard = (f) => { __GUARD__; return f; };\n"
+    "const shapes = __SHAPES__;\n"
+    "const out = {};\n"
+    "for (const [name, input] of Object.entries(shapes)) {\n"
+    "  try {\n"
+    "    out[name] = { contents: guard(JSON.parse(JSON.stringify(input))).contents };\n"
+    "  } catch (err) {\n"
+    "    out[name] = { threw: String((err && err.message) || err) };\n"
+    "  }\n"
+    "}\n"
+    "process.stdout.write(JSON.stringify(out));\n"
+)
+
+
+@unittest.skipUnless(NODE_AVAILABLE, "node not on PATH")
+class RawShapes(unittest.TestCase):
+    """The patcher's own v3 guard text run on raw, malformed contents (D-908)."""
+
+    BAD_SHAPES = {
+        "null_contents": {"contents": None},
+        "undefined_contents": {},
+        "list_with_null": {"contents": [None]},
+        "user_null_parts": {"contents": [{"role": "user", "parts": None}]},
+        "parts_undefined": {"contents": [{"role": "user"}]},
+        "missing_role": {"contents": [{"parts": [{"text": "x"}]}]},
+        # A functionResponse part inside a role:"model" turn is not a mixed
+        # *user* turn: it keeps v2 semantics and is popped only if it trails.
+        "model_function_response": {"contents": [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [{"functionResponse": {"name": "x"}}]}]},
+        "lone_model_function_response": {"contents": [
+            {"role": "model", "parts": [{"functionResponse": {"name": "x"}}]}]},
+    }
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        self.patcher = __import__("apply-vertex-patch")
+        text = (RAW_JS_TEMPLATE
+                .replace("__GUARD__", self.patcher._v3_inner("f"))
+                .replace("__SHAPES__", json.dumps(self.BAD_SHAPES)))
+        self._tmp = tempfile.TemporaryDirectory()
+        driver = Path(self._tmp.name) / "raw_driver.cjs"
+        driver.write_text(text, encoding="utf-8")
+        proc = subprocess.run(["node", str(driver)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError("raw guard harness failed: " + proc.stderr[:2000])
+        self.report = json.loads(proc.stdout)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_raw_bad_shape_never_throws(self):
+        for name, got in self.report.items():
+            self.assertNotIn("threw", got, name)
+
+    def test_a_raw_bad_shape_ends_on_a_user_turn_or_is_refilled(self):
+        for name, got in self.report.items():
+            contents = got.get("contents") or []
+            self.assertTrue(contents, name)
+            self.assertEqual("user", contents[-1].get("role"), name)
+
+    def test_function_response_in_a_model_turn_is_popped_not_split(self):
+        got = self.report["model_function_response"]["contents"]
+        self.assertEqual(["user"], [c["role"] for c in got])
+        self.assertEqual([{"text": "go"}], got[0]["parts"])
+        self.assertNotIn("Noted.", json.dumps(got))
+        self.assertEqual([CONTINUE_TURN],
+                         self.report["lone_model_function_response"]["contents"])
+
+
 class ScriptAgreement(unittest.TestCase):
     """One guard, two scripts: the .ps1 carries the chunk table byte for byte."""
 
