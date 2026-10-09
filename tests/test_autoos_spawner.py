@@ -267,7 +267,7 @@ class RoutingTableTests(unittest.TestCase):
         # fallback leg, so ctx=1m public cards route there again.
         for card in ({"ctx": "1m", "role": "orchestrate"},
                      {"ctx": "1m", "complexity": "hard"},
-                     {"ctx": "1m", "role": "review", "spend": "credit"}):
+                     {"ctx": "1m", "role": "review", "spend": "free-ok"}):
             combo, reason = routing.select_combo(card)
             self.assertEqual(combo, "l1-orchestrator")
             self.assertEqual(reason, "public-1m")
@@ -281,13 +281,11 @@ class RoutingTableTests(unittest.TestCase):
     def test_public_trivial_free_is_t3_driver(self):
         self.assertEqual(self.pick(complexity="trivial"), "l3-driver")
 
-    def test_public_implement_credit_is_t2_worker(self):
-        # The -credit chains were dropped 2026-09-23 (ADR 0006): l2-worker
-        # already overflows to its paid legs, so credit picks the same combo.
-        self.assertEqual(self.pick(spend="credit"), "l2-worker")
-
-    def test_public_review_credit_is_t3_driver(self):
-        self.assertEqual(self.pick(role="review", spend="credit"), "l3-driver")
+    # DEADROWS 2026-10-08 dropped the two `spend=credit` rows of this table:
+    # the -credit chains went 2026-09-23, the spawner's TIERS has no credit
+    # tier, so credit only ever resolved to the combo the free-ok rows above
+    # already pin. The value itself is now refused — see
+    # RoutingBoundaryTests.test_spend_credit_is_refused_naming_its_values.
 
     def test_every_combo_exists_and_none_is_retired(self):
         retired = {"tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag",
@@ -311,7 +309,7 @@ class RoutingTableTests(unittest.TestCase):
         self.assertEqual(self.pick(privacy="sensitive"), "l2-worker-clean")
 
     def test_sensitive_hard_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="credit"), "l2-worker-clean")
+        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="free-ok"), "l2-worker-clean")
 
     def test_sensitive_review_is_t3_driver_clean(self):
         self.assertEqual(self.pick(privacy="sensitive", role="review"), "l3-driver-clean")
@@ -358,7 +356,26 @@ class RoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(routing.CARD_VALUES["privacy"], ("public", "sensitive"))
 
     def test_spend_values(self):
-        self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
+        # DEADROWS 2026-10-08: `credit` left the allowed set — the -credit
+        # combos went 2026-09-23, ALL_COMBOS has no credit route and the
+        # spawner's TIERS has no credit tier, so the value asked for something
+        # nothing could serve.
+        self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok",))
+
+    def test_spend_credit_is_refused_naming_its_values(self):
+        # The card is refused at parse time, not silently re-routed.
+        for card in ({"spend": "credit"},
+                     {"role": "implement", "spend": "credit"},
+                     {"privacy": "sensitive", "spend": "credit"}):
+            with self.assertRaises(routing.CardError) as ctx:
+                routing.select_combo(card)
+            msg = str(ctx.exception)
+            self.assertIn("spend", msg)
+            self.assertIn("credit", msg)
+            self.assertIn("free-ok", msg)
+        # The same refusal on the v1 path of normalize_v2, and on a key=value card.
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2(routing.parse_card("role=review,spend=credit"))
 
     def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
         # T1FREE 2026-09-27: l1-orchestrator serves public-strong again (ctx=128k +
@@ -4335,12 +4352,12 @@ class CardV2Tests(unittest.TestCase):
 
     def test_v1_output_carries_bucket_min_context_and_spend(self):
         out = self.norm({"role": "implement", "complexity": "hard",
-                         "ctx": "1m", "privacy": "sensitive", "spend": "credit"})
+                         "ctx": "1m", "privacy": "sensitive", "spend": "free-ok"})
         self.assertEqual(out["version"], "1")
         self.assertEqual(out["kind"], "implement")
         self.assertEqual(out["bucket_hint"], "S3")
         self.assertEqual(out["min_context"], 1000000)
-        self.assertEqual(out["spend"], "credit")
+        self.assertEqual(out["spend"], "free-ok")
         self.assertEqual(out["privacy"], "sensitive")
         self.assertEqual(set(out), set(routing.CARD_V2_DEFAULTS)
                          | {"version", "bucket_hint", "min_context", "spend"})
@@ -4395,7 +4412,7 @@ class CardV2Tests(unittest.TestCase):
         for card in ({"role": "implement", "kind": "debug"},
                      {"complexity": "hard", "spec": "exact"},
                      {"ctx": "1m", "mode": "quality-first"},
-                     {"spend": "credit", "paths": ["a"]},
+                     {"spend": "free-ok", "paths": ["a"]},
                      {"role": "implement", "override.route": "l1-orchestrator"}):
             with self.assertRaises(routing.CardError) as ctx:
                 self.norm(card)

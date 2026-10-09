@@ -124,21 +124,23 @@ spend), then a preference by role and complexity.
 | `complexity` | trivial, standard, hard | standard |
 | `ctx` | 128k, 1m | 128k |
 | `privacy` | public, sensitive | public |
-| `spend` | free-ok, credit | free-ok |
+| `spend` | free-ok | free-ok |
 
 | privacy | ctx | role / complexity | spend | combo |
 |---|---|---|---|---|
-| public | 1m | any | any | `l1-orchestrator` |
-| public | 128k | orchestrate, or hard | any | `l1-orchestrator` |
-| public | 128k | implement / standard | any | `l2-worker` |
-| public | 128k | review, or trivial | any | `l3-driver` |
-| sensitive | 128k | review, or trivial | any | `l3-driver-clean` |
-| sensitive | 128k | anything else | any | `l2-worker-clean` |
-| sensitive | 1m | any | any | refused - split to 128k, or `--allow-training` (logged) |
+| public | 1m | any | free-ok | `l1-orchestrator` |
+| public | 128k | orchestrate, or hard | free-ok | `l1-orchestrator` |
+| public | 128k | implement / standard | free-ok | `l2-worker` |
+| public | 128k | review, or trivial | free-ok | `l3-driver` |
+| sensitive | 128k | review, or trivial | free-ok | `l3-driver-clean` |
+| sensitive | 128k | anything else | free-ok | `l2-worker-clean` |
+| sensitive | 1m | any | free-ok | refused - split to 128k, or `--allow-training` (logged) |
 
-`spend=credit` is still accepted but has no combo of its own: the `-credit`
-chains were dropped on 2026-09-23 and `l2-worker` / `l3-driver` already
-overflow to their paid legs (ADR 0006).
+`spend=credit` is refused as a card value (DEADROWS 2026-10-08): the `-credit`
+chains were dropped on 2026-09-23, no `-credit` combo is left in
+`ALL_COMBOS` and the spawner's `TIERS` has no credit tier, so the value named
+nothing a card could be routed to. `l2-worker` / `l3-driver` already overflow
+to their paid legs, which is how paid work is reached today.
 
 The combo's tier picks the opencode agent (`l3-driver-clean` runs `t3-reviewer`).
 
