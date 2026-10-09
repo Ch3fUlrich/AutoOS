@@ -10781,7 +10781,13 @@ class LaneDiffPathsTests(unittest.TestCase):
     value is the RAW `git diff -U0 --no-color` body, stripped by nobody, because
     the judge that reads it strips the '+' itself (P4b-fixes D1), and git is run
     in bytes mode with a lenient decode because a lane diff is not guaranteed to
-    be UTF-8 (P4b-fixes D3)."""
+    be UTF-8 (P4b-fixes D3).
+
+    The file list comes back as git's ``-z`` records, NUL-separated and unquoted
+    (``-c core.quotepath=false``), because the default ``--name-only`` rendering
+    QUOTES a name it cannot print — P4b-fixes D4. The fakes below therefore hand
+    over bytes with ``\\x00`` separators, which is the real shape of ``-z`` output,
+    never the ``\\n`` shape the old reader split on."""
 
     BASE_OID = "1" * 40
     SHA_OID = "2" * 40
@@ -10794,11 +10800,11 @@ class LaneDiffPathsTests(unittest.TestCase):
         reader decodes them itself (P4b-fixes D3)."""
         return subprocess.CompletedProcess(["git"], rc, stdout=stdout, stderr=stderr)
 
-    def seq(self, paths=b"a.py\n", body=b"+x\n", base_oid=None, sha_oid=None,
+    def seq(self, paths=b"a.py\x00", body=b"+x\n", base_oid=None, sha_oid=None,
             base_rc=0, sha_rc=0, ancestor_rc=0):
         """The five procs git answers, in call order: `rev-parse --verify` base,
-        `rev-parse --verify` sha, `merge-base --is-ancestor`, `diff --name-only`,
-        `diff -U0 --no-color`."""
+        `rev-parse --verify` sha, `merge-base --is-ancestor`, `diff -z --name-only`
+        (NUL-terminated records, like the real `-z` answer), `diff -U0 --no-color`."""
         return [self.proc(("%s\n" % (base_oid or self.BASE_OID)).encode(), rc=base_rc),
                 self.proc(("%s\n" % (sha_oid or self.SHA_OID)).encode(), rc=sha_rc),
                 self.proc(b"", rc=ancestor_rc),
@@ -10843,10 +10849,10 @@ class LaneDiffPathsTests(unittest.TestCase):
             ["git", "-C", "/repo", "rev-parse", "--verify", "abc^{commit}"],
             ["git", "-C", "/repo", "merge-base", "--is-ancestor",
              self.BASE_OID, self.SHA_OID],
-            ["git", "-C", "/repo", "diff", "--name-only", "--no-renames",
-             "origin/main...abc"],
-            ["git", "-C", "/repo", "diff", "-U0", "--no-color",
-             "origin/main...abc"]])
+            ["git", "-C", "/repo", "-c", "core.quotepath=false", "diff", "-z",
+             "--name-only", "--no-renames", "origin/main...abc"],
+            ["git", "-C", "/repo", "-c", "core.quotepath=false", "diff", "-U0",
+             "--no-color", "origin/main...abc"]])
         for _argv, kw in seen:
             self.assertLessEqual(kw.get("timeout", 10 ** 9), 120)
             self.assertIn("stdin", kw)
@@ -10863,7 +10869,7 @@ class LaneDiffPathsTests(unittest.TestCase):
         body = ("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n"
                 "+password: rotate\n-not-this\n+--- \n")
         paths, raw, err = self.read(self.seq(
-            paths=b"playbooks/x.yml\ninventory.yml\n",
+            paths=b"playbooks/x.yml\x00inventory.yml\x00",
             body=body.encode()))[0]
         self.assertIsNone(err)
         self.assertEqual(paths, ["playbooks/x.yml", "inventory.yml"])
@@ -10876,7 +10882,7 @@ class LaneDiffPathsTests(unittest.TestCase):
         # and `requires_ops_guards("docs", ["notes.txt"], that)` measured False —
         # a lane that had just added a `token:` line was waved through with no
         # brief, no report and no scope fence at all.
-        paths, raw, err = self.read(self.seq(paths=b"notes.txt\n",
+        paths, raw, err = self.read(self.seq(paths=b"notes.txt\x00",
                                              body=LANE_MARKER_BODY.encode()))[0]
         self.assertIsNone(err)
         self.assertTrue(self.agent.ready_guards.requires_ops_guards(
@@ -10900,10 +10906,14 @@ class LaneDiffPathsTests(unittest.TestCase):
     def test_an_empty_lane_diff_refuses_the_lane(self):
         # A lane with no change in it is not a lane that is ready, and an empty
         # path list is the same open door the `--base` == `--sha` case came in
-        # through — so it refuses here, after git answered, as exit 1.
-        msg, seen = self.refuse(self.seq(paths=b"\n"))
-        self.assertIn("writer-guards: empty lane diff", msg)
-        self.assertEqual(len(seen), 5, seen)
+        # through — so it refuses here, after git answered, as exit 1. git's `-z`
+        # answer for an empty range is no bytes at all; a lone terminating NUL is
+        # the same answer, and neither may read as one path named "".
+        for paths in (b"", b"\x00"):
+            with self.subTest(paths=paths):
+                msg, seen = self.refuse(self.seq(paths=paths))
+                self.assertIn("writer-guards: empty lane diff", msg)
+                self.assertEqual(len(seen), 5, seen)
 
     def test_a_base_that_does_not_resolve_is_a_cannot_read_error(self):
         # Not a refusal: an unfetched `origin/main` is the gate not running, which
@@ -10955,13 +10965,93 @@ class LaneDiffPathsTests(unittest.TestCase):
     def test_a_non_utf8_path_survives_instead_of_raising(self):
         # P4b-fixes D3: an invalid byte is a NAME, so it must not be renamed into
         # a match or a miss — surrogateescape keeps it, and the scope fence
-        # compares the same bytes back.
+        # compares the same bytes back. Fed as git's own `-z` bytes (D4), not as a
+        # bare line: the pre-fix fake handed over the raw byte where the real
+        # unquoted `--name-only` answer would have carried a quote, which is how
+        # the quoting bug stayed invisible.
         (paths, _raw, err), _seen = self.read(
-            self.seq(paths=b"docs/\xffunfriendly.md\n"))
+            self.seq(paths=b"docs/\xffunfriendly.md\x00"))
         self.assertIsNone(err)
         self.assertEqual(paths, ["docs/\udcffunfriendly.md"])
         self.assertEqual([p.encode("utf-8", "surrogateescape") for p in paths],
                          [b"docs/\xffunfriendly.md"])
+
+    def test_the_quotepath_knob_and_the_z_splitter_are_never_dropped_from_the_argv(self):
+        # P4b-fixes D4, pinned on the recorded argv because the symptom is silent:
+        # without `-z` git quotes a name carrying a tab, newline, quote or
+        # backslash (quotepath=false does not cover control characters), and
+        # without the knob it C-quotes a non-ASCII one into
+        # '"ops/caf\303\251.yml"'. Neither spelling matches the ops regex, so the
+        # lane reads docs/R1 and `ready` skips the whole writer-guards block.
+        (_p, _r, err), seen = self.read(self.seq())
+        self.assertIsNone(err)
+        self.assertEqual(len(seen), 5, seen)
+        named, body = seen[3][0], seen[4][0]
+        self.assertEqual(named, ["git", "-C", "/repo", "-c", "core.quotepath=false",
+                                 "diff", "-z", "--name-only", "--no-renames",
+                                 "origin/main...abc"])
+        self.assertEqual(body, ["git", "-C", "/repo", "-c", "core.quotepath=false",
+                                "diff", "-U0", "--no-color", "origin/main...abc"])
+        # The knob is git's own `-c` (before the subcommand), and the refused
+        # dash-leading revs never reach it: the range stays one trailing
+        # positional argument.
+        for argv in (named, body):
+            self.assertEqual(argv[:5], ["git", "-C", "/repo", "-c",
+                                        "core.quotepath=false"], argv)
+            self.assertEqual(argv[-1], "origin/main...abc", argv)
+
+    def test_a_non_ascii_ops_path_is_the_name_the_ops_regex_sees(self):
+        # The defect this round closes: a lane that added `ops/café.yml` printed
+        # '"ops/caf\303\251.yml"' through `--name-only`, `(?:^|/)ops/` and
+        # `\.ya?ml$` matched neither, `required_r_level("docs", paths)` answered
+        # R1, `requires_ops_guards` answered False, and an ops lane was certified
+        # with no brief, no report and no scope fence. The `-z` bytes ARE the name.
+        utf8_name = "ops/café.yml".encode("utf-8")
+        (paths, _raw, err), _seen = self.read(self.seq(paths=utf8_name + b"\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/café.yml"])
+        guards = self.agent.ready_guards
+        self.assertTrue(guards.requires_ops_guards("docs", paths=paths))
+        allowed = guards.brief_files("TASK: x\n"
+                                     "FILES (only these; <= 3 files, <= 200 lines "
+                                     "changed): tools/a.py. Do not touch other "
+                                     "lines/files.\n")
+        self.assertEqual(guards.scope_fence(paths, allowed), ["ops/café.yml"])
+
+    def test_a_non_utf8_ops_path_still_reads_as_ops(self):
+        # The same name in bytes the filesystem may hold and UTF-8 does not: one
+        # surrogateescape char, still an `ops/` path, still R2, and the fence names
+        # the exact bytes back (a non-ASCII path can never equal an ASCII allowed
+        # entry, so it is always a violation — never a silent fold).
+        (paths, _raw, err), _seen = self.read(self.seq(paths=b"ops/caf\xe9.yml\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/caf\udce9.yml"])
+        self.assertEqual([p.encode("utf-8", "surrogateescape") for p in paths],
+                         [b"ops/caf\xe9.yml"])
+        guards = self.agent.ready_guards
+        self.assertTrue(guards.requires_ops_guards("docs", paths=paths))
+
+    def test_a_name_with_a_newline_or_a_quote_is_one_record(self):
+        # Splitting on '\n' used to cut `ops/nl<LF>name.yml` into two paths, and
+        # the surviving half matched nothing; `-z` delimits with a byte no path can
+        # contain, so each name arrives whole — and a quoted-looking one is git's
+        # content, never git's quoting, because quoting is off by construction.
+        (paths, _raw, err), _seen = self.read(
+            self.seq(paths=b'ops/nl\nname.yml\x00ops/we"ird.yml\x00'))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["ops/nl\nname.yml", 'ops/we"ird.yml'])
+        self.assertTrue(self.agent.ready_guards.requires_ops_guards("docs",
+                                                                    paths=paths))
+
+    def test_the_terminating_nul_is_not_an_empty_path(self):
+        # git terminates the LAST record with a NUL too, so a naive split leaves a
+        # trailing '' that would reach the fence as a path that was never there —
+        # and an empty name is not a change, which is why '' is dropped rather than
+        # kept.
+        (paths, _raw, err), _seen = self.read(
+            self.seq(paths=b"a.py\x00tools/b.py\x00"))
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["a.py", "tools/b.py"])
 
     def test_a_non_utf8_diff_body_is_replaced_not_a_traceback(self):
         # The body is only ever pattern-matched for risk tokens, so a lossy

@@ -5005,8 +5005,11 @@ def _git_out(raw, errors):
     ``except`` does not name -- so the caller got a traceback where it was owed a
     verdict. ``surrogateescape`` is for the path list, so an odd byte is a NAME
     that survives to the scope fence instead of being renamed into a match or a
-    miss (``git diff --name-only`` does not quote one away); ``replace`` is enough
-    for the diff body, which is only ever pattern-matched for risk tokens. git's
+    miss (``lane_diff_paths`` asks git for it unquoted -- ``-z`` plus
+    ``core.quotepath=false`` -- because a plain ``--name-only`` C-quotes it into
+    ``"ops/caf\\303\\251.yml"``, a string of literal quotes and octal escapes no
+    path regex matches); ``replace`` is enough for the diff body, which is only
+    ever pattern-matched for risk tokens. git's
     own buffers are bytes, so a runner injected by a test hands bytes too.
     """
     return (raw or b"").decode("utf-8", errors)
@@ -5040,11 +5043,20 @@ def lane_diff_paths(repo, base, sha):
          the lane clears a gate it never stood in front of. A range that is not
          an ancestor, or is empty, raises LaneDiffRefusal (exit 1); a git that
          cannot answer is an ``error`` (exit 2);
-      3. ``git diff --name-only --no-renames <base>...<sha>`` for the file list --
-         ``--no-renames`` so a rename arrives as both of its paths and the scope
-         fence sees each half;
-      4. ``git diff -U0 --no-color <base>...<sha>`` for the RAW body, handed back
-         verbatim (P4b-fixes D1).
+      3. ``git -c core.quotepath=false diff -z --name-only --no-renames
+         <base>...<sha>`` for the file list -- ``--no-renames`` so a rename
+         arrives as both of its paths and the scope fence sees each half, and
+         ``-z`` (P4b-fixes D4) because the default ``--name-only`` answer is a
+         *quoted* rendering, not the name: git C-quotes a non-ASCII path into
+         ``"ops/caf\\303\\251.yml"`` and a path with a tab, newline, quote or
+         backslash into an escaped, quoted string -- and neither spelling matches
+         the ops pattern, so a lane that added ``ops/café.yml`` was measured
+         ``docs``/R1 and never stood in front of the writer guards. ``-z`` makes
+         every record the exact path bytes, NUL-terminated, quoting off by
+         construction (``core.quotepath=false`` is what keeps the same bytes
+         unquoted in the body's headers);
+      4. ``git -c core.quotepath=false diff -U0 --no-color <base>...<sha>`` for
+         the RAW body, handed back verbatim (P4b-fixes D1).
 
     That last point is the whole reason the body is not reduced here:
     ``autoos_writer_rule._added``, which decides the risk level, is written for
@@ -5110,15 +5122,17 @@ def lane_diff_paths(repo, base, sha):
             "writer-guards: --base must be a strict ancestor of --sha (%s is not "
             "behind %s)" % (base, sha))
     try:
-        named = subprocess.run(["git", "-C", repo, "diff", "--name-only",
+        named = subprocess.run(["git", "-C", repo, "-c", "core.quotepath=false",
+                                "diff", "-z", "--name-only",
                                 "--no-renames", rng], capture_output=True,
                                timeout=60, stdin=subprocess.DEVNULL)
-        body = subprocess.run(["git", "-C", repo, "diff", "-U0", "--no-color", rng],
+        body = subprocess.run(["git", "-C", repo, "-c", "core.quotepath=false",
+                               "diff", "-U0", "--no-color", rng],
                               capture_output=True, timeout=60,
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, None, "git diff: %s" % exc
-    for label, proc in (("--name-only", named), ("-U0", body)):
+    for label, proc in (("-z --name-only", named), ("-U0", body)):
         if proc.returncode != 0:
             return None, None, ((_git_out(proc.stderr, "replace").strip())
                                 or "git diff %s exited %d" % (label, proc.returncode))
@@ -5127,8 +5141,10 @@ def lane_diff_paths(repo, base, sha):
             return None, None, ("diff too large to judge: git diff %s printed %d "
                                 "bytes, over the %d limit"
                                 % (label, size, LANE_DIFF_MAX_BYTES))
-    paths = [line for line in _git_out(named.stdout, "surrogateescape").split("\n")
-             if line.strip()]
+    # P4b-fixes D4: NUL is the separator, so a name with a newline in it is one
+    # record, not two. git terminates the last record with a NUL too, which leaves
+    # one trailing empty string -- dropped, like every empty record.
+    paths = [p for p in _git_out(named.stdout, "surrogateescape").split("\x00") if p]
     if not paths:
         raise LaneDiffRefusal(
             "writer-guards: empty lane diff -- %s is a strict ancestor of %s and "
