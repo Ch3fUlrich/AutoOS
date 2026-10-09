@@ -3029,6 +3029,32 @@ def _check_reviewers(registry) -> list:
     return problems
 
 
+def _check_writers(registry) -> list:
+    """policy.writers: the allow-list tools/autoos_writer_rule.py reads."""
+    problems = []
+    writers = _section(registry, "policy").get("writers")
+    if writers is None:
+        return []
+    if not isinstance(writers, dict):
+        return ["writers: policy.writers must be an object"]
+    subs = writers.get("sub40_models", [])
+    if not isinstance(subs, list) or any(not isinstance(s, str) or not s for s in subs):
+        problems.append("writers: policy.writers.sub40_models must list non-empty strings")
+    for key in ("R2", "R3"):
+        legs = writers.get(key, [])
+        if not isinstance(legs, list):
+            problems.append("writers: policy.writers.%s must be a list" % key)
+            continue
+        for index, leg in enumerate(legs):
+            label = "policy.writers.%s[%d]" % (key, index)
+            if not isinstance(leg, dict) or not leg.get("model") \
+                    or not isinstance(leg["model"], str):
+                problems.append("writers: %s.model must be a non-empty string" % label)
+            elif "available" in leg and not isinstance(leg["available"], bool):
+                problems.append("writers: %s.available must be a boolean" % label)
+    return problems
+
+
 # ===========================================================================
 # rule 12 - the risk policy is a policy tools/autoos_risk.py can actually apply
 # ===========================================================================
@@ -3736,6 +3762,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))
     problems.extend(_check_reviewers(registry))
+    problems.extend(_check_writers(registry))
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
     problems.extend(_check_handoff_caps(registry))
