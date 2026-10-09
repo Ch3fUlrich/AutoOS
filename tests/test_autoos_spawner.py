@@ -40,6 +40,8 @@ import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 
 def load_agent():
@@ -68,10 +70,11 @@ def allow_in_place(case, agent):
 # whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
 _WORKERS_TMP = None
 _MEMINFO_TMP = None
+_HOST_PINS = None
 
 
 def setUpModule():
-    global _WORKERS_TMP, _MEMINFO_TMP
+    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
     # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
@@ -83,12 +86,59 @@ def setUpModule():
         fh.write("MemTotal:       67108864 kB\nMemFree:        1 kB\n"
                  "MemAvailable:   67108864 kB\n")
     os.environ["AUTOOS_MEMINFO_PATH"] = _MEMINFO_TMP
+    # AO-ADMISSION-2 (2026-10-09): the same argument binds for the two remaining
+    # host reads. The run budget gate reads the day's spend report — on a host
+    # that has spent its day every Google-paid start here is refused for a reason
+    # no test in this file is about (4 GeminiSideModelPinTests, and the 2026-10-08
+    # and -09 prepush overrides were exactly this), while CI, a machine with no
+    # report at all, stays green. Name a report that says the day is inside
+    # budget. And `AUTOOS_ADMISSION_OFF=1` is the spawner's own test-only escape
+    # for host admission: a `mock.patch.dict(..., clear=True)` below the module
+    # would otherwise put the live /proc/meminfo back (the escape does not reach
+    # a client worker — tools/autoos-agent.py copies it to our own CLI by name).
+    # HostAdmissionTests is the rule itself: it pops the escape and names both
+    # sources per case.
+    _HOST_PINS = host_state.install(None, directory=_WORKERS_TMP, gate="allow",
+                                    workers=False, meminfo=None, admission_off=True)
 
 
 def tearDownModule():
+    # `uninstall` first: it puts back what `install` found, which includes the two
+    # names this module set before it, so the pops below have to come after it or
+    # it would put them back and leave the next test file pointing at this dir.
+    if _HOST_PINS is not None:
+        host_state.uninstall(_HOST_PINS)
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
     os.environ.pop("AUTOOS_MEMINFO_PATH", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
+
+
+def pinned_env(**extra):
+    """The body of a `mock.patch.dict(os.environ, ..., clear=True)` for a test
+    that drives the spawner: the caller's names, plus the host reads pinned to
+    fixtures under this module's temp dir.
+
+    `clear=True` is what makes a test independent of the calling shell — and it
+    drops the module's pins with the rest of the environment, which puts the live
+    spend report, the live worker count and the live MemAvailable back in the
+    process under test. A test that replaces the whole environment has to name the
+    fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
+    """
+    env = dict(_host_env_pins())
+    env.update(extra)
+    return env
+
+
+_HOST_ENV = None
+
+
+def _host_env_pins():
+    """The host-read pins for this module's temp dir, built once and copied."""
+    global _HOST_ENV
+    if _HOST_ENV is None:
+        _HOST_ENV = host_state.pin_values(_WORKERS_TMP, workers=False,
+                                          admission_off=True)
+    return _HOST_ENV
 
 
 SHIPPED_REGISTRY = json.loads(
@@ -7372,9 +7422,10 @@ class ClientModeHelpTests(unittest.TestCase):
                           ("l1-orchestrator", "l2-worker", "t3-reviewer")},
                "providers": {"qoder": {"models": {"x": {}}}}}
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
-                                          "AUTOOS_WORKERS_DIR": self.tmp,
-                                          "PATH": self.tmp + os.pathsep + os.environ.get("PATH", "")},
+        with mock.patch.dict(os.environ, pinned_env(
+                AUTOOS_STATE_DIR=self.tmp,
+                AUTOOS_WORKERS_DIR=self.tmp,
+                PATH=self.tmp + os.pathsep + os.environ.get("PATH", "")),
                              clear=True):
             with mock.patch.dict(self.clients.CLIENTS, {"qoder": bogus}):
                 with mock.patch.object(agent, "run_client",
@@ -7509,8 +7560,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "wait_for_free_slot",
                                    lambda *a, **k: wait_result):
                 with mock.patch.object(agent, "run_client",
@@ -7544,8 +7595,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
             max_depth=None, lean=False, title=None, dry_run=True, no_defer=False)
         cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "wait_for_free_slot",
                                    side_effect=AssertionError("a dry run waited for a slot")):
                 with contextlib.redirect_stdout(io.StringIO()), \
@@ -7681,8 +7732,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "run_client",
                                    lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
                 with mock.patch.object(agent.clients, "signin_state",
@@ -8484,8 +8535,8 @@ class ReviewerGateTests(unittest.TestCase):
         self.client_state["claude"] = {"installed": False}
         calls = []
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
-                                          "AUTOOS_WORKERS_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_STATE_DIR=self.tmp,
+                                                    AUTOOS_WORKERS_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
                 with mock.patch.object(agent.clients, "signin_state",
                                        lambda client, env=None: (None, "")):

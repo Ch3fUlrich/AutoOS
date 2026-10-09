@@ -30,7 +30,6 @@ TOOL = ROOT / "tools" / "seat-model-evidence.py"
 # Real example dbs are located by ABSOLUTE path so these tests run from any
 # worktree / lane sandbox, and are skipped only if the path is genuinely absent.
 REAL_SANDBOXES = Path("/home/s/code/AutoOS/logs/sandboxes")
-REAL_LOGS = Path("/home/s/code/AutoOS/logs")
 NEMOTRON = "AutoOS-20261001-205139-wsomni-4g-review-nemotro-e4fe9f"
 NEMOTRON_RID = "20261001-205139-wsomni-4g-review-nemotro-e4fe9f"
 MIMO_PIN = "AutoOS-20261001-160210-t0-freeze-2-review-a-pin-00a24d"
@@ -963,6 +962,18 @@ class SeatEvidenceTests(unittest.TestCase):
                              Path(str(base) + ".seat-evidence.json"))
 
     # --- real example dbs (located by absolute path; skip only if absent) ---
+    #
+    # The db and its CLI start-up log are read from the real sandbox, read-only.
+    # Everything the test WRITES or DEPENDS ON the host remembering is its own:
+    # the evidence file goes to a per-test temp dir, and the run record — the
+    # third source of the three-way — is written into a temp logs root rather
+    # than read from the live `logs/workers`. Both were host state (lane
+    # AO-ADMISSION-2, 2026-10-09): `/tmp/qtest_nem.json` was one fixed path that
+    # every lane running this file wrote into, so a parallel run answered the
+    # assertions with someone else's evidence; and the record of a 2026-10-01 run
+    # rotates out of the live workers dir, after which the run record source is
+    # empty, `all_match` is false, and the test fails for what the machine has
+    # forgotten rather than for what the tool decides.
 
     def test_real_nemotron_db_three_way_match(self):
         sandbox = real_sandbox(NEMOTRON)
@@ -971,29 +982,37 @@ class SeatEvidenceTests(unittest.TestCase):
         # D-261 wording: this seat's CLI was started with --model nemotron and
         # its db records nemotron; nemotron was in fact the requested model, so
         # all three sources agree and the check passes.
-        proc = run_tool(sandbox, NEMO, out=Path("/tmp") / "qtest_nem.json",
-                        rid=NEMOTRON_RID, logs_root=REAL_LOGS)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        r = parse_stdout(proc)
-        self.assertEqual(r["kind"], "request-side")
-        self.assertEqual(r["match"], "true")
-        self.assertGreaterEqual(r["turns"], 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "evidence.json"
+            write_run_record(root, NEMOTRON_RID, NEMO)
+            proc = run_tool(sandbox, NEMO, out=out,
+                            rid=NEMOTRON_RID, logs_root=root)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            r = parse_stdout(proc)
+            self.assertEqual(Path(r["path"]), out)
+            self.assertEqual(r["kind"], "request-side")
+            self.assertEqual(r["match"], "true")
+            self.assertGreaterEqual(r["turns"], 1)
 
     def test_real_mimo_pin_db_flags_fence_relaunch(self):
         # D-261: autoos-agent's own cross-family fence started opencode with
         # `--model nemotron`, so the CLI and db record nemotron even though the
         # run record requested mimo. The evidence is request-side and the
         # three-way diverges -> the tool flags it (exit 2), never papers over.
-        # Evidence is written to /tmp, never beside the real sandbox.
         sandbox = real_sandbox(MIMO_PIN)
         if sandbox is None:
             self.skipTest(f"example db not present: {MIMO_PIN}")
-        proc = run_tool(sandbox, MIMO, out=Path("/tmp") / "qtest_mimo.json",
-                        rid=MIMO_PIN_RID, logs_root=REAL_LOGS)
-        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-        doc = json.loads((Path("/tmp") / "qtest_mimo.json").read_text())
-        self.assertEqual(doc["sources"]["cli"]["model"], NEMO)
-        self.assertEqual(doc["sources"]["run_record"]["model"], MIMO)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "evidence.json"
+            write_run_record(root, MIMO_PIN_RID, MIMO)
+            proc = run_tool(sandbox, MIMO, out=out,
+                            rid=MIMO_PIN_RID, logs_root=root)
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            doc = json.loads(out.read_text())
+            self.assertEqual(doc["sources"]["cli"]["model"], NEMO)
+            self.assertEqual(doc["sources"]["run_record"]["model"], MIMO)
 
 
 if __name__ == "__main__":

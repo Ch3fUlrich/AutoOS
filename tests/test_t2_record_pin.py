@@ -43,8 +43,10 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 AGENT = TOOLS / "autoos-agent.py"
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import autoos_agent_mcp as mcp_server  # noqa: E402
+import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 
 def load_agent():
@@ -71,10 +73,11 @@ def plan_of(*args, env=None):
 
 
 _WORKERS_TMP = None
+_HOST_PINS = None
 
 
 def setUpModule():
-    global _WORKERS_TMP
+    global _WORKERS_TMP, _HOST_PINS
     for k in list(os.environ):
         if k.startswith("GIT_CONFIG_"):
             os.environ.pop(k, None)
@@ -84,9 +87,23 @@ def setUpModule():
     # model, so the gate is escaped (the test-only switch) rather than faked -
     # HostAdmissionTests in tests/test_autoos_spawner.py tests the rule itself.
     os.environ["AUTOOS_ADMISSION_OFF"] = "1"
+    # AO-ADMISSION-2 (2026-10-09): the run budget gate reads the day's spend
+    # report from the host, and the D-284 pins this file guards are Google-paid
+    # models. On a host that has spent its day the CLI exits 2 on "daily budget
+    # blocked" before the pin is ever looked at, and the D284 cases fail for the
+    # ledger rather than for D-284 - while CI, with no report at all, stays green.
+    # Name a report that says the day is inside budget; RefusalTests in
+    # tests/test_run_budget_spawner.py is where the gate itself is tested.
+    _HOST_PINS = host_state.install(None, directory=_WORKERS_TMP, gate="allow",
+                                    workers=False, meminfo=None)
 
 
 def tearDownModule():
+    # `uninstall` first: it restores the names `install` found, which includes the
+    # two this module set before it, so the pops come after or it puts them back
+    # and the next test file inherits them.
+    if _HOST_PINS is not None:
+        host_state.uninstall(_HOST_PINS)
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
     os.environ.pop("AUTOOS_ADMISSION_OFF", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
