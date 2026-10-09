@@ -22,6 +22,9 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 
 def _load(name, path):
@@ -224,6 +227,20 @@ class McpStartGateTests(GateFileCase):
     """The MCP spawn path: preflight and spawn run the CLI as a child, so the
     gate has to reach that child, or the MCP path is wide open."""
 
+    def setUp(self):
+        super().setUp()
+        # The CLI child these two paths exec measures the host it runs on before
+        # it plans anything: the live worker count (`logs/workers`, which on a lane
+        # host is the lanes' own records) and MemAvailable. So the class names an
+        # empty records dir and the spawner's own test-only admission escape, and
+        # puts the *default* spend report in an empty state home — a machine that
+        # has spent nothing today, which is what CI is. Without this, "the gate
+        # refused" below can be a memory refusal, and "no gate named" can be
+        # today's real over-budget ledger (AO-ADMISSION-2, 2026-10-09).
+        host_state.install(self, directory=os.path.join(self.tmp.name, "host-pins"),
+                           gate="absent", workers=True, meminfo=None,
+                           admission_off=True)
+
     def test_the_gate_file_reaches_the_cli_child_env(self):
         # the spawner builds the child env through one passlist; the gate
         # file has to clear it, whatever value names it
@@ -243,6 +260,9 @@ class McpStartGateTests(GateFileCase):
                       "exceeds budget $25.00", out.get("error", ""))
 
     def test_mcp_start_is_unchanged_when_the_var_is_unset(self):
+        # `setUp` already moved the default report out of the way: an empty state
+        # home is a host that has spent nothing today. Popping the variable here is
+        # the test's own premise, not the machine's state.
         old = os.environ.pop(GATE_ENV, None)
         try:
             refused = mcp_server.preflight(

@@ -40,6 +40,8 @@ import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 
 def load_agent():
@@ -68,10 +70,11 @@ def allow_in_place(case, agent):
 # whole module; a test that needs its own dir still passes AUTOOS_WORKERS_DIR.
 _WORKERS_TMP = None
 _MEMINFO_TMP = None
+_HOST_PINS = None
 
 
 def setUpModule():
-    global _WORKERS_TMP, _MEMINFO_TMP
+    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
     # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
@@ -83,12 +86,59 @@ def setUpModule():
         fh.write("MemTotal:       67108864 kB\nMemFree:        1 kB\n"
                  "MemAvailable:   67108864 kB\n")
     os.environ["AUTOOS_MEMINFO_PATH"] = _MEMINFO_TMP
+    # AO-ADMISSION-2 (2026-10-09): the same argument binds for the two remaining
+    # host reads. The run budget gate reads the day's spend report — on a host
+    # that has spent its day every Google-paid start here is refused for a reason
+    # no test in this file is about (4 GeminiSideModelPinTests, and the 2026-10-08
+    # and -09 prepush overrides were exactly this), while CI, a machine with no
+    # report at all, stays green. Name a report that says the day is inside
+    # budget. And `AUTOOS_ADMISSION_OFF=1` is the spawner's own test-only escape
+    # for host admission: a `mock.patch.dict(..., clear=True)` below the module
+    # would otherwise put the live /proc/meminfo back (the escape does not reach
+    # a client worker — tools/autoos-agent.py copies it to our own CLI by name).
+    # HostAdmissionTests is the rule itself: it pops the escape and names both
+    # sources per case.
+    _HOST_PINS = host_state.install(None, directory=_WORKERS_TMP, gate="allow",
+                                    workers=False, meminfo=None, admission_off=True)
 
 
 def tearDownModule():
+    # `uninstall` first: it puts back what `install` found, which includes the two
+    # names this module set before it, so the pops below have to come after it or
+    # it would put them back and leave the next test file pointing at this dir.
+    if _HOST_PINS is not None:
+        host_state.uninstall(_HOST_PINS)
     os.environ.pop("AUTOOS_WORKERS_DIR", None)
     os.environ.pop("AUTOOS_MEMINFO_PATH", None)
     shutil.rmtree(_WORKERS_TMP, ignore_errors=True)
+
+
+def pinned_env(**extra):
+    """The body of a `mock.patch.dict(os.environ, ..., clear=True)` for a test
+    that drives the spawner: the caller's names, plus the host reads pinned to
+    fixtures under this module's temp dir.
+
+    `clear=True` is what makes a test independent of the calling shell — and it
+    drops the module's pins with the rest of the environment, which puts the live
+    spend report, the live worker count and the live MemAvailable back in the
+    process under test. A test that replaces the whole environment has to name the
+    fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
+    """
+    env = dict(_host_env_pins())
+    env.update(extra)
+    return env
+
+
+_HOST_ENV = None
+
+
+def _host_env_pins():
+    """The host-read pins for this module's temp dir, built once and copied."""
+    global _HOST_ENV
+    if _HOST_ENV is None:
+        _HOST_ENV = host_state.pin_values(_WORKERS_TMP, workers=False,
+                                          admission_off=True)
+    return _HOST_ENV
 
 
 SHIPPED_REGISTRY = json.loads(
@@ -267,7 +317,7 @@ class RoutingTableTests(unittest.TestCase):
         # fallback leg, so ctx=1m public cards route there again.
         for card in ({"ctx": "1m", "role": "orchestrate"},
                      {"ctx": "1m", "complexity": "hard"},
-                     {"ctx": "1m", "role": "review", "spend": "credit"}):
+                     {"ctx": "1m", "role": "review", "spend": "free-ok"}):
             combo, reason = routing.select_combo(card)
             self.assertEqual(combo, "l1-orchestrator")
             self.assertEqual(reason, "public-1m")
@@ -281,13 +331,11 @@ class RoutingTableTests(unittest.TestCase):
     def test_public_trivial_free_is_t3_driver(self):
         self.assertEqual(self.pick(complexity="trivial"), "l3-driver")
 
-    def test_public_implement_credit_is_t2_worker(self):
-        # The -credit chains were dropped 2026-09-23 (ADR 0006): l2-worker
-        # already overflows to its paid legs, so credit picks the same combo.
-        self.assertEqual(self.pick(spend="credit"), "l2-worker")
-
-    def test_public_review_credit_is_t3_driver(self):
-        self.assertEqual(self.pick(role="review", spend="credit"), "l3-driver")
+    # DEADROWS 2026-10-08 dropped the two `spend=credit` rows of this table:
+    # the -credit chains went 2026-09-23, the spawner's TIERS has no credit
+    # tier, so credit only ever resolved to the combo the free-ok rows above
+    # already pin. The value itself is now refused — see
+    # RoutingBoundaryTests.test_spend_credit_is_refused_naming_its_values.
 
     def test_every_combo_exists_and_none_is_retired(self):
         retired = {"tier1", "tier1-clean", "tier2", "tier2-clean", "tier3", "tier3-clean", "rag",
@@ -311,7 +359,7 @@ class RoutingTableTests(unittest.TestCase):
         self.assertEqual(self.pick(privacy="sensitive"), "l2-worker-clean")
 
     def test_sensitive_hard_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="credit"), "l2-worker-clean")
+        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="free-ok"), "l2-worker-clean")
 
     def test_sensitive_review_is_t3_driver_clean(self):
         self.assertEqual(self.pick(privacy="sensitive", role="review"), "l3-driver-clean")
@@ -358,7 +406,26 @@ class RoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(routing.CARD_VALUES["privacy"], ("public", "sensitive"))
 
     def test_spend_values(self):
-        self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok", "credit"))
+        # DEADROWS 2026-10-08: `credit` left the allowed set — the -credit
+        # combos went 2026-09-23, ALL_COMBOS has no credit route and the
+        # spawner's TIERS has no credit tier, so the value asked for something
+        # nothing could serve.
+        self.assertEqual(routing.CARD_VALUES["spend"], ("free-ok",))
+
+    def test_spend_credit_is_refused_naming_its_values(self):
+        # The card is refused at parse time, not silently re-routed.
+        for card in ({"spend": "credit"},
+                     {"role": "implement", "spend": "credit"},
+                     {"privacy": "sensitive", "spend": "credit"}):
+            with self.assertRaises(routing.CardError) as ctx:
+                routing.select_combo(card)
+            msg = str(ctx.exception)
+            self.assertIn("spend", msg)
+            self.assertIn("credit", msg)
+            self.assertIn("free-ok", msg)
+        # The same refusal on the v1 path of normalize_v2, and on a key=value card.
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2(routing.parse_card("role=review,spend=credit"))
 
     def test_public_128k_orchestrate_goes_to_t1_orchestrator(self):
         # T1FREE 2026-09-27: l1-orchestrator serves public-strong again (ctx=128k +
@@ -4335,12 +4402,12 @@ class CardV2Tests(unittest.TestCase):
 
     def test_v1_output_carries_bucket_min_context_and_spend(self):
         out = self.norm({"role": "implement", "complexity": "hard",
-                         "ctx": "1m", "privacy": "sensitive", "spend": "credit"})
+                         "ctx": "1m", "privacy": "sensitive", "spend": "free-ok"})
         self.assertEqual(out["version"], "1")
         self.assertEqual(out["kind"], "implement")
         self.assertEqual(out["bucket_hint"], "S3")
         self.assertEqual(out["min_context"], 1000000)
-        self.assertEqual(out["spend"], "credit")
+        self.assertEqual(out["spend"], "free-ok")
         self.assertEqual(out["privacy"], "sensitive")
         self.assertEqual(set(out), set(routing.CARD_V2_DEFAULTS)
                          | {"version", "bucket_hint", "min_context", "spend"})
@@ -4395,7 +4462,7 @@ class CardV2Tests(unittest.TestCase):
         for card in ({"role": "implement", "kind": "debug"},
                      {"complexity": "hard", "spec": "exact"},
                      {"ctx": "1m", "mode": "quality-first"},
-                     {"spend": "credit", "paths": ["a"]},
+                     {"spend": "free-ok", "paths": ["a"]},
                      {"role": "implement", "override.route": "l1-orchestrator"}):
             with self.assertRaises(routing.CardError) as ctx:
                 self.norm(card)
@@ -7355,9 +7422,10 @@ class ClientModeHelpTests(unittest.TestCase):
                           ("l1-orchestrator", "l2-worker", "t3-reviewer")},
                "providers": {"qoder": {"models": {"x": {}}}}}
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
-                                          "AUTOOS_WORKERS_DIR": self.tmp,
-                                          "PATH": self.tmp + os.pathsep + os.environ.get("PATH", "")},
+        with mock.patch.dict(os.environ, pinned_env(
+                AUTOOS_STATE_DIR=self.tmp,
+                AUTOOS_WORKERS_DIR=self.tmp,
+                PATH=self.tmp + os.pathsep + os.environ.get("PATH", "")),
                              clear=True):
             with mock.patch.dict(self.clients.CLIENTS, {"qoder": bogus}):
                 with mock.patch.object(agent, "run_client",
@@ -7492,8 +7560,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "wait_for_free_slot",
                                    lambda *a, **k: wait_result):
                 with mock.patch.object(agent, "run_client",
@@ -7527,8 +7595,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
             max_depth=None, lean=False, title=None, dry_run=True, no_defer=False)
         cfg = {"providers": {"opencode": {"models": {"muse-spark-1.3-contributor-free": {}}}},
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "wait_for_free_slot",
                                    side_effect=AssertionError("a dry run waited for a slot")):
                 with contextlib.redirect_stdout(io.StringIO()), \
@@ -7664,8 +7732,8 @@ class FreeConcurrencyCapTests(unittest.TestCase):
                "agents": {"l2-worker": {"model": "opencode/muse-spark-1.3-contributor-free"}}}
         out, err = io.StringIO(), io.StringIO()
         calls = []
-        with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
-                                          "AUTOOS_STATE_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_WORKERS_DIR=self.workers,
+                                                    AUTOOS_STATE_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "run_client",
                                    lambda *a, **k: calls.append(1) or agent.ClientExit(0)):
                 with mock.patch.object(agent.clients, "signin_state",
@@ -8467,8 +8535,8 @@ class ReviewerGateTests(unittest.TestCase):
         self.client_state["claude"] = {"installed": False}
         calls = []
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp,
-                                          "AUTOOS_WORKERS_DIR": self.tmp}, clear=True):
+        with mock.patch.dict(os.environ, pinned_env(AUTOOS_STATE_DIR=self.tmp,
+                                                    AUTOOS_WORKERS_DIR=self.tmp), clear=True):
             with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
                 with mock.patch.object(agent.clients, "signin_state",
                                        lambda client, env=None: (None, "")):

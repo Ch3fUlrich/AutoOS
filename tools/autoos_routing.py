@@ -11,7 +11,7 @@ Card v1 (unknown fields and values are an error):
     complexity  trivial | standard | hard            default standard
     ctx         128k | 1m                            default 128k
     privacy     public | sensitive                   default public
-    spend       free-ok | credit                     default free-ok
+    spend       free-ok                            default free-ok
 
 Resolution is filters, then preference: privacy, ctx, spend, then
 role/complexity. ctx=1m routes to l1-orchestrator again since 2026-09-27
@@ -21,9 +21,13 @@ a free leg). Sensitive 1m still has no route: l1-orchestrator-clean's only
 leg is a contributor model that trains on prompts and stays off, so it is
 reachable only through an explicit allow_training, which the caller logs -
 but that leg is provider-off too, so allow_training is retained for
-compatibility and is inert. spend=credit stays a valid value but has no
-combo of its own: the -credit chains were dropped 2026-09-23, and l2-worker /
-l3-driver already overflow to their paid legs.
+compatibility and is inert. spend no longer accepts credit (DEADROWS,
+2026-10-08): the -credit chains were dropped 2026-09-23, no -credit combo is
+left in ALL_COMBOS and the spawner's TIERS has no credit tier, so a
+spend=credit card could only ever resolve to a combo that ignores the request.
+Refusing it at parse time is honest; a card that wants a paid leg says so by
+role/complexity and gets l2-worker / l3-driver, which already overflow to their
+paid legs.
 """
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ CARD_VALUES = {
     "complexity": ("trivial", "standard", "hard"),
     "ctx": ("128k", "1m"),
     "privacy": ("public", "sensitive"),
-    "spend": ("free-ok", "credit"),
+    "spend": ("free-ok",),
 }
 CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
@@ -340,7 +344,7 @@ def select_combo(card: dict, allow_training: bool = False) -> tuple:
                 "(OpenRouter off; the Zen leg is client-bound). Split the work so "
                 "each part fits 128k and run it on l2-worker-clean "
                 "(card privacy=sensitive,ctx=128k).")
-        # 3. spend - -clean is paid only, so spend changes nothing here.
+        # 3. spend - only free-ok parses, so it changes nothing here.
         # 4. role/complexity preference.
         return ("l3-driver-clean", "sensitive-light") if light else ("l2-worker-clean", "sensitive")
 
@@ -352,7 +356,7 @@ def select_combo(card: dict, allow_training: bool = False) -> tuple:
         return "l1-orchestrator", "public-1m"
     if strong:
         return "l1-orchestrator", "public-strong"
-    # 3. spend - no -credit chains since 2026-09-23; the reason still says credit.
-    if c["spend"] == "credit":
-        return ("l3-driver", "public-light-credit") if light else ("l2-worker", "public-credit")
+    # 3. spend - spend=credit is refused by normalize() (DEADROWS 2026-10-08: no
+    #    -credit combo since 2026-09-23, no credit tier in the spawner's TIERS),
+    #    so nothing here branches on it; these combos already overflow to paid.
     return ("l3-driver", "public-light") if light else ("l2-worker", "public-default")

@@ -9,20 +9,20 @@
     "",
     "TARGET SPELLING: use the RESOLVED provider, not the routing alias. The gateway",
     "builds the override lookup key from the resolved provider (server.js",
-    "getModelCapabilityOverride), e.g. the routing alias scw resolves to provider",
-    "scaleway, so the row must read scaleway/qwen3-235b-a22b-instruct-2507 - a row",
-    "spelled scw/... does NOT match and silently does nothing.",
+    "getModelCapabilityOverride), e.g. the routing alias ovh resolves to provider",
+    "ovhcloud, so the row must read ovhcloud/<model> - a row spelled ovh/... does NOT",
+    "match and silently does nothing.",
     "",
     "NOTE: the cap alone only makes the gateway FILTER an over-limit leg out of a combo",
     "(HARD_COMPAT_REASONS includes output_tokens); it does not CLAMP the forwarded value.",
-    "Clamping is the code change in patches/0001-clamp-max-tokens.patch. Keep both."
+    "Clamping is the code change in patches/0001-clamp-max-tokens.patch. Keep both.",
+    "",
+    "SCWREMOVAL 2026-10-06 (operator: scaleway is not used anymore) retired the last",
+    "row here, scaleway/qwen3-235b-a22b-instruct-2507 (max_output_tokens 16384, measured",
+    "2026-09-30). No leg of that provider reaches a combo any more, so the cap has",
+    "nothing to guard; providers.scaleway stays available:false in the registry for",
+    "pricing history. The live gateway row must be deleted alongside this file -",
+    "apply-capability-overrides.ps1 only ensures rows, it never removes one."
   ],
-  "overrides": [
-    {
-      "target": "scaleway/qwen3-235b-a22b-instruct-2507",
-      "key": "max_output_tokens",
-      "value": 16384,
-      "$comment": "Scaleway rejects max_completion_tokens > 16384 with a 400 payload validation error (\"max_completion_tokens is limited to 16384 for qwen3-235b-a22b-instruct-2507\") and the whole request fails, so the combo falls through. Measured 2026-09-30: max_tokens=32768 -> 400, max_tokens=16 -> 200. The cap lets the request be clamped to 16384 instead of rejected. Row already applied live at 2026-09-30 14:32:21Z; this file is the durable source."
-    }
-  ]
+  "overrides": []
 }

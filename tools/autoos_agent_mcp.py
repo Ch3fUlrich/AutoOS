@@ -1798,7 +1798,7 @@ def build_server(profile: str | None = None):
         """Start one agent on `task` and return its run id at once (poll status/result).
 
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
-        ctx: 128k|1m, privacy: public|sensitive, spend: free-ok|credit}; omitted fields
+        ctx: 128k|1m, privacy: public|sensitive, spend: free-ok}; omitted fields
         take their defaults, an empty card is l2-worker. Or pass tier 1-3 instead of a card.
         isolate: private git clone on its own branch, forked from `cwd`'s repo and
         HEAD. It is FORCED for every spawned tier (2 and 3) and for a role that
