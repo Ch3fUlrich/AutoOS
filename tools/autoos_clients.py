@@ -92,6 +92,16 @@ AGY_DEFAULT_MODEL = "claude-opus-5-5-medium"
 # and runs a shell command unattended in 25 s with bypass_permissions.
 QODER_DEFAULT_MODEL = "Qwen3.8-Flash"
 
+# The account's own keys for that default model — what qodercli calls it when it
+# speaks for itself. Measured in the FAMILYFENCE-b block below: a transcript writes
+# the internal key ("qfmodel") and the fallback line names the display rung
+# ("efficient"), and neither is a spelling a registry can place. The list exists so
+# "this id IS the account's default" is a lookup rather than a guess: an id outside
+# it is a model the caller pinned, and the default's vendor is not a fact about it.
+CLIENT_DEFAULT_KEYS = {
+    "qoder": ("qfmodel", "efficient"),
+}
+
 # --- FAMILYFENCE-b: what the client itself recorded about the model it used ----
 #
 # An own-account client has no gateway to ask, and its argv is only what was

@@ -40,7 +40,9 @@ child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
                    fallback group kill uses where there is no user manager
     output.log   the child's stdout + stderr (never contains a key)
     exit.json    {rc, ended, family, family_source|family_reason} once the child
-                 exits; {"cancelled": true} on cancel
+                 exits; {"cancelled": true} on cancel. A `family_source` naming a
+                 layer was read off a model a witness saw serve; `planned-model` is
+                 the plan's own claim and satisfies no gate
     question.json  a worker's ask-back question {"text", "asked"} - written by
                    tools/autoos-ask.py, which run_job points here through the
                    child's AUTOOS_TASK_DIR
@@ -1018,12 +1020,17 @@ def recorded_family_fields(run_id: str, job: dict | None) -> dict:
     """The family fields `exit.json` answers with — AO-RUN-FAMILY-RECORD (D-807).
 
     The runner-private kill record wins: its `writer` is what the launch actually
-    served, written by the CLI, which a worker cannot edit (R-orch-17). Where the
-    run never reached that point — a client that is not installed, a run that died
-    before the record — the spawn-time answer in job.json's `request` is used, and
-    says so with `family_source: planned-model`, because "what I meant to run" and
-    "what answered" are claims of different strength. A plan that resolved to no
-    family travels as null plus its reason; neither reader invents one."""
+    served, written by the CLI, which a worker cannot edit (R-orch-17), and the CLI
+    already labelled that family by its witness — a layer name when a gateway row or
+    the client's own transcript named the model, `planned-model` when nothing
+    answered. Where the run never reached that point — a client that is not
+    installed, a run that died before the record — the spawn-time answer in job.json's
+    `request` is used, and says so with `family_source: planned-model`, because "what
+    I meant to run" and "what answered" are claims of different strength: a gate
+    (this repo's cross-family review, the plangraph reviewer token) accepts a served
+    or client-reported source and treats this one as information only. A plan that
+    resolved to no family travels as null plus its reason; neither reader invents
+    one."""
     writer = (read_kill_record(run_id) or {}).get("writer") or {}
     if writer.get("family"):
         fields = {"family": writer["family"]}
@@ -1038,7 +1045,8 @@ def recorded_family_fields(run_id: str, job: dict | None) -> dict:
         return {}
     if request.get("family_reason"):
         return {"family": None, "family_reason": request["family_reason"]}
-    return {"family": request.get("family"), "family_source": "planned-model"}
+    return {"family": request.get("family"),
+            "family_source": agent.FAMILY_SOURCE_PLANNED}
 
 
 def planned_model_args(req: dict) -> dict:
@@ -1075,12 +1083,13 @@ def planned_family_fields(req: dict, client: str) -> dict:
     `client` is the adapter's name, which is what lets a qoder run whose model no
     registry row names resolve on the client's own default model (a qwen family),
     while a gateway run resolves from the model its route served or the family every
-    leg of that route declares."""
+    leg of that route declares. Nothing has answered yet, so `witnessed_family`
+    labels the result `planned-model` rather than the layer that placed it: this half
+    is a plan by construction, and the layer's strength claim only means something
+    about a model a witness named."""
     model, _source = agent.effective_spawn_model(client, **planned_model_args(req))
     family, family_source, reason = agent.run_model_family(model, client=client)
-    if family is None:
-        return {"family": None, "family_reason": reason}
-    return {"family": family, "family_source": family_source}
+    return agent.witnessed_family(family, family_source, reason, False)
 
 
 def spawn(req: dict) -> dict:

@@ -15483,13 +15483,16 @@ class ResolvedWriterTests(unittest.TestCase):
         # FAMILYFENCE-b says what that answer is worth: a plan model with no
         # witness behind it is recorded, but not as a proof (agy keeps no
         # transcript this spawner can read, so `assumed-default` is the truth).
+        # AO-RUN-FAMILY-RECORD REJECT 3: and the FAMILY inherits that weakness —
+        # the layer read it off an id nobody witnessed serving, so the record says
+        # `planned-model` where the gateway record above says `registry-row`.
         agent = self.agent
         registry = {"models": {"gemini-3.8-flash": {"family": "gemini"}}}
         native = agent.resolved_writer({"client": "agy", "model": "gemini-3.8-flash"},
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
                                   "family": "gemini", "source": "assumed-default",
-                                  "family_source": agent.FAMILY_SOURCE_REGISTRY})
+                                  "family_source": agent.FAMILY_SOURCE_PLANNED})
         self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
                                      False, registry={"models": {}})
@@ -16563,12 +16566,14 @@ class WriterProvenanceTests(unittest.TestCase):
         # claude takes no --model unless the caller names one, so what answers is
         # the account's business — and "(client default)" is not a model name.
         # D-807: the MODEL stays unresolved, but the family is not unknown — the
-        # client's own account is Anthropic's, and that is what the footer reads.
+        # client's own account is Anthropic's. REJECT 3: the witness for that family
+        # is the plan, because no model was witnessed, and the footer reads the
+        # family while a gate reads the witness.
         writer = self._native({"client": "claude", "model": "(client default)",
                                "model_source": self.agent.WRITER_SOURCE_ASSUMED})
         self.assertEqual(writer["model"], self.agent.WRITER_UNRESOLVED)
         self.assertEqual(writer["family"], "anthropic")
-        self.assertEqual(writer["family_source"], self.agent.FAMILY_SOURCE_CLIENT_NAME)
+        self.assertEqual(writer["family_source"], self.agent.FAMILY_SOURCE_PLANNED)
         self.assertEqual(writer["source"], self.agent.WRITER_SOURCE_ASSUMED)
 
     def test_the_free_promo_id_keeps_its_provider_out_of_the_model_name(self):
@@ -16763,11 +16768,14 @@ class RunFamilyRecordTests(unittest.TestCase):
 
     def test_a_qoder_default_model_names_the_qwen_family(self):
         # build_plan fills a qoder run with the account's default; the registry
-        # fixture holds no row, so the name is what answers.
+        # fixture holds no row, so the name is what answers. REJECT 3: the name is
+        # the plan's, so the record labels the family `planned-model` — the layer
+        # that read it is only a strength claim about a model somebody saw serve
+        # (the served half is `test_a_family_read_off_an_unwitnessed_model_...`).
         writer = self._native({"client": "qoder", "model": "Qwen3.8-Flash",
                                "model_source": self.agent.WRITER_SOURCE_ASSUMED})
         self.assertEqual(writer["family"], "qwen")
-        self.assertEqual(writer["family_source"], self.agent.FAMILY_SOURCE_MODEL_NAME)
+        self.assertEqual(writer["family_source"], self.agent.FAMILY_SOURCE_PLANNED)
 
     def test_a_qoder_id_the_registry_never_saw_resolves_on_the_client_default(self):
         # The measured evidence: `writer: qoder/qfmodel (unresolved)`. qfmodel is
@@ -16902,7 +16910,10 @@ class RunFamilyRecordTests(unittest.TestCase):
             _wid, rec = agent._worker_record_start(plan, argparse.Namespace(
                 title=None, task="t", max_depth=None), tmp)
         self.assertEqual(rec["family"], "anthropic")
-        self.assertEqual(rec["family_source"], agent.FAMILY_SOURCE_CLIENT_NAME)
+        # REJECT 3: the record is written before the child exists, so the family on
+        # it is the plan's claim and says `planned-model` — a keeper that reads a
+        # reviewer token out of this file cannot count it as who wrote the diff.
+        self.assertEqual(rec["family_source"], agent.FAMILY_SOURCE_PLANNED)
 
     # --- the footer ----------------------------------------------------------
 
@@ -17030,6 +17041,182 @@ class RunFamilyRecordTests(unittest.TestCase):
     def test_a_name_the_table_cannot_place_names_no_family(self):
         self.assertIsNone(self.agent.vendor_family_name("jetski-9"))
         self.assertIsNone(self.agent.vendor_family_name(""))
+
+    # --- REJECT 1: the account's default answers for the account's own model ----
+
+    def test_a_model_that_is_not_the_accounts_own_names_no_family(self):
+        # `--model widget-9` on qoder: no registry row, the id names no vendor, and
+        # the account's default is a Qwen. Reading `qwen` there invented a family
+        # for a model the account never said it served — the client's default is a
+        # fact about the DEFAULT, not about whatever the caller typed.
+        agent = self.agent
+        for client, model in (("qoder", "widget-9"), ("qoder", "NoSuchModel99"),
+                              ("qoder", "mimosa-v1"), ("agy", "widget-9")):
+            with self.subTest(client=client, model=model):
+                family, source, reason = agent.run_model_family(
+                    model, client=client, registry={"models": {}})
+                self.assertIsNone(family, "%s/%s invented %s" % (client, model, family))
+                self.assertIsNone(source)
+                self.assertTrue(reason)
+        writer = self._native({"client": "qoder", "model": "widget-9",
+                               "model_source": agent.WRITER_SOURCE_PIN})
+        self.assertIsNone(writer["family"])
+        self.assertTrue(writer["family_reason"])
+        self.assertNotIn("family_source", writer)
+        self.assertIn("writer: qoder/widget-9 (unresolved) source=pinned",
+                      agent.writer_line(writer))
+
+    def test_the_models_that_are_the_account_own_default_still_answer(self):
+        # The negatives, each answered by the layer it belongs to: the default's own
+        # name names its vendor, the account's internal keys for that same model
+        # answer on the client default, and an unnamed model is the account's
+        # business from the first.
+        agent = self.agent
+        for model, client, expected, source in (
+                ("Qwen3.8-Flash", "qoder", "qwen", agent.FAMILY_SOURCE_MODEL_NAME),
+                ("qfmodel", "qoder", "qwen", agent.FAMILY_SOURCE_CLIENT_DEFAULT),
+                ("Efficient", "qoder", "qwen", agent.FAMILY_SOURCE_CLIENT_DEFAULT),
+                (agent.PLAN_MODEL_UNNAMED, "qoder", "qwen",
+                 agent.FAMILY_SOURCE_CLIENT_DEFAULT),
+                (agent.PLAN_MODEL_UNNAMED, "claude", "anthropic",
+                 agent.FAMILY_SOURCE_CLIENT_NAME),
+                (agent.PLAN_MODEL_UNNAMED, "agy", "anthropic",
+                 agent.FAMILY_SOURCE_CLIENT_DEFAULT)):
+            with self.subTest(model=model, client=client):
+                family, source_, reason = agent.run_model_family(
+                    model, client=client, registry={"models": {}})
+                self.assertEqual((family, source_), (expected, source), reason)
+                self.assertIsNone(reason)
+
+    # --- REJECT 2: a vendor token is a name in the id, not a piece of one ------
+
+    def test_the_vendor_table_needs_the_whole_name_not_a_piece_of_it(self):
+        # `if token in key` read "notsonnet" as Anthropic's and "mimosa-v1" as
+        # Xiaomi's, and `ollama-qwen2.5-coder` as Meta's because "llama" sits inside
+        # "ollama". A spelling names a family when one of the table's tokens stands
+        # in it as a whole name — nothing is lifted out of the middle of a word.
+        agent = self.agent
+        for spelling in ("notsonnet", "mimosa-v1", "notclaude", "sonnetic", "glmx",
+                         "metaverse", "openaioss", "qwenx", "nemotrone"):
+            with self.subTest(spelling=spelling):
+                self.assertIsNone(agent.vendor_family_name(spelling))
+        self.assertEqual(agent.vendor_family_name("ollama-qwen2.5-coder"), "qwen")
+
+    def test_a_whole_vendor_token_still_names_its_family(self):
+        agent = self.agent
+        for spelling, expected in (
+                ("muse-spark-1.3-contributor-free", "meta"),
+                ("claude-sonnet-5-5", "anthropic"),
+                ("gpt-oss-120b", "openai-oss"),
+                ("Qwen3.8-Flash", "qwen"),
+                ("Qwen3.8-27B", "qwen"),
+                ("mimo-v2.6-flash-free", "xiaomi"),
+                ("glm-5.2", "zhipu"),
+                ("kimi-k3", "moonshot"),
+                ("nemotron-3-ultra-free", "nvidia"),
+                ("opencode/mimo-v2.6-flash:free", "xiaomi"),
+                ("agy-claude-opus-5-5-medium", "anthropic"),
+                ("omniroute/sonnet", "anthropic")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(agent.vendor_family_name(spelling), expected)
+
+    # --- REJECT 3: a family the plan resolved never opens a gate ---------------
+
+    def test_a_family_read_off_an_unwitnessed_model_is_labelled_the_plan(self):
+        agent = self.agent
+        # The run died before answering: no transcript, no gateway row, so its model
+        # is what the plan meant to run. The family under that claim is the plan's
+        # claim too, and `family_source` says so instead of naming the layer that
+        # read it off a model nobody saw serve.
+        planned = self._native({"client": "qoder", "model": "Qwen3.8-Flash",
+                               "model_source": agent.WRITER_SOURCE_ASSUMED})
+        self.assertEqual(planned["family"], "qwen")
+        self.assertEqual(planned["family_source"], agent.FAMILY_SOURCE_PLANNED)
+        self.assertNotEqual(planned["family_source"], agent.FAMILY_SOURCE_MODEL_NAME)
+        served = self._native({"client": "qoder", "model": "Qwen3.8-Flash",
+                               "model_source": agent.WRITER_SOURCE_REPORT})
+        self.assertEqual(served["family_source"], agent.FAMILY_SOURCE_MODEL_NAME)
+
+    def test_the_planned_label_is_the_one_string_every_reader_of_it_sees(self):
+        self.assertEqual(self.agent.FAMILY_SOURCE_PLANNED, "planned-model")
+
+    def test_a_planned_family_does_not_count_as_the_writers_family(self):
+        # The gate half: `--review-of` a run that never answered. Its record names a
+        # family, but the family came from the plan, so the fence gets no writer
+        # family from it and FAMILYFENCE-4 refuses the review rather than planning
+        # it unfenced beside a family nobody witnessed.
+        agent = self.agent
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        run = "20261009-000000-rfplan-abcdef"
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            self.assertTrue(agent.write_kill_record(run, {"mode": "write", "writer": {
+                "provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+                "source": agent.WRITER_SOURCE_ASSUMED,
+                "family_source": agent.FAMILY_SOURCE_PLANNED}}))
+            self.assertIsNone(agent.writer_family_of_run(run))
+            fence = agent.family_fence(argparse.Namespace(
+                not_family=None, review_of=run, card="role=review", tier=None))
+            self.assertIsNone(fence["writer_family"])
+            self.assertTrue(fence["refusal"], "planned family fenced nothing")
+            line = agent.cross_family_line(
+                {"provider": "qoder", "model": "Qwen3.8-Flash", "family": "qwen",
+                 "source": agent.WRITER_SOURCE_REPORT,
+                 "family_source": agent.FAMILY_SOURCE_PLANNED},
+                {"writer_family": "meta", "families": ["meta"], "review": True})
+            self.assertIn("CROSS-FAMILY: unknown", line)
+            self.assertNotIn("CROSS-FAMILY: yes", line)
+
+    def test_a_served_family_still_counts_and_a_record_that_said_nothing_is_kept(self):
+        agent = self.agent
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        for name, family_source in (("20261009-000000-rfser1-abcdef",
+                                     agent.FAMILY_SOURCE_MODEL_NAME),
+                                    # A record written before the field existed keeps
+                                    # answering; the rule disqualifies a family the
+                                    # plan CLAIMED, not one a record never labelled.
+                                    ("20261009-000000-rfser2-abcdef", None)):
+            with self.subTest(family_source=family_source):
+                writer = {"provider": "qoder", "model": "Qwen3.8-Flash",
+                          "family": "qwen", "source": agent.WRITER_SOURCE_REPORT}
+                if family_source:
+                    writer["family_source"] = family_source
+                self.assertTrue(agent.write_kill_record(name, {"mode": "write",
+                                                               "writer": writer}))
+                self.assertEqual(agent.writer_family_of_run(name), "qwen")
+                fence = agent.family_fence(argparse.Namespace(
+                    not_family=None, review_of=name, card="role=review", tier=None))
+                self.assertEqual(fence["writer_family"], "qwen")
+                self.assertIsNone(fence["refusal"])
+
+    def test_the_runner_relabels_a_fallback_to_the_plan_even_if_job_json_said_a_layer(self):
+        # A run dir whose kill record never answered falls back to job.json's
+        # spawn-time family, and the exit.json half re-labels it `planned-model`
+        # whatever the request field carried — the keeper that reads a reviewer token
+        # out of exit.json sees the plan's claim, not a layer's (REJECT 3).
+        agent = self.agent
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        job = os.path.join(tmp, "job.json")
+        with io.open(job, "w", encoding="utf-8") as fh:
+            json.dump({"request": {"client": "claude", "family": "anthropic",
+                                   "family_source": agent.FAMILY_SOURCE_MODEL_NAME}},
+                      fh)
+        fields = mcp_server.recorded_family_fields(
+            "20261009-000000-rfnone-abcdef", mcp_server._read_json(job))
+        self.assertEqual(fields, {"family": "anthropic",
+                                  "family_source": agent.FAMILY_SOURCE_PLANNED})
+        with io.open(job, "w", encoding="utf-8") as fh:
+            json.dump({"request": {"client": "claude", "family": None,
+                                   "family_reason": "names nothing"}}, fh)
+        self.assertEqual(mcp_server.recorded_family_fields(
+            "20261009-000000-rfnone-abcdef", mcp_server._read_json(job)),
+            {"family": None, "family_reason": "names nothing"})
+        # and the spawn half labels itself the same way, before any child exists
+        self.assertEqual(mcp_server.planned_family_fields(
+            {"client": "qoder", "model": "Qwen3.8-Flash"}, "qoder"),
+            {"family": "qwen", "family_source": agent.FAMILY_SOURCE_PLANNED})
 
 
 class NativeSessionIdTests(unittest.TestCase):
