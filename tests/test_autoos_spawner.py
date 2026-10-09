@@ -22084,6 +22084,35 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             with self.assertRaises(cli.ReviewBaseRefused):
                 cli.isolate_clone(root, dest + "-2", "agent/p1rb2", (base, base))
 
+    @unittest.skipIf(os.name == "nt", "names `*` and `secrets-*` are illegal on Windows")
+    def test_a_glob_shaped_tracked_name_never_expands_the_patch(self):
+        # P1-FIX2 (cross-family REJECT): the pathspec chunk of write_review_diff
+        # was INTERPRETED, so a tracked file literally named `*` glob-expanded to
+        # every path in the range - `secrets-generated/` included - and the
+        # excluded blob rode out. Same I1 as _isolate_batch_entries names.
+        cli = self.cli
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "secrets-generated"))
+        names = ("*", "secrets-*", "secrets-generated/leak.key")
+        shas = []
+        for tag in ("BASE", "HEAD"):
+            for name in names:
+                with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                    fh.write("STAR-%s\n" % tag if "/" not in name
+                             else "GLOB-%s-LEAK\n" % tag)
+            subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+            subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", tag], check=True)
+            shas.append(self._out("-C", root, "rev-parse", "HEAD"))
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1gl", tuple(shas))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+STAR-HEAD", patch, "the allowed glob-shaped name still diffs")
+            for secret in ("GLOB-BASE-LEAK", "GLOB-HEAD-LEAK"):
+                self.assertNotIn(secret, patch, "an excluded path is never a pathspec match")
+
     def _sparse_repo(self):
         """`pkg/hidden.txt` is sparse-hidden in the SOURCE by a non-cone
         sparse-checkout, so the allowed set drops it - the exclude list alone

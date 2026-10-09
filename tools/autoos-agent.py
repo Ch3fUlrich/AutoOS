@@ -1069,6 +1069,8 @@ def review_base_preflight_refuse(root: str, pair, allowed) -> None:
     for rel in sorted(decoded & set(allowed)):
         if not _isolate_secret_name(rel):
             continue
+        # `rev:path` is a tree lookup, not a pathspec: a name like `*` resolves
+        # to the one file called `*` and never globs the tree (P1-FIX2 checked).
         blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
                                pair[0] + ":" + rel], capture_output=True,
                               stdin=subprocess.DEVNULL)
@@ -1473,8 +1475,13 @@ def write_review_diff(root: str, path: str, pair, allowed) -> None:
             if p and p in keep]
     with io.open(os.path.join(path, REVIEW_DIFF_FILE), "wb") as fh:
         for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
+            # P1-FIX2 (I1 again, cf. _isolate_batch_entries): a kept NAME may be
+            # `*`, `secrets-*` or `:(glob)**`, and an INTERPRETED pathspec globs it
+            # over the whole range - pulling paths the filter just dropped, secrets
+            # included, back into the patch. Names are literal, always.
             # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
-            subprocess.run(["git", "-C", root, "diff", rng, "--"] + kept[i:i + 200],
+            subprocess.run(["git", "-C", root, "--literal-pathspecs",
+                            "diff", rng, "--"] + kept[i:i + 200],
                            stdout=fh, check=True, stdin=subprocess.DEVNULL)
 
 
