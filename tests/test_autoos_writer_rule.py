@@ -142,6 +142,32 @@ class WriterAllowedTests(unittest.TestCase):
         self.assertFalse(rule.writer_allowed("my-gemini-3.8-flash-model", "R2", "code", regd))
         self.assertTrue(rule.writer_allowed("vertex/gemini-3.8-flash:free", "R2", "ops", regd))
 
+    def test_chain_requires_leg_provider_prefix(self):
+        regd = reg()
+        for bad in ("gemini-3.8-flash", "google/gemini-3.8-flash",
+                    "openrouter/google/gemini-3.8-flash",
+                    "gemini/gemini-3.8-flash"):
+            with self.subTest(bad=bad):
+                self.assertFalse(rule.writer_allowed(bad, "R2", "ops", regd))
+                self.assertFalse(rule.writer_allowed(bad, "R3", "ops", regd))
+        for good in ("vertex/gemini-3.8-flash", "vertex_ai/gemini-3.8-flash",
+                     "vertex/gemini-3.8-flash:high", "VERTEX/gemini-3.8-flash"):
+            with self.subTest(good=good):
+                self.assertTrue(rule.writer_allowed(good, "R2", "ops", regd))
+                self.assertTrue(rule.writer_allowed(good, "R3", "ops", regd))
+        self.assertFalse(rule.writer_allowed("vertex/gemini-3.8-flash-lite", "R2", "ops", regd))
+        self.assertFalse(rule.writer_allowed("vertex_ai/gemini-3.8-flash-lite", "R3", "ops", regd))
+        qreg = {"policy": {"writers": {"sub40_models": SUBS,
+                                       "R2": [{"client": "qoder", "model": "qwen3.8-max"}],
+                                       "R3": [{"client": "qoder", "model": "qwen3.8-max"}]}}}
+        self.assertTrue(rule.writer_allowed("qoder/qwen3.8-max", "R2", "ops", qreg))
+        self.assertFalse(rule.writer_allowed("qwen3.8-max", "R2", "ops", qreg))
+        self.assertFalse(rule.writer_allowed("other/qwen3.8-max", "R2", "ops", qreg))
+        nreg = {"policy": {"writers": {"sub40_models": SUBS,
+                                       "R2": [{"model": "custom-model"}]}}}
+        self.assertTrue(rule.writer_allowed("custom-model", "R2", "ops", nreg))
+        self.assertTrue(rule.writer_allowed("other/custom-model", "R2", "ops", nreg))
+
     def test_r2_chain_skips_only_exact_false(self):
         legs = [{"model": "a"}, {"model": "b", "available": True},
                 {"model": "c", "available": 0}, {"model": "d", "available": None},

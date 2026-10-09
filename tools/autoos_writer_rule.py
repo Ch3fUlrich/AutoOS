@@ -112,11 +112,41 @@ def _canonical(model_id):
     return str(model_id or "").strip().lower().split("/")[-1].split(":")[0]
 
 
+def _leg_prefixes(client):
+    """Accepted 'provider/' spellings for a chain leg's client.
+
+    Consistent with policy.writers legs ({client, model} pairs) and the
+    registry's own vertex_ai <-> vertex alias (providers.vertex_ai id,
+    gateway connection 'vertex'): a vertex leg answers to both spellings.
+    Every other client answers to its own id (plus '_'/'-' variants).
+    """
+    c = str(client or "").strip().lower()
+    if c in ("vertex", "vertex_ai"):
+        return ("vertex/", "vertex_ai/")
+    return tuple({c + "/", c.replace("-", "_") + "/", c.replace("_", "-") + "/"})
+
+
 def _chain_match(model_id, legs):
-    want = _canonical(model_id)
+    """A leg with a client matches only a provider-prefixed id for that
+    client (exact bare model after the prefix, optional ':tag' stripped);
+    a bare id or another provider's id never matches. A leg without a
+    client falls back to the old exact bare-name match."""
+    base = str(model_id or "").strip().lower().split(":")[0]
     for leg in legs:
         model = leg.get("model")
-        if isinstance(model, str) and model and _canonical(model) and want == _canonical(model):
+        if not (isinstance(model, str) and model):
+            continue
+        want = _canonical(model)
+        if not want:
+            continue
+        client = leg.get("client")
+        if isinstance(client, str) and client.strip():
+            for prefix in _leg_prefixes(client):
+                if base.startswith(prefix):
+                    rest = base[len(prefix):]
+                    if rest and "/" not in rest and rest == want:
+                        return True
+        elif _canonical(model_id) == want:
             return True
     return False
 
