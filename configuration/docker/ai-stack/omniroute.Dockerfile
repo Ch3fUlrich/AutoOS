@@ -28,23 +28,34 @@ RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-f
 USER node
 
 # U2 (autoos3, D-626): Vertex "Requests ending with a model turn are not supported" (400).
-# tools/apply-vertex-patch.py (reviewed, lane F1-vertex) strips a trailing role:"model"
-# content at the 12 mergeConsecutiveSameRoleContents call sites in 6 compiled chunks.
+# tools/apply-vertex-patch.py (reviewed, lane F1-vertex) strips the trailing role:"model"
+# contents at every mergeConsecutiveSameRoleContents call site in the compiled chunks.
 # The runtime image has a read-only rootfs and no python, so the patch runs at BUILD time
-# in a python stage over a copy of the chunks, which are copied back. The build FAILS
-# unless the first run reports exactly 12 patched / 0 skipped / 0 errors and a second run
-# 0 patched / 12 skipped (idempotent) - chunk names are build-specific, so a FROM bump
-# that renames them breaks the build instead of shipping an unpatched gateway.
+# in a python stage over a copy of the chunks, which are copied back.
+# v2 (lane VERTEX-GUARD, D-859): the v1 guard tested `contents.length>1`, so a request
+# whose contents is ONE lone model turn was never stripped - the shape that reproduces the
+# 400. v2 pops every trailing model turn and refills an emptied contents with one synthetic
+# user turn (configuration/omniroute/vertex-trailing-turn-README.md).
+# v3 (lane VERTEX-GUARD, gate 06c19a): the counts this stage checked were the counts of the
+# 6 chunk names the patcher's table carries, which FAILS OPEN - a bump that adds a 13th
+# call site in a new chunk, or renames one of the 6, ships an unpatched gateway and every
+# number still matches, because the check never looked at that file. The counting now
+# lives in tools/vertex-patch-gate.py, which judges EVERY *.js chunk in the directory it is
+# given and stops the build unless: v2 guards == call sites == refill sites, call sites
+# >= 12, no v1 guard text survives, and both patcher runs add up to that same count. No
+# chunk name appears below - the text of the tree is the truth, not a list of files.
 FROM python:3.12-slim-bookworm@sha256:7753c33391fc9f01d1984375bf375eb6686d52ba10db6043a86634a5ccf90dcf AS vertex-patch
 COPY --from=base /app/.build/next/server/chunks /chunks
 COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py
+COPY --from=tools vertex-patch-gate.py /vertex-patch-gate.py
 # set -e and no pipes (/bin/sh has no pipefail): every step must succeed, the patcher's
-# exit code included, or the build stops.
+# and the gate's exit code included, or the build stops. The gate runs after both patcher
+# runs - they wrote the tree it judges - and before the cleanup removes the backups it
+# skips.
 RUN set -e; \
     python3 /apply-vertex-patch.py /chunks > /run1.txt || { cat /run1.txt; exit 1; }; cat /run1.txt; \
-    grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt; \
     python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }; cat /run2.txt; \
-    grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt; \
+    python3 /vertex-patch-gate.py /chunks --min-sites 12 --run1 /run1.txt --run2 /run2.txt; \
     rm -f /chunks/*.autoos-backup-*
 
 FROM base
