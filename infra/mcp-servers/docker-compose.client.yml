@@ -21,18 +21,29 @@ name: mcp-client
 
 services:
   # ─── Serena — LSP semantic code navigation (SSE) ──────────────────────────
+  # The context file below is what keeps Serena's memory tools (write_memory /
+  # read_memory / list_memories / edit_memory / rename_memory / delete_memory)
+  # and `onboarding` OFF this server: it is reachable by every agent that talks
+  # to :9121, and D-869 says serena memory is never used - Omnigraph is the only
+  # memory layer. Serena's `excluded_tools` in ~/.serena/serena_config.yml is on
+  # the serena_data volume and rewritten by Serena itself, so the exclusion can
+  # only be delivered as a read-only context file. See that file for why.
   serena:
     image: ghcr.io/oraios/serena:latest
     container_name: serena-mcp
     command: >
       serena start-mcp-server
-      --transport sse --port 9121 --host 0.0.0.0 --context ide-assistant
+      --transport sse --port 9121 --host 0.0.0.0
+      --context /serena-config/serena-context-no-memory.yml
     environment:
       - SERENA_DOCKER=1
     volumes:
       # SAME path in and out so the project paths the agent sends resolve.
       - ${CODE_ROOT:?set CODE_ROOT in .env.client}:${CODE_ROOT}
       - serena_data:/root/.serena
+      # Input-only: Serena never writes its context file, unlike the config in
+      # serena_data, so :ro is safe here.
+      - ./config/serena-context-no-memory.yml:/serena-config/serena-context-no-memory.yml:ro
     ports:
       - "127.0.0.1:9121:9121"     # SSE MCP endpoint: /sse
       - "127.0.0.1:24282:24282"   # web dashboard (optional)

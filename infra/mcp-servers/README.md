@@ -279,7 +279,8 @@ your coding agent Agent
   │
   ├── Serena (uvx, stdio)
   │     ├── LSP servers (per-language) ──► Project source code
-  │     └── Memories (JSON, local disk) ──► ~/.serena/memories/
+  │     └── no memory layer — the memory tools are excluded (D-869);
+  │         durable memory is Omnigraph, below
   │
   ├── Omnigraph (stdio bridge ──► HTTP :8080)
   │     └── omnigraph-server ──► MinIO (S3 object store)
@@ -348,7 +349,8 @@ mcp-servers/
 │   ├── mcp.json                         # Production config (Serena + Omnigraph + Superpowers)
 │   ├── mcp-claude-code.json             # Claude Code equivalent config
 │   ├── mcp_antigravity.json             # Google Antigravity config
-│   └── serena-project.yml               # Per-repo template for Serena
+│   ├── serena-project.yml               # Per-repo template for Serena
+│   └── serena-context-no-memory.yml     # Serena context for the shared SSE server (no memory tools)
 │
 ├── cluster/                             # Declared Omnigraph cluster (see servers/omnigraph/)
 │   ├── cluster.yaml                     # Graphs + embedding provider
@@ -432,7 +434,9 @@ starters/mcp-servers/
 ```
 
 This installs `AGENTS.md` and `CLAUDE.md` files that teach the agent how to activate
-Serena, run onboarding, build a Graphify graph, and use semantic code navigation from the first turn.
+Serena, build a Graphify graph, and use semantic code navigation from the first
+turn. Serena's `onboarding` is not part of it: it writes Serena memories, and
+memory belongs to Omnigraph (see below).
 
 ## Google Antigravity Setup
 
@@ -446,4 +450,5 @@ On Windows, Antigravity reads its config from:
 To prevent agent confusion and tool redundancy (e.g., memory tools exposed by both Serena and Omnigraph), we filter out unused/unneeded tools using the client-side `excludeTools` property:
 
 *   **Serena**: Memory tools (`write_memory`, `read_memory`, `list_memories`, `delete_memory`, `rename_memory`, `edit_memory`) and GUI/setup tools (`onboarding`, `open_dashboard`, `initial_instructions`) are **excluded**, leaving Serena focused on LSP semantic search, refactoring, and project switching. `activate_project`/`get_current_config` are **kept** — Serena runs in multi-project mode (see [`../../docs/architecture.md`](../../docs/architecture.md)), and excluding those two would strand a session on whichever repo activates first with no way to switch to another.
+    A client's `excludeTools` only hides tools from that client, so the shared server hides them server-side too: `docker-compose.client.yml` mounts [`config/serena-context-no-memory.yml`](config/serena-context-no-memory.yml) and starts Serena with `--context` pointing at it, which keeps the six memory tools and `onboarding` out of the *exposed* tool set for every agent on `:9121` (D-869 — "serena memory should not be used at all"; Omnigraph is the only memory layer). `install.sh` / `AutoOS.Install.psm1` do not start this container, so nothing there had to change; they keep writing the same list into `~/.serena/serena_config.yml` for the stdio servers they register. Check it with `python3 tools/check-serena-tools.py --url http://127.0.0.1:9121/sse` (after a recreate; never in CI).
 *   **Superpowers**: All workflow tools are left active.

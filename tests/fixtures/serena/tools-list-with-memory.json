@@ -1,0 +1,93 @@
+{
+  "tools": [
+    {
+      "name": "activate_project",
+      "description": "..."
+    },
+    {
+      "name": "delete_memory",
+      "description": "..."
+    },
+    {
+      "name": "edit_memory",
+      "description": "..."
+    },
+    {
+      "name": "find_declaration",
+      "description": "..."
+    },
+    {
+      "name": "find_implementations",
+      "description": "..."
+    },
+    {
+      "name": "find_referencing_symbols",
+      "description": "..."
+    },
+    {
+      "name": "find_symbol",
+      "description": "..."
+    },
+    {
+      "name": "get_current_config",
+      "description": "..."
+    },
+    {
+      "name": "get_diagnostics_for_file",
+      "description": "..."
+    },
+    {
+      "name": "get_symbols_overview",
+      "description": "..."
+    },
+    {
+      "name": "initial_instructions",
+      "description": "..."
+    },
+    {
+      "name": "insert_after_symbol",
+      "description": "..."
+    },
+    {
+      "name": "insert_before_symbol",
+      "description": "..."
+    },
+    {
+      "name": "list_memories",
+      "description": "..."
+    },
+    {
+      "name": "onboarding",
+      "description": "..."
+    },
+    {
+      "name": "read_memory",
+      "description": "..."
+    },
+    {
+      "name": "rename_memory",
+      "description": "..."
+    },
+    {
+      "name": "rename_symbol",
+      "description": "..."
+    },
+    {
+      "name": "replace_content",
+      "description": "..."
+    },
+    {
+      "name": "replace_in_files",
+      "description": "..."
+    },
+    {
+      "name": "replace_symbol_body",
+      "description": "..."
+    },
+    {
+      "name": "write_memory",
+      "description": "..."
+    }
+  ],
+  "nextCursor": null
+}

@@ -267,3 +267,99 @@ PY
     assert_eq "$out" "http://host.docker.internal:8080"
 fi
 
+
+# ─── The shared SSE server on :9121 (docker-compose.client.yml) ─────────────
+# D-869 (operator, 2026-10-09): "serena memory should not be used at all".
+# Everything above hides Serena's memory tools on the HOST. The container that
+# serves 127.0.0.1:9121 - which is what a Claude Code session actually talks to -
+# carries its own /root/.serena volume and never reads ~/.serena/serena_config.yml,
+# so the exclusion has to travel with the compose file, as a read-only mounted
+# context file passed to --context. Hermetic by construction: these cases read
+# file contents and run the checker's fixture mode. They never start Serena,
+# never open a socket, and never send a request to 9121.
+
+SERENA_COMPOSE="infra/mcp-servers/docker-compose.client.yml"
+SERENA_CONTEXT_FILE="infra/mcp-servers/config/serena-context-no-memory.yml"
+
+if it "the shared serena SSE server starts with the no-memory context file (serena)"; then
+    if grep -q -- "--context /serena-config/serena-context-no-memory.yml" "$SERENA_COMPOSE" \
+       && ! grep -q -- "--context ide-assistant" "$SERENA_COMPOSE"; then
+        pass
+    else
+        fail "compose must pass --context /serena-config/serena-context-no-memory.yml and drop --context ide-assistant"
+    fi
+fi
+
+if it "the shared serena SSE server mounts that context file read-only (serena)"; then
+    if grep -q "config/serena-context-no-memory.yml:/serena-config/serena-context-no-memory.yml:ro" "$SERENA_COMPOSE"; then
+        pass
+    else
+        fail "no :ro bind mount of config/serena-context-no-memory.yml at the --context path"
+    fi
+fi
+
+if it "the no-memory serena context excludes the six memory tools, onboarding, and keeps the vendor set (serena)"; then
+    if python3 - "$SERENA_CONTEXT_FILE" <<'PY'
+import json, sys
+
+mem = set(json.load(open("catalog/agent-harness.json", encoding="utf-8"))["mcp_servers"]["serena"]["memory_tools"])
+assert len(mem) == 6, sorted(mem)
+want = mem | {"onboarding"}
+# the vendor claude-code context (what --context ide-assistant resolved to)
+# already excluded these; a fork that drops one re-exposes a tool.
+want |= {"create_text_file", "read_file", "execute_shell_command",
+         "find_file", "list_dir", "search_for_pattern"}
+
+text = open(sys.argv[1], encoding="utf-8").read()
+block = text.split("excluded_tools:", 1)[1].split("\n\n", 1)[0]
+names = {line.strip()[2:].strip() for line in block.splitlines() if line.strip().startswith("- ")}
+missing = sorted(want - names)
+assert not missing, f"not excluded: {missing}"
+assert "fixed_tools:" not in text, "fixed_tools alongside excluded_tools stops Serena starting"
+PY
+    then pass; else fail "the context file's excluded_tools does not cover the policy"; fi
+fi
+
+if it "check-serena-tools --tools-file fails on a tool list that exposes a memory tool (serena)"; then
+    out="$(python3 tools/check-serena-tools.py --tools-file tests/fixtures/serena/tools-list-with-memory.json 2>&1)"
+    rc=$?
+    if [[ "$rc" == "1" && "$out" == *write_memory* && "$out" == *list_memories* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+fi
+
+if it "check-serena-tools --tools-file passes on a tool list without memory tools (serena)"; then
+    out="$(python3 tools/check-serena-tools.py --tools-file tests/fixtures/serena/tools-list-no-memory.json 2>&1)"
+    rc=$?
+    if [[ "$rc" == "0" && "$out" == OK:* ]]; then
+        pass
+    else
+        fail "rc=$rc out=$out"
+    fi
+fi
+
+if it "no serena SSE server anywhere in the repo starts without the no-memory context (serena)"; then
+    offenders="$(grep -rl --include="*.yml" --include="*.yaml" --include="*.sh" --include="*.psm1" \
+        --include="*.py" --include="*.md" --include="*.json" --include="*.jsonc" \
+        -e "start-mcp-server" . 2>/dev/null | grep -v '^./logs/' | while read -r f; do
+            grep -q -- "--transport sse" "$f" && ! grep -q "serena-context-no-memory.yml" "$f" && printf '%s ' "$f"
+        done)"
+    if [[ -z "$offenders" ]]; then
+        pass
+    else
+        fail "SSE serena started without the context file: $offenders"
+    fi
+fi
+
+if it "the serena install guide shows omnigraph, never a serena memory call (serena)"; then
+    guide="infra/mcp-servers/docs/INSTALL-GUIDE.md"
+    if grep -qE "serena_(write|read|list|edit|rename|delete)_memory|mcp_serena_(write|read)_memory|memory_name=" "$guide"; then
+        fail "the guide still shows a serena memory call"
+    elif grep -q "mcp_omnigraph_mutate" "$guide" && grep -q "mcp_omnigraph_query" "$guide"; then
+        pass
+    else
+        fail "the guide lost the project-notes example entirely"
+    fi
+fi
