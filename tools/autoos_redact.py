@@ -14,7 +14,8 @@ The value shapes are the hostexec ones (review F12/F13: bearer tokens,
 plus the forms a worker's report actually contains: the vendor key prefixes
 (``sk-``, ``sk-or``, ``sk-ant``, ``ghp_``/``gho_``/``github_pat_``, ``AIza``,
 ``xox[bp]-``, ``glpat-``), ``key|token|secret|password = value`` assignments,
-PEM private-key blocks, and the exact values of the secret-named variables the
+PEM and PGP-armored private-key blocks, and the exact values of the
+secret-named variables the
 spawner injects into the child env (``AUTOOS_OMNIROUTE_KEY`` and friends) - a
 key with an unknown shape still has to be masked when the spawner itself is the
 one that handed it over.
@@ -91,8 +92,108 @@ _SEPARATOR_RE = re.compile(r"[=:]")
 _NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
 _ASSIGNMENT_KEYWORDS = ("key", "token", "secret", "password", "passwd", "credential")
 
-_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
-_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# The label may run past `PRIVATE KEY` to the ` BLOCK` suffix an armored PGP
+# secret keyring carries: RFC 4880 armour frames a key with the same BEGIN/END
+# markers as a PEM key, and the old pattern required the label to END at `KEY`,
+# so a whole armored keyring printed in the clear (AO-REDACT-SPAN P3). A PUBLIC
+# key label still does not match — only a PRIVATE label is secret.
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+# What the lines AFTER an open BEGIN may be: a base64 body line, or a header
+# line — the PEM encryption headers (`Proc-Type:`, `DEK-Info:`) and the PGP
+# armour headers. Anything else is not key material, so PEM mode ends and that
+# line is processed like every other line (AO-REDACT-SPAN: the old blanket
+# swallow ate a report that merely MENTIONED a BEGIN marker, VERDICT line
+# included).
+#
+# A body line is `[ \t]*[A-Za-z0-9+/=]*[ \t]*` — so the empty line, a
+# whitespace-only line, an indented line and the ragged LAST line of a real key
+# ("YQ==", "abc=", "===") all count as body, and so does the armour's `=XXXX`
+# CRC line. The old `{16,}` fullmatch called every one of those "not key
+# material", ended PEM mode early and printed the rest of a real private key —
+# the END marker and everything after it — in plaintext (AO-REDACT-SPAN rework,
+# attacker review).
+#
+# Written as strip-then-core-fullmatch rather than that one expression: the two
+# `[ \t]*` flanks make the engine re-scan the whitespace run on every backtrack
+# (quadratic on a 200 KB line, which is exactly the cost the pump thread may not
+# pay), while `strip` + a single character class are two linear C-speed walks.
+#
+# KNOWN LIMIT (A), pinned by `tests/test_autoos_redact_span.py`: the alphabet is
+# STANDARD base64, all RFC 7468 permits in a PEM body. A line written in the
+# URL-safe alphabet (`-` and `_` where `+` and `/` belong) is NOT body, so it
+# ends PEM mode and the lines after it are ordinary lines. Deliberate: a body
+# that strays from the PEM alphabet is not a PEM block, and swallowing on
+# anything-and-everything is the over-eating this shape replaced. The cost is
+# that a base64url-encoded key handed over under an open marker is masked only
+# by the per-line value patterns, never by the span.
+_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]*")
+# One scan for both markers, built from the two grammars above so a label
+# widened later is widened in the scan and in the pair walk at once. Named
+# groups say which kind matched; the patterns have no groups of their own.
+_PEM_MARKER_RE = re.compile("(?P<begin>%s)|(?P<end>%s)"
+                            % (_PEM_BEGIN_RE.pattern, _PEM_END_RE.pattern))
+# The characters RFC 7468 permits in a PEM body — what a key's own text is made
+# of, and therefore what may never sit unmasked in front of a marker. `-` and `_`
+# are NOT here: limit (A) says base64url is not PEM, and a hyphen is what prose
+# and a quoted marker have in common ("not-a-key-----BEGIN"), while a run that
+# reaches back over a hyphen would eat the sentence.
+_PEM_ALPHABET_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                "0123456789+/=")
+
+# `Version:`/`Comment:`/`MessageID:`/`SessionKey:`/`Label:`/`Arc:` are the
+# RFC 4880 armour headers a secret keyring puts between its BEGIN line and its
+# body, one blank line ahead of it (a blank line is body-shaped already, so the
+# separator needs no rule of its own).
+_PEM_HEADER_RE = re.compile(
+    r"[ \t]*(?:Proc-Type|DEK-Info|Version|Comment|Message-?ID|SessionKey|Label|Arc):")
+
+
+def _is_pem_body_line(line: str) -> bool:
+    """True for a line that is base64 body, blank, or whitespace-only — see
+    ``_PEM_BODY_RE`` for the shape and the reason it is not one regex."""
+    return _PEM_BODY_RE.fullmatch(line.strip(" \t")) is not None
+
+
+def _glue_start(line: str, pos: int, floor: int) -> int:
+    """Start of the PEM-alphabet run that ends at ``pos`` (a marker glued to key
+    text), never before ``floor`` — AO-REDACT-SPAN P4.
+
+    Returns ``pos`` when the character in front of the marker is whitespace or
+    not key material: prose that quotes a marker is separated from it, so what
+    sits in front of the ``-----`` is not body and stays visible. Walking from
+    ``pos`` with a monotonic floor keeps the runs of one line non-overlapping, so
+    the whole line still costs one linear pass."""
+    i = pos
+    while i > floor and line[i - 1] in _PEM_ALPHABET_CHARS:
+        i -= 1
+    return i
+
+
+# A worker's verdict is how the caller learns the outcome; it is never swallowed
+# and it always closes an open PEM block. Leading indent is tolerated (a verdict
+# inside a fenced block or a markdown list is still a verdict).
+_VERDICT_LINE_RE = re.compile(r"[ \t]*VERDICT:")
+
+# Backstop for an open BEGIN whose END never arrives: at most this many lines
+# (body AND blanks/headers) are swallowed before PEM mode is given up on. A real
+# RSA-2048/4096 key body is 6-30 lines, so the cap is far above any genuine
+# block; every swallowed line counts, blanks included, because a blank line is
+# body and a key copy-pasted out of a terminal is full of them.
+#
+# 256 rather than 200: an armored PGP secret keyring is not one key body but a
+# primary key plus its subkeys, each with its own signatures and CRC line, so
+# the room a single RSA-4096 needs is the floor of what a real block costs, not
+# the ceiling. The headroom is paid only in lines a report could lose, and the
+# shape still ends the mode at the first non-body line, so an ordinary report
+# never walks into it.
+#
+# COST OF THE PERMISSIVE BODY SHAPE (accepted, attacker review): a report that
+# MENTIONS an unclosed BEGIN and is followed by one or two lines that are
+# alnum-only — a bare word, a hash, `MERGE_OK`-without-underscore — looks like
+# key body, so those lines are swallowed. Only those lines: the first line that
+# is not body-shaped ends PEM mode, and a VERDICT line ends it and survives.
+PEM_BODY_CAP = 256
 
 
 def sanitize_text(s: str) -> str:
@@ -193,17 +294,32 @@ def _apply_line_patterns(text: str) -> tuple[str, int]:
 class Redactor:
     """Line-oriented redactor for a stream the caller reads as it arrives.
 
-    ``text()`` may be fed a whole report or one line at a time; a PEM block
-    that spans lines is masked as it passes (the BEGIN line becomes the marker,
-    the body is swallowed until the END line). ``count`` is how many secrets
-    have been masked so far, so the spawner can tell the caller it did
-    something instead of silently altering the worker's output.
+    ``text()`` may be fed a whole report or one line at a time; a PEM block or a
+    PGP armored one that spans lines is masked as it passes: every BEGIN..END
+    *span* on the line becomes the marker (a second and third block on the same
+    line are masked too), the key-alphabet text GLUED in front of a marker goes
+    with it, and the lines under an open BEGIN are swallowed while they look like
+    key body — base64, blank, indented, a PEM encryption header or a PGP armour
+    header — until the END line, the first line that is not, ``PEM_BODY_CAP``
+    lines, or a VERDICT line. A line that closes an open BEGIN is masked in full
+    (fail closed): under an open marker there is no safe way to tell prose from
+    the key's own last body line, and a lost line is recoverable while a printed
+    key is not. A report that merely mentions a BEGIN marker therefore still
+    reaches the caller, verdict included
+    (AO-REDACT-SPAN; the body shape itself is the rework — a short last line, a
+    blank or an indent inside a real key used to end the block early and print
+    its tail in plaintext).
+
+    ``count`` is how many secrets have been masked so far, so the spawner can
+    tell the caller it did something instead of silently altering the worker's
+    output. One key counts once: the END line closes the block without adding.
     """
 
     def __init__(self, values: Iterable[str] = ()):
         self.values: list[str] = []
         self.count = 0
         self._in_pem = False
+        self._pem_bodies = 0
         self.add_values(values)
 
     def add_values(self, values: Iterable[str]) -> None:
@@ -226,25 +342,115 @@ class Redactor:
             out.append(self._one_line(body) + line[len(body):])
         return "".join(out)
 
-    def _one_line(self, line: str) -> str:
-        if self._in_pem:
-            if _PEM_END_RE.search(line):
-                self._in_pem = False
-            return ""
-        begin = _PEM_BEGIN_RE.search(line)
-        if begin:
-            # A whole key on one line (a log record of it) is masked in place;
-            # an open BEGIN starts the swallow until the matching END line.
-            self.count += 1
-            self._in_pem = not _PEM_END_RE.search(line, begin.end())
-            return TEXT_MASK
-        # The injected literals go first: they are the values we KNOW are
-        # secret, and masking them whole before the patterns run means a
-        # pattern can never mask the middle of one and leave its ends visible.
+    def _exit_pem(self) -> None:
+        self._in_pem = False
+        self._pem_bodies = 0
+
+    def _masked(self, line: str) -> str:
+        """The per-line masking of a line that is not key body: the injected
+        literals go first (they are the values we KNOW are secret, and masking
+        them whole before the patterns run means a pattern can never mask the
+        middle of one and leave its ends visible), then the value shapes."""
         masked, hits = redact_values(line, self.values, TEXT_MASK)
         masked, n = _apply_line_patterns(masked)
         self.count += hits + n
         return masked
+
+    def _mask_markers(self, line: str):
+        """Mask every marker shape ``line`` carries, in one left-to-right walk
+        (AO-REDACT-SPAN P4). Returns the masked text, or ``None`` when the line
+        holds no marker at all and the caller masks it as ordinary text.
+
+        * a complete ``BEGIN..END`` pair masks from the marker to the end of the
+          closing marker — and the walk keeps going, so a second and third block
+          on the same line are masked too; the old single search stopped at the
+          first pair and printed the rest of the line's keys in the clear;
+        * an unclosed ``BEGIN`` masks to the end of the line and opens the
+          body-only swallow;
+        * key text GLUED in front of any marker (no whitespace between the
+          base64 and the ``-----``) is masked with it, from the start of that
+          run — which for a line that begins with body means the whole line.
+
+        Each pair and each open BEGIN counts one key; a stray ``END`` nobody is
+        waiting for masks its own glued run without counting, since the BEGIN it
+        closes was never in this stream.
+        """
+        out: list[str] = []
+        pos = 0
+        opened = False
+        for marker in _PEM_MARKER_RE.finditer(line):
+            if marker.start() < pos:
+                continue                      # inside a span already masked
+            start = _glue_start(line, marker.start(), pos)
+            if marker.group("begin") is not None:
+                self.count += 1
+                closing = _PEM_END_RE.search(line, marker.end())
+                if closing:
+                    stop = closing.end()
+                else:
+                    stop = len(line)          # the rest of the line may be body
+                    opened = True
+            else:
+                stop = marker.end()
+            out.append(line[pos:start])
+            out.append(TEXT_MASK)
+            pos = stop
+            if opened:
+                break
+        if pos == 0:
+            return None
+        out.append(line[pos:])
+        if opened:
+            self._in_pem = True
+            self._pem_bodies = 0
+        return self._masked("".join(out))
+
+    def _one_line(self, line: str) -> str:
+        if _VERDICT_LINE_RE.match(line):
+            # Never swallowed, and it ends a block: the caller's one mandatory
+            # line must survive an unterminated PEM marker.
+            #
+            # KNOWN LIMIT (B), pinned by `tests/test_autoos_redact_span.py`:
+            # because the verdict is passed through rather than dropped, key
+            # text a worker APPENDS to it after an open BEGIN survives — a
+            # bare base64 run is not a shape any per-line pattern masks. The
+            # trade is deliberate and one-sided: a report that lost its verdict
+            # to a swallow is useless to the caller that reads it (the original
+            # AO-REDACT-SPAN failure), while a worker that puts key material on
+            # its own verdict line has already broken the rule it was told to
+            # report with. What the per-line patterns do name on that line —
+            # bearer tokens, `key=`/`token:` carriers, vendor prefixes, the
+            # injected literals — is still masked there.
+            self._exit_pem()
+            return self._masked(line)
+        if self._in_pem:
+            closing = _PEM_END_RE.search(line)
+            if closing:
+                # Fail closed (AO-REDACT-SPAN P4): a line that closes an open
+                # BEGIN is part of the key's own text, and the last body line of
+                # a wrapped or single-line key sits GLUED to this marker with no
+                # whitespace to tell it from prose — so the whole line is masked
+                # and the text that marker was glued to cannot ride through. One
+                # lost report line is recoverable; one printed key is not.
+                self._exit_pem()
+                end = closing.end()
+                while (nxt := _PEM_END_RE.search(line, end)):
+                    end = nxt.end()          # the rightmost END on the line
+                if _PEM_BEGIN_RE.search(line, end):
+                    # A line that closes this key and opens the NEXT one (a
+                    # one-line log record of two keys) is still masked in full,
+                    # but the second key's body goes on underneath, so the
+                    # swallow has to restart rather than print its tail.
+                    self._in_pem = True
+                    self.count += 1
+                return TEXT_MASK
+            if (self._pem_bodies < PEM_BODY_CAP
+                    and (_is_pem_body_line(line) or _PEM_HEADER_RE.match(line))):
+                self._pem_bodies += 1
+                return ""
+            self._exit_pem()              # not key body: this line is a normal line
+        masked = self._mask_markers(line)
+        return self._masked(line) if masked is None else masked
 
 
 # ─── argv (hostexec's stored form) ─────────────────────────────────────────
