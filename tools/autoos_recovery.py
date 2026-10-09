@@ -131,6 +131,13 @@ Residuals, stated rather than hidden:
   lane blocked, and the lock file itself stays put. What neither gives is a wait:
   a lock still contested after ``LOCK_RETRIES`` tries is refused, and a refused
   record escalates the lane instead of running an unrecorded leg.
+* the default lane key is hashed from the CANONICAL ORIGINAL task, with every
+  continuation footer cut before the hash (`original_task`, P4c-fixes7). A leg's
+  ``job.json`` task is its predecessor's brief — original plus footer — so hashing
+  it as it stands gives each leg a new key, each key reads attempts 0, and the
+  ``MAX_ATTEMPTS`` cap is bypassable: three dead writers and no escalation. What a
+  worker forges inside its own task text is cut the same way, so the key depends on
+  the prefix alone and the cap still holds.
 * the CLI's exit contract (P4c-fixes3): 0 none/wait and a recorded leg, 3 rerun,
   4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
   unwritable recovery state raises `RecoveryStateError`, which `main` answers
@@ -178,8 +185,16 @@ STALL_SECS_MAX = 7 * 24 * 60 * 60
 # does not.
 TAIL_BYTES = 256 * 1024
 TASK_MAX_BYTES = 200 * 1024
-# The head of the original task the default lane key is hashed from.
+# The head of the ORIGINAL task the default lane key is hashed from.
 KEY_TASK_CHARS = 2000
+# The one place the continuation footer's shape is written down (P4c-fixes7): the
+# blank line plus the heading up to the attempt number, which is the only part that
+# is the same on every leg. `continuation_task` appends text starting with exactly
+# this, and `original_task` cuts the task at the first occurrence of it — so a lane
+# key, which is a hash of the task, stays the SAME key across the whole recovery
+# chain instead of drifting one key per leg. The leading "\n\n" is load-bearing: a
+# task that merely mentions the heading inside a line of prose is not cut there.
+CONTINUE_MARKER = "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt "
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
 # A REPORT heading may name this run by a PREFIX of its id, but only from this many
@@ -261,6 +276,11 @@ _BLANK_STRIP = " \t"
 # silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
 # a real line legitimately carries; every other member makes a report suspect.
 _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
+# What a task must hold besides it: the same invisible classes, widened with Cf
+# (zero-width joiners, bidi overrides — characters that render nothing a writer can
+# be told to work on), and judged AFTER the output normaliser has run, so ANSI
+# colour cannot pass as content either (P4c-fixes7, `_has_visible_text`).
+_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
 # --- output.log normalisation (P4c-fixes5 (1)) --------------------------------
 #
 # ``output.log`` is the CLIENT's raw captured stdout. A CLI that believes it owns a
@@ -1057,10 +1077,27 @@ def _output_age(run_dir, now):
     return None
 
 
+def _has_visible_text(task):
+    """Whether the task says anything a writer could act on.
+
+    Truthiness is not the question: three spaces, a bare newline, a U+00A0 and an
+    ANSI reset are all truthy strings, and each of them is a record that names
+    no work — a footer-only brief would otherwise buy a continuation leg (P4c-
+    fixes7). The judgement runs on `_normalise_output`'s text, so colour and a
+    redraw do not count as content either, and then on what is left once every
+    whitespace character and every Zs/Zl/Zp/Cc/Cf character is gone."""
+    for ch in _normalise_output(task):
+        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+            continue
+        return True
+    return False
+
+
 def _usable_task(job, job_ok):
     """The task a record can be continued from, or None when it cannot say what
     it ran: no readable ``job.json`` (absent, unreadable, not an object) or no task
-    of its own (absent, not a str, or the empty string) after the type guard.
+    of its own (absent, not a str, or nothing but whitespace, control characters
+    and escapes) after the type guard.
 
     A continuation brief needs a brief. Without a task the only text that would
     reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer, and every
@@ -1073,7 +1110,7 @@ def _usable_task(job, job_ok):
     task = (job or {}).get("task")
     if type(task) is not str or not task:
         return None
-    return task
+    return task if _has_visible_text(task) else None
 
 
 def _job_record_suspect(job):
@@ -1228,18 +1265,42 @@ def next_action(attempts, state, max_attempts=MAX_ATTEMPTS, record_suspect=False
     return "rerun" if attempts < max_attempts else "escalate"
 
 
-def continuation_task(original_task, attempt, sandbox=None, max_attempts=MAX_ATTEMPTS):
+def original_task(task):
+    """The brief a run was REALLY given: the task cut at its first continuation
+    footer, with the whitespace the footer left behind stripped.
+
+    A recovery leg's ``job.json`` task is the previous leg's brief, which is the
+    original text plus one footer (P4c-fixes7): hashing it as it stands gives every
+    leg a DIFFERENT default lane key, so each leg reads attempts 0 and the
+    ``MAX_ATTEMPTS`` cap never closes — three dead runs and no escalation. Cutting
+    at the FIRST marker collapses the nested footers a chain of legs stacks, which
+    is what puts all of them back on one key.
+
+    A task that only mentions the heading inside a line of prose keeps it: the
+    marker begins with the blank line that separates the footer from the brief, so
+    mid-line text does not match. A worker that forges the marker early in its own
+    task is cut there, and the key then depends on that prefix alone — the cap
+    still holds, because every leg of the lane carries the same prefix.
+    """
+    if type(task) is not str:
+        raise RecoveryError("task: str, got %s" % type(task).__name__)
+    return task.split(CONTINUE_MARKER, 1)[0].rstrip()
+
+
+def continuation_task(task_text, attempt, sandbox=None, max_attempts=MAX_ATTEMPTS):
     """The task text for one recovery leg: the original brief plus the footer.
 
     The original task is capped so the footer always arrives, and the sandbox
     path lands in the text only after the same validation the reader used — a
     path that failed to parse raises here rather than being pasted into a brief.
+    The input is cut with `original_task` first, so feeding a leg's own brief back
+    in replaces its footer instead of stacking a second one (P4c-fixes7).
     """
-    if type(original_task) is not str:
-        raise RecoveryError("original_task: str, got %s" % type(original_task).__name__)
+    if type(task_text) is not str:
+        raise RecoveryError("task_text: str, got %s" % type(task_text).__name__)
     if type(attempt) is bool or not isinstance(attempt, int) or not 1 <= attempt <= max_attempts:
         raise RecoveryError("attempt: 1..%d, got %r" % (max_attempts, attempt))
-    task = original_task
+    task = original_task(task_text)
     encoded = task.encode("utf-8")
     if len(encoded) > TASK_MAX_BYTES:
         task = encoded[:TASK_MAX_BYTES].decode("utf-8", "ignore")
@@ -1254,16 +1315,24 @@ def continuation_task(original_task, attempt, sandbox=None, max_attempts=MAX_ATT
         "the REPORT." % where if where else
         "Your earlier work is in the worktree you are given; do NOT restart; "
         "finish what is missing, run every required check, and end with the REPORT.")
-    footer = ("CONTINUE FROM CURRENT DIFF (recovery attempt %d/%d): your previous run "
+    footer = (CONTINUE_MARKER + "%d/%d): your previous run "
               "ended without a REPORT. %s" % (attempt, max_attempts, place))
-    return task.rstrip("\n") + "\n\n" + footer + "\n"
+    # `task` is `original_task`'s output, already free of trailing whitespace, so
+    # the marker's own blank line is the only separator the brief gets.
+    return task + footer + "\n"
 
 
 def lane_key_for_task(task):
-    """The default lane key: sha256 over the task's first 2000 characters."""
+    """The default lane key: sha256 over the ORIGINAL task's first 2000 characters.
+
+    The footer is cut before the hash (P4c-fixes7) so a leg's brief and the leg it
+    continues share one key, and one attempt budget. The cut happens BEFORE the
+    2000-character head is taken: for a task longer than the head the footer sits
+    past the cut anyway, and for a shorter one it is already gone, so both map all
+    legs of the chain onto the same lane."""
     if type(task) is not str:
         raise RecoveryError("task: str, got %s" % type(task).__name__)
-    return hashlib.sha256(task[:KEY_TASK_CHARS].encode("utf-8")).hexdigest()
+    return hashlib.sha256(original_task(task)[:KEY_TASK_CHARS].encode("utf-8")).hexdigest()
 
 
 def path_of(key, state=None):

@@ -1576,11 +1576,31 @@ class ContinuationTask(TempCase):
 
 class LaneKeys(TempCase):
     def test_the_default_key_is_the_hash_of_the_task_head(self):
+        # P4c-fixes7: the head is taken from the ORIGINAL task, so the trailing
+        # whitespace a brief ends on is not part of the key.
         self.assertEqual(r.lane_key_for_task(TASK),
-                         hashlib.sha256(TASK.encode("utf-8")).hexdigest())
+                         hashlib.sha256(TASK.rstrip().encode("utf-8")).hexdigest())
         head = "y" * (r.KEY_TASK_CHARS + 500)
         self.assertEqual(r.lane_key_for_task(head),
                          hashlib.sha256(head[:r.KEY_TASK_CHARS].encode("utf-8")).hexdigest())
+
+    def test_a_continuation_footer_never_moves_the_key(self):
+        for task in (TASK, "x" * (r.KEY_TASK_CHARS + 500) + "\n", "brief"):
+            with_footer = r.continuation_task(task, 1, SB)
+            self.assertEqual(r.lane_key_for_task(with_footer),
+                             r.lane_key_for_task(task), task[:12])
+
+    def test_nested_footers_all_collapse_to_one_key(self):
+        text = TASK
+        keys = set()
+        for attempt in (1, 2):
+            text = r.continuation_task(text, attempt, SB)
+            keys.add(r.lane_key_for_task(text))
+        self.assertEqual(keys, {r.lane_key_for_task(TASK)})
+        # ...and the brief itself carries exactly ONE footer, not one per leg.
+        self.assertEqual(text.count("CONTINUE FROM CURRENT DIFF"), 1)
+        self.assertIn("recovery attempt 2/2", text)
+        self.assertNotIn("recovery attempt 1/2", text)
 
     def test_tasks_that_differ_only_past_the_head_share_a_lane(self):
         a = "x" * r.KEY_TASK_CHARS + "\nfirst tail"
@@ -1614,6 +1634,164 @@ class LaneKeys(TempCase):
                              r.recovery_dir(self.state))
             self.assertRegex(os.path.basename(r._lock_path(key, self.state)),
                              r"^[0-9a-f]{64}\.lock$")
+
+
+class CrossLegLaneDrift(TempCase):
+    """P4c-fixes7 (the real defect, found on an isolated seat): a leg's job.json
+    task is the previous leg's brief — ORIGINAL PLUS THE FOOTER — so hashing it
+    as it stood gave every leg a different default lane key, each fresh key read
+    attempts 0, and three dead writers in a row never escalated. All legs must
+    resolve to ONE key derived from the canonical original task."""
+
+    RUNS = (RUN, LEG1, LEG2)          # one per leg of the chain
+
+    def chain(self, task, lane=None, expect_key=None):
+        """Run the plan for each death, hand each leg the brief the plan of the
+        leg before it returned, and return the (attempts, action, key) triples."""
+        sb = self.sb()
+        seen = []
+        key = None
+        for i, run_id in enumerate(self.RUNS):
+            make_record(self.state, run_id=run_id, task=task,
+                        output=header_lines(sb), exit_json={"rc": 1})
+            p = r.plan(run_id, lane_key=lane, state=self.state, now=NOW,
+                       pid_probe=dead)
+            if key is None:
+                key = p["lane_key"]
+            self.assertEqual(p["lane_key"], key, "leg %d drifted to a new key" % i)
+            self.assertEqual((p["attempts"], p["state"]), (i, "died"), run_id)
+            # an escalation names no brief and no cwd; a rerun names both
+            self.assertEqual(p["continue_task"] is not None, p["action"] == "rerun",
+                             "leg %d: %s" % (i, p["action"]))
+            self.assertEqual(p["spawn_hint"] is not None, p["action"] == "rerun", run_id)
+            seen.append((p["attempts"], p["action"], p["lane_key"]))
+            if i < len(self.RUNS) - 1:
+                task = p["continue_task"]
+                r.record_attempt(key, self.RUNS[i + 1], self.state)
+        if expect_key is not None:
+            self.assertEqual(key, expect_key)
+        return seen, key
+
+    def test_three_deaths_on_one_default_lane_escalate(self):
+        """The probe: a 68-character brief. attempts 0 -> 1 -> 2 and the third leg
+        is the lane, not a fourth rerun."""
+        task = "Fix the widget and run the suite."
+        self.assertLess(len(task), r.KEY_TASK_CHARS)
+        seen, key = self.chain(task, expect_key=hashlib.sha256(
+            task.encode("utf-8")).hexdigest())
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+
+    def test_the_brief_of_a_leg_carries_exactly_one_footer(self):
+        sb = self.sb()
+        make_record(self.state, task="Fix the widget.", output=header_lines(sb),
+                    exit_json={"rc": 1})
+        first = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        second_task = first["continue_task"]
+        r.record_attempt(first["lane_key"], LEG1, self.state)
+        make_record(self.state, run_id=LEG1, task=second_task,
+                    output=header_lines(sb), exit_json={"rc": 1})
+        second = r.plan(LEG1, state=self.state, now=NOW, pid_probe=dead)
+        cont = second["continue_task"]
+        self.assertEqual(cont.count("CONTINUE FROM CURRENT DIFF"), 1)
+        self.assertIn("recovery attempt 2/2", cont)
+        self.assertNotIn("recovery attempt 1/2", cont)
+        self.assertTrue(cont.startswith("Fix the widget.\n\n"), repr(cont[:40]))
+
+    def test_a_task_longer_than_the_key_head_stays_on_one_lane(self):
+        """3000 chars: the footer sits past the 2000-character head, so the head
+        alone decides — every leg still shares it."""
+        task = "z" * 3000
+        seen, key = self.chain(task, expect_key=hashlib.sha256(
+            task[:r.KEY_TASK_CHARS].encode("utf-8")).hexdigest())
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+
+    def test_a_marker_phrase_inside_a_line_does_not_cut_the_task(self):
+        """Prose about the footer is not a footer: the marker begins with the blank
+        line that separates a footer from its brief, so the key is the whole text."""
+        task = ("Document that a brief may contain the words CONTINUE FROM CURRENT "
+                "DIFF (recovery attempt 1/2) on a line of its own prose.\n")
+        seen, key = self.chain(task, expect_key=hashlib.sha256(
+            task.rstrip().encode("utf-8")).hexdigest())
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+        # The helper itself: only the exact '\n\n' + marker prefix cuts.
+        self.assertEqual(r.original_task(task), task.rstrip())
+        self.assertEqual(r.original_task("line\n" + r.CONTINUE_MARKER + "x"), "line")
+
+    def test_a_forged_footer_early_in_the_task_still_shares_one_key(self):
+        """A worker that writes the marker into its own task is cut there: the key
+        then depends on that prefix alone, so every leg of the chain — which always
+        carries the same prefix — keeps one budget and the cap still holds."""
+        task = ("real brief" + r.CONTINUE_MARKER + "forged tail\n")
+        seen, key = self.chain(task, expect_key=hashlib.sha256(
+            b"real brief").hexdigest())
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+
+    def test_the_last_leg_names_no_brief_and_no_hint(self):
+        sb = self.sb()
+        make_record(self.state, task="Fix the widget.", output=header_lines(sb),
+                    exit_json={"rc": 1})
+        first = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        r.record_attempt(first["lane_key"], LEG1, self.state)
+        second = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        r.record_attempt(first["lane_key"], LEG2, self.state)
+        third = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertEqual((first["attempts"], second["attempts"], third["attempts"]),
+                         (0, 1, 2))
+        self.assertEqual(third["action"], "escalate")
+        self.assertIsNone(third["continue_task"])
+        self.assertIsNone(third["spawn_hint"])
+        self.assertEqual({first["lane_key"], second["lane_key"], third["lane_key"]},
+                         {first["lane_key"]})
+
+    def test_an_explicit_lane_is_unchanged(self):
+        """--lane still owns the budget by name; the task text plays no part."""
+        seen, key = self.chain("Fix the widget.", lane=LANE)
+        self.assertEqual(key, LANE)
+        self.assertEqual([a for a, _, _ in seen], [0, 1, 2])
+        self.assertEqual([x for _, x, _ in seen], ["rerun", "rerun", "escalate"])
+
+
+class ContentFreeTask(TempCase):
+    """P4c-fixes7 DEFECT 2: `_usable_task` judged a task by truthiness, so a string
+    of nothing — spaces, a lone newline, a non-breaking space, an ANSI reset — read
+    as a brief and bought a continuation leg holding only the footer."""
+
+    def test_content_free_tasks_are_not_usable(self):
+        for task in ("   ", " ", "\n", "\r\n  \n", "\t", "\x1b[0m",
+                     "\x1b[32m\x1b[0m", "\u00a0", "\u2003", "\u200b", "\u2028",
+                     "\u2029", "\u200e\u200f", " \x1b[0m \n\t"):
+            st = self.other_state()
+            make_record(st, task=task, exit_json={"rc": 1})
+            root = os.path.join(st, "agents", RUN)
+            info = classify(root, probe=dead)
+            self.assertEqual((info["state"], info["record_suspect"]),
+                             ("unknown", True), repr(task))
+            self.assertEqual(r.next_action(0, info["state"],
+                                           record_suspect=info["record_suspect"]),
+                             "escalate", repr(task))
+            with self.assertRaises(r.RecoveryStateError, msg=repr(task)):
+                r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+
+    def test_visible_tasks_are_usable(self):
+        for task in ("x", "42", "\u4f60\u597d", "\u2764", "\xff0d\u5e38",
+                     "\x1b[32mgreen brief\x1b[0m", "  indented brief  ",
+                     "\n\n real brief \n\n"):
+            st = self.other_state()
+            make_record(st, task=task, exit_json={"rc": 1}, output="thinking\n")
+            info = classify(os.path.join(st, "agents", RUN), probe=dead)
+            self.assertFalse(info["record_suspect"], repr(task))
+            self.assertEqual(info["state"], "died", repr(task))
+
+    def test_a_content_free_task_still_escalates_through_the_cli(self):
+        make_record(self.state, task="\u00a0\u00a0", exit_json={"rc": 1})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = r.main(["plan", RUN])
+        self.assertEqual(code, 4)
 
 
 class Attempts(TempCase):
