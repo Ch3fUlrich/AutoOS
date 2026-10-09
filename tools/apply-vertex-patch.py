@@ -75,16 +75,33 @@ def split_mixed_tool_turns(var):
     model["Noted."], user[the other parts, original order]. Text-only and
     functionResponse-only turns are untouched. Pure statements, no side effects
     beyond reassigning `var.contents`.
+
+    Hardened (D-908 follow-up), because v3 dereferences a turn's `parts` and v2
+    never did, so v3 must not be *less* robust than v2 on a malformed body:
+
+      * non-array contents is treated as an empty array, so the pop/refill that
+        follows appends the same Continue. turn v2 would;
+      * a null or non-object entry is skipped, never dereferenced;
+      * a turn's `parts` is used only when it is a real array, so `parts: null`
+        and a missing `parts` are tolerated;
+      * an entry with no `role`, or a role other than user/model, is not a turn
+        and is skipped, so the array stays well formed;
+      * a null part is not a functionResponse, so it lands on the non-response
+        side of a user turn rather than throwing in `.filter`.
+
+    A functionResponse part inside a role:"model" turn is NOT a mixed *user*
+    turn: the model turn passes through and keeps v2 trailing-pop semantics.
     """
     return (
-        f'{var}.contents={var}.contents.reduce((a,c)=>{{'
-        f'const q=c.parts||[];'
+        f'{var}.contents=Array.isArray({var}.contents)?{var}.contents.reduce((a,c)=>{{'
+        f'const q=c&&Array.isArray(c.parts)?c.parts:[];'
+        f'if(!c||"object"!=typeof c||("user"!==c.role&&"model"!==c.role))return a;'
         f'if("user"!==c.role){{a.push(c);return a}}'
-        f'const r=q.filter(p=>p.functionResponse),x=q.filter(p=>!p.functionResponse);'
+        f'const r=q.filter(p=>p&&p.functionResponse),x=q.filter(p=>!p||!p.functionResponse);'
         f'if(r.length&&x.length){{a.push({{role:"user",parts:r}});'
         f'a.push({NOTED_MODEL_TURN});'
         f'a.push({{role:"user",parts:x}})}}else{{a.push(c)}}'
-        f'return a}},[])'
+        f'return a}},[]):[]'
     )
 
 

@@ -87,10 +87,11 @@ the D-908 mixed turn survived untouched.
 the v2 pop/refill unchanged:
 
 ```js
-contents = contents.reduce((a,c)=>{
-  const q=c.parts||[];
+contents = (Array.isArray(contents) ? contents : []).reduce((a,c)=>{
+  const q=c&&Array.isArray(c.parts)?c.parts:[];
+  if(!c||"object"!=typeof c||(c.role!=="user"&&c.role!=="model"))return a;
   if(c.role!=="user"){a.push(c);return a}
-  const r=q.filter(p=>p.functionResponse),x=q.filter(p=>!p.functionResponse);
+  const r=q.filter(p=>p&&p.functionResponse),x=q.filter(p=>!p||!p.functionResponse);
   if(r.length&&x.length){a.push({role:"user",parts:r});
     a.push({role:"model",parts:[{text:"Noted."}]});
     a.push({role:"user",parts:x})}else{a.push(c)}
@@ -106,6 +107,17 @@ part without becomes, in original order: `user`[the functionResponse parts],
 functionResponse-only turn are left exactly as they were. Because the split ends on a
 `user` turn, the final contents end on `user`, and the synthetic `model` turn sits
 mid-history where the pop can never reach it.
+
+The split is deliberately no less tolerant than v2 on a malformed body, because v3 is
+the first guard that looks *inside* a turn and so the first that dereferences `parts`.
+Non-array `contents` is treated as an empty array (and so is refilled with the Continue
+turn, exactly as v2 refills an emptied one); a null or non-object entry, or a turn whose
+`role` is neither `user` nor `model`, is skipped rather than dereferenced; and a turn's
+`parts` is read only when it is a real array, so `parts: null` or a missing `parts` are
+tolerated. A `functionResponse` part inside a `role:"model"` turn is not a mixed *user*
+turn: it passes through untouched and keeps v2 trailing-pop semantics. All of this is
+pinned by `RawShapes` in `tests/test_vertex_trailing_turn_patch.py`, which runs the
+patcher's own guard text over these raw shapes.
 
 ## The choice, and its trade-off
 
