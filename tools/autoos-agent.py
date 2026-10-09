@@ -159,6 +159,18 @@ resolved writer carries a
 the runner-private kill record. `--model` pins an own-account client too, and its
 family feeds the fence like a gateway leg's — qoder appears in no route, so a fence
 that only read routes was blind to that choice.
+The family is RESOLVED, not read off one table only (AO-RUN-FAMILY-RECORD, D-807):
+a registry row, the vendor the model id itself names, a route whose legs all declare
+one family, the provider half, an own-account client's own default model, and finally
+that client's name — in that order, the first that names a model answering. One
+normalisation table (`FAMILY_VENDORS`) turns a spelling into the registry's family
+name, and `gpt-oss` is openai-oss, never openai. A record carries `family_source`
+beside a family and `family_reason` beside a null, and null is the answer only when
+nothing names a model: `unresolved` is a display marker for "no model was witnessed",
+never a family. The spawn paths that name a run dir before a launch can answer —
+job.json's `request`, and `exit.json` when the kill record named nothing — carry the
+family the plan resolved, `exit.json` saying `family_source: planned-model` for the
+weaker claim.
 
 Never prints a key. The OmniRoute client key comes from AUTOOS_OMNIROUTE_KEY
 or the gateway-named field of configuration/api-keys.yml (`omniroute_server`
@@ -4287,6 +4299,170 @@ def reviewer_family(spelling, registry):
     return None
 
 
+# --- AO-RUN-FAMILY-RECORD (D-807): the family of the model a run ANSWERED with ----
+#
+# `family_for_model` answers one question: what family does the registry declare
+# for this exact spelling. The run record needs the wider one, because a client's
+# own model id is not a registry spelling: `qfmodel` is Qoder's key for what its
+# account serves, `claude-sonnet-5-5` is Anthropic's id for a Sonnet, and every run
+# on one of them recorded `family: unresolved` — which the review footer read as
+# "nobody knows who reviewed this" (CROSS-FAMILY: unknown beside a writer line that
+# NAMED the model), and the plangraph keeper read as no reviewer token at all.
+#
+# The layers below answer in order and say WHICH one answered (`family_source`), so
+# a reader can tell a registry row from a vendor name from a client's default. When
+# none of them names a family the answer is `null` plus the reason — never the word
+# `unresolved`, which is not a family and sat in a family's field reading like one.
+# What stays unchanged is the conservative lookup the lane-record review seats use
+# (`family_for_model`, `reviewer_family`): an invented author or reviewer family is
+# still refused there, and a run's own record is not evidence about anyone else's.
+
+#: The vendor spellings that name a registry family from inside a model id, a
+#: provider id or a client name — the ONE normalisation table: "gpt-oss" is
+#: openai-oss and never openai, "claude"/"sonnet"/"opus" are anthropic, "Meta Muse"
+#: is meta. Matched longest-token-first across the whole table, so a spelling that
+#: carries two vendor names takes the more specific one. A family is only ever a
+#: key of this table: a name the table cannot place answers None, and nothing is
+#: lifted out of an arbitrary string.
+FAMILY_VENDORS = (
+    ("openai-oss", ("gpt-oss", "openai-oss")),
+    ("anthropic", ("claude", "anthropic", "sonnet", "opus", "haiku", "fable")),
+    ("google", ("gemini", "google")),
+    ("qwen", ("qwen", "tongyi", "qwq")),
+    ("deepseek", ("deepseek",)),
+    ("nvidia", ("nemotron", "nvidia")),
+    ("meta", ("muse-spark", "llama", "meta")),
+    ("mistral", ("mistral", "codestral", "devstral")),
+    ("xiaomi", ("mimo", "xiaomi")),
+    ("zhipu", ("glm", "zhipu", "zai-org")),
+    ("moonshot", ("kimi", "moonshot")),
+    ("minimax", ("minimax",)),
+    ("meituan", ("longcat", "meituan")),
+    ("cohere", ("command-r", "command-a", "north-mini", "cohere")),
+    ("poolside", ("laguna", "poolside")),
+    ("thinkingmachines", ("inkling",)),
+    ("nex-agi", ("nex-pro", "nex-mini")),
+    ("inclusionai", ("ling-", "inclusionai")),
+    ("dots-studio", ("dots3",)),
+    ("openai", ("gpt-4", "gpt-5", "gpt-6", "openai")),
+)
+
+#: Which layer named the family — said out loud, because "the registry declares it"
+#: and "the vendor's own name says it" are claims of different strength.
+FAMILY_SOURCE_REGISTRY = "registry-row"
+FAMILY_SOURCE_MODEL_NAME = "model-vendor-name"
+FAMILY_SOURCE_ROUTE_LEGS = "route-single-family"
+FAMILY_SOURCE_PROVIDER_NAME = "provider-vendor-name"
+FAMILY_SOURCE_CLIENT_DEFAULT = "client-default-model"
+FAMILY_SOURCE_CLIENT_NAME = "client-vendor-name"
+
+
+def vendor_family_name(spelling) -> str | None:
+    """The family a model / provider / client spelling names from inside its own id.
+
+    `resolver.family_key` normalises case first, then the separators, so "OpenAI
+    OSS", "openai_oss" and "gpt-oss-120b" all reach `openai-oss`. None when the
+    table places nothing, which the caller records as an unknown family rather
+    than a guessed one.
+    """
+    key = resolver.family_key(spelling)
+    if not key:
+        return None
+    key = key.replace(" ", "-").replace("_", "-")
+    best = None
+    for family, tokens in FAMILY_VENDORS:
+        for token in tokens:
+            if token in key and (best is None or len(token) > best[0]):
+                best = (len(token), family)
+    return best[1] if best else None
+
+
+def route_family(route_id, registry) -> str | None:
+    """The ONE family every leg of a route declares, or None when they differ.
+
+    A combo is a fall-through list, so a chain whose legs sit in two families names
+    neither, and a leg the registry cannot place makes the whole route unknown —
+    the same rule `fence_blocks_route` applies to a chain.
+    """
+    entry = (registry.get("routes") or {}).get(route_id) if route_id else None
+    legs = (entry or {}).get("legs") or []
+    family = None
+    for leg in legs:
+        try:
+            _provider_id, model_id = resolve_leg(leg, registry)
+        except ValueError:
+            model_id = None  # a leg the registry cannot place names no family
+        spelling = model_id or leg
+        key = (_family_of_one_spelling(spelling, registry)
+               or vendor_family_name(spelling))
+        if not key:
+            return None
+        if family is None:
+            family = key
+        elif family != key:
+            return None
+    return family
+
+
+def run_model_family(model, client=None, provider=None, registry=None,
+                     cfg=None) -> tuple:
+    """``(family, source, reason)`` for the model a run served — two of three, ever.
+
+    The layers, ordered by how directly each names what ANSWERED:
+
+      1. the registry's own declaration for the served spelling — `reviewer_family`,
+         the one model→family lookup the record and the reviewer walk share, which
+         also reads a client's `claude-<name>-<version>` id back to its bare name;
+      2. the vendor named inside the model id (`vendor_family_name`);
+      3. the route the spelling names, when every leg declares one family;
+      4. the provider half, when the model half named nothing;
+      5. an own-account client's own default model, and finally the client's own
+         name — reached only for a model the client picked itself. A
+         provider-qualified id (`--free somevendor/model`) is that vendor's model,
+         not the account's own business, and the client's default family would be a
+         fabrication read off the wrong half.
+
+    ``reason`` says what was tried when the answer is None, and a None family keeps
+    every cross-family check closed: an unknown family is never evidence of
+    independence, exactly as an unknown author is not.
+    """
+    registry = registry if registry is not None else load_live_registry()
+    text = str(model or "").strip()
+    if text == PLAN_MODEL_UNNAMED:
+        text = ""
+    # The id as this client writes it (the bare name), and whether a vendor prefix
+    # rode with it — the prefix is what says "this model is not the account's own".
+    bare = text.rpartition("/")[2] if "/" in text else text
+    qualified = "/" in text
+    if text:
+        family = reviewer_family(text, registry) or reviewer_family(bare, registry)
+        if family:
+            return family, FAMILY_SOURCE_REGISTRY, None
+        family = vendor_family_name(bare)
+        if family:
+            return family, FAMILY_SOURCE_MODEL_NAME, None
+        family = route_family(_combo_of(text), registry)
+        if family:
+            return family, FAMILY_SOURCE_ROUTE_LEGS, None
+    if provider and str(provider).strip():
+        family = vendor_family_name(provider)
+        if family:
+            return family, FAMILY_SOURCE_PROVIDER_NAME, None
+    own_account = bool(client) and not _gateway_client(client)
+    if own_account and not qualified:
+        default, _source = effective_spawn_model(client, registry=registry, cfg=cfg)
+        family = (reviewer_family(default, registry) if default else None) or \
+            vendor_family_name(default)
+        if family:
+            return family, FAMILY_SOURCE_CLIENT_DEFAULT, None
+        family = vendor_family_name(client)
+        if family:
+            return family, FAMILY_SOURCE_CLIENT_NAME, None
+    return None, None, ("no registry row, vendor name or client default names a "
+                        "family for model %s client %s provider %s"
+                        % (text or "none", client or "none", provider or "none"))
+
+
 def is_final_reviewer(spelling):
     """True when ``spelling`` NAMES the final checker, stripped and lower-cased.
 
@@ -5704,34 +5880,52 @@ def gateway_writer(session_id, gateway=None, key=None, fetch=None, limit=CALL_LO
     return (row.get("provider") or WRITER_UNRESOLVED, row.get("model") or WRITER_UNRESOLVED)
 
 
+def _writer_named(value) -> str | None:
+    """`value` when it names something, None for the marker and the blank.
+
+    `WRITER_UNRESOLVED` is what the record SAYS about a field nothing witnessed;
+    it is never an input to a lookup, and reading it as a model or provider name is
+    how a run that named nothing came to record a family called `unresolved`.
+    """
+    text = str(value or "").strip()
+    return None if not text or text == WRITER_UNRESOLVED else text
+
+
 def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
                     gateway=None, home=None) -> dict:
-    """The writer of this run: `{provider, model, family, source}`.
+    """The writer of this run: `{provider, model, family, source}` (+ the family's
+    own witness, `family_source`, or `family_reason` when nothing names a family).
 
     A gateway run asks the gateway (one GET, by the run's own session id); a
     native run asks the client first — its own session transcript, joined by the
     session id this spawner minted into the argv — and only falls back on the plan
     when the client said nothing. `--free` names the provider in that same
-    `provider/model` id. The family is the registry's own declaration for that
-    model spelling, never a guess from the name.
+    `provider/model` id. The family is `run_model_family`'s answer for that model:
+    the registry's declaration first, and the vendor the served id itself names
+    after it (AO-RUN-FAMILY-RECORD, D-807 — a client's own id is not a registry
+    spelling, and was recording `unresolved` beside a model that named its vendor).
 
-    `source` is the witness behind the answer (`WRITER_SOURCE_*`), because a model
-    the plan assumed and a model the client attested are not the same claim — a
-    review is only independent of an author it can PROVE it ran elsewhere.
+    `source` is the witness behind the model answer (`WRITER_SOURCE_*`), because a
+    model the plan assumed and a model the client attested are not the same claim —
+    a review is only independent of an author it can PROVE it ran elsewhere.
 
-    Any field this cannot prove is `unresolved`, which is the point of the
-    record: an empty field reads like "the run did not use a model".
+    Provider, model and source say `unresolved` when the run named no model. The
+    family says null plus a reason (D-807): `unresolved` is not a family, and every
+    cross-family check stays closed on a null whatever the reason.
     """
     registry = registry if registry is not None else load_live_registry()
-    provider = model = None
+    provider = model = served_id = None
     if uses_gateway:
         session = session_header_value(plan.get("session_tag") or "", plan.get("run_id")) \
             if plan.get("session_tag") else None
         found = gateway_writer(session, gateway=gateway, key=key, fetch=fetch)
         if found is None:
             return {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
-                    "family": WRITER_UNRESOLVED, "source": WRITER_UNRESOLVED}
+                    "family": None, "source": WRITER_UNRESOLVED,
+                    "family_reason": "the gateway call log named no model for "
+                                     "this run"}
         provider, model = found
+        served_id = model
         source = WRITER_SOURCE_GATEWAY
     else:
         asked = plan.get("model") or None
@@ -5746,6 +5940,12 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
             source = WRITER_SOURCE_REPORT
         else:
             model = asked
+        # The family read keeps the id exactly as it was served — its vendor
+        # prefix, if it carried one, is the fact that says the model is NOT this
+        # client's own account's business (D-807). The record's `model` field is
+        # the bare name (below and in `writer_line`), which is what the prefix is
+        # for: `mimo/mimo-7` beside `mimo-7` reads as two models.
+        served_id = model
         if model:
             # A native client's own id, or a `provider/model` promo id on --free.
             provider = free_provider(model) if "/" in model else plan.get("client")
@@ -5754,15 +5954,35 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
             # different models, and the prefix is already in `provider`.
             if "/" in model:
                 model = model.rpartition("/")[2]
-    family = (_family_of_one_spelling(model, registry) if model else None)
-    return {"provider": provider or WRITER_UNRESOLVED,
-            "model": model or WRITER_UNRESOLVED,
-            "family": family or WRITER_UNRESOLVED,
-            "source": source or WRITER_UNRESOLVED}
+    client = plan.get("client") or None
+    # A native run's provider half IS the client's name; that name answers at the
+    # client layer, where the account's own default model is read with it, and not
+    # as a vendor row beside it.
+    named_provider = _writer_named(provider)
+    if named_provider == client:
+        named_provider = None
+    family, family_source, family_reason = run_model_family(
+        _writer_named(served_id), client=client, provider=named_provider,
+        registry=registry)
+    result = {"provider": provider or WRITER_UNRESOLVED,
+              "model": model or WRITER_UNRESOLVED,
+              "family": family,
+              "source": source or WRITER_UNRESOLVED}
+    if family is not None:
+        result["family_source"] = family_source
+    else:
+        result["family_reason"] = family_reason
+    return result
 
 
 def writer_line(writer: dict) -> str:
-    """The one line every reader of the run sees: `writer: <provider>/<model> (<family>) source=<witness>`."""
+    """The one line every reader of the run sees: `writer: <provider>/<model> (<family>) source=<witness>`.
+
+    A family nobody could name prints as `unresolved`, which is the marker the log
+    has always used — the RECORD carries `null` plus `family_reason` (D-807), because
+    a word sitting in a family's field reads as a family, and `ps`, the review fence
+    and the keeper all read the record rather than this line.
+    """
     return "writer: %s/%s (%s) source=%s" % (
         writer.get("provider") or WRITER_UNRESOLVED,
         writer.get("model") or WRITER_UNRESOLVED,
@@ -9897,6 +10117,9 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
     parent = os.environ.get("AUTOOS_AGENT_RUN_ID") or None
     if parent == wid:
         parent = None
+    # D-807: one resolution for the record, read off the model the plan launched.
+    plan_family, plan_family_source, plan_family_reason = run_model_family(
+        plan.get("launched_model") or plan.get("model"), client=plan.get("client"))
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
@@ -9908,12 +10131,17 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "model_source": plan.get("model_source"),
         # T2-RECORD-PIN item 2: the ask, the launch and the family, so a record
         # answers "was this the model I pinned, and whose family wrote it"
-        # without a second read of the plan. `family` is the launched model's
-        # (what answered), None when the registry names no family for it — a
-        # record must not invent one.
+        # without a second read of the plan. AO-RUN-FAMILY-RECORD (D-807): `family`
+        # is the launched model's RESOLVED family — a registry row, the vendor the
+        # id itself names, or the own-account client's default — and null plus
+        # `family_reason` when nothing names one. `family_source` says which layer
+        # answered, because a registry declaration and a vendor name in a string
+        # are claims of different strength; a record still must not invent one.
         "requested_model": plan.get("requested_model") or "",
         "launched_model": plan.get("launched_model") or plan.get("model") or "",
-        "family": family_for_model(plan.get("launched_model") or plan.get("model")),
+        "family": plan_family,
+        "family_source": plan_family_source,
+        "family_reason": plan_family_reason,
         "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
@@ -9930,6 +10158,13 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
     mismatch = model_mismatch_refusal(plan)
     if mismatch is not None:
         record["reason"] = mismatch
+    # D-807: exactly one of the two family witnesses is on the record — the layer
+    # that named it, or the reason none did. A null beside the other would read as
+    # a field nobody filled in.
+    if plan_family is None:
+        record.pop("family_source", None)
+    else:
+        record.pop("family_reason", None)
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -11286,7 +11521,9 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: writer unresolved (%s)" % type(exc).__name__,
                   file=sys.stderr)
             writer = {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
-                      "family": WRITER_UNRESOLVED, "source": WRITER_UNRESOLVED}
+                      "family": None, "source": WRITER_UNRESOLVED,
+                      "family_reason": "the writer lookup raised %s"
+                                       % type(exc).__name__}
         if writer is not None:
             print(writer_line(writer))
             # FAMILYFENCE item 4: a review's independence is a claim about the

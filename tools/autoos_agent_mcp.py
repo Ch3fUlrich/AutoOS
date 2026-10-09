@@ -39,7 +39,8 @@ child's AUTOOS_AGENT_RUN_ID are one string (FLEETSPEC §5.1):
                    time, 0600, written by the runner alone — the record the
                    fallback group kill uses where there is no user manager
     output.log   the child's stdout + stderr (never contains a key)
-    exit.json    {rc, ended} once the child exits; {"cancelled": true} on cancel
+    exit.json    {rc, ended, family, family_source|family_reason} once the child
+                 exits; {"cancelled": true} on cancel
     question.json  a worker's ask-back question {"text", "asked"} - written by
                    tools/autoos-ask.py, which run_job points here through the
                    child's AUTOOS_TASK_DIR
@@ -1013,6 +1014,75 @@ def _refused(msg: str) -> dict:
     return {"error": msg, "state": "rejected"}
 
 
+def recorded_family_fields(run_id: str, job: dict | None) -> dict:
+    """The family fields `exit.json` answers with — AO-RUN-FAMILY-RECORD (D-807).
+
+    The runner-private kill record wins: its `writer` is what the launch actually
+    served, written by the CLI, which a worker cannot edit (R-orch-17). Where the
+    run never reached that point — a client that is not installed, a run that died
+    before the record — the spawn-time answer in job.json's `request` is used, and
+    says so with `family_source: planned-model`, because "what I meant to run" and
+    "what answered" are claims of different strength. A plan that resolved to no
+    family travels as null plus its reason; neither reader invents one."""
+    writer = (read_kill_record(run_id) or {}).get("writer") or {}
+    if writer.get("family"):
+        fields = {"family": writer["family"]}
+        for key in ("family_source", "family_reason"):
+            if writer.get(key):
+                fields[key] = writer[key]
+        return fields
+    request = (job or {}).get("request") or {}
+    if "family" not in request:
+        # A run dir written before this field existed: say nothing, rather than
+        # saying "unresolved", which a keeper reads as a family.
+        return {}
+    if request.get("family_reason"):
+        return {"family": None, "family_reason": request["family_reason"]}
+    return {"family": request.get("family"), "family_source": "planned-model"}
+
+
+def planned_model_args(req: dict) -> dict:
+    """The one reading of the spawn flags that decide WHICH model this run answers
+    with, as the kwargs both callers take.
+
+    CLAUDEBUDGET-f item 3 / T2-RECORD-PIN item 1: the budget gate prices the pin,
+    not the default — a spawn that carries `free` and a model launches that model
+    (the argv passes it as --free-model too), so the value the gate judges is the
+    value the plan will carry. AO-RUN-FAMILY-RECORD (D-807) adds the second
+    reader: the family written into job.json is resolved from that same model, so
+    the price and the record cannot drift onto two different runs."""
+    return dict(
+        model=req.get("model"),
+        card=req.get("card"),
+        tier=req.get("tier"),
+        free=bool(req.get("free")),
+        free_model=(req.get("model") if (req.get("free") and req.get("model"))
+                    else agent.DEFAULT_FREE_MODEL),
+        clean=bool(req.get("clean")))
+
+
+def planned_family_fields(req: dict, client: str) -> dict:
+    """``family`` / ``family_source`` (or ``family`` null plus ``family_reason``)
+    for the model this spawn resolves to — AO-RUN-FAMILY-RECORD (D-807).
+
+    The run's real writer family lands in the runner-private kill record when the
+    launch answers; this is the spawn-time half, written before the child exists
+    so a run that dies instantly still names a family. The same `run_model_family`
+    layers resolve both, so a reader that only has the run dir gets the resolved
+    name rather than the word "unresolved", and a plan that names nothing gets
+    null with the reason — never a guess.
+
+    `client` is the adapter's name, which is what lets a qoder run whose model no
+    registry row names resolve on the client's own default model (a qwen family),
+    while a gateway run resolves from the model its route served or the family every
+    leg of that route declares."""
+    model, _source = agent.effective_spawn_model(client, **planned_model_args(req))
+    family, family_source, reason = agent.run_model_family(model, client=client)
+    if family is None:
+        return {"family": None, "family_reason": reason}
+    return {"family": family, "family_source": family_source}
+
+
 def spawn(req: dict) -> dict:
     _reap()
     # R-pause-01/R-heartbeat-03: a hard stop, checked before every launch. Only
@@ -1038,23 +1108,20 @@ def spawn(req: dict) -> dict:
             req.get("client") or "opencode", os.environ,
             # CLAUDEBUDGET-f item 3: the same one resolution the CLI's build_plan
             # runs -- the flags go in as flags, and `free` is priced at the promo
-            # model the argv carries (this tool passes --free, never --free-model).
-            model=req.get("model"), card=req.get("card"), tier=req.get("tier"),
-            # T2-RECORD-PIN item 1: price the pin, not the default -- a spawn
-            # that carries `free` and a model launches that model (the argv
-            # above passes it as --free-model too), so the budget gate must see
-            # the same value the plan will.
-            free=bool(req.get("free")),
-            free_model=(req.get("model") if (req.get("free")
-                                             and req.get("model")) else
-                        agent.DEFAULT_FREE_MODEL),
-            clean=bool(req.get("clean")),
+            # model the argv carries. `planned_model_args` is the same reading the
+            # run record's family is resolved from (AO-RUN-FAMILY-RECORD).
+            **planned_model_args(req),
+            # CLAUDEBUDGET-d item 2/3: the gate reads the model the request names (or the
+            # client's default, or the tier/card combo), and `claude_reason` is this
+            # spawn's own declaration -- so the exception is one call wide instead of an
+            # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
             reason=req.get("claude_reason"))
     except (OSError, ValueError) as exc:
         return _refused("cannot read the Claude budget: %s" % exc)
     if budget_refusal is not None:
         return _refused(budget_refusal)
     budget_env = spawn_budget_env(req)
+    client = req.get("client") or "opencode"
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
@@ -1120,7 +1187,8 @@ def spawn(req: dict) -> dict:
                         "state": "failed"}
             continue
     job = {"id": run_id, "run_id": run_id,
-           "request": {k: v for k, v in req.items() if k != "task"},
+           "request": dict({k: v for k, v in req.items() if k != "task"},
+                          **planned_family_fields(req, client)),
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
@@ -1229,7 +1297,8 @@ def run_job(path: str) -> int:
         message = "autoos-agent: %s" % exc
         with io.open(os.path.join(path, "output.log"), "ab") as out:
             out.write((message + "\n").encode("utf-8", "replace"))
-        _write_exit(path, {"rc": 3, "ended": time.time()})
+        _write_exit(path, dict({"rc": 3, "ended": time.time()},
+                               **recorded_family_fields(run_id, job)))
         print(message, file=sys.stderr)
         return 3
     if agent.scope_supported():
@@ -1254,7 +1323,9 @@ def run_job(path: str) -> int:
         # The runner's group and the scope unit are recorded above, by the runner.
         rc = subprocess.call(cmd, cwd=job["cwd"], env=env,
                              stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
-    _write_exit(path, {"rc": rc, "ended": time.time()})  # loses to an earlier cancel
+    # loses to an earlier cancel
+    _write_exit(path, dict({"rc": rc, "ended": time.time()},
+                           **recorded_family_fields(run_id, job)))
     _write_fallback(path)
     return rc
 
