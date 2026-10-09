@@ -7,6 +7,7 @@ inject away, and the `isdir` read on whatever that lookup returned."""
 import os
 import re
 import shutil
+import unicodedata
 
 from autoos_writer_rule import R_LEVELS, required_r_level
 
@@ -18,21 +19,33 @@ _RESERVED = frozenset({"CON", "PRN", "AUX", "NUL"}
 _CANON_PREFIX = "FILES (only these;"
 _FILES_LOOK = re.compile(r"^[ \t]*FILES\b")
 _FILES_RE = re.compile(r"^FILES \(only these; <= 3 files, <= 200 lines changed\):"
-                       r"[ \t]*(?P<paths>.*?)\.[ \t]Do not touch other lines/files\.[ \t]*$")
+                       r"[ ]*(?P<paths>.*?)\.[ ]Do not touch other lines/files\.[ ]*$")
 # Markdown's own fence rule, shared by BOTH readers (see _Fences): at most 3
-# leading blanks, then 3+ of the same ` or ~; `tail` is what follows on the line.
-_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(?P<tail>.*)$")
+# leading SPACES, then 3+ of the same ` or ~; `tail` is what follows on the line.
+# CommonMark expands a leading TAB to 4 columns, so a tab-indented ``` is fence
+# CONTENT, never an opener or closer — the indent is ' ' only, and any other
+# leading whitespace character (tab included) before the backticks means
+# "not a fence line".
+_FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(?P<tail>.*)$")
 _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
-# str.splitlines() ends a line on more than '\n': \x0b \x0c \x1c \x1d \x1e \x85
-# \u2028 and \u2029 all break it, and every other C0 control is just as
-# meaningless in a brief or a report. Matching the whole set (minus the
-# tab/newline/CR a real body carries), a line such as 'foo\x0c```' used to reach
-# the fence reader as a bare ``` line that CLOSED the block, so the forged
-# `CHECK 6: PASS` line under it counted. Fail closed: refuse the text outright —
-# see _guard_text — and split on '\n' only — see _lines.
-_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x85\u2028\u2029]")
+# The characters a body may NEVER carry: every Unicode category Zs/Zl/Zp/Cc/Cf
+# (whitespace separators, line/paragraph breaks, controls and invisible format
+# characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000, U+200B,
+# the BOM, ...) except the four a real body legitimately carries: ' ', '\t',
+# '\n', '\r'. Each one is either a line break str.splitlines() would invent (so
+# a line such as 'foo\x0c```' used to reach the fence reader as a bare ``` closer
+# and the forged `CHECK 6: PASS` line under it counted), or an unspelled
+# whitespace/format character a path or CHECK line would silently eat (a
+# `files_line(['tools/a.py\xa0'])` once returned 'tools/a.py', a path the brief
+# did not spell). Matching the WHOLE set by category — see _invisible_char —
+# the text fails closed: refuse it outright (see _guard_text) and split on
+# '\n' only (see _lines). ' ' stays legal because it is the template's own
+# separator; '\t' stays legal inside a line because it can neither break a line
+# nor indent a fence (' ' indent only, see _FENCE_RE).
+_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
+_ALLOWED_CHARS = frozenset(" \t\n\r")
 # A verdict needs a non-empty tail after it: a bare 'PASS' proves nothing.
 _VERDICT_RE = re.compile(r"^(PASS|FAIL|INPUT_REQUIRED)[ \t]+\S.*$")
 REQUIRED_TOOLS = ("yamllint", "ansible-playbook", "ansible-lint", "gitleaks", "pre-commit")
@@ -52,28 +65,45 @@ class GuardError(ValueError):
     """The brief, the report shape, or a caller argument is not usable."""
 
 
+def _invisible_char(text):
+    """The first character of `text` no brief or report may carry: any Unicode
+    category Zs/Zl/Zp/Cc/Cf character that is not ' ', '\\t', '\\n' or '\\r'.
+    Decided by `unicodedata.category`, never by a hand-listed codepoint set, so
+    an exotic separator (U+180E, a U+2000-U+200A en-dash-space, the BOM) is
+    refused as surely as '\\x0c'."""
+    for ch in text:
+        if ch in _ALLOWED_CHARS:
+            continue
+        if unicodedata.category(ch) in _INVISIBLE_CATS:
+            return ch
+    return None
+
+
 def _guard_text(name, text):
     """A brief/report body must be a usable str (P4a fix 2: a wrong type raises,
     it never reaches a line loop and dies with AttributeError/TypeError), must fit
-    the size limit (fix 4) and must carry no line-breaking control character
-    (P4a round 3): one of them anywhere makes the body unjudgeable as physical
-    lines, so it is refused rather than read as something the author did not write."""
+    the size limit (fix 4) and must carry no invisible whitespace/control/format
+    character (P4a rounds 3-4): one of them anywhere makes the body unjudgeable
+    as physical lines or unspells a path with a character str.strip() would eat,
+    so it is refused rather than read as something the author did not write."""
     if type(text) is not str:
         raise GuardError("%s must be a str, got %s" % (name, type(text).__name__))
     if len(text) > MAX_TEXT_CHARS:
         raise GuardError("%s is %d characters, over the %d limit"
                          % (name, len(text), MAX_TEXT_CHARS))
-    bad = _CONTROL_RE.search(text)
+    bad = _invisible_char(text)
     if bad:
-        raise GuardError("%s contains the control character %s (U+%04X): a brief or "
-                         "report is read as physical '\\n'-separated lines, never as "
-                         "splitlines() output" % (name, repr(bad.group()), ord(bad.group())))
+        raise GuardError("%s contains the invisible/control character %s (U+%04X, "
+                         "category %s): a brief or report is read as physical "
+                         "'\\n'-separated lines of spelled ASCII, never as "
+                         "splitlines() output" % (name, repr(bad), ord(bad),
+                                                  unicodedata.category(bad)))
 
 
 def _lines(text):
     """The body's physical lines: split on '\\n' ONLY, never str.splitlines(),
-    which also breaks on the characters _CONTROL_RE refuses (that guard is the
-    fence; this is the shape both readers agree on). Yields `(line, cr)` per line,
+    which also breaks on the characters _invisible_char refuses (that guard is
+    the fence; this is the shape both readers agree on). Yields `(line, cr)` per line,
     with ONE trailing '\\r' removed so a CRLF body reads like an LF one and the
     flag says whether it was there — `brief_files` needs the flag because a
     CR-terminated FILES line is a violation it refuses rather than normalises
@@ -115,8 +145,12 @@ def exact_path(path):
     compare unequal and become violations. Returns None when the input is not a
     plain relative path (fail closed). Spaces INSIDE a name are legal —
     'ops/host names.yml' is a path, 'not a path' is compared and usually
-    violates; only the shape and the size limits below refuse a name."""
-    if (type(path) is not str or not path or not path.isascii() or path != path.strip()
+    violates; only the shape and the size limits below refuse a name. ASCII-only
+    (brief paths are ASCII per tools/autoos_brief.py): a non-ASCII path can never
+    equal an allowed ASCII path, so it is refused here and named a violation by
+    scope_fence rather than silently Unicode-folded."""
+    if (type(path) is not str or not path or not path.isascii()
+            or path != path.strip(" ")
             or any(ord(c) < 0x20 or ord(c) == 0x7f for c in path)):
         return None
     if path.startswith("./"):
@@ -132,7 +166,7 @@ def exact_path(path):
         return None
     if any(p in ("", ".", "..") for p in parts):
         return None
-    if any(c != c.strip() or c.endswith(".") or c.split(".")[0].upper() in _RESERVED
+    if any(c != c.strip(" ") or c.endswith(".") or c.split(".")[0].upper() in _RESERVED
            for c in parts):
         return None
     return path or None
@@ -160,10 +194,12 @@ class _Fences:
 
     `feed(line)` returns True for a line that is fence markup or fenced content,
     False for a line that counts. A fence opens on 3+ of the same ` or ~ after at
-    most 3 leading blanks (its info string may follow); it closes ONLY on a line
-    of the same character, at least as long, with nothing after it. A shorter
-    marker, the other character, or a marker with trailing text is content, not a
-    closer — so a fence that is never closed swallows the rest of the text."""
+    most 3 leading SPACES (its info string may follow; a TAB or any other
+    whitespace-indented marker is content, never markup — see _FENCE_RE); it
+    closes ONLY on a line of the same character, at least as long, with nothing
+    after it. A shorter marker, the other character, a marker with trailing text,
+    or a whitespace-other-than-space-indented marker is content, not a closer —
+    so a fence that is never closed swallows the rest of the text."""
 
     def __init__(self):
         self.open = None
@@ -183,6 +219,25 @@ class _Fences:
         return False
 
 
+def _files_item(item):
+    """One comma-separated FILES entry, spelled exactly: the template's separator
+    is ',' plus optional ' ', so ONLY ' ' is trimmed, and an item carrying any
+    character outside printable ASCII (ord < 0x20 or > 0x7e — a TAB, a U+00A0, a
+    U+2000-U+200A, an invisible format character) raises naming the item. The old
+    blanket `item.strip()` ate every str.isspace() character, so
+    'FILES ...: tools/a.py\\xa0. Do not touch...' handed back 'tools/a.py' — a
+    path the brief never spelled. Brief paths are ASCII-only per
+    tools/autoos_brief.py; anything else is refused, never normalised away."""
+    for ch in item:
+        if ord(ch) < 0x20 or ord(ch) > 0x7e:
+            raise GuardError("FILES item %r carries the non-printable-ASCII "
+                             "character %s (U+%04X, category %s): brief paths are "
+                             "spelled in printable ASCII, and only ' ' separates "
+                             "items" % (item, repr(ch), ord(ch),
+                                        unicodedata.category(ch)))
+    return item.strip(" ")
+
+
 def brief_files(brief_text):
     """Normalised paths the brief allows, from its ONE canonical FILES line.
 
@@ -190,9 +245,11 @@ def brief_files(brief_text):
     wording. A FILES-looking line that is indented, CR-terminated, quoted, or
     sitting inside a ``` / ~~~ fence is never used silently — it raises, as does
     a second canonical line anywhere. Lines are the physical '\\n'-separated ones
-    (see _lines); a body carrying a line-breaking control character raises before
-    any of this (see _guard_text), so a 'foo\\x0c```' line can neither fake a fence
-    closer here nor a second canonical FILES line. Fences follow ONE rule for both
+    (see _lines); a body carrying an invisible/control/format character raises
+    before any of this (see _guard_text), so a 'foo\\x0c```' line can neither fake
+    a fence closer here nor a second canonical FILES line, and a TAB-indented
+    '```' line is fence content — a block opened above it stays open and swallows
+    the FILES line under it. Fences follow ONE rule for both
     readers (see _Fences): a ``` block closes only on a ``` or longer marker with
     nothing after it, a ~~~ block only on ~~~, and a fence that never closes
     swallows the rest of the text. Duplicate DETECTION stays case-insensitive
@@ -210,8 +267,8 @@ def brief_files(brief_text):
             continue
         # A CR anywhere in a FILES line is a violation, never something to
         # normalise away: the ending ('files.\r') is a non-unix line break in a
-        # brief, and an interior one ('a.py\r. Do') would be eaten by the item
-        # strip() below and hand back a path the brief did not spell.
+        # brief, and an interior one ('a.py\r. Do') would reach the item split
+        # below as a control character _files_item refuses.
         if (cr or "\r" in line or not line.startswith(_CANON_PREFIX)
                 or not _FILES_RE.match(line)):
             raise GuardError("non-canonical FILES line: %r" % line[:120])
@@ -220,7 +277,7 @@ def brief_files(brief_text):
         raise GuardError("brief has %d canonical FILES lines, expected exactly 1"
                          % len(canonical))
     raw = _FILES_RE.match(canonical[0]).group("paths")
-    items = [p.strip() for p in raw.split(",")]
+    items = [_files_item(p) for p in raw.split(",")]
     out = [exact_path(p) for p in items]
     folded = [norm_path(p) for p in items]
     if None in out or len(out) > 3 or len(folded) != len(set(folded)):
@@ -237,7 +294,10 @@ def scope_fence(diff_paths, allowed):
     and `allowed` must each be a sequence: a str, bytes, None or a non-iterable is
     a GuardError, never a crash and never a silent character-by-character walk. A
     non-str ENTRY in `allowed` is a GuardError (the caller passed a broken
-    allow-list); a non-str diff path is a violation named by its repr."""
+    allow-list); a non-str diff path is a violation named by its repr. ASCII-only
+    both ways (exact_path refuses anything else): a non-ASCII diff path — 'tools/fré.py',
+    or a 'tools/a.py' with an unspelled trailing U+00A0 — can never equal an
+    allowed ASCII path, so it is always a violation, never a silent fold."""
     ok = set()
     for a in _guard_seq("allowed", allowed):
         if type(a) is not str:
@@ -280,13 +340,17 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     lines are quoted output and never count, and neither does a zero-padded or
     non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Lines are the physical
     '\\n'-separated ones (see _lines), never splitlines() output: a body that
-    carries a line-breaking control character ('foo\\x0c```' used to hand the fence
-    reader a bare ``` closer and let the forged `CHECK 6: PASS` line under it
-    count) raises before any of this — see _guard_text. Fenced output never
+    carries an invisible/control/format character — any Zs/Zl/Zp/Cc/Cf character
+    outside ' \\t\\n\\r' ('foo\\x0c```' used to hand the fence reader a bare ```
+    closer and let the forged `CHECK 6: PASS` line under it count; a U+00A0 or
+    U+200B smuggles a line or a path that was never spelled) — raises before any
+    of this: see _guard_text. Fenced output never
     counts, under the same markdown rule `brief_files` uses (_Fences: closed only
-    by the same character, at least as long, with nothing after it; never closed
-    means the rest of the text is swallowed). No line for n is missing; a FAIL, a
-    verdict with no evidence tail, an unparsable verdict, or conflicting
+    by the same character, at least as long, with nothing after it, and indented
+    by at most 3 SPACES — a TAB-indented '```' is content, so a block opened
+    above it never closes; never closed means the rest of the text is swallowed).
+    No line for n is missing; a FAIL, a verdict with no evidence tail, an unparsable
+    verdict, or conflicting
     duplicates (the last line does not silently win) is failed. A body that is not
     a str, one over MAX_TEXT_CHARS, one carrying a control character, or a
     `required` argument that is not a non-empty tuple/list of ints in 1..99 all
@@ -327,7 +391,7 @@ def tool_preflight(required_tools=REQUIRED_TOOLS, which=shutil.which):
         raise GuardError("which must be callable")
     missing = []
     for tool in required_tools:
-        if type(tool) is not str or not tool.strip():
+        if type(tool) is not str or not tool.strip(" "):
             raise GuardError("bad tool name: %r" % (tool,))
         try:
             found = which(tool)
