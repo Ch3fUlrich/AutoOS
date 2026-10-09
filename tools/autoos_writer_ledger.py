@@ -37,6 +37,10 @@ KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_mod
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
 _FUTURE_SKEW = datetime.timedelta(minutes=5)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# A valid row is a handful of <=200-char fields; anything past this is garbage
+# (an unbounded append of junk bytes) and is skipped unread rather than
+# allocating a whole line's worth of text.
+_MAX_LINE_BYTES = 65536
 
 
 class LedgerError(ValueError):
@@ -50,6 +54,9 @@ def _open_ledger_ro(resolved):
     FIFOs (opened O_NONBLOCK so the open itself never blocks), directories,
     and symlinks (O_NOFOLLOW). A path that does not exist at all reads as
     an empty ledger (None) instead.
+
+    The handle is binary: decoding happens per line in load(), so one torn
+    or invalid-UTF-8 record cannot hide the rows written after it.
     """
     if not os.path.lexists(resolved):
         return None
@@ -104,7 +111,7 @@ def _open_ledger_ro(resolved):
             raise LedgerError("ledger %r is a symlink" % (resolved,))
 
     try:
-        return os.fdopen(fd, "r", encoding="utf-8")
+        return os.fdopen(fd, "rb")
     except Exception:
         try:
             os.close(fd)
@@ -354,6 +361,14 @@ def record(e, path=None):
 
 
 def load(path=None):
+    """Read the ledger, returning (rows, skipped).
+
+    Bytes are read and decoded one line at a time, with errors='replace': a
+    record torn mid multi-byte character, a line of binary garbage or a NUL
+    byte counts as one skipped row and the parse carries on, so the verdicts
+    written after the damage stay visible. Nothing that lives in the file can
+    raise out of here; only LedgerError from the open path can.
+    """
     rows, skip = [], 0
     resolved = path or default_path()
     h = _open_ledger_ro(resolved)
@@ -362,12 +377,17 @@ def load(path=None):
         return rows, skip
 
     with h:
-        for ln in h:
-            if not ln.strip():
+        for raw in h:
+            if not raw.strip():
+                continue
+
+            if len(raw) > _MAX_LINE_BYTES:
+                skip += 1
                 continue
 
             try:
-                j = json.loads(ln)
+                line = raw.decode("utf-8", "replace")
+                j = json.loads(line)
 
                 if type(j) is not dict:
                     raise ValueError("nope")

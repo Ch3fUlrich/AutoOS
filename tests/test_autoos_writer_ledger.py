@@ -181,6 +181,80 @@ class LedgerTests(unittest.TestCase):
         slot = ledger.rollup(mixed, NOW)["gemini-3.8-flash"]["code"]
         self.assertEqual(slot["rejected"], 3)
 
+    def test_torn_multibyte_tail_hides_nothing(self):
+        target = path()
+
+        with open(target, "wb") as fh:
+            fh.write(b'{"run_id":"\xe2\x82')
+
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual((len(rows), skipped), (2, 1))
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2"})
+        self.assertTrue(ledger.demoted(MODEL, "code", now=NOW, path=target))
+        self.assertEqual(ledger.rollup(target, NOW)["gemini-3.8-flash"]["code"]["rejected"], 2)
+
+    def test_invalid_utf8_midfile_keeps_later_rows(self):
+        target = path()
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+
+        with open(target, "ab") as fh:
+            fh.write(b'{"run_id":"\xff\xfe\xfd-broken"}\n')
+
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        ledger.record(entry(run_id="r3", ts=ago(3)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual((len(rows), skipped), (3, 1))
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2", "r3"})
+        self.assertTrue(ledger.demoted(MODEL, "code", now=NOW, path=target))
+
+    def test_nul_byte_lines_are_skipped_not_fatal(self):
+        target = path()
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+
+        with open(target, "ab") as fh:
+            fh.write(b"\x00\x01\x02\n")
+            fh.write(b'{"run_id":"r\x00n", "verdict":"rejected"}\n')
+
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual((len(rows), skipped), (2, 2))
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2"})
+
+    def test_very_long_garbage_line_is_skipped(self):
+        target = path()
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+
+        with open(target, "ab") as fh:
+            fh.write(b'{"a":"' + b"\xff" * (ledger._MAX_LINE_BYTES + 1024) + b"\n")
+
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual((len(rows), skipped), (2, 1))
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2"})
+
+    def test_cli_demoted_after_torn_multibyte_tail_exits_3(self):
+        state = tempfile.mkdtemp()
+        target = os.path.join(state, "writer-ledger.jsonl")
+
+        with open(target, "wb") as fh:
+            fh.write(b'{"run_id":"\xe2\x82')
+
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        os.environ["AUTOOS_STATE_DIR"] = state
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stdout(buf):
+                self.assertEqual(ledger.main(["demoted", MODEL, "code"]), 3)
+
+            self.assertEqual(buf.getvalue().strip(), "demoted")
+        finally:
+            del os.environ["AUTOOS_STATE_DIR"]
+
     def test_record_short_write_raises(self):
         target = path()
         real_write = os.write
