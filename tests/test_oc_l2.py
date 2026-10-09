@@ -828,8 +828,8 @@ class ResumeTest(unittest.TestCase):
     """AO-L2-RESUME (P1): heartbeat advance, stalled detection, resume, inbox.
 
     Offline: the same FakeServer stands in for `opencode serve`, and child
-    runs are plain directories holding the spawner's exit.json - no live host
-    state, no process scan.
+    runs are plain directories holding the spawner's job.json/exit.json - no
+    live host state, no process scan.
     """
 
     def setUp(self):
@@ -896,19 +896,25 @@ class ResumeTest(unittest.TestCase):
         return {"type": "assistant", "time": {"created": now, "updated": now},
                 "content": content}
 
-    def _record_child(self, name, run_id="run-t2-writer", rc=0,
-                      next_action="pick up the verdict", write_exit=True):
+    def _spawn_child(self, run_id="20261009-120000-writer-a1b2c3", rc=0,
+                       ended=None, cwd=None, started=None):
+        """A fake spawner run dir: job.json the way tools/autoos_agent_mcp.py
+        spawn() writes it (request.cwd = the spawner's cwd, run_id, started),
+        plus exit.json {rc, ended} once the child ended. rc=None means the
+        child is still running (no exit.json)."""
         run_dir = self.proj / "logs" / "agents" / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
-        if write_exit:
-            (run_dir / "exit.json").write_text(
-                json.dumps({"rc": rc, "ended": time.time()}), encoding="utf-8")
-        entry = {"run_id": run_id, "run_dir": str(run_dir),
-                 "next_action": next_action}
-        scratch = oc_l2.lane_dir(name)
-        (scratch / oc_l2.CHILD_RUNS_FILE).write_text(
-            json.dumps([entry], indent=2) + "\n", encoding="utf-8")
-        return entry
+        (run_dir / "job.json").write_text(json.dumps({
+            "id": run_id, "run_id": run_id,
+            "request": {"cwd": str(self.proj if cwd is None else cwd)},
+            "cwd": str(self.proj if cwd is None else cwd),
+            "started": time.time() if started is None else started,
+        }), encoding="utf-8")
+        if rc is not None:
+            (run_dir / "exit.json").write_text(json.dumps({
+                "rc": rc, "ended": time.time() if ended is None else ended,
+            }), encoding="utf-8")
+        return run_dir
 
     def _prompts_to(self, sid):
         return [r for r in self.srv.requests
@@ -963,13 +969,12 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []  # the L2 never picked the result up
-        self._record_child(result["lane"], rc=3,
-                           next_action="read the failure and re-plan")
+        self._spawn_child(rc=3)
         info = oc_l2.stalled(result["lane"])
         self.assertTrue(info["stalled"], info)
         self.assertEqual(info["reason"], "child-exited")
         self.assertEqual(info["rc"], 3)
-        self.assertEqual(info["next_action"], "read the failure and re-plan")
+        self.assertEqual(info["run_id"], "20261009-120000-writer-a1b2c3")
         out, src = oc_l2.cmd_status(result["lane"])
         self.assertEqual(out["verdict"], "stalled", out)
         self.assertEqual(src, 1)
@@ -978,20 +983,55 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
-        self._record_child(result["lane"], write_exit=False)
+        self._spawn_child(rc=None)  # job.json only: the child still works
         info = oc_l2.stalled(result["lane"])
         self.assertFalse(info["stalled"], info)
         out, src = oc_l2.cmd_status(result["lane"])
         self.assertEqual(out["verdict"], "silent", out)
         self.assertEqual(src, 1)
 
-    # resume: one wake prompt naming the next action, else a restart
-    def test_resume_sends_one_wake_prompt_naming_child_and_next_action(self):
+    def test_child_stall_follows_activity_not_just_exit(self):
+        # one test, three states: a running child never stalls; an exited
+        # child stalls an idle lane; a lane that spoke AFTER the child ended
+        # already picked the result up, so it is not stalled.
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
-        self._record_child(result["lane"], run_id="run-t2-writer", rc=0,
-                           next_action="pick up the verdict")
+        self._spawn_child(run_id="20261009-120000-writer-a1b2c3", rc=None)
+        self.assertFalse(oc_l2.stalled(result["lane"])["stalled"],
+                         "a running child is not a stall")
+        self._spawn_child(run_id="20261009-120100-writer-d4e5f6", rc=0,
+                          ended=time.time() - 60)
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "child-exited")
+        self.assertEqual(info["run_id"], "20261009-120100-writer-d4e5f6")
+        # the lane answers AFTER the child ended: the result is picked up.
+        self.srv.items = [self._assistant_item()]
+        self.assertFalse(oc_l2.stalled(result["lane"])["stalled"],
+                         "a lane active after the child ended is not stalled")
+
+    def test_child_from_another_checkout_or_era_is_not_mine(self):
+        # discovery, not a list: a run spawned from elsewhere, or before this
+        # lane started, is not this lane's child even with an exit.json.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        other = self.td / "elsewhere"
+        other.mkdir()
+        self._spawn_child(run_id="20261009-120000-foreign-a1b2c3", rc=0,
+                          cwd=other)
+        self._spawn_child(run_id="20261009-120000-stale-d4e5f6", rc=0,
+                          started=1.0)
+        info = oc_l2.stalled(result["lane"])
+        self.assertFalse(info["stalled"], info)
+
+    # resume: one wake prompt naming the child, else a restart
+    def test_resume_sends_one_wake_prompt_naming_child_and_result(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child(run_id="20261009-120000-writer-a1b2c3", rc=0)
         before = len(self._prompts_to(FAKE_SESSION_ID))
         out = oc_l2.cmd_resume(result["lane"])
         self.assertTrue(out["resumed"], out)
@@ -999,7 +1039,8 @@ class ResumeTest(unittest.TestCase):
         prompts = self._prompts_to(FAKE_SESSION_ID)[before:]
         self.assertEqual(len(prompts), 1, "exactly ONE wake prompt")
         text = prompts[0]["body"]["text"]
-        for needle in ("run-t2-writer", "rc=0", "pick up the verdict"):
+        for needle in ("20261009-120000-writer-a1b2c3", "rc=0",
+                       "autoos-agent result"):
             self.assertIn(needle, text, text)
 
     def test_resume_of_a_healthy_lane_is_a_noop(self):
@@ -1017,7 +1058,7 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
-        self._record_child(result["lane"])
+        self._spawn_child()
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli_rc = oc_l2.main(["resume", "--lane", result["lane"]])
@@ -1029,7 +1070,7 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
-        self._record_child(result["lane"])
+        self._spawn_child()
         real_request = oc_l2._request
 
         def flaky(port, method, path, body=None, password=""):
@@ -1052,7 +1093,7 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
-        self._record_child(result["lane"])
+        self._spawn_child()
         before = len(self._prompts_to(FAKE_SESSION_ID))
         out = oc_l2.cmd_inbox(result["lane"], "child finished, carry on")
         self.assertFalse(out["refused"], out)

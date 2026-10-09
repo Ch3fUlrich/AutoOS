@@ -197,10 +197,11 @@ python3 tools/oc_l2.py resume --lane l2-<repo>-<checkout-tag>-<phase>
 
 Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
 4 health timeout, 5 `UNATTENDED-REFUSED`. `status` adds one verdict of its own: `stalled` (exit 1) — the session is alive but its
-last turn ended in error, or it sits idle while a child run it recorded already exited. `resume` wakes a stalled lane once with
-the next action (`child <run-id> exited rc=N; read its result and continue with <next action>`), or stops and restarts it when
-the session is unrecoverable. Child state is the run's own `exit.json` under `logs/agents/<run>/` — never `pgrep -f`, which
-matches the caller's own argv. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
+last turn ended in error, or it sits idle while a child run it spawned already exited. `resume` wakes a stalled lane once with
+the next action (`child <run-id> exited rc=N; read its result with autoos-agent result and continue with <next action>`), or stops
+and restarts it when the session is unrecoverable. Children are discovered, not recorded: a lane's children are the run dirs under
+`<lane cwd>/logs/agents/` whose `job.json` names the lane's cwd and started at or after the lane, and child state is the run's own
+`exit.json` — never `pgrep -f`, which matches the caller's own argv. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
 `l2_stop`, `l2_inbox`), so an L1 coordinates phases without leaving its own session.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):

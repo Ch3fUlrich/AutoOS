@@ -126,9 +126,9 @@ L2_PERMISSIONS = {
 }
 
 SKILL = "unattended-orchestration"
-# AO-L2-RESUME (P1): where a lane's spawned workers are remembered (the stall
-# check reads their exit.json), and the footer line telling the L2 how to wait.
-CHILD_RUNS_FILE = "child_runs.json"
+# AO-L2-RESUME (P1): the footer line telling the L2 how to wait. Which runs
+# are its children is DISCOVERED from the spawner run records (job.json per
+# run under logs/agents/) - no recorder file is ever written.
 CHILD_WAIT_LINE = (
     "Wait on children via `autoos-agent status`/`result` (their run record "
     "under logs/agents/<run>/, exit.json when done) - never `pgrep -f`.")
@@ -453,10 +453,11 @@ def live_session(lane):
 # The canary writes heartbeat.json with turn 0 and nothing moved it, so a live
 # lane read as turn 0. Every status poll merges the session's turn count and
 # newest message ts forward; a lane whose last turn errored, or that sits idle
-# while a recorded child run already exited, is `stalled` (wake it with
-# `resume`, which restarts the lane when the session is gone). Child state is
-# the run's own exit.json under logs/agents/<run>/ - never `pgrep -f`, whose
-# pattern sits in the caller's own argv and matches itself, so it never ends.
+# while its newest spawned child already exited, is `stalled` (wake it with
+# `resume`, which restarts the lane when the session is gone). Children are
+# discovered from the spawner's own run records under logs/agents/<run>/
+# (job.json to match, exit.json when done) - never `pgrep -f`, whose pattern
+# sits in the caller's own argv and matches itself, so it never ends.
 
 def _session_messages(port, sid, password, limit=20):
     """Newest-first messages, [] when empty, None when unreachable (never raises)."""
@@ -559,38 +560,37 @@ def child_exited(run_dir):
     return out
 
 
-def _child_entries(lane):
-    """The lane's recorded workers ({run_id, run_dir, next_action}): the config
-    list plus the scratch file. Both are data the lane owns - never a scan."""
-    raw = list((lane.get("l2") or {}).get("child_runs") or [])
-    path = Path(lane.get("scratch_dir") or "") / CHILD_RUNS_FILE
-    if path.is_file():
+def _lane_children(lane):
+    """The lane's spawned workers, newest last, DISCOVERED not recorded: run
+    dirs under the spawner's agents root whose job.json names this lane's cwd
+    and started at or after the lane. Nothing writes a list of children."""
+    state = _read_state(lane.get("state_file") or "") or {}
+    start = 0.0
+    with contextlib.suppress(ValueError, TypeError):
+        start = datetime.fromisoformat(
+            str(state.get("started_utc") or "").replace("Z", "+00:00")).timestamp()
+    base = os.environ.get("AUTOOS_STATE_DIR")
+    root = (Path(base) if base else Path(lane.get("cwd") or ".") / "logs") / "agents"
+    want = os.path.realpath(lane.get("cwd") or "")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return []
+    found = []
+    for name in names:
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
-                raw += [e for e in loaded if isinstance(e, dict)]
-        except (OSError, ValueError):
-            pass
-    entries, seen = [], set()
-    for e in raw:
-        if not isinstance(e, dict):
+            job = json.loads((root / name / "job.json").read_text(encoding="utf-8"))
+            req = job.get("request") or {}
+            got = req.get("cwd") if isinstance(req, dict) else None
+            got = os.path.realpath(got or job.get("cwd") or "")
+            begun = job.get("started")
+            if got == want and isinstance(begun, (int, float)) and begun >= start:
+                found.append({"run_id": job.get("run_id") or job.get("id") or name,
+                              "run_dir": str(root / name), "started": float(begun)})
+        except (OSError, ValueError, AttributeError):
             continue
-        key = e.get("run_id") or e.get("run_dir")
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        rd = e.get("run_dir")
-        if rd:
-            p = Path(rd)
-            e = dict(e, run_dir=str(p if p.is_absolute()
-                                    else Path(lane.get("cwd") or ".") / p))
-        elif e.get("run_id"):
-            e = dict(e, run_dir=str(Path(lane.get("cwd") or ".") / "logs"
-                                    / "agents" / str(e["run_id"])))
-        else:
-            continue
-        entries.append(e)
-    return entries
+    found.sort(key=lambda e: e["started"])
+    return found
 
 
 def _last_turn_error(items):
@@ -643,16 +643,15 @@ def stalled(name):
                 "detail": detail, "session_id": state.get("session_id"),
                 "port": state.get("port")}
     _, newest = _turn_activity(items)
-    for entry in _child_entries(lane):
-        ex = child_exited(entry["run_dir"])
-        if not ex["exited"]:
-            continue
-        if newest is None or ex["ended"] is None or newest <= ex["ended"]:
-            return {"lane": name, "stalled": True, "reason": "child-exited",
-                    "run_id": entry.get("run_id"), "run_dir": entry["run_dir"],
-                    "rc": ex["rc"], "cancelled": ex["cancelled"],
-                    "next_action": entry.get("next_action"),
-                    "session_id": state.get("session_id"), "port": state.get("port")}
+    kids = _lane_children(lane)
+    kid = kids[-1] if kids else None
+    ex = child_exited(kid["run_dir"]) if kid else {"exited": False}
+    if kid and ex["exited"] and (newest is None or ex["ended"] is None
+                                 or newest <= ex["ended"]):
+        return {"lane": name, "stalled": True, "reason": "child-exited",
+                "run_id": kid["run_id"], "run_dir": kid["run_dir"],
+                "rc": ex["rc"], "cancelled": ex["cancelled"],
+                "session_id": state.get("session_id"), "port": state.get("port")}
     return {"lane": name, "stalled": False, "reason": "ok",
             "session_id": state.get("session_id"), "port": state.get("port")}
 
@@ -662,9 +661,9 @@ def _wake_text(info):
     nxt = info.get("next_action") or "the next phase step"
     if info.get("reason") == "child-exited":
         return ("Wake: child %s exited rc=%s; read its result with autoos-agent "
-                "status/result (logs/agents/%s/) and continue with %s. Reply with "
+                "result and continue with %s. Reply with "
                 "one short line of what you do next."
-                % (info.get("run_id"), info.get("rc"), info.get("run_id"), nxt))
+                % (info.get("run_id"), info.get("rc"), nxt))
     return ("Wake: your last turn ended in error (%s); read the error and continue "
             "with %s. Reply with one short line of what you do next."
             % (info.get("detail") or "unknown error", nxt))
@@ -1086,7 +1085,7 @@ def cmd_status(name):
     The poll also advances the heartbeat past the canary (turn count / newest
     message ts, merged forward), so a live serve with recent turns reads
     `live`, not `dead`. A live session whose last turn errored, or that sits
-    idle while a recorded child run already exited, reads `stalled` (exit 1):
+    idle while a spawned child run already exited, reads `stalled` (exit 1):
     wake it with `resume`."""
     name = check_lane(name)
     lane = read_config(name)
