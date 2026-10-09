@@ -2,7 +2,7 @@
 FILES (only these; <= 3 files, <= 200 lines changed): {{paths}}. Do not touch other lines/files.
 GOAL: {{goal}}.
 INVARIANTS (must hold on every path): {{invariants}}
-SECRETS: read keys only from {{keys_file}} (0600) like {{reference_playbook}}; never via environment:, script args, argv, logs or env vars.
+SECRETS: read keys only from {{keys_file}} (0600, READ-ONLY, do not edit) like {{reference_playbook}} (READ-ONLY, do not edit); never via environment:, script args, argv, logs or env vars.
 ALERTS/MAIL: at most once per {{entity}}; persist alerted state in {{state_path}}; test proves no repeat.
 EDIT METHOD: anchored edits; never rewrite a whole YAML file; keep indentation width {{indent}}; trailing newline.
 DONE = all of, pasted into REPORT:

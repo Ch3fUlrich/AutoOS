@@ -9,11 +9,12 @@ import autoos_brief as brief  # noqa: E402
 
 
 def base():
-    return {"task_id": "AO-1", "one_line": "fix mail", "paths": ["a.yml", "b.yml"],
+    return {"task_id": "AO-1", "one_line": "fix mail",
+            "paths": ["a.yml", "b.yml", "test_x.py"],
             "goal": "once-only mail", "invariants": "idempotent",
             "keys_file": "keys.yml", "reference_playbook": "ref.yml",
             "entity": "host", "state_path": "state.json", "indent": "2",
-            "files": "a.yml", "playbooks": "site.yml", "test_files": "test_x.py"}
+            "files": "a.yml", "playbooks": "b.yml", "test_files": "test_x.py"}
 
 
 class BriefTests(unittest.TestCase):
@@ -453,6 +454,9 @@ class BriefTests(unittest.TestCase):
         self.assertEqual(len(ok_path), 200)
         f = base()
         f["paths"] = [ok_path]
+        f["files"] = ok_path
+        f["playbooks"] = ok_path
+        f["test_files"] = ok_path
         brief.render_brief("ops", "R2", f)
         bad_path = "a" * 197 + ".yml"
         self.assertEqual(len(bad_path), 201)
@@ -490,6 +494,55 @@ class BriefTests(unittest.TestCase):
         f["paths"] = L(["a.yml"])
         with self.assertRaises(ValueError):
             brief.render_brief("ops", "R2", f)
+
+    def test_files_subset_fence_stray_refused(self):
+        for key, stray in (("files", "stray.yml"),
+                           ("playbooks", "stray_pb.yml"),
+                           ("test_files", "stray_test.py")):
+            with self.subTest(key=key, stray=stray):
+                f = base()
+                f[key] = stray
+                with self.assertRaises(ValueError) as cm:
+                    brief.render_brief("ops", "R2", f)
+                self.assertIn(stray, str(cm.exception))
+
+    def test_files_subset_fence_subset_accepted(self):
+        f = base()
+        f["paths"] = ["a.yml", "b.yml", "test_x.py"]
+        f["files"] = ["a.yml", "b.yml"]
+        f["playbooks"] = "b.yml"
+        f["test_files"] = "test_x.py"
+        out = brief.render_brief("ops", "R2", f)
+        self.assertIn("AO-1", out)
+        g = base()
+        g["paths"] = ["A.yml", "b.yml", "test_x.py"]
+        g["files"] = "a.yml"
+        g["playbooks"] = "B.YML"
+        g["test_files"] = "TEST_X.py"
+        self.assertIn("AO-1", brief.render_brief("ops", "R2", g))
+
+    def test_files_subset_fence_new_test_file(self):
+        f = base()
+        f["paths"] = ["a.yml", "b.yml", "test_new.py"]
+        f["files"] = "a.yml"
+        f["playbooks"] = "b.yml"
+        f["test_files"] = "test_new.py"
+        out = brief.render_brief("ops", "R2", f)
+        self.assertIn("test_new.py", out)
+
+    def test_files_subset_fence_14_distinct_refused(self):
+        f = base()
+        f["paths"] = ["p1.yml", "p2.yml", "p3.yml"]
+        f["files"] = ["f1.yml", "f2.yml", "f3.yml"]
+        f["playbooks"] = ["pb1.yml", "pb2.yml", "pb3.yml"]
+        f["test_files"] = ["t1.py", "t2.py", "t3.py"]
+        with self.assertRaises(ValueError) as cm:
+            brief.render_brief("ops", "R2", f)
+        self.assertIn("f1.yml", str(cm.exception))
+
+    def test_readonly_refs_marked(self):
+        ops = (ROOT / "templates" / "briefs" / "ops.md").read_text(encoding="utf-8")
+        self.assertIn("READ-ONLY, do not edit", ops)
 
     def test_rendered_lines_never_start_with_keyword_structural(self):
         import unicodedata

@@ -284,6 +284,18 @@ def render_brief(task_type, r_level, fields):
         if k in fields:
             single_norm[k] = _validate_single_path(
                 k, fields[k], allow_absolute=(k == "keys_file"))
+    # P2 files-subset fence: every file the writer is expected to change or
+    # add (files, playbooks, test_files) must be a member of paths, compared
+    # case-insensitively after the same normalisation. The union then stays
+    # <= 3 automatically. keys_file/reference_playbook stay read-only refs.
+    if "paths" in path_norm:
+        _allowed = {s.lower() for s in path_norm["paths"]}
+        for _k in ("files", "playbooks", "test_files"):
+            if _k in path_norm:
+                for _s in path_norm[_k]:
+                    if _s.lower() not in _allowed:
+                        raise ValueError(
+                            "%s entry %r not in paths" % (_k, _s))
     # Plain substring replacement only, single pass so a value holding
     # "{{x}}" is never re-expanded; no f-string eval, no format().
     shown = {}
