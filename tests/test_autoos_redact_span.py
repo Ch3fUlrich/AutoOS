@@ -21,6 +21,16 @@ Synthetic secrets only (AGENTS.md rule 1): the shapes are invented, and the
 ``sk-`` / PEM literals are split the way ``test_autoos_spawner.py`` splits them
 so this tracked file never carries a key shape as one string.
 
+AO-REDACT-SPAN P3 widened the same machine to the PGP armour shape — a longer
+label (``… PRIVATE KEY BLOCK``), ``Version:``/``Comment:`` headers, a blank
+separator and a ``=XXXX`` CRC line before the END marker — and raised
+``PEM_BODY_CAP`` for a keyring export. ``PgpArmorTests`` pins that; the survival
+rules above are re-pinned for the new label (an unterminated PGP mention still
+reaches its caller, and a PUBLIC label is not a secret marker), and
+``PemDocumentedLimitsTests`` pins the two limits the design accepts rather than
+closes: base64url is not PEM, and a worker's own ``VERDICT:`` line is never
+swallowed even when it carries key text.
+
     python3 tests/test_autoos_redact_span.py
 """
 import sys
@@ -58,6 +68,30 @@ def body_line(i: int) -> str:
 TAIL_SHORT = "YQ" + "=="
 TAIL_PAD = "abc" + "="
 TAIL_EQUALS = "=" * 3
+
+# AO-REDACT-SPAN P3 — PGP armour. RFC 4880 frames a secret keyring with the same
+# BEGIN/END markers as a PEM key but a longer label (the ` BLOCK` suffix), puts
+# `Version:`/`Comment:` armour headers plus a blank line between the marker and
+# the base64, and closes the body with a `=XXXX` CRC24 line. The old marker
+# patterns ended their label at `KEY`, so nothing of such a block ever matched
+# and the whole keyring printed in the clear. Split like every marker above, so
+# no key shape sits in this tracked file as one string.
+BEGIN_PGP = "-----BEGIN" + " PGP PRIVATE KEY BLOCK-----"
+END_PGP = "-----END" + " PGP PRIVATE KEY BLOCK-----"
+BEGIN_PGP_PUBLIC = "-----BEGIN" + " PGP PUBLIC KEY BLOCK-----"
+END_PGP_PUBLIC = "-----END" + " PGP PUBLIC KEY BLOCK-----"
+PGP_VERSION_HEADER = "Version: GnuPG v2"
+PGP_COMMENT_HEADER = "Comment: a synthetic shape, not a key"
+PGP_CRC_LINE = "=" + "aB3d"
+
+
+def pgp_key_lines(*extra_body):
+    """An armored secret keyring in the shape `gpg --export-secret-keys` writes:
+    marker, armour headers, the blank separator, base64 with its ragged last
+    line, the CRC line, the closing marker. `extra_body` inserts more lines."""
+    return ([BEGIN_PGP, PGP_VERSION_HEADER, PGP_COMMENT_HEADER, "",
+             body_line(1), body_line(2), TAIL_SHORT]
+            + list(extra_body) + [PGP_CRC_LINE, END_PGP])
 
 
 def rsa_key_lines(*extra_body):
@@ -156,6 +190,53 @@ class PemLeakTests(unittest.TestCase):
         self.assertEqual(red.count, 2)
 
 
+class PgpArmorTests(unittest.TestCase):
+    """AO-REDACT-SPAN P3: an armored PGP private key is the same leak with a
+    longer label — `... PRIVATE KEY BLOCK` — and body lines the RSA-shaped
+    matcher never saw coming (armour headers, a blank separator, a CRC tail)."""
+
+    def test_a_full_pgp_block_is_masked_with_its_headers_and_crc(self):
+        out, red = stream(*pgp_key_lines(), "tail of the report", "VERDICT: ACCEPT")
+        for probe in (BEGIN_PGP, END_PGP, PGP_VERSION_HEADER, PGP_COMMENT_HEADER,
+                      PGP_CRC_LINE, body_line(1), body_line(2), TAIL_SHORT):
+            self.assertNotIn(probe, out, "armored key material leaked:\n" + out)
+        self.assertIn("tail of the report", out, "the report after the key was lost")
+        self.assertIn("VERDICT: ACCEPT", out)
+        self.assertEqual(red.count, 1, "one keyring counts once")
+
+    def test_a_pgp_block_with_a_subkey_block_in_it_is_masked_whole(self):
+        # an export of a primary key plus a subkey: the inner CRC line, a blank
+        # and more base64 all sit under the one open BEGIN.
+        lines = pgp_key_lines(body_line(3), PGP_CRC_LINE, "", PGP_VERSION_HEADER,
+                              body_line(4), TAIL_PAD)
+        out, red = stream(*lines, "after the keyring")
+        for probe in (BEGIN_PGP, END_PGP, body_line(3), body_line(4),
+                      PGP_CRC_LINE, PGP_VERSION_HEADER, TAIL_PAD):
+            self.assertNotIn(probe, out, "armored key material leaked:\n" + out)
+        self.assertIn("after the keyring", out)
+        self.assertEqual(red.count, 1)
+
+    def test_an_unterminated_pgp_mention_keeps_its_prose_and_its_verdict(self):
+        # P3 must not re-open the original hole with the new label: a fixture
+        # list that quotes the marker still reaches the caller whole.
+        out, _red = stream("the detector fixture is '" + BEGIN_PGP + "'",
+                           "which is a marker, not a key",
+                           "VERDICT: ACCEPT")
+        self.assertIn("which is a marker, not a key", out)
+        self.assertIn("VERDICT: ACCEPT", out)
+        self.assertNotIn(BEGIN_PGP, out)
+
+    def test_a_pgp_public_key_label_is_not_taken_for_a_private_one(self):
+        # widening the label must not widen what counts as secret: only a
+        # PRIVATE label is key material, a public block is ordinary text.
+        out, red = stream(BEGIN_PGP_PUBLIC, body_line(1), "the report goes on",
+                          END_PGP_PUBLIC)
+        self.assertIn(BEGIN_PGP_PUBLIC, out, "a public label is not a secret marker")
+        self.assertIn(body_line(1), out)
+        self.assertIn("the report goes on", out)
+        self.assertEqual(red.count, 0, out)
+
+
 class PemSurvivalTests(unittest.TestCase):
     """What the fix must NOT cost: an unterminated mention still lets the
     report through, VERDICT included."""
@@ -232,6 +313,23 @@ class PemSpanTests(unittest.TestCase):
         self.assertIn("the tail of the report", out)
         self.assertIn("VERDICT: ACCEPT", out)
 
+    def test_a_block_that_fills_the_body_cap_is_masked_whole(self):
+        # P3 raised the backstop to 256 for the armored keyring shape, and the
+        # bound is read from the constant: a block that runs exactly to the cap
+        # still ends at its OWN END marker and counts once — it must not give up
+        # one line early and print the closing marker and whatever follows it.
+        self.assertGreaterEqual(redact.PEM_BODY_CAP, 256,
+                                "the cap is below an armored keyring export")
+        lines = ([BEGIN] + [body_line(i) for i in range(1, redact.PEM_BODY_CAP + 1)]
+                 + [END])
+        out, red = stream(*lines, "the tail after the key", "VERDICT: ACCEPT")
+        for i in (1, redact.PEM_BODY_CAP // 2, redact.PEM_BODY_CAP):
+            self.assertNotIn(body_line(i), out, "a body line inside the cap leaked")
+        self.assertNotIn(END, out)
+        self.assertIn("the tail after the key", out)
+        self.assertIn("VERDICT: ACCEPT", out)
+        self.assertEqual(red.count, 1, "a cap-full block is still ONE key")
+
     def test_a_verdict_line_ends_pem_mode_and_keeps_its_own_masking(self):
         red = redact.Redactor()
         self.assertEqual(red.text(BEGIN + "\n"), MASK + "\n")
@@ -273,6 +371,40 @@ class PemSpanTests(unittest.TestCase):
         self.assertNotIn(BEGIN, out, "the marker itself is masked")
         self.assertNotIn("sk-test-abcdef123456", out)
         self.assertGreaterEqual(red.count, 2)
+
+
+class PemDocumentedLimitsTests(unittest.TestCase):
+    """P3: the two limits the span machine accepts. They are written down in
+    ``tools/autoos_redact.py`` next to the code that holds them and pinned here,
+    so neither one arrives as a surprise to whoever reads the swallow next."""
+
+    # RFC 7468 permits only STANDARD base64 in a PEM body line, so a line in the
+    # URL-safe alphabet (`-` and `_` where `+` and `/` belong) is body-shaped to
+    # a base64 reader but is NOT PEM, and PEM mode ends on it.
+    URLSAFE_BODY = "MIIBogIBAAJBALRm9DaFhwmB-QKB8CgYQK0_AAAAAAAAAAAAAAA"
+
+    def test_limit_a_a_base64url_line_is_not_body_and_ends_the_swallow(self):
+        out, _red = stream(BEGIN, body_line(1), self.URLSAFE_BODY, body_line(2))
+        self.assertNotIn(body_line(1), out, "the body before the odd line is swallowed")
+        self.assertIn(self.URLSAFE_BODY, out,
+                      "base64url ends PEM mode: it is not the RFC 7468 alphabet")
+        self.assertIn(body_line(2), out, "and the lines after it are ordinary lines")
+
+    def test_limit_b_key_text_appended_to_a_verdict_line_survives_the_verdict(self):
+        # The verdict is never swallowed, so a worker that puts key body on that
+        # one line after an open BEGIN keeps it in the clear — and the caller
+        # still gets its verdict. What a per-line pattern does name is masked.
+        red = redact.Redactor()
+        self.assertEqual(red.text(BEGIN + "\n"), MASK + "\n")
+        out = red.text("VERDICT: ACCEPT tail=" + BODY
+                       + " token=" + "abc123def456" + "\n")
+        self.assertIn("VERDICT: ACCEPT", out, "the verdict reaches the caller")
+        self.assertIn(BODY, out,
+                      "the documented limit: plain base64 on a verdict line survives")
+        self.assertNotIn("token=" + "abc123def456", out,
+                         "a value a pattern names is masked on that line too")
+        # the block is closed: the next body-shaped line is an ordinary line
+        self.assertEqual(red.text(BODY + "\n"), BODY + "\n")
 
 
 if __name__ == "__main__":
