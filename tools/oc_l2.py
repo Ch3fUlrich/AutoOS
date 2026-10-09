@@ -559,7 +559,9 @@ def note_activity(lane):
     """Merge the session's turn count / newest message ts into heartbeat.json.
 
     The turn only moves forward; only the turn/last-activity keys are touched.
-    Best-effort: returns (turn, last_message_ts) or None, never raises."""
+    The activity stamp is the newest MESSAGE's ts, not the moment of the poll -
+    see the note in the body. Best-effort: returns (turn, last_message_ts) or
+    None, never raises."""
     try:
         state = _read_state(lane.get("state_file") or "")
         if not isinstance(state, dict):
@@ -576,7 +578,13 @@ def note_activity(lane):
         data["turn"] = max(int(data.get("turn") or 0), count)
         if newest is not None:
             data["last_message_ts"] = newest
-            data["last_activity_ts"] = _now_ts()
+            # AO-L2-RESUME (P1): the stamp follows the transcript, never the
+            # polling. It used to be `now`, so every status/inbox poll refreshed
+            # a lane that had said nothing for an hour and an external monitor
+            # could not tell a working lane from a stalled one off this key at
+            # all. A poll that sees no newer message leaves both stamps where
+            # they were, which is the point: no new message, no activity.
+            data["last_activity_ts"] = newest
         _write_heartbeat(lane, data)
         return data["turn"], data.get("last_message_ts")
     except (OSError, ValueError):
@@ -1196,7 +1204,8 @@ def cmd_inbox(name, text):
     # AO-L2-RESUME: a stalled-but-alive lane cleared its canary, so it is
     # nudged like any running lane - the refusal above stays for lanes that
     # never cleared it. The flag tells the caller the nudge is a wake, and a
-    # nudge precedes a turn, so the heartbeat moves with it.
+    # wake that lands is recorded below, so the stall it covered reads
+    # already-woken to whatever asks next instead of buying a second prompt.
     info = _poll_stalled(name, out)
     out["stalled"] = bool(info and info.get("stalled"))
     if info and out["stalled"]:
@@ -1213,6 +1222,16 @@ def cmd_inbox(name, text):
         return out
     out["nudged"] = status == 200
     if out["nudged"] and out.get("stalled"):
+        # AO-L2-RESUME (P1): the nudge IS the wake for this stall, so it is
+        # recorded like `resume`'s own, under the same key. Without it a caller
+        # that had just delivered an inbox line to a stalled lane went on
+        # reading the stall as unwoken, and the `resume` it sent a moment later
+        # posted a second prompt for the one turn the lane had already been
+        # handed. Only a nudge that LANDED is a wake: a refusal (HTTP != 200)
+        # records nothing, and the stall stays wakeable. `stalled()` never
+        # reports an already-woken stall here (it answers `already-woken`,
+        # `stalled: false`), so this branch cannot overwrite a live marker.
+        _record_wake(lane, info)
         out["detail"] = "stalled (%s) - nudged session %s to wake it" \
             % (out.get("stalled_reason"), state["session_id"])
     else:

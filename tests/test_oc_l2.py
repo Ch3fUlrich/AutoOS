@@ -984,6 +984,32 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(out["verdict"], "live", out)
         self.assertEqual(src, 0)
 
+    # (1b) AO-L2-RESUME P1: the activity stamp follows the transcript, not the polling
+    def test_a_poll_that_sees_no_new_message_does_not_advance_the_activity_stamp(self):
+        # What an external monitor reads `last_activity_ts` for is staleness:
+        # a lane that has said nothing for an hour has to LOOK like it. The bug
+        # stamped `now` on every poll, so a stalled lane stayed as fresh as a
+        # working one for as long as anything kept asking it.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item(ts=time.time() - 3600)]
+        oc_l2.cmd_status(result["lane"])
+        hb = self._heartbeat()
+        self.assertEqual(hb["last_activity_ts"], hb["last_message_ts"], hb)
+        self.assertLess(hb["last_activity_ts"], time.time() - 3000,
+                        "the stamp is the newest message's, not the poll's: %r" % hb)
+        oc_l2.cmd_status(result["lane"])
+        self.assertEqual(self._heartbeat()["last_activity_ts"],
+                         hb["last_activity_ts"],
+                         "a poll with no new message refreshed the stamp")
+        # ... and one real new message moves it, to that message's own time.
+        newest = time.time() - 60
+        self.srv.items = [self._assistant_item(ts=newest)] + self.srv.items
+        oc_l2.cmd_status(result["lane"])
+        after = self._heartbeat()
+        self.assertGreater(after["last_activity_ts"], hb["last_activity_ts"], after)
+        self.assertEqual(after["last_activity_ts"], after["last_message_ts"], after)
+
     # (2) stalled: a dead turn, or idle while a recorded child already exited
     def test_last_turn_error_is_stalled(self):
         result, rc = self._start()
@@ -1576,7 +1602,46 @@ class ResumeTest(unittest.TestCase):
         self.assertIn("child finished, carry on",
                       Path(out["inbox"]).read_text(encoding="utf-8"))
 
-    # (3b) a poll's decorations report what failed instead of hiding it
+    # (3b) AO-L2-RESUME P1: an inbox nudge IS the wake for the stall it covered
+    def test_an_inbox_nudge_of_a_stalled_lane_covers_that_stall_for_resume(self):
+        # F2 says one wake per stall; the nudge posts a prompt, so it owes the
+        # same marker `resume` would have left. Without it the caller that sent
+        # the line and then asked for a resume handed the lane a second prompt
+        # for the one stall it had already been told about.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child()
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_inbox(result["lane"], "child finished, carry on")
+        self.assertTrue(out["nudged"], out)
+        self.assertTrue(out["stalled"], out)
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before + 1)
+        hb = self._heartbeat()
+        self.assertIsInstance(hb.get("last_wake_ts"), float, hb)
+        self.assertEqual(hb.get("last_wake_key"),
+                         "child-exited:20261009-120000-writer-a1b2c3", hb)
+        second = oc_l2.cmd_resume(result["lane"])
+        self.assertFalse(second["resumed"], second)
+        self.assertTrue(second["already_woken"], second)
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before + 1,
+                         "the stall the inbox nudge woke was woken again")
+
+    def test_a_nudge_of_a_healthy_lane_leaves_no_wake_marker(self):
+        # The marker answers for one stall. A lane that was not stuck and merely
+        # got an inbox line must not carry one, or its first real stall of the
+        # same key would read already-woken and never be woken.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+        out = oc_l2.cmd_inbox(result["lane"], "one more thing")
+        self.assertTrue(out["nudged"], out)
+        self.assertFalse(out["stalled"], out)
+        hb = self._heartbeat()
+        self.assertNotIn("last_wake_ts", hb, hb)
+        self.assertNotIn("last_wake_key", hb, hb)
+
+    # (3c) a poll's decorations report what failed instead of hiding it
     def test_a_status_poll_names_a_stall_probe_that_failed_rather_than_passing(self):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)

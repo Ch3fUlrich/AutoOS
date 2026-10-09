@@ -211,9 +211,12 @@ child state is the run's own `exit.json` — never `pgrep -f`, which matches the
 the last tool error, retry the failed step once, then continue the phase plan`) — `stalled` puts that on the verdict as `next_action`
 so the wake, the answer and the `status` detail all say the same thing — and the three outcomes are distinguishable in that one JSON
 object.
-ONE wake per stall (F2): the prompt is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
+ONE wake per stall (F2): the wake is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
 while it stands — no turn activity newer than the wake and the 10-minute wake window unexpired — `stalled` reads `already-woken` and
-a second `resume` is a no-op instead of a prompt per poll. The marker belongs to the session that wrote it: `start` clears every
+a second `resume` is a no-op instead of a prompt per poll. An `inbox` nudge that lands on a stalled lane records that same marker
+under the same key (P1): the nudge posts a prompt, so it IS the wake for the stall it named, and the `resume` sent straight after it
+answers `already_woken` with no second prompt — a nudge that only the append landed (a refused HTTP status) records nothing, and the
+stall stays wakeable. The marker belongs to the session that wrote it: `start` clears every
 `last_wake_*` key from the heartbeat the canary merged forward (and a restart goes through `start`), because a new session reading
 its predecessor's marker would report its first stall of the same key `already-woken` and never be woken. Only the markers go — the
 turn count merges forward and the canary record stays.
@@ -234,6 +237,10 @@ breaks a tie), so an errored turn the lane already spoke past is history, not a 
 probe and a heartbeat merge as decoration: what the lane state can legitimately fail with (`L2Error`, `ServerDown`, `OSError`,
 `ValueError`) is named in the answer as `stalled_error` / `activity_error` and the poll carries on with its ordinary verdict, while
 anything else raises — a bug in the probe is not reported as a lane that is simply not stalled.
+Both polls also merge the transcript into `heartbeat.json`, and the stamps there are the messages' own, never the moment of the
+poll (P1): `last_message_ts` and `last_activity_ts` both carry the newest progress item's timestamp, so a poll that sees no new
+message leaves the lane exactly as stale as it was — which is what an external monitor watching one needs to read a stalled lane off
+the file at all, instead of a fresh `last_activity_ts` per ask.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
 
@@ -273,6 +280,8 @@ is set, else `<lane dir>/inbox.md`, the path the append reports — and the live
 `POST /api/session/{id}/prompt` the launcher uses for its first prompt. Only a session that proved itself guarded is woken: a lane
 whose recorded canary never denied, or that was never prompted, is refused (`refused: true`, exit 2) while the line stays in the
 inbox. A stalled-but-alive lane cleared its canary, so it is nudged, not refused. The append happens whether or not the nudge lands, and the answer says which.
+A nudge that lands on a stalled lane is that stall's wake and records the `heartbeat.json` marker `resume` would have left, so the
+`resume` after it is a no-op rather than a second prompt (F2, P1).
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), one directory per lane with the generated config
 (0600 — it names host paths), the scratch dirs, the composed prompt and the lane inbox. **Nothing is merged into
