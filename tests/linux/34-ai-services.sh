@@ -4438,11 +4438,16 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
 fi
 
-if it "aistack: the omniroute U2 stage patches at build time and fails the build unless 12 patched then 12 skipped"; then
+if it "aistack: vertex the omniroute U2 stage patches at build time, fails the build unless 12 patched then 12 skipped, and checks the v2 guard bytes"; then
     # autoos3 (D-626): the runtime rootfs is read-only and has no python, so the reviewed
     # tools/apply-vertex-patch.py runs in a python build stage over a copy of the chunks. The
     # stage must stop the build on a patcher error or on any other count (renamed chunks after
     # a FROM bump), must not pipe (no pipefail in /bin/sh), and must drop the backups.
+    # D-859 (lane VERTEX-GUARD): the counts alone cannot tell the v2 guard from the v1 one it
+    # replaces - both install at the same 12 anchors and both report "12 patched". The stage
+    # therefore also asserts the guard's own bytes, so a patcher that regressed to the v1 text
+    # (contents.length>1, which never pops a lone model turn) fails the build instead of
+    # shipping a gateway that still 400s.
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     grep -qE '^FROM python:[0-9.]+-slim[a-z-]*@sha256:[0-9a-f]{64} AS vertex-patch$' "$f" || { ok=0; echo "no digest-pinned python stage named vertex-patch" >&2; }
@@ -4450,15 +4455,36 @@ if it "aistack: the omniroute U2 stage patches at build time and fails the build
     grep -qx 'RUN set -e; \\' "$f" || { ok=0; echo "the patch RUN does not start with set -e" >&2; }
     grep -qF "grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt" "$f" || { ok=0; echo "run 1 count is not asserted" >&2; }
     grep -qF "grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt" "$f" || { ok=0; echo "run 2 (idempotent) count is not asserted" >&2; }
+    # the v2 guard's own bytes: 12 refill sites and no v1 guard text, over the 6 named chunks
+    grep -qF 'got=b.count(' "$f" || { ok=0; echo "the refill-site count is not computed" >&2; }
+    grep -qF "contents.length>1" "$f" || { ok=0; echo "the v1 guard text is not asserted absent" >&2; }
+    grep -qF 'text:\"Continue.\"' "$f" || { ok=0; echo "the refill marker is not what the count looks for" >&2; }
+    grep -qF "sys.exit(0 if got==12 and not v1 else 1)" "$f" || { ok=0; echo "the guard check does not fail the build" >&2; }
+    names_check="$(grep -oE "_08_y1bx|_18ct13i|_1j_edf1|_1luyz1c|_15ose6x|_1xkpq2s" "$f" | sort -u | wc -l)"
+    [[ "$names_check" == "6" ]] || { ok=0; echo "the guard check reads $names_check of the 6 patched chunks" >&2; }
     grep -qF 'rm -f /chunks/*.autoos-backup-*' "$f" || { ok=0; echo "patch backups are not removed" >&2; }
     stage="$(sed -n '/^FROM python:.* AS vertex-patch$/,/^FROM /p' "$f")"
     # a single `|` after the patcher call is a pipe; `||` (the error branch) is not
     grep -qE 'apply-vertex-patch\.py[^|]*\|([^|]|$)' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
+    # the byte check must sit between the idempotency grep and the backup cleanup: after the
+    # cleanup the files it reads are gone, before the runs it would judge the unpatched text
+    check_line="$(grep -nF "sys.exit(0 if got==12 and not v1 else 1)" "$f" | cut -d: -f1)"
+    skip_line="$(grep -nF "grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt" "$f" | cut -d: -f1)"
+    rm_line="$(grep -nF 'rm -f /chunks/*.autoos-backup-*' "$f" | cut -d: -f1)"
+    (( ${check_line:-0} > ${skip_line:-0} && ${check_line:-0} < ${rm_line:-0} )) \
+        || { ok=0; echo "the guard byte check does not run after run 2 and before the cleanup" >&2; }
     [[ "$(grep -E '^FROM ' "$f" | tail -n1)" == "FROM base" ]] || { ok=0; echo "the final stage is not FROM base" >&2; }
     grep -qx 'COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/' "$f" || { ok=0; echo "the patched chunks are not copied back" >&2; }
     grep -qE '^      additional_contexts:$' "$AISTACK/compose.yml" && grep -qE '^        tools: \.\./\.\./\.\./tools$' "$AISTACK/compose.yml" \
         || { ok=0; echo "compose.yml does not pass the tools build context" >&2; }
     if (( ok )); then pass; else fail "the omniroute U2 build stage contract is broken"; fi
+fi
+
+if it "vertex guard: pops the whole model tail, refills emptied contents, upgrades v1 in place, fails loudly on anything else (unit tests)"; then
+    # tests/test_vertex_trailing_turn_patch.py is hermetic (D-852): fixture copies of the 6
+    # compiled chunks, node --check plus a shape harness over the patched handler bodies, and
+    # pwsh over a fake package tree where it is installed. It never builds or runs a container.
+    out="$(python3 tests/test_vertex_trailing_turn_patch.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then

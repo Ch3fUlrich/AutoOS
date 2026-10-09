@@ -28,13 +28,20 @@ RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-f
 USER node
 
 # U2 (autoos3, D-626): Vertex "Requests ending with a model turn are not supported" (400).
-# tools/apply-vertex-patch.py (reviewed, lane F1-vertex) strips a trailing role:"model"
-# content at the 12 mergeConsecutiveSameRoleContents call sites in 6 compiled chunks.
+# tools/apply-vertex-patch.py (reviewed, lane F1-vertex) strips the trailing role:"model"
+# contents at the 12 mergeConsecutiveSameRoleContents call sites in 6 compiled chunks.
 # The runtime image has a read-only rootfs and no python, so the patch runs at BUILD time
 # in a python stage over a copy of the chunks, which are copied back. The build FAILS
 # unless the first run reports exactly 12 patched / 0 skipped / 0 errors and a second run
 # 0 patched / 12 skipped (idempotent) - chunk names are build-specific, so a FROM bump
 # that renames them breaks the build instead of shipping an unpatched gateway.
+# v2 (lane VERTEX-GUARD, D-859): the v1 guard tested `contents.length>1`, so a request
+# whose contents is ONE lone model turn was never stripped - the shape that reproduces the
+# 400. v2 pops every trailing model turn and refills an emptied contents with one synthetic
+# user turn (configuration/omniroute/vertex-trailing-turn-README.md). The site count is the
+# same 12 because the anchors did not move, only the guard inserted at them, so the counts
+# above stay - which is why the build also asserts the guard's own bytes below: a patcher
+# that silently regressed to the v1 text would still report 12 patched.
 FROM python:3.12-slim-bookworm@sha256:7753c33391fc9f01d1984375bf375eb6686d52ba10db6043a86634a5ccf90dcf AS vertex-patch
 COPY --from=base /app/.build/next/server/chunks /chunks
 COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py
@@ -45,6 +52,7 @@ RUN set -e; \
     grep -qx 'Done: 12 patched, 0 skipped, 0 errors' /run1.txt; \
     python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }; cat /run2.txt; \
     grep -qx 'Done: 0 patched, 12 skipped, 0 errors' /run2.txt; \
+    python3 -c "import sys; names=['_08_y1bx','_18ct13i','_1j_edf1','_1luyz1c','_15ose6x','_1xkpq2s']; b=''.join(open('/chunks/'+n+'._.js',encoding='utf-8').read() for n in names); got=b.count('text:\"Continue.\"'); v1='contents.length>1&&\"model\"===' in b; print('v2 guard check: refill sites=%d (need 12), v1 text present=%s (need False)'%(got,v1)); sys.exit(0 if got==12 and not v1 else 1)"; \
     rm -f /chunks/*.autoos-backup-*
 
 FROM base
