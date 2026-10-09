@@ -13,7 +13,7 @@ def base():
             "paths": ["a.yml", "b.yml", "test_x.py"],
             "goal": "once-only mail", "invariants": "idempotent",
             "keys_file": "keys.yml", "reference_playbook": "ref.yml",
-            "entity": "host", "state_path": "state.json", "indent": "2",
+            "entity": "host", "state_path": "a.yml", "indent": "2",
             "files": "a.yml", "playbooks": "b.yml", "test_files": "test_x.py"}
 
 
@@ -457,6 +457,7 @@ class BriefTests(unittest.TestCase):
         f["files"] = ok_path
         f["playbooks"] = ok_path
         f["test_files"] = ok_path
+        f["state_path"] = ok_path
         brief.render_brief("ops", "R2", f)
         bad_path = "a" * 197 + ".yml"
         self.assertEqual(len(bad_path), 201)
@@ -536,9 +537,28 @@ class BriefTests(unittest.TestCase):
         f["files"] = ["f1.yml", "f2.yml", "f3.yml"]
         f["playbooks"] = ["pb1.yml", "pb2.yml", "pb3.yml"]
         f["test_files"] = ["t1.py", "t2.py", "t3.py"]
+        f["state_path"] = "p1.yml"
         with self.assertRaises(ValueError) as cm:
             brief.render_brief("ops", "R2", f)
         self.assertIn("f1.yml", str(cm.exception))
+
+    def test_state_path_outside_paths_refused(self):
+        f = base()
+        f["state_path"] = "stray_state.json"
+        with self.assertRaises(ValueError) as cm:
+            brief.render_brief("ops", "R2", f)
+        self.assertIn("stray_state.json", str(cm.exception))
+
+    def test_state_path_inside_paths_accepted(self):
+        f = base()
+        f["paths"] = ["a.yml", "b.yml", "test_x.py"]
+        f["state_path"] = "b.yml"
+        out = brief.render_brief("ops", "R2", f)
+        self.assertIn("b.yml", out)
+        g = base()
+        g["paths"] = ["A.yml", "b.yml", "test_x.py"]
+        g["state_path"] = "a.YML"
+        self.assertIn("AO-1", brief.render_brief("ops", "R2", g))
 
     def test_readonly_refs_marked(self):
         ops = (ROOT / "templates" / "briefs" / "ops.md").read_text(encoding="utf-8")
