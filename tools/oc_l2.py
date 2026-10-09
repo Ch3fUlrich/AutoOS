@@ -682,32 +682,55 @@ def _already_woken(heartbeat, info, newest):
     return (time.time() - ts) < _WAKE_COOLDOWN_S
 
 
-def _last_turn_error(items):
-    """Did the newest turn end in error? (True, detail) or (False, "").
+def _newest_progress_item(items):
+    """The transcript's NEWEST progress item, or None when it holds none.
 
-    A dead turn is finish=error, or a tool item (top-level or in parts/content)
-    whose state is error - the shapes the transcript carries."""
+    `_session_messages` asks the server for `order=desc`, so the first progress
+    item is the newest and that position is the tie-break - exactly what
+    `oc_l1_serve._newest_progress_ts` assumes. Where the items do carry
+    timestamps the largest wins even if the transcript came back oldest-first:
+    `stalled()` reads the newest turn out of `_turn_activity` the same way, and
+    the two must name one and the same turn."""
+    chosen, chosen_ts = None, None
     for item in items:
         if not oc_l1_serve._is_progress(item):
             continue
-        cands = [item]
-        for key in ("parts", "content"):
-            parts = item.get(key)
-            if isinstance(parts, list):
-                cands += [p for p in parts if isinstance(p, dict)]
-        for cand in cands:
-            state = cand.get("state")
-            status = (state.get("status") if isinstance(state, dict) else None) \
-                or cand.get("status")
-            if status in _ERROR_STATUSES:
-                err = (state.get("error") if isinstance(state, dict) else None) \
-                    or cand.get("error") or ""
-                if isinstance(err, dict):
-                    err = err.get("message") or ""
-                return True, str(err)[:200] or "tool %s error" % (cand.get("tool") or "?")
-            if cand.get("finish") == "error" or item.get("finish") == "error":
-                return True, "finish=error"
+        ts = oc_l1_serve._item_ts(item)
+        if chosen is None:
+            chosen, chosen_ts = item, ts
+        elif ts is not None and (chosen_ts is None or ts > chosen_ts):
+            chosen, chosen_ts = item, ts
+    return chosen
+
+
+def _last_turn_error(items):
+    """Did the newest turn end in error? (True, detail) or (False, "").
+
+    Exactly ONE item is judged: `_newest_progress_item`'s. A dead turn is
+    finish=error, or a tool item (top-level or in parts/content) whose state is
+    error - the shapes the transcript carries. An older errored turn is not a
+    stall: the lane spoke again after it, and scanning back through the
+    transcript would wake it for an error it already worked past."""
+    item = _newest_progress_item(items)
+    if item is None:
         return False, ""
+    cands = [item]
+    for key in ("parts", "content"):
+        parts = item.get(key)
+        if isinstance(parts, list):
+            cands += [p for p in parts if isinstance(p, dict)]
+    for cand in cands:
+        state = cand.get("state")
+        status = (state.get("status") if isinstance(state, dict) else None) \
+            or cand.get("status")
+        if status in _ERROR_STATUSES:
+            err = (state.get("error") if isinstance(state, dict) else None) \
+                or cand.get("error") or ""
+            if isinstance(err, dict):
+                err = err.get("message") or ""
+            return True, str(err)[:200] or "tool %s error" % (cand.get("tool") or "?")
+        if cand.get("finish") == "error" or item.get("finish") == "error":
+            return True, "finish=error"
     return False, ""
 
 
@@ -752,6 +775,33 @@ def stalled(name):
     return dict(base, stalled=True, **verdict)
 
 
+# What the lane-state layer can legitimately fail with on a poll: a malformed
+# lane name or config, an unreadable state/heartbeat file, a server that stopped
+# answering mid-request. Anything else that reaches a poll is a bug in the probe
+# and is allowed to surface - the bare `except Exception` these calls carried
+# swallowed it and the poll just looked like a lane that was not stalled.
+_POLL_PROBE_ERRORS = (L2Error, ServerDown, OSError, ValueError)
+
+
+def _poll_stalled(name, out):
+    """`stalled()` for a status/inbox poll: the verdict, or None with the reason
+    named in `out` when the probe failed on something the lane state can do."""
+    try:
+        return stalled(name)
+    except _POLL_PROBE_ERRORS as e:
+        out["stalled_error"] = type(e).__name__
+        return None
+
+
+def _poll_activity(lane, out):
+    """`note_activity()` for a poll, which is decoration on the verdict: an
+    expected failure is named in `out`, a bug in it is not swallowed."""
+    try:
+        note_activity(lane)
+    except _POLL_PROBE_ERRORS as e:
+        out["activity_error"] = type(e).__name__
+
+
 def _wake_text(info):
     """The one short wake prompt: it names the next action, not the brief.
 
@@ -778,6 +828,26 @@ def _record_wake(lane, info):
     for key in ("run_id", "detail"):
         if info.get(key) is not None:
             hb["last_wake_" + key] = _safe_text(info[key])
+    with contextlib.suppress(OSError):
+        _write_heartbeat(lane, hb)
+
+
+def _clear_wakes(lane):
+    """Drop F2's wake markers, and only those, from the heartbeat.
+
+    A marker says "this stall was woken for" about the SESSION that wrote it. A
+    restarted lane - by `resume` or by a stop and start over the same scratch
+    dir - is a new session reading the heartbeat.json the canary merges, so a
+    stale marker answers for a stall that has not happened yet: the first stall
+    under the same key reads `already-woken` and never gets a wake. The turn
+    count is left alone - it only ever merges forward, and zeroing it here would
+    set the lane back."""
+    hb = _read_heartbeat(lane)
+    stale = [k for k in hb if k.startswith("last_wake")]
+    if not stale:
+        return                      # nothing to clear, and no file to create
+    for key in stale:
+        del hb[key]
     with contextlib.suppress(OSError):
         _write_heartbeat(lane, hb)
 
@@ -1100,17 +1170,11 @@ def cmd_inbox(name, text):
     # nudged like any running lane - the refusal above stays for lanes that
     # never cleared it. The flag tells the caller the nudge is a wake, and a
     # nudge precedes a turn, so the heartbeat moves with it.
-    try:
-        info = stalled(name)
-    except Exception:
-        info = {"stalled": False}
-    out["stalled"] = bool(info.get("stalled"))
-    if info.get("stalled"):
+    info = _poll_stalled(name, out)
+    out["stalled"] = bool(info and info.get("stalled"))
+    if info and out["stalled"]:
         out["stalled_reason"] = info.get("reason")
-    try:
-        note_activity(lane)
-    except Exception:
-        pass
+    _poll_activity(lane, out)
     password = os.environ.get(lane.get("password_env") or ENV_PW)
     try:
         status, _ = _request(state["port"], "POST",
@@ -1192,6 +1256,11 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
     cfg = write_config(lane)
 
     rc, output = run_oc_l1("start", name, cfg)
+    # The canary MERGES heartbeat.json, so a wake marker from the lane this one
+    # replaces (a restart, or a stop and start over the same scratch dir)
+    # survived the launch into the new session. Nothing of this session was
+    # woken for yet.
+    _clear_wakes(lane)
     state = _read_state(lane["state_file"]) or {}
     canary = state.get("canary") if isinstance(state.get("canary"), dict) else {}
     result = {
@@ -1246,10 +1315,7 @@ def cmd_status(name):
     if isinstance(canary, dict):
         out["canary"] = {"denied": canary.get("denied"), "detail": canary.get("detail"),
                          "ts": canary.get("ts")}
-    try:
-        note_activity(lane)
-    except Exception:
-        pass
+    _poll_activity(lane, out)
     if verdict in ("silent", "dead"):
         # A live serve with recent turns is live, not dead: the launcher's
         # verdict off a stale poll does not overrule the session itself.
@@ -1263,10 +1329,7 @@ def cmd_status(name):
                 verdict, rc = "live", 0
                 out["verdict"], out["exit_code"] = verdict, rc
     if verdict in ("live", "silent"):
-        try:
-            info = stalled(name)
-        except Exception:
-            info = None
+        info = _poll_stalled(name, out)
         if info and info.get("stalled"):
             out["verdict"], out["exit_code"] = "stalled", 1
             out["stalled"] = info

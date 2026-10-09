@@ -877,10 +877,13 @@ class ResumeTest(unittest.TestCase):
         # leave one holding a port and sleeping for 300 s past the suite.
         for pid in self._pids:
             if pid and pid_alive(pid):
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    pass
+                # killpg/SIGKILL are POSIX-only: the group is already gone on
+                # Windows, where the stop path killed the process by pid.
+                if os.name != "nt":
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError, OSError):
+                        pass
                 oc_l2._wait_gone(pid, 5.0)
         for k, v in self._envs.items():
             if v is None:
@@ -907,8 +910,8 @@ class ResumeTest(unittest.TestCase):
         lane = oc_l2.read_config(self._lane_name())
         return json.loads(Path(lane["heartbeat_file"]).read_text(encoding="utf-8"))
 
-    def _assistant_item(self, error=None, finish_error=False):
-        now = int(time.time())
+    def _assistant_item(self, error=None, finish_error=False, ts=None):
+        now = int(time.time()) if ts is None else int(ts)
         if finish_error:
             return {"type": "assistant", "finish": "error",
                     "time": {"created": now, "updated": now},
@@ -998,6 +1001,62 @@ class ResumeTest(unittest.TestCase):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = [self._assistant_item(finish_error=True)]
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "last-turn-error")
+
+    # (2b) exactly ONE item decides: the newest turn, in either transcript order
+    def _two_turn_transcript(self, newest_error):
+        """A healthy turn and an errored turn, in both orders the server can
+        hand the transcript back: `order=desc`, which `_session_messages` asks
+        for (newest FIRST), and oldest-first. The turns are distinguished by
+        their timestamps, not by where they sit, so both orders must give the
+        same verdict."""
+        now = time.time()
+        newest = (self._assistant_item(error="boom: cannot verify", ts=now)
+                  if newest_error else self._assistant_item(ts=now))
+        older = (self._assistant_item(ts=now - 60) if newest_error
+                 else self._assistant_item(error="boom: cannot verify", ts=now - 60))
+        return [newest, older], [older, newest]
+
+    def _asc_transcript(self, newest_error):
+        """The same pair handed back oldest-first, the order the desc request
+        does not ask for and the one that used to decide the verdict alone."""
+        return self._two_turn_transcript(newest_error)[1]
+
+    def test_newest_errored_turn_stalls_whatever_the_healthy_one_before_it(self):
+        for order in self._two_turn_transcript(newest_error=True):
+            is_err, detail = oc_l2._last_turn_error(order)
+            self.assertTrue(is_err, order)
+            self.assertIn("boom", detail)
+
+    def test_an_error_the_lane_already_recovered_from_is_not_the_last_turn(self):
+        # the bug this pins: an older errored turn is history, not a stall -
+        # judging more than the newest item reads a lane that is working as dead.
+        for order in self._two_turn_transcript(newest_error=False):
+            self.assertEqual(oc_l2._last_turn_error(order), (False, ""), order)
+
+    def test_a_transcript_that_carries_no_usable_timestamp_orders_desc(self):
+        # Nothing to order by: the first progress item wins, which is the newest
+        # under the order=desc the request asks for.
+        stamp = time.time()
+        bad = self._assistant_item(error="boom", ts=stamp)
+        good = self._assistant_item(ts=stamp)
+        self.assertTrue(oc_l2._last_turn_error([bad, good])[0])
+        self.assertEqual(oc_l2._last_turn_error([good, bad]), (False, ""))
+
+    def test_an_older_error_under_a_healthy_newest_turn_does_not_stall_the_lane(self):
+        # end to end: the fake hands back exactly the list the test sets, so the
+        # transcript order alone used to decide the verdict.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = self._asc_transcript(newest_error=False)
+        info = oc_l2.stalled(result["lane"])
+        self.assertFalse(info["stalled"], info)
+        self.assertEqual(info["reason"], "ok")
+        out, _src = oc_l2.cmd_status(result["lane"])
+        self.assertNotEqual(out["verdict"], "stalled", out)
+        self.srv.items = self._asc_transcript(newest_error=True)
         info = oc_l2.stalled(result["lane"])
         self.assertTrue(info["stalled"], info)
         self.assertEqual(info["reason"], "last-turn-error")
@@ -1253,6 +1312,59 @@ class ResumeTest(unittest.TestCase):
         self.assertIn(live["verdict"], ("live", "silent", "stalled"), live)
         oc_l2.cmd_stop(result["lane"])
 
+    # (2e2) a restart belongs to a NEW session: F2's marker must not carry over
+    def test_a_restart_clears_the_wake_marker_the_old_session_left(self):
+        # The wake in heartbeat.json covered the stall of the session that just
+        # died. Left standing, it answers for the new session too: its first
+        # stall under the same key reads `already-woken` and is never woken.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        run_id = "20261009-120000-writer-a1b2c3"
+        self._spawn_child()
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        hb = self._heartbeat()
+        self.assertIn("last_wake_ts", hb)
+        self.assertEqual(hb["last_wake_key"], "child-exited:%s" % run_id)
+        self.assertEqual(hb["last_wake_run_id"], run_id)
+        turn_before = hb["turn"]
+
+        self.srv.session_outcome = "failed"
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["restarted"], out)
+        self._pids.append(out["start"]["pid"])
+        self.srv.session_outcome = "succeeded"
+
+        hb = self._heartbeat()
+        self.assertEqual([k for k in hb if k.startswith("last_wake")], [], hb)
+        self.assertEqual(hb["turn"], turn_before,
+                         "the wake markers go; the turn count is merge-forward, not reset")
+        self.assertTrue(hb["canary"]["denied"], "the canary record survives the restart")
+        # the same child stall of the same key is a new stall for the new session
+        self._spawn_child(run_id=run_id, started=time.time())
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "child-exited")
+        self.assertEqual(info["run_id"], run_id)
+        oc_l2.cmd_stop(result["lane"])
+
+    def test_a_plain_start_clears_a_wake_marker_the_scratch_dir_still_holds(self):
+        # stop/start reuses the scratch dir, so the same stale marker would
+        # survive an l2_stop and the manual restart that follows it.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        hb = self._heartbeat()
+        hb["last_wake_ts"] = time.time()
+        hb["last_wake_key"] = "child-exited:gone-run"
+        oc_l2._write_heartbeat(oc_l2.read_config(result["lane"]), hb)
+        self.assertIn("last_wake_ts", self._heartbeat())
+        self.assertEqual(oc_l2.cmd_stop(result["lane"])["stopped"], True)
+        again, rc = self._start()
+        self.assertEqual(rc, 0, again)
+        self.assertEqual([k for k in self._heartbeat() if k.startswith("last_wake")],
+                         [], self._heartbeat())
+
     def test_resume_leaves_a_healthy_lane_that_refused_the_wake_alone(self):
         # 409 busy is the server answering - the lane is up and working. Only a
         # connection failure or a gone session earns a restart; anything less
@@ -1355,6 +1467,64 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before + 1)
         self.assertIn("child finished, carry on",
                       Path(out["inbox"]).read_text(encoding="utf-8"))
+
+    # (3b) a poll's decorations report what failed instead of hiding it
+    def test_a_status_poll_names_a_stall_probe_that_failed_rather_than_passing(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+
+        def boom(name):
+            raise OSError("the lane's state file will not read")
+
+        with mock.patch.object(oc_l2, "stalled", side_effect=boom):
+            out, _src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out.get("stalled_error"), "OSError", out)
+        self.assertNotEqual(out["verdict"], "stalled", out)
+
+    def test_an_inbox_nudge_names_a_stall_probe_that_failed_and_still_delivers(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child()
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+
+        def boom(name):
+            raise OSError("the lane's state file will not read")
+
+        with mock.patch.object(oc_l2, "stalled", side_effect=boom):
+            out = oc_l2.cmd_inbox(result["lane"], "carry on")
+        self.assertTrue(out["nudged"], out)
+        self.assertIs(out["stalled"], False, out)
+        self.assertEqual(out.get("stalled_error"), "OSError", out)
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before + 1)
+
+    def test_a_bug_in_the_stall_probe_is_not_swallowed_by_the_poll(self):
+        # narrowing is the whole point: what the lane-state layer can raise is
+        # reported, a TypeError is a defect in the probe and has to surface.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+
+        def bug(name):
+            raise TypeError("no attribute 'reason'")
+
+        with mock.patch.object(oc_l2, "stalled", side_effect=bug):
+            with self.assertRaises(TypeError):
+                oc_l2.cmd_status(result["lane"])
+
+    def test_a_bug_in_the_heartbeat_merge_is_not_swallowed_either(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+        with mock.patch.object(oc_l2, "note_activity",
+                               side_effect=AttributeError("'NoneType' has no")):
+            with self.assertRaises(AttributeError):
+                oc_l2.cmd_status(result["lane"])
+        with mock.patch.object(oc_l2, "note_activity",
+                               side_effect=OSError("disk went away")):
+            out, _src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out.get("activity_error"), "OSError", out)
 
     # (4) exit.json shapes, the pgrep guard, and the footer line
     def test_child_exited_reads_exit_json(self):

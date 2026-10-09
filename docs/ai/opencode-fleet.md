@@ -210,7 +210,11 @@ child state is the run's own `exit.json` — never `pgrep -f`, which matches the
 with autoos-agent result and continue with <next action>`), and the three outcomes are distinguishable in that one JSON object.
 ONE wake per stall (F2): the prompt is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
 while it stands — no turn activity newer than the wake and the 10-minute wake window unexpired — `stalled` reads `already-woken` and
-a second `resume` is a no-op instead of a prompt per poll. A RESTART is for a lane that cannot take a prompt at all (F3): the
+a second `resume` is a no-op instead of a prompt per poll. The marker belongs to the session that wrote it: `start` clears every
+`last_wake_*` key from the heartbeat the canary merged forward (and a restart goes through `start`), because a new session reading
+its predecessor's marker would report its first stall of the same key `already-woken` and never be woken. Only the markers go — the
+turn count merges forward and the canary record stays.
+A RESTART is for a lane that cannot take a prompt at all (F3): the
 session is gone (`live_session` answers nothing, or ended `failed`/`interrupted`) or the connection itself failed, and then `resume`
 stops and starts the lane from its stored config and reports `restarted`. An HTTP status that is merely a refusal (409 busy is the
 server answering a working lane) reports `wake_rejected` with `http_status` and leaves the lane, its state file and its process
@@ -218,6 +222,12 @@ alone — a healthy lane is never restarted for being busy. What the record and 
 capped line before it is interpolated (F6), so an error string with a newline cannot end the wake sentence and start an instruction
 of its own. The five are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`, `l2_stop`, `l2_resume`, `l2_inbox`), so an
 L1 coordinates phases without leaving its own session.
+
+`stalled` judges exactly one turn of the transcript: the newest progress item, decided by its timestamp (`order=desc` position only
+breaks a tie), so an errored turn the lane already spoke past is history, not a stall. The `status` and `inbox` polls treat a stall
+probe and a heartbeat merge as decoration: what the lane state can legitimately fail with (`L2Error`, `ServerDown`, `OSError`,
+`ValueError`) is named in the answer as `stalled_error` / `activity_error` and the poll carries on with its ordinary verdict, while
+anything else raises — a bug in the probe is not reported as a lane that is simply not stalled.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
 
