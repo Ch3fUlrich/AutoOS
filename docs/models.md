@@ -491,6 +491,11 @@ want short prompts (TPM caps), sambanova legs are $5-credit overflow.
 omniroute simulate --combo l1-orchestrator            # shows the resolved fallback tree
 ```
 
+The ref must name an artefact that EXISTS — a decisions-log line, a QUESTIONS/ANSWERS
+item, a worker record — not merely look like one; `--go-offline` waives the lookup and
+logs it. What each shape is checked against is in
+[the GO reference](../configuration/README.md#the-go-reference).
+
 ```powershell
 .\configuration\omniroute\apply.ps1
 .\configuration\omniroute\apply.ps1 -DryRun

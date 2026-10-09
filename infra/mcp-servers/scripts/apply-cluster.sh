@@ -8,6 +8,7 @@
 # snapshot path is printed so you can restore.
 #
 # Run from infra/mcp-servers:  ./scripts/apply-cluster.sh --go <ref> --go-sha <sha>
+#                              (add --go-offline only when this host cannot read the GO's artefact)
 set -euo pipefail
 
 # ─── Fleet rule D-825: converge the live store only on an explicit GO ─────────
@@ -15,12 +16,17 @@ set -euo pipefail
 # omnigraph store and restarts the server — a shared-infra change every time it
 # runs. So it refuses without --go <ref> (a judge run id YYYYMMDD-HHMMSS-…, a
 # decision id D-<n> or an OS-<n> item) and --go-sha <sha> equal to this
-# checkout's HEAD, so the GO names the exact code being applied. Inspect the
-# diff by hand; there is no dry run here to reach.
-APC_DIR="$(cd "$(dirname "$0")" && pwd)"              # .../infra/mcp-servers/scripts
-APC_ROOT="$(cd "$APC_DIR/../.." && pwd)"             # repo root
+# checkout's HEAD, so the GO names the exact code being applied. The reference is
+# then proved to EXIST through `_go_gate.py verify-ref` — the one implementation
+# every gate on this rule calls — and a ref that names no artefact, or a source
+# that cannot be read, refuses. --go-offline is the operator's declared exception
+# and logs `GO-OFFLINE: <ref> unverified`. Inspect the diff by hand; there is no
+# dry run here to reach.
+APC_SH_DIR="$(cd "$(dirname "$0")" && pwd)"              # .../infra/mcp-servers/scripts
+APC_ROOT="$(cd "$APC_SH_DIR/../.." && pwd)"             # repo root
 GO_REF=""
 GO_SHA=""
+GO_OFFLINE=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --go)
@@ -31,6 +37,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo "apply-cluster.sh: --go-sha needs this checkout's HEAD sha." >&2; exit 2; }
             GO_SHA="$2"; shift ;;
         --go-sha=*) GO_SHA="${1#--go-sha=}" ;;
+        --go-offline) GO_OFFLINE=1 ;;
         *) echo "apply-cluster.sh: unknown argument '$1'." >&2; exit 2 ;;
     esac
     shift
@@ -40,10 +47,6 @@ done
     echo "  apply + server restart mutate shared infrastructure; pass --go <ref> --go-sha <sha>," >&2
     echo "  where <ref> is a judge run id (YYYYMMDD-HHMMSS-…), D-<n> or OS-<n>, and <sha> is" >&2
     echo "  'git rev-parse HEAD' of this checkout." >&2
-    exit 2
-}
-[[ "$GO_REF" =~ ^([0-9]{8}-[0-9]{6}-[^[:space:]]+|D-[0-9]+|OS-[0-9]+)$ ]] || {
-    echo "apply-cluster.sh: --go '$GO_REF' is not a judge run id (YYYYMMDD-HHMMSS-…), D-<n> or OS-<n>." >&2
     exit 2
 }
 [ -n "$GO_SHA" ] || {
@@ -59,6 +62,31 @@ CHECKOUT_HEAD="$(git -C "$APC_ROOT" rev-parse HEAD 2>/dev/null || true)"
     echo "apply-cluster.sh: --go-sha '$GO_SHA' is not this checkout's HEAD '$CHECKOUT_HEAD'." >&2
     exit 2
 }
+# The reference's SHAPE and its EXISTENCE are one implementation, not two: the
+# `_go_gate.py verify-ref` command next to this script, which every gate on this rule
+# calls. Checking only the shape was the bug — `--go D-1` matched the regex while no
+# D-1 decision existed anywhere. The CLI refuses on a shape that is not a judge
+# reference, on an id naming no artefact, and on a source it cannot read; its refusal
+# text goes to stderr untouched, so only the exit code is handled here. A refusal
+# prints no GO line, and nothing below it has run.
+_go_gate="$APC_SH_DIR/_go_gate.py"
+_go_offline_arg=""
+[ "$GO_OFFLINE" = "1" ] && _go_offline_arg="--offline"
+if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$_go_gate" ]; then
+    # No way to read the artefact tree at all — an unverifiable GO is not a GO,
+    # unless the operator said so with --go-offline, which is logged as such.
+    if [ "$GO_OFFLINE" != "1" ]; then
+        echo "apply-cluster.sh: cannot verify --go '$GO_REF' — python3 and $_go_gate are what read the GO's artefact tree (fleet rule D-825)." >&2
+        echo "  Install python3, or pass --go-offline to run with the ref logged as unverified." >&2
+        exit 2
+    fi
+    echo "GO-OFFLINE: $GO_REF unverified"
+elif ! _go_verified="$(python3 "$_go_gate" verify-ref --tool apply-cluster.sh --ref "$GO_REF" \
+            --root "$APC_ROOT" ${_go_offline_arg:+"$_go_offline_arg"})"; then
+    exit 2
+elif [ -n "$_go_verified" ]; then
+    printf '%s\n' "$_go_verified"
+fi
 echo "GO: $GO_REF sha=$CHECKOUT_HEAD"
 
 here="$(cd "$(dirname "$0")/.." && pwd)"        # infra/mcp-servers

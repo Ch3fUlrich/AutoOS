@@ -1584,6 +1584,181 @@ if it "D-825: --go on a --dry-run is echoed and stays read-only"; then
     if (( ok )); then pass; else fail "--go on a --dry-run was refused or mutated state"; fi
 fi
 
+# ─── Fleet rule D-825 part 2: the named artefact must EXIST, not just look right ──
+# A format check alone let `--go D-1` through: it matches the shape and names nothing.
+# The gate now proves the ref against the sources it comes from — a D-<n> line in the
+# routing decisions log (or the consolidated DECISIONS.md), an OS-<n> item in the
+# routing QUESTIONS.md / ANSWERS.md, a worker record for a judge run id — and refuses
+# when the id is absent OR the source cannot be read. `--go-offline` is the operator's
+# declared exception: it proceeds and logs `GO-OFFLINE: <ref> unverified` first.
+# The sources are a host's own files, so each case below points AUTOOS_DECISIONS_LOG /
+# AUTOOS_ROUTING_DIR / AUTOOS_WORKERS_DIR at a throwaway tree it writes; the suite-wide
+# default is tests/fixtures/go-gate (exported by tests/run-tests.sh).
+# _gate_ref_run <dir> [KEY=VAL ...] -- <apply args...>: apply.sh against the prune
+# stand-ins with EXTRA env first (the ref sources), the args verbatim. Prints merged
+# stdout+stderr, returns apply's exit code.
+_gate_ref_run() {
+    local d="$1" pid port out rc
+    shift
+    local envs=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
+    [[ "${1:-}" == "--" ]] && shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        env ${envs[@]+"${envs[@]}"} bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    kill "$pid" 2>/dev/null
+    printf '%s' "$out"
+    return "$rc"
+}
+
+if it "D-825: apply refuses a --go decision id that is in no decisions log"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    printf '| D-825 | all L1s | a live step runs only on an explicit GO |\n' >"$d/log.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-9999 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a --go naming no artefact exited 0" >&2; }
+    [[ "$out" == *"names no decision"* ]] || { ok=0; echo "no ref-existence refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line for an artefact that does not exist: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply accepted a --go that names nothing"; fi
+fi
+
+if it "D-825: a decision id matches exactly — D-82 is not D-825"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    # One log line, one id: D-825. The substring D-82 sits inside it, so a plain
+    # substring search would let D-82 through; the boundary must stop it.
+    printf '| D-825 | all L1s | a live step runs only on an explicit GO |\n' >"$d/log.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-82 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "D-82 matched the D-825 line" >&2; }
+    [[ "$out" == *"names no decision"* ]] || { ok=0; echo "no exact-id refusal: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-825 --go-sha "$sha")"; rc=$?
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO: D-825 sha=$sha" ]] \
+        || { ok=0; echo "the id that IS in the log was refused: [$first_line]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the exact-id match is wrong in one direction"; fi
+fi
+
+if it "D-825: an OS-<n> item is checked against QUESTIONS.md / ANSWERS.md"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    mkdir -p "$d/routing"
+    printf '## OS-1 — where does the gate run?\n\nBefore any gateway call.\n' >"$d/routing/QUESTIONS.md"
+    printf '## OS-10 — answered in the answers file\n\nclose\n' >"$d/routing/ANSWERS.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-1 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: OS-1 sha=$sha" ]] \
+        || { ok=0; echo "an OS item present in QUESTIONS.md was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-10 --go-sha "$sha")"; rc=$?
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: OS-10 sha=$sha" ]] \
+        || { ok=0; echo "an OS item present only in ANSWERS.md was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-9 --go-sha "$sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no OS"* ]] \
+        || { ok=0; echo "an absent OS item was accepted: rc=$rc out=$out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the OS-<n> source check is wrong"; fi
+fi
+
+if it "D-825: a judge run id needs a worker record (json or agent dir)"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    mkdir -p "$d/logs/workers" "$d/logs/agents/20261009-070000-goref-agent"
+    printf '{"id":"20261009-064139-goref-fix"}\n' >"$d/logs/workers/20261009-064139-goref-fix.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-064139-goref-fix --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: 20261009-064139-goref-fix sha=$sha" ]] \
+        || { ok=0; echo "a run id with logs/workers/<id>.json was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-070000-goref-agent --go-sha "$sha")"; rc=$?
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: 20261009-070000-goref-agent sha=$sha" ]] \
+        || { ok=0; echo "a run id with only logs/agents/<id>/ was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-000000-nosuchrun --go-sha "$sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no worker record"* ]] \
+        || { ok=0; echo "a run id with no record was accepted: rc=$rc out=$out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the run-id worker-record check is wrong"; fi
+fi
+
+if it "D-825: an unreadable source refuses — no artefact tree, no GO"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/decisions-log.md" -- \
+        --go D-825 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "an unreadable decisions log let the run through" >&2; }
+    [[ "$out" == *"cannot read the routing decisions log"* ]] \
+        || { ok=0; echo "no unreadable-source refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ran live on a GO it could not verify"; fi
+fi
+
+if it "D-825: --go-offline proceeds and logs the unverified ref first"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/decisions-log.md" -- \
+        --go D-825 --go-sha "$sha" --go-offline)"; rc=$?
+    ok=1
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO-OFFLINE: D-825 unverified" ]] \
+        || { ok=0; echo "the first line was not the offline log: [$first_line]" >&2; }
+    [[ "$out" == *"GO: D-825 sha=$sha"* ]] || { ok=0; echo "the gate refused offline: $out" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the offline run never reached the live store" >&2; }
+    # --go-offline still cannot carry a bad sha: the offline flag waives the
+    # artefact lookup, not the sha the GO has to name.
+    out="$(_gate_ref_run "$d" -- --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] \
+        || { ok=0; echo "--go-offline waived the sha check: rc=$rc out=$out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go-offline did not proceed, log, or keep the sha bar"; fi
+fi
+
+if it "D-825: --go-offline is echoed on a read-only run and gates nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --dry-run --go-offline)"; rc=$?
+    ok=1
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "no dry-run banner: $out" >&2; }
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--go-offline hit the gate on a dry run: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go-offline was gated on a read-only run"; fi
+fi
+
+# ─── apply.sh refuses an unknown flag rather than ignoring it ────────────────
+# The arg loop had no `*` arm, so `apply.sh --bogus` parsed as "no flags given" and
+# ran on — silently dropping whatever the flag was meant to prevent (apply-cluster.sh
+# has refused unknown arguments from the start). A typo'd --go-sha or a stale
+# --apply would be swallowed exactly that way.
+if it "apply.sh: an unknown flag is refused with rc 2 and runs nothing"; then
+    out="$(bash "$ROOT/configuration/omniroute/apply.sh" --bogus 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 2 ]] || { ok=0; echo "rc=$rc (expected 2)" >&2; }
+    [[ "$out" == *"unknown argument '--bogus'"* ]] \
+        || { ok=0; echo "no unknown-flag refusal: $out" >&2; }
+    [[ "$out" != *"This is a dry run"* && "$out" != *"GO:"* ]] \
+        || { ok=0; echo "the run went on past the parser: $out" >&2; }
+    if (( ok )); then pass; else fail "apply.sh accepted an unknown flag"; fi
+fi
+
 # ─── apply.sh --drift: live combos vs combos.json ───────────────────────────
 # Nothing today says whether the live combos equal the file (OR1b). --drift
 # reads `omniroute --output json combo list` ({"combos":[{"name","models":[

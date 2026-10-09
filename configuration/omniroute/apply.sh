@@ -32,7 +32,7 @@
 # (see the Combos loop).
 #
 #   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift] \
-#                                      [--go <ref> --go-sha <sha>]
+#                                      [--go <ref> --go-sha <sha>] [--go-offline]
 #
 # --probe sends one tiny request per combo and reports what answered
 # (spends a few hundred tokens; skipped under --dry-run).
@@ -44,10 +44,20 @@
 # gateway (any run that is neither --dry-run nor --drift, --probe included)
 # refuses with exit 2 unless it carries an explicit judge GO: <ref> names the
 # approving artefact (a judge run id YYYYMMDD-HHMMSS-…, a decision id D-<n>, or
-# an OS-<n> item) and <sha> equals `git rev-parse HEAD` of this checkout, so the
-# GO covers the exact code being applied. --dry-run and --drift need no GO and
-# are unchanged; a --go on a read-only run is harmless and only echoed. The
-# first line a gated run prints is `GO: <ref> sha=<sha>`.
+# an OS-<n> item) AND <sha> equals `git rev-parse HEAD` of this checkout, so the
+# GO covers the exact code being applied. Naming the right SHAPE is not enough:
+# the gate also proves the ref EXISTS — a line with that exact id in the routing
+# decisions log ($AUTOOS_DECISIONS_LOG, else $AUTOOS_ROUTING_DIR/docs/decisions-log.md
+# or .../DECISIONS.md), the same in QUESTIONS.md/ANSWERS.md for an OS-<n> item, a
+# worker record ($AUTOOS_WORKERS_DIR/<id>.json or its sibling agents/<id>/, else
+# logs/workers and logs/agents under this checkout) for a run id. A source that is
+# missing or unreadable refuses too; --go-offline is the operator's declared
+# exception and logs `GO-OFFLINE: <ref> unverified` first (the sha is still
+# verified). The lookup is infra/mcp-servers/scripts/_go_gate.py, one implementation
+# every gate on this rule calls. --dry-run and --drift need no GO and are unchanged;
+# a --go on a read-only run is harmless and only echoed. The first line a gated run
+# prints is `GO: <ref> sha=<sha>`, or `GO-OFFLINE: …` above it.
+# Unknown arguments are refused with exit 2 — a typo'd flag must not read as "none".
 # Requires python3 for JSON parsing and the probe's HTTP calls.
 set -euo pipefail
 
@@ -65,6 +75,7 @@ PROBE=0
 DRIFT=0
 GO_REF=""
 GO_SHA=""
+GO_OFFLINE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY=1 ;;
@@ -78,6 +89,13 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "apply.sh: --go-sha needs this checkout's HEAD sha ('git rev-parse HEAD')." >&2; exit 2; }
             GO_SHA="$2"; shift ;;
         --go-sha=*) GO_SHA="${1#--go-sha=}" ;;
+        --go-offline) GO_OFFLINE=1 ;;
+        # An unknown flag must never read as "no flags given": without this arm
+        # `apply.sh --bogus` fell through to a live run, and a typo'd --go-sha or a
+        # stale --apply was swallowed exactly that way. apply-cluster.sh has always
+        # refused unknown arguments; apply.sh now does the same.
+        *) echo "apply.sh: unknown argument '$1' (--dry-run --probe --drift --go <ref> --go-sha <sha> --go-offline are the flags)." >&2
+           exit 2 ;;
     esac
     shift
 done
@@ -101,10 +119,6 @@ if [[ $DRY -ne 1 && $DRIFT -ne 1 ]]; then
         echo "  To inspect without changing anything: --dry-run or --drift." >&2
         exit 2
     }
-    [[ "$GO_REF" =~ ^([0-9]{8}-[0-9]{6}-[^[:space:]]+|D-[0-9]+|OS-[0-9]+)$ ]] || {
-        echo "apply.sh: --go '$GO_REF' is not a judge run id (YYYYMMDD-HHMMSS-…), a decision id (D-<n>) or an OS-<n> item." >&2
-        exit 2
-    }
     [[ -n "$GO_SHA" ]] || {
         echo "apply.sh: refusing to change live gateway state without --go-sha <sha> (fleet rule D-825)." >&2
         echo "  <sha> must equal 'git rev-parse HEAD' of this checkout, so the GO names the exact code applied." >&2
@@ -121,6 +135,31 @@ if [[ $DRY -ne 1 && $DRIFT -ne 1 ]]; then
         echo "  The GO must name the exact sha of the code being applied (fleet rule D-825)." >&2
         exit 2
     }
+    # The reference's SHAPE and its EXISTENCE are one implementation, not two:
+    # infra/mcp-servers/scripts/_go_gate.py `verify-ref`, which every gate on this rule
+    # calls. Checking only the shape was the bug — `--go D-1` matched the regex while no
+    # D-1 decision existed anywhere. The CLI refuses (exit 2) on a shape that is not a
+    # judge reference, on an id that names no artefact, and on a source it cannot read;
+    # its refusal text goes to stderr untouched, so only the exit code is handled here.
+    # After the sha bar and before the first printed line: a refusal prints no GO.
+    _go_gate="$ROOT/infra/mcp-servers/scripts/_go_gate.py"
+    _go_offline_arg=()
+    [[ $GO_OFFLINE -eq 1 ]] && _go_offline_arg=(--offline)
+    if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$_go_gate" ]]; then
+        # No way to read the artefact tree at all — an unverifiable GO is not a GO,
+        # unless the operator said so with --go-offline, which is logged as such.
+        if [[ $GO_OFFLINE -ne 1 ]]; then
+            echo "apply.sh: cannot verify --go '$GO_REF' — python3 and $_go_gate are what read the GO's artefact tree (fleet rule D-825)." >&2
+            echo "  Install python3, or pass --go-offline to run with the ref logged as unverified." >&2
+            exit 2
+        fi
+        echo "GO-OFFLINE: $GO_REF unverified"
+    elif ! _go_verified="$(python3 "$_go_gate" verify-ref --tool apply.sh --ref "$GO_REF" \
+                --root "$ROOT" ${_go_offline_arg[@]+"${_go_offline_arg[@]}"})"; then
+        exit 2
+    elif [[ -n "$_go_verified" ]]; then
+        printf '%s\n' "$_go_verified"
+    fi
     echo "GO: $GO_REF sha=$CHECKOUT_HEAD"
 elif [[ -n "$GO_REF" ]]; then
     echo "GO: $GO_REF sha=${GO_SHA:-none} (read-only run — no gate applies)"

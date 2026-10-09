@@ -276,6 +276,17 @@ SHELLCHECK_FILES=(setup.sh lib/linux/*.sh tests/run-tests.sh)
 # shellcheck source=../lib/linux/usb.sh
 . lib/linux/usb.sh
 
+# ─── Fleet rule D-825: the GO gate reads the fake artefact tree, never a host's ──
+# A --go reference now has to name an artefact that EXISTS, and the sources it is
+# looked up in are a host's own files (~/code/routing/..., this checkout's
+# logs/workers/...). Set, not defaulted: an unfiltered suite run must reach the same
+# verdicts on the operator's machine as on a CI runner with no routing dir at all,
+# and must never pass by accident because the host happened to hold the id. A case
+# that wants other content (or an unreadable source) points the env somewhere else
+# for its own child process. See tests/fixtures/go-gate/README.md.
+export AUTOOS_ROUTING_DIR="$ROOT/tests/fixtures/go-gate/routing"
+export AUTOOS_WORKERS_DIR="$ROOT/tests/fixtures/go-gate/worker-tree/workers"
+
 AUTOOS_NO_COLOR=1
 ui_init
 

@@ -81,7 +81,7 @@ def main():
     # file only and needs none. The gate runs before any docker/token access.
     _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
     enforce("populate-embeddings.py", "overwrite-load the live omnigraph graph",
-            not a.no_load, a.go, a.go_sha, _root)
+            not a.no_load, a.go, a.go_sha, _root, go_offline=a.go_offline)
 
     records, n = [], 0
     for fn in a.seeds:

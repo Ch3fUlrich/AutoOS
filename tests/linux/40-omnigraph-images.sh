@@ -282,3 +282,71 @@ if it "D-825: compact-graphs.ps1 gate is present (refuses without -Go)"; then
     if (( ok )); then pass; else fail "compact-graphs.ps1 ran live without a -Go: rc=$rc out=$out"; fi
 fi
 
+# ─── Fleet rule D-825 part 2: the ref must name an artefact that EXISTS ─────────
+# A judge run id, a D-<n> decision, an OS-<n> item: any of them matches the regex, and
+# matching the regex used to be the whole check, so `--go D-1` opened the gate. The
+# lookup now lives in _go_gate.py — one implementation, imported by the Python tools and
+# execed by apply.sh / apply-cluster.sh / the PowerShell twins (invoke-go-gate.ps1) — so
+# these cases prove the shared verdict, and the 34-ai-services.sh battery proves the
+# bash gate reaches it. Every case here stays on the REFUSAL side: passing the gate of a
+# live-store tool would mean a real docker call, and there is no stack in the suite.
+if it "D-825: the ref-existence gate unit tests (python3 tests/test_go_gate_ref.py)"; then
+    out="$(python3 tests/test_go_gate_ref.py 2>&1)" && pass \
+        || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "D-825: dedup-graph refuses a --go that names no decision, exact id only"; then
+    d="$(mktemp -d)"
+    printf '| D-825 | all L1s | only an explicit GO counts | router |\n' >"$d/log.md"
+    ok=1
+    for ref in D-9999 D-82; do
+        out="$(AUTOOS_DECISIONS_LOG="$d/log.md" python3 "$OG_PY/dedup-graph.py" \
+            --go "$ref" --go-sha "$(_head)" 2>&1)"; rc=$?
+        [[ $rc -ne 0 ]] || { ok=0; echo "--go $ref cleared the gate: $out" >&2; }
+        [[ "$out" == *"names no decision"* ]] || { ok=0; echo "$ref: no existence refusal: $out" >&2; }
+        [[ "$out" != *"GO:"* ]] || { ok=0; echo "$ref: printed a GO line for nothing: $out" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dedup-graph accepted a ref that names no artefact"; fi
+fi
+
+if it "D-825: dedup-graph refuses when the decisions log cannot be read"; then
+    d="$(mktemp -d)"
+    out="$(AUTOOS_DECISIONS_LOG="$d/no-such-dir/log.md" python3 "$OG_PY/dedup-graph.py" \
+        --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "an unreadable source cleared the gate: $out" >&2; }
+    [[ "$out" == *"cannot read the routing decisions log"* ]] \
+        || { ok=0; echo "no unreadable-source refusal: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dedup-graph deduped on an unverifiable GO"; fi
+fi
+
+if it "D-825: dedup-graph --go-offline still refuses a bad --go-sha"; then
+    # The offline flag waives the artefact lookup, never the sha the GO names — and the
+    # refusal on the sha is what keeps this case safe to run with no stack at all.
+    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 \
+        --go-offline 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
+        || fail "--go-offline waived the sha bar: rc=$rc out=$out"
+fi
+
+if it "D-825: apply-cluster refuses a --go that names no artefact, unknown flags still rc 2"; then
+    ok=1
+    out="$(bash "$APC_SH" --go D-9999 --go-sha "$(_head)" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no decision"* ]] \
+        || { ok=0; echo "apply-cluster converged on a ref that names nothing: rc=$rc out=$out" >&2; }
+    # The fixture tree (tests/fixtures/go-gate, exported by run-tests.sh) holds D-825:
+    # an id that IS there must not be refused, or the suite's own mutating cases break.
+    out="$(bash "$APC_SH" --go D-82 --go-sha "$(_head)" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no decision"* ]] \
+        || { ok=0; echo "D-82 matched the fixture's D-825 line: rc=$rc out=$out" >&2; }
+    out="$(bash "$APC_SH" --bogus 2>&1)"; rc=$?
+    [[ $rc -eq 2 && "$out" == *"unknown argument '--bogus'"* ]] \
+        || { ok=0; echo "an unknown argument was not refused: rc=$rc out=$out" >&2; }
+    out="$(bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] \
+        || { ok=0; echo "--go-offline waived the sha bar or was an unknown flag: rc=$rc out=$out" >&2; }
+    if (( ok )); then pass; else fail "apply-cluster.sh accepted an unverifiable --go"; fi
+fi
+

@@ -208,7 +208,8 @@ def main() -> None:
     # The gate runs before any token/docker access, so a refused run touches nothing.
     _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
     enforce("split-project-graph.py", "write to the live omnigraph graph",
-            bool(args.apply or args.prune_source), args.go, args.go_sha, _root)
+            bool(args.apply or args.prune_source), args.go, args.go_sha, _root,
+            go_offline=args.go_offline)
 
     env = load_env()
     token = env.get("OMNIGRAPH_TOKEN") or os.environ.get("OMNIGRAPH_TOKEN", "")

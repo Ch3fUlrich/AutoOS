@@ -32,13 +32,16 @@
 .EXAMPLE
   # A live (non -DryRun) run needs a judge GO naming this checkout's HEAD (fleet rule D-825):
   .\configuration\omniroute\apply.ps1 -Go D-825 -GoSha (git rev-parse HEAD)
+  # The GO must name an artefact that exists; from a machine that cannot read it:
+  .\configuration\omniroute\apply.ps1 -Go D-825 -GoSha (git rev-parse HEAD) -GoOffline
 #>
 [CmdletBinding()]
 param(
     [switch]$DryRun,
     [switch]$Probe,
     [string]$Go = '',
-    [string]$GoSha = ''
+    [string]$GoSha = '',
+    [switch]$GoOffline
 )
 
 Set-StrictMode -Version Latest
@@ -58,6 +61,10 @@ $Root      = Split-Path -Parent (Split-Path -Parent $Here)
 # artefact and -GoSha equals this checkout's git HEAD, so the GO covers the
 # exact code applied. -DryRun needs none and is unchanged; a -Go there is
 # echoed only. The gate runs before the module import or any gateway contact.
+# The reference's shape and its EXISTENCE are decided by one implementation —
+# infra/mcp-servers/scripts/_go_gate.py, reached through invoke-go-gate.ps1 —
+# never re-derived here: `--go D-1` used to clear this gate while no D-1
+# decision existed anywhere, because a regex was the only check.
 if (-not $DryRun) {
     if (-not $Go) {
         [Console]::Error.WriteLine('apply.ps1: refusing to change live gateway state without -Go <ref> (fleet rule D-825).')
@@ -67,10 +74,6 @@ if (-not $DryRun) {
         [Console]::Error.WriteLine('  Pass -Go <ref> -GoSha <sha>, where <ref> is a judge run id')
         [Console]::Error.WriteLine('  (YYYYMMDD-HHMMSS-...), a decision id (D-<n>) or an OS-<n> item, and <sha> is')
         [Console]::Error.WriteLine("  'git rev-parse HEAD' of this checkout. To inspect without changing anything: -DryRun.")
-        exit 2
-    }
-    if ($Go -notmatch '^(?:\d{8}-\d{6}-\S+|D-\d+|OS-\d+)$') {
-        [Console]::Error.WriteLine("apply.ps1: -Go '$Go' is not a judge run id (YYYYMMDD-HHMMSS-...), a decision id (D-<n>) or an OS-<n> item.")
         exit 2
     }
     if (-not $GoSha) {
@@ -89,6 +92,11 @@ if (-not $DryRun) {
         [Console]::Error.WriteLine('  The GO must name the exact sha of the code being applied (fleet rule D-825).')
         exit 2
     }
+    $goVerdict = & (Join-Path $Root 'infra\mcp-servers\scripts\invoke-go-gate.ps1') `
+        -Tool 'apply.ps1' -Ref $Go -Root $Root -Offline:$GoOffline
+    foreach ($goLine in $goVerdict.Err) { [Console]::Error.WriteLine($goLine) }
+    if ($goVerdict.Code -ne 0) { exit 2 }
+    foreach ($goLine in $goVerdict.Out) { Write-Host $goLine }
     Write-Host "GO: $Go sha=$CheckoutHead"
 } elseif ($Go) {
     $goShaShown = if ($GoSha) { $GoSha } else { 'none' }

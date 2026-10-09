@@ -210,7 +210,8 @@ def main():
     # so a run that is not --dry-run proceeds only on a judge GO naming this checkout's
     # HEAD. The gate runs before any docker call, so a refused run touches nothing.
     _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
-    enforce("dedup-graph.py", "dedup the live omnigraph store", not a.dry_run, a.go, a.go_sha, _root)
+    enforce("dedup-graph.py", "dedup the live omnigraph store", not a.dry_run, a.go,
+            a.go_sha, _root, go_offline=a.go_offline)
     a.graphs = [g.strip() for g in a.graphs.split(",") if g.strip()]
 
     # Ask docker what is actually here rather than assuming the local stack: central
