@@ -22076,13 +22076,70 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
                 patch = fh.read()
             self.assertIn("+two", patch)
-            self.assertNotIn("FAKE-PLAINTEXT", patch, "a secret-bearing patch is the leak")
+            self.assertNotIn("LEAK", patch, "a secret-bearing patch is the leak")
             self.assertEqual(self._out("-C", dest, "rev-list", "--all", "--count"), "1",
                              "the patch rides IN the base commit: a clean seat tree")
             self.assertEqual(self._out("-C", dest, "status", "--short"), "")
             # a parent that moved would have the seat diff a tree it does not hold
             with self.assertRaises(cli.ReviewBaseRefused):
                 cli.isolate_clone(root, dest + "-2", "agent/p1rb2", (base, base))
+
+    def _sparse_repo(self):
+        """`pkg/hidden.txt` is sparse-hidden in the SOURCE by a non-cone
+        sparse-checkout, so the allowed set drops it - the exclude list alone
+        kept it, and its base..head content rode out in the patch (F1)."""
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "pkg"))
+        for name, text in (("keep.txt", "one\n"), ("pkg/hidden.txt", "SPARSE-BASE-CONTENT\n")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "sparse base"], check=True)
+        for name, text in (("keep.txt", "two\n"), ("pkg/hidden.txt", "SPARSE-HEAD-CONTENT\n")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "sparse head"], check=True)
+        subprocess.run(self.git + ["-C", root, "sparse-checkout", "set", "--no-cone",
+                                   "/keep.txt"], check=True)
+        return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
+
+    def test_a_sparse_hidden_path_never_rides_the_patch(self):
+        cli, root, base, head = self.cli, *self._sparse_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1sp", (base, head))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+two", patch)
+            self.assertNotIn("SPARSE-BASE-CONTENT", patch, "sparse-hidden is not allowed")
+            self.assertNotIn("SPARSE-HEAD-CONTENT", patch, "sparse-hidden is not allowed")
+
+    def test_a_plaintext_secret_on_the_base_side_refuses_like_the_head_preflight(self):
+        # F2: a `-` line IS base content - `.env` re-encrypted at head passes the
+        # HEAD preflight, but its base blob would ride out as the removal hunk.
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        commits = ("API_TOKEN=BASE-PLAINTEXT-SECRET\n",
+                   "API_TOKEN=ENC[AES256_GCM,data:ZmFrZQ==,iv:ZmFrZQ==,"
+                   "tag=ZmFrZQ==,type:str]\n")
+        shas = []
+        for text in commits:
+            with io.open(os.path.join(root, ".env"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+            subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "env"], check=True)
+            shas.append(self._out("-C", root, "rev-parse", "HEAD"))
+        cli = self.cli
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(cli.PrivacyRefused) as cm:
+                cli.isolate_clone(root, os.path.join(tmp, "sandbox"), "agent/p1bs",
+                                  tuple(shas))
+            self.assertNotIn("BASE-PLAINTEXT-SECRET", str(cm.exception),
+                             "the refusal names paths, never contents")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, "sandbox")),
+                             "refused before anything was built")
 
     def _args(self, review_base):
         return argparse.Namespace(client="opencode", tier=2, card=None, auto=True,

@@ -1049,6 +1049,42 @@ def isolate_preflight_refuse(root: str) -> None:
             "nothing was cloned)" % ", ".join(bad))
 
 
+def review_base_preflight_refuse(root: str, pair, allowed) -> None:
+    """Raise PrivacyRefused when the BASE side of --review-base tracks a plaintext
+    secret on a path the patch would carry (F2).
+
+    `isolate_preflight_refuse` reads HEAD only, but a `-` line of REVIEW-DIFF.patch
+    IS base content: a secret committed at base and re-encrypted (or edited away)
+    at head passes that preflight yet rides out as a removal hunk. Same bytes-only
+    rule as the head preflight (`_isolate_blob_plain` on the BASE blob, paths the
+    sandbox allows - the rest never enters the patch), and the same verdict it
+    gives: REFUSE, not a silently narrowed patch. The message names PATHS only.
+    """
+    rng = "%s..%s" % pair
+    names = subprocess.run(["git", "-C", root, "diff", "--name-only", "-z", rng],
+                           capture_output=True, check=True,
+                           stdin=subprocess.DEVNULL).stdout.split(b"\0")
+    decoded = {n.decode("utf-8", "surrogateescape") for n in names if n}
+    bad = []
+    for rel in sorted(decoded & set(allowed)):
+        if not _isolate_secret_name(rel):
+            continue
+        blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
+                               pair[0] + ":" + rel], capture_output=True,
+                              stdin=subprocess.DEVNULL)
+        if blob.returncode != 0:
+            continue
+        if not _isolate_blob_plain(blob.stdout):
+            continue
+        bad.append(rel)
+    if bad:
+        raise PrivacyRefused(
+            "refusing sandbox: review-base %s tracks plaintext secret file(s): "
+            "%s on the base side (the patch would carry them as removal lines; "
+            "list them in .agentignore; nothing was cloned)"
+            % (pair[0][:8], ", ".join(bad)))
+
+
 def sandbox_repo_slug(source: str) -> str:
     """Filesystem/branch-safe basename of the source repo (S4)."""
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-",
@@ -1340,7 +1376,7 @@ def sandbox_branch_for(source: str, run_id: str) -> str:
     return "%s/%s" % (sandbox_repo_slug(source), run_id)
 
 
-def _isolate_build(root: str, path: str, source_sha: str, allowed: list, agentignore: list, review_base=None) -> None:
+def _isolate_build(root: str, path: str, source_sha: str, allowed: list, review_base=None) -> None:
     """Materialise the allowed HEAD entries and commit them as the base sha.
 
     Runs inside isolate_clone's cleanup, so a raise at any step of it leaves no
@@ -1351,7 +1387,7 @@ def _isolate_build(root: str, path: str, source_sha: str, allowed: list, agentig
                          _isolate_batch_entries(root, source_sha, allowed), path)
     subprocess.run(["git", "-C", path, "add", "-A"], check=True, stdin=subprocess.DEVNULL)
     if review_base is not None:
-        write_review_diff(root, path, review_base, agentignore)
+        write_review_diff(root, path, review_base, allowed)
         subprocess.run(["git", "-C", path, "add", "-f", "--", REVIEW_DIFF_FILE], check=True,
                        stdin=subprocess.DEVNULL)
     subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
@@ -1422,14 +1458,19 @@ def resolve_review_base(root: str, base):
     return tuple(proc.stdout.split()) if proc.returncode == 0 else None
 
 
-def write_review_diff(root: str, path: str, pair, agentignore: list) -> None:
-    """Ride base..head into the sandbox as REVIEW-DIFF.patch, minus the paths isolation
-    keeps out (S2: a patch with a plaintext secret in it is itself the leak)."""
+def write_review_diff(root: str, path: str, pair, allowed) -> None:
+    """Ride base..head into the sandbox as REVIEW-DIFF.patch, keeping only the paths
+    the seat materialises (S2: a patch with a plaintext secret in it is itself the
+    leak). F1: the exclude list is NOT the allowed set - a sparse-hidden path is
+    neither excluded nor allowed, and filtering on the exclude list alone carried
+    its full base..head content out. `allowed` is the same set one-commit
+    materialisation uses."""
     rng = "%s..%s" % pair
     names = subprocess.run(["git", "-C", root, "diff", "--name-only", "-z", rng], capture_output=True,
                            check=True, stdin=subprocess.DEVNULL).stdout.split(b"\0")
+    keep = set(allowed)
     kept = [p for p in (n.decode("utf-8", "surrogateescape") for n in names)
-            if p and not _isolate_path_excluded(p, agentignore)]
+            if p and p in keep]
     with io.open(os.path.join(path, REVIEW_DIFF_FILE), "wb") as fh:
         for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
             # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
@@ -1489,13 +1530,17 @@ def isolate_clone(root: str, path: str, branch: str, review_base=None) -> str:
     if os.path.lexists(path):
         raise FileExistsError("sandbox destination already exists: %s" % path)
     isolate_preflight_refuse(root)
-    source_sha, allowed, agentignore = _isolate_allowed_files(root)
-    if review_base is not None and review_base[1] != source_sha:
-        raise ReviewBaseRefused("review-base: parent HEAD moved %s -> %s, re-run"
-                                % (review_base[1], source_sha))
+    source_sha, allowed, _ = _isolate_allowed_files(root)
+    if review_base is not None:
+        if review_base[1] != source_sha:
+            raise ReviewBaseRefused("review-base: parent HEAD moved %s -> %s, re-run"
+                                    % (review_base[1], source_sha))
+        # F2: the head preflight cannot see a secret that lives only on the
+        # base side of the range the patch is about to carry.
+        review_base_preflight_refuse(root, review_base, allowed)
     os.makedirs(path, exist_ok=True)
     try:
-        _isolate_build(root, path, source_sha, allowed, agentignore, review_base)
+        _isolate_build(root, path, source_sha, allowed, review_base)
         # The orchestrator still fetches from the sandbox path (unchanged); every
         # remote's push URL is disabled and a pre-push hook is installed, so an
         # unplanned `git push` - to origin or to the parent's absolute path the
