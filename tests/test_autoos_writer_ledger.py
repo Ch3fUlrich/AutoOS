@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -134,6 +135,128 @@ class LedgerTests(unittest.TestCase):
         rows, skipped = ledger.load(target)
         self.assertEqual((len(rows), skipped), (1, 2))
         self.assertEqual(ledger.load(os.path.join(tempfile.mkdtemp(), "no.jsonl")), ([], 0))
+
+    def test_torn_tail_then_two_rejects_seen(self):
+        target = path()
+
+        with open(target, "w", encoding="utf-8") as fh:
+            fh.write('{"run_id": "torn-fragment-without-newline')
+
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual(len(rows), 2)
+        self.assertGreaterEqual(skipped, 1)
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2"})
+        self.assertTrue(ledger.demoted(MODEL, "code", now=NOW, path=target))
+
+    def test_torn_midfile_three_of_four_counted(self):
+        target = path()
+        ledger.record(entry(run_id="r1", ts=ago(1)), path=target)
+        ledger.record(entry(run_id="r2", ts=ago(2)), path=target)
+
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write('{"run_id": "torn-midfile-fragment')
+
+        ledger.record(entry(run_id="r3", ts=ago(3)), path=target)
+        ledger.record(entry(run_id="r4", ts=ago(4)), path=target)
+        rows, skipped = ledger.load(target)
+        self.assertEqual(len(rows), 4)
+        self.assertGreaterEqual(skipped, 1)
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2", "r3", "r4"})
+        mixed = path()
+        write_rows(mixed, [entry(run_id="r1", ts=ago(1)),
+                           entry(run_id="r2", ts=ago(2))])
+
+        with open(mixed, "a", encoding="utf-8") as fh:
+            fh.write('{"run_id": "torn-r3-fragment\n')
+
+        write_rows(mixed, [entry(run_id="r4", ts=ago(4))])
+        rows, skipped = ledger.load(mixed)
+        self.assertEqual(len(rows), 3)
+        self.assertGreaterEqual(skipped, 1)
+        self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2", "r4"})
+        slot = ledger.rollup(mixed, NOW)["gemini-3.8-flash"]["code"]
+        self.assertEqual(slot["rejected"], 3)
+
+    def test_record_short_write_raises(self):
+        target = path()
+        real_write = os.write
+
+        def short(fd, buf):
+            keep = len(buf) - 1 if len(buf) > 1 else 0
+            return real_write(fd, buf[:keep]) if keep else 0
+
+        os.write = short
+
+        try:
+            with self.assertRaises(OSError):
+                ledger.record(entry(), path=target)
+        finally:
+            os.write = real_write
+
+    def test_ledger_error_is_value_error(self):
+        self.assertTrue(issubclass(ledger.LedgerError, ValueError))
+
+    def test_directory_raises_and_cli_exits_4(self):
+        target = tempfile.mkdtemp()
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.load(target)
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.demoted(MODEL, "code", now=NOW, path=target)
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.rollup(target, NOW)
+
+        state = tempfile.mkdtemp()
+        os.mkdir(os.path.join(state, "writer-ledger.jsonl"))
+        os.environ["AUTOOS_STATE_DIR"] = state
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                self.assertEqual(ledger.main(["demoted", MODEL, "code"]), 4)
+
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            del os.environ["AUTOOS_STATE_DIR"]
+
+    def test_fifo_does_not_block(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo unavailable")
+
+        target = os.path.join(tempfile.mkdtemp(), "fifo")
+        os.mkfifo(target)
+        out = {}
+
+        def run_load():
+            try:
+                ledger.load(target)
+            except Exception as ex:  # noqa: BLE001 - recorded for the assert
+                out["ex"] = ex
+            else:
+                out["ex"] = None
+
+        worker = threading.Thread(target=run_load, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "load blocked on a FIFO")
+        self.assertIsInstance(out.get("ex"), ledger.LedgerError)
+
+        def run_demoted():
+            try:
+                ledger.demoted(MODEL, "code", now=NOW, path=target)
+            except Exception as ex:  # noqa: BLE001 - recorded for the assert
+                out["demoted"] = ex
+
+        worker = threading.Thread(target=run_demoted, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "demoted blocked on a FIFO")
+        self.assertIsInstance(out.get("demoted"), ledger.LedgerError)
 
     def test_demoted_threshold_window_spelling(self):
         target = path()

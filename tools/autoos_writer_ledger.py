@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import stat
 import sys
 import unicodedata
 
@@ -35,6 +36,62 @@ KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_mod
         "task_type", "risk", "reviewer", "fixer_model", "probe")
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
 _FUTURE_SKEW = datetime.timedelta(minutes=5)
+
+
+class LedgerError(ValueError):
+    """Non-regular or unsafe ledger path (FIFO, directory, symlink, ...)."""
+
+
+def _open_ledger_ro(resolved):
+    """Read-only handle for a ledger path, or None when absent.
+
+    Raises LedgerError for anything that is not a regular file, including
+    FIFOs (opened O_NONBLOCK so the open itself never blocks), directories,
+    and symlinks (O_NOFOLLOW). A path that does not exist at all reads as
+    an empty ledger (None) instead.
+    """
+    if not os.path.lexists(resolved):
+        return None
+
+    try:
+        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+    except AttributeError:
+        flags = os.O_RDONLY
+
+    try:
+        fd = os.open(resolved, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as ex:
+        raise LedgerError("ledger %r: %s" % (resolved, ex)) from None
+
+    try:
+        st = os.fstat(fd)
+    except OSError as ex:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+        raise LedgerError("ledger %r: %s" % (resolved, ex)) from None
+
+    if not stat.S_ISREG(st.st_mode):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+        raise LedgerError("ledger %r is not a regular file" % (resolved,))
+
+    try:
+        return os.fdopen(fd, "r", encoding="utf-8")
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+        raise
 
 
 def _now():
@@ -221,7 +278,11 @@ def record(e, path=None):
     fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
 
     try:
-        os.write(fd, (json.dumps(o, sort_keys=True) + "\n").encode("utf-8"))
+        buf = b"\n" + json.dumps(o, sort_keys=True).encode("utf-8") + b"\n"
+        n = os.write(fd, buf)
+
+        if n != len(buf):
+            raise OSError("short write on %r: %d of %d bytes" % (t, n, len(buf)))
     finally:
         os.close(fd)
 
@@ -230,10 +291,10 @@ def record(e, path=None):
 
 def load(path=None):
     rows, skip = [], 0
+    resolved = path or default_path()
+    h = _open_ledger_ro(resolved)
 
-    try:
-        h = io.open(path or default_path(), encoding="utf-8")
-    except OSError:
+    if h is None:
         return rows, skip
 
     with h:
@@ -442,6 +503,9 @@ def main(argv=None):
         bad = demoted(a.model, a.task_type)
         print("demoted" if bad else "not-demoted")
         return 3 if bad else 0
+    except LedgerError as ex:
+        print("ledger: %s" % ex, file=sys.stderr)
+        return 4
     except ValueError as ex:
         print("ledger: %s" % ex, file=sys.stderr)
         return 2
