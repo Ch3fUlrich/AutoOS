@@ -603,6 +603,98 @@ class ReportDetection(TempCase):
         self.assertTrue(self.classified(["**REPORT**\n", "done\n"],
                                         state=self.other_state())["has_report"])
 
+    # P4c-fixes3 (1): `str.strip()` also empties U+00A0, \x0b, \x0c, U+0085,
+    # U+2028, U+3000..., so a line holding only one of those separators used to
+    # CLOSE the block quote and hand the REPORT under it back as a claim. A
+    # blank line is ONLY ' ' and '\t', and lines are cut on '\n' only.
+    LINE_BREAK_LIKES = ("\u00a0", "\x0b", "\x0c", "\x85", "\u2028", "\u2029", "\u3000")
+
+    def test_a_separator_line_does_not_close_the_quote(self):
+        for sep in self.LINE_BREAK_LIKES:
+            out = self.classified("> worker quoting a report:\n%s\n"
+                                  "REPORT %s \u00b7 OK \u00b7 green\n" % (sep, RUN),
+                                  task="Implement the widget.\n",
+                                  state=self.other_state())
+            self.assertFalse(out["has_report"], repr(sep))
+            self.assertEqual(out["state"], "died", repr(sep))
+            self.assertEqual(r.next_action(0, out["state"]), "rerun", repr(sep))
+
+    def test_a_space_or_tab_only_line_closes_the_quote_and_the_report_counts(self):
+        for blank in ("", " ", "\t", "  \t ", "   "):
+            self.assertTrue(self.classified(["> worker quoting a report:\n",
+                                             blank + "\n", report_body()],
+                                            state=self.other_state())["has_report"],
+                            repr(blank))
+
+    def test_a_zwsp_line_is_not_a_blank_line(self):
+        """U+200B is invisible but never was blank for str.strip(); it stays a
+        lazy continuation of the quote, so the REPORT under it is still quoted."""
+        self.assertFalse(self.classified(["> worker quoting a report:\n",
+                                          "\u200b\n", report_body()],
+                                         state=self.other_state())["has_report"])
+
+    def test_a_splitlines_break_does_not_split_a_line(self):
+        """splitlines() breaks at \\x0b/\\x0c/U+0085/U+2028/U+2029: a heading and
+        a forged one on the same physical line used to read as two. Cutting on
+        '\\n' only keeps them one suspect line, and the whole report fails closed."""
+        for bad in self.LINE_BREAK_LIKES:
+            self.assertFalse(self.classified(["worker says%sdone\n" % bad,
+                                              report_body()],
+                                             state=self.other_state())["has_report"],
+                             repr(bad))
+
+    def test_a_separator_inside_the_report_region_fails_it_closed(self):
+        """Not a quote case at all: a genuine report with a separator/control
+        character somewhere in the worker's own lines is not believed — the text
+        another reader could re-split or re-strip into a different verdict is no
+        verdict (has_report False, fail closed)."""
+        for bad in self.LINE_BREAK_LIKES + ("\r",):
+            self.assertFalse(self.classified([report_body(), "a%sb\n" % bad],
+                                              state=self.other_state())["has_report"],
+                             repr(bad))
+
+    def test_a_crlf_log_still_reads_its_report(self):
+        """One trailing '\\r' per line is dropped, so a CRLF output.log is a
+        normal log; a bare '\\r' inside a line is content and fails closed."""
+        self.assertTrue(self.classified("# REPORT\r\ndone\r\n",
+                                        state=self.other_state())["has_report"])
+        self.assertFalse(self.classified(["REPORT %s\ryes\n" % RUN],
+                                         state=self.other_state())["has_report"])
+
+    # P4c-fixes3 (2): a REPORT inside an HTML comment is not a claim.
+    def test_a_commented_out_report_is_not_a_report(self):
+        cases = [
+            ["<!--\n", report_body(), "-->\n"],                       # spans lines
+            ["<!--\n", report_body()],                                 # unclosed swallows the rest
+            ["<!-- %s -->\n" % report_body().rstrip("\n")],            # closed on the same line
+            ["prose <!-- start\n", report_body(), "still inside\n"],   # open, never shut
+            ["worker note <!-- aside --> REPORT %s \u00b7 OK\n" % RUN],  # shares its line
+        ]
+        for lines in cases:
+            self.assertFalse(self.classified(lines, state=self.other_state())
+                             ["has_report"], lines)
+
+    def test_a_report_after_a_closed_comment_counts(self):
+        self.assertTrue(self.classified(["<!-- old work, not a claim -->\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+        self.assertTrue(self.classified(["<!--\n", "nothing here\n", "-->\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+        # A bare `-->` with no open comment is text, not markup.
+        self.assertTrue(self.classified(["unmatched --> close\n", report_body()],
+                                        state=self.other_state())["has_report"])
+
+    def test_a_fence_beats_a_comment_marker(self):
+        """`<!--` inside a fence is code text: it opens no comment region and
+        must not swallow the genuine report that follows the closed fence."""
+        self.assertTrue(self.classified(["```sh\n", "# <!-- not markup\n", "```\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+        self.assertFalse(self.classified(["```sh\n", "# <!-- not markup\n",
+                                          report_body()],
+                                         state=self.other_state())["has_report"])
+
     def test_empty_output_has_no_report(self):
         self.assertFalse(self.classified("")["has_report"])
 
@@ -1429,6 +1521,82 @@ class Cli(TempCase):
         self.assertEqual((code, out["action"], out["record_suspect"]), (4, "escalate", True))
         self.assertIn("wrong type", err)
         self.assertNotIn("Traceback", err)
+
+    # P4c-fixes3 (3): corrupt / contested / non-regular / unwritable lane state
+    # is an ESCALATION (exit 4), not a usage error (exit 2); 2 stays only for
+    # argparse failures and bad run ids / lane keys.
+    def test_a_corrupt_lane_state_record_exits_four_not_two(self):
+        os.makedirs(r.recovery_dir(self.state))
+        write_text(r.path_of(LANE, self.state), "{ not json")
+        code, _, err = self.cli(["record", RUN, "--lane", LANE])
+        self.assertEqual(code, 4)
+        self.assertIn("autoos_recovery:", err)
+        self.assertIn("corrupt", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(err.count("\n"), 1, "the message is one line")
+
+    @unittest.skipIf(os.name == "nt", "flock; POSIX only")
+    def test_a_held_lane_lock_record_exits_four(self):
+        os.makedirs(r.recovery_dir(self.state))
+        old = (r.LOCK_RETRIES, r.LOCK_RETRY_SECS)
+        self.addCleanup(setattr, r, "LOCK_RETRIES", old[0])
+        self.addCleanup(setattr, r, "LOCK_RETRY_SECS", old[1])
+        r.LOCK_RETRIES, r.LOCK_RETRY_SECS = 5, 0.001
+        acquired, release, errors = threading.Event(), threading.Event(), []
+
+        def hold():
+            try:
+                fd = r._acquire_lock(r._lock_path(LANE, self.state))
+                acquired.set()
+                release.wait(30)
+                r._release_lock(fd)
+            except BaseException as exc:                # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        self.assertTrue(acquired.wait(10), "the holder never took the lock")
+        try:
+            code, _, err = self.cli(["record", RUN, "--lane", LANE])
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(code, 4)
+        self.assertIn("held by another writer", err)
+        self.assertNotIn("Traceback", err)
+
+    @unittest.skipIf(os.name == "nt" or not hasattr(os, "mkfifo"), "mkfifo; POSIX only")
+    def test_a_fifo_state_record_exits_four(self):
+        os.makedirs(r.recovery_dir(self.state))
+        os.mkfifo(r.path_of(LANE, self.state))
+        code, _, err = self.cli(["record", RUN, "--lane", LANE])
+        self.assertEqual(code, 4)
+        self.assertIn("autoos_recovery:", err)
+
+    @unittest.skipIf(os.name == "nt", "symlinked state file; POSIX only")
+    def test_a_symlinked_state_record_and_plan_exit_four(self):
+        os.makedirs(r.recovery_dir(self.state))
+        write_text(os.path.join(self.state, "elsewhere.json"), "{}")
+        os.symlink(os.path.join(self.state, "elsewhere.json"), r.path_of(LANE, self.state))
+        make_record(self.state, output=spawner_lines(self.sb()))
+        self.assertEqual(self.cli(["record", RUN, "--lane", LANE])[0], 4)
+        self.assertEqual(self.cli(["plan", RUN, "--lane", LANE])[0], 4)
+
+    @unittest.skipIf(os.name == "nt", "directory modes; POSIX only")
+    def test_an_unwritable_state_dir_record_exits_four(self):
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        os.chmod(self.state, 0o500)
+        self.addCleanup(os.chmod, self.state, 0o700)
+        code, _, err = self.cli(["record", RUN, "--lane", LANE])
+        self.assertEqual(code, 4)
+        self.assertIn("cannot prepare the recovery state dir", err)
+
+    def test_a_lane_state_error_is_still_a_recovery_error(self):
+        """The refuse-locally contract does not change for library callers:
+        every raise stays catchable as RecoveryError; only the CLI exit splits."""
+        self.assertTrue(issubclass(r.RecoveryStateError, r.RecoveryError))
 
     def test_an_unexpected_fault_exits_four_never_zero_or_three(self):
         make_record(self.state, exit_json={"rc": 1})

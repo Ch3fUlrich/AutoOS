@@ -62,10 +62,18 @@ Residuals, stated rather than hidden:
   reported), but the L1 that cancelled on purpose must not ask for a plan.
 * report detection reuses tools/autoos_report.py's parser on the output tail and
   falls back to a REPORT heading line, both read over only the worker's own
-  lines (fences, whole block-quote blocks — a quote continues lazily over every
-  following non-blank line, marker or no marker, and the task's echoed text
-  excluded, see `_report_view`). A heading that carries a run id must name THIS
-  run, so a
+  lines (fences, HTML comment regions — a REPORT inside `<!--` ... `-->` is not
+  a claim and an unclosed `<!--` swallows the rest, whole block-quote blocks — a
+  quote continues lazily over every following non-blank line, marker or no
+  marker, where a blank line is ONLY ' ' and '\t' (CommonMark's own rule:
+  `str.strip()` also empties U+00A0, \x0b, \x0c, U+0085, U+2028, U+3000, so a
+  separator line may never close a quote) and lines are cut on '\n' ONLY (never
+  `splitlines()`, which invents line breaks at those same characters), and the
+  task's echoed text excluded, see `_report_view`). Any separator/control
+  character that still reaches the report view — any Zs other than ' ', any
+  Zl/Zp, any Cc other than '\t' — makes the WHOLE report suspect: has_report
+  False, fail closed (P4c-fixes3). A heading that carries a run id must name
+  THIS run, so a
   heading naming something else — including prose like ``REPORT: the field
   list`` — is not believed: the cost is one needless continuation leg on a run
   that wrote an unusual heading, never a false 'completed'. The strict protocol
@@ -82,6 +90,11 @@ Residuals, stated rather than hidden:
   lane blocked, and the lock file itself stays put. What neither gives is a wait:
   a lock still contested after ``LOCK_RETRIES`` tries is refused, and a refused
   record escalates the lane instead of running an unrecorded leg.
+* the CLI's exit contract (P4c-fixes3): 0 none/wait and a recorded leg, 3 rerun,
+  4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
+  unwritable recovery state raises `RecoveryStateError`, which `main` answers
+  with the one-line escalate message. Exit 2 stays ONLY for a usage error: an
+  argparse failure or a run id / lane key the caller passed in the wrong shape.
 """
 from __future__ import annotations
 
@@ -159,10 +172,79 @@ _REPORT_HEADING_RE = re.compile(
 _TAKE_RE = re.compile(r"^take it:[ \t]+git fetch[ \t]+")
 _REVIEW_RE = re.compile(r"^review:[ \t]+git -C[ \t]+")
 _SANDBOX_RE = re.compile(r"^sandbox:[ \t]+(?P<path>\S+)[ \t]+\(branch (?P<branch>\S+)\)$")
+# A blank line is empty after ' ' and '\t' ONLY — CommonMark's own rule.
+# `str.strip()` also empties U+00A0, \x0b, \x0c, U+0085, U+2028, U+3000..., so a
+# line holding only one of those separators would CLOSE a block quote and hand
+# back the REPORT under it as an unquoted claim (P4c-fixes3).
+_BLANK_STRIP = " \t"
+# The Unicode categories whose members splitlines() breaks lines at or strip()
+# silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
+# a real line legitimately carries; every other member makes a report suspect.
+_SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
 
 
 class RecoveryError(ValueError):
-    """A run id, a lane key or a record path this module will not touch."""
+    """A run id, a lane key or a record path this module will not touch — the
+    caller's argument was wrong, which the CLI answers with the usage exit (2)."""
+
+
+class RecoveryStateError(RecoveryError):
+    """The lane's own state refused the record: corrupt, contested, not a
+    regular file, or unwritable. This is not a caller mistake to correct — it
+    needs a human — so the CLI answers it with the escalate exit (4), never 2."""
+
+
+def _lines(text):
+    """`text` as PHYSICAL lines: split on '\\n' only, one trailing '\\r' dropped
+    so a CRLF log reads like an LF one. Never `str.splitlines()`, which also
+    breaks at \\x0b, \\x0c, U+0085, U+2028, U+2029 — the very characters that
+    must stay inside one line so the quote logic sees a non-blank line and the
+    fail-closed screen sees a suspect one (P4c-fixes3)."""
+    return [p[:-1] if p.endswith("\r") else p for p in (text or "").split("\n")]
+
+
+def _is_blank(line):
+    """CommonMark's blank line: nothing but spaces and tabs."""
+    return line.strip(_BLANK_STRIP) == ""
+
+
+def _suspect_line(line):
+    """Whether `line` carries a character the reader cannot count line breaks or
+    blankness on: any Zs other than ' ', any Zl/Zp, any Cc other than '\\t'. A
+    report whose lines contain one of these could be re-split or re-stripped
+    into a different verdict, so the WHOLE report is read as no report."""
+    for ch in line:
+        if ch == " " or ch == "\t":
+            continue
+        if unicodedata.category(ch) in _SUSPECT_CATS:
+            return True
+    return False
+
+
+def _comment_scan(line, in_comment):
+    """Advance the HTML-comment tracker over `line`: (state_after, touched).
+    `touched` is True when any part of the line lies inside a `<!--` ... `-->`
+    region or opens/closes one, so a commented-out REPORT — whole, half, or on
+    the very line that ends the comment — is dropped rather than believed; an
+    unclosed `<!--` keeps the region open and swallows the rest of the tail. A
+    `-->` with no open comment is text, not markup. `line` here is never fence
+    content: the caller runs this only on unfenced lines, so a `<!--` inside a
+    code block stays code and opens nothing (the fence wins)."""
+    touched = in_comment
+    rest = line
+    while True:
+        if in_comment:
+            end = rest.find("-->")
+            if end < 0:
+                return True, touched
+            in_comment = False
+            rest = rest[end + 3:]
+        start = rest.find("<!--")
+        if start < 0:
+            return False, touched
+        in_comment = True
+        touched = True
+        rest = rest[start + 4:]
 
 
 def _now():
@@ -473,7 +555,7 @@ def _parse_sandbox(tail, state=None):
     sandbox roots, a missing directory or a symlink is None — the caller loses the
     worktree hint, it never gets a guessed path.
     """
-    lines = (tail or "").splitlines()
+    lines = _lines(tail)
     if not lines:
         return None, None
     header_end = len(lines)
@@ -520,31 +602,43 @@ def _report_view(tail, task):
     (`autoos_ready_guards._Fences`: a fence opens on 3+ of the same ` or ~ after at
     most three leading spaces and closes only on the same character at least as
     long with nothing after it, so a fence that is never closed swallows the rest
-    of the tail); WHOLE block-quote blocks, because a quote is not a claim — a
-    block starts at a line that, once stripped of its leading blanks (spaces or
-    tabs; CommonMark's own rule is at most three spaces), begins with '>', and it
-    continues over EVERY following non-blank line until the first blank one,
-    marked or not: a REPORT line sitting under a '>' line with no blank between is
-    a lazy continuation of the quote, not a claim of its own; and every line that
-    also occurs in the task — a client that cats its brief back has echoed the
-    return contract's own REPORT line, and that is the brief's text, not a report
-    on the work.
+    of the tail); HTML comment regions — every line any part of which lies inside
+    a `<!--` ... `-->` comment is dropped on the same exclusion path (an unclosed
+    `<!--` swallows the rest, and a `<!--` inside a fence stays code: the fence
+    owns its lines and wins); WHOLE block-quote blocks, because a quote is not a
+    claim — a block starts at a line that, once stripped of its leading blanks
+    (spaces or tabs; CommonMark's own rule is at most three spaces), begins with
+    '>', and it continues over EVERY following non-blank line until the first
+    blank one, marked or not: a REPORT line sitting under a '>' line with no
+    blank between is a lazy continuation of the quote, not a claim of its own.
+    A blank line here means ONLY ' ' and '\\t' (`_is_blank`), and both inputs are
+    cut on '\\n' only (`_lines`): a U+00A0/\\x0b/\\x0c/U+0085/U+2028/U+3000 line
+    neither closes the quote nor breaks a line, so the quoted REPORT stays quoted
+    (P4c-fixes3); and every line that also occurs in the task — a client that
+    cats its brief back has echoed the return contract's own REPORT line, and
+    that is the brief's text, not a report on the work.
     """
-    echoed = {line.strip() for line in (task or "").splitlines() if line.strip()}
+    echoed = {line.strip(_BLANK_STRIP) for line in _lines(task)
+              if not _is_blank(line)}
     fences = ready_guards._Fences()
     out = []
     in_quote = False
-    for raw in (tail or "").splitlines():
+    in_comment = False
+    for raw in _lines(tail):
         # The tracker must see EVERY line: its state is the fence structure, and
         # skipping a line here would re-open a block that is still shut.
         fenced = fences.feed(raw)
-        line = raw.strip()
+        if fenced:
+            in_comment_here = False      # '<!--' inside a fence is code text
+        else:
+            in_comment, in_comment_here = _comment_scan(raw, in_comment)
+        line = raw.strip(_BLANK_STRIP)
         if not line:
             in_quote = False       # a blank line is what closes a quote block
             continue
         if not fenced and line.startswith(">"):
             in_quote = True        # '>' inside a fence is code text, not a marker
-        if fenced or in_quote or line in echoed:
+        if fenced or in_comment_here or in_quote or line in echoed:
             continue
         out.append(raw)
     return out
@@ -569,11 +663,17 @@ def _has_report(tail, task, run_id):
     tools/autoos_report.py's parser finds the last ``REPORT <id>`` block, and a
     heading that parser cannot read (``# REPORT``, ``**REPORT**``) still counts,
     because the return contract IS a heading. Either way a run id the heading
-    carries must be this run's. A block inside a fence, inside a quote, or copied
-    out of the task never reaches either reader.
+    carries must be this run's. A block inside a fence, inside an HTML comment,
+    inside a quote, or copied out of the task never reaches either reader — and
+    any view line carrying a separator or control character the line rules are
+    built on (any Zs other than ' ', any Zl/Zp, any Cc other than '\\t') makes
+    the WHOLE report suspect: has_report False, fail closed, because a text
+    another reader could split or strip differently is not a claim to believe.
     """
     lines = _report_view(tail, task)
     if not lines:
+        return False
+    if any(_suspect_line(line) for line in lines):
         return False
     try:
         parsed = report_parser.parse_report("\n".join(lines))
@@ -790,7 +890,7 @@ def read_attempts(key, state=None):
     """
     path = path_of(key, state)
     if os.path.islink(path):
-        raise RecoveryError("recovery state %r is a symlink" % (path,))
+        raise RecoveryStateError("recovery state %r is a symlink" % (path,))
     data, ok = _read_json_dict(path)
     if data is None and ok:
         return _no_attempts(key)      # the file simply is not there: zero attempts
@@ -819,7 +919,7 @@ def _lock_regular(fd, path):
         regular = False
     if not regular:
         _close(fd)
-        raise RecoveryError("lane lock %r is not a regular file" % (path,))
+        raise RecoveryStateError("lane lock %r is not a regular file" % (path,))
     return fd
 
 
@@ -829,7 +929,7 @@ def _lock_open(path, flags):
     try:
         return _lock_regular(os.open(path, flags, 0o600), path)
     except OSError as exc:
-        raise RecoveryError("cannot take the lane lock %r: %s" % (path, exc))
+        raise RecoveryStateError("cannot take the lane lock %r: %s" % (path, exc))
 
 
 def _acquire_lock(path):
@@ -847,8 +947,9 @@ def _acquire_lock(path):
     module must stay
     importable there) so it uses ``msvcrt.locking`` on one byte of the same fd;
     both platforms then pay the same bounded retry loop.
-    A lock still contested after `LOCK_RETRIES` tries raises: refusing to record
-    escalates the lane, which is safe, where recording anyway spends a leg nobody
+    A lock still contested after `LOCK_RETRIES` tries raises a
+    `RecoveryStateError`: refusing to record escalates the lane (the CLI's
+    exit 4), which is safe, where recording anyway spends a leg nobody
     counted, which is not.
     """
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
@@ -865,8 +966,8 @@ def _acquire_lock(path):
                 time.sleep(LOCK_RETRY_SECS)
                 continue
             return fd
-        raise RecoveryError("lane lock %r is held by another writer (%d tries)"
-                            % (path, LOCK_RETRIES))
+        raise RecoveryStateError("lane lock %r is held by another writer (%d tries)"
+                                 % (path, LOCK_RETRIES))
     else:
         import fcntl  # inside the platform check: no fcntl on Windows
 
@@ -886,10 +987,11 @@ def _acquire_lock(path):
                     time.sleep(LOCK_RETRY_SECS)
                     continue
                 except OSError as exc:
-                    raise RecoveryError("cannot take the lane lock %r: %s" % (path, exc))
+                    raise RecoveryStateError("cannot take the lane lock %r: %s"
+                                             % (path, exc))
                 return fd
-            raise RecoveryError("lane lock %r is held by another writer (%d tries)"
-                                % (path, LOCK_RETRIES))
+            raise RecoveryStateError("lane lock %r is held by another writer (%d tries)"
+                                     % (path, LOCK_RETRIES))
         except BaseException:
             _close(fd)
             raise
@@ -911,30 +1013,48 @@ def record_attempt(key, run_id, state=None):
     count. The write is atomic (temp + ``os.replace``) at 0600, because this file
     is the lane's budget. A record that is not a readable attempt file is refused
     rather than overwritten: repairing it here would hand the lane back the budget
-    the corruption hid.
+    the corruption hid. A refusal of the STATE — corrupt, contested, not a regular
+    file, unwritable — is a `RecoveryStateError`, which the CLI answers as
+    escalate (exit 4); a refused run id or lane key stays a usage error.
     """
     _check_key(key)
     _check_run_id(run_id)
     path = path_of(key, state)
     target = os.path.dirname(path)
-    os.makedirs(target, mode=0o700, exist_ok=True)
-    if os.name != "nt":
-        # makedirs' mode is umask-masked and never applied to an existing parent.
-        os.chmod(target, 0o700)
+    try:
+        os.makedirs(target, mode=0o700, exist_ok=True)
+        if os.name != "nt":
+            # makedirs' mode is umask-masked and never applied to an existing parent.
+            os.chmod(target, 0o700)
+    except OSError as exc:
+        raise RecoveryStateError("cannot prepare the recovery state dir %r: %s"
+                                 % (target, exc))
     lock_fd = _acquire_lock(_lock_path(key, state))
     try:
         cur = read_attempts(key, state)
         if cur["corrupt"]:
-            raise RecoveryError("recovery state %r is corrupt: escalate, do not re-arm"
-                                % (path,))
+            raise RecoveryStateError("recovery state %r is corrupt: do not re-arm"
+                                     % (path,))
         if run_id not in cur["runs"]:
             record = {"key": key, "attempts": cur["attempts"] + 1,
                       "runs": cur["runs"] + [run_id], "last_ts": _now()}
-            fd, tmp = tempfile.mkstemp(dir=target, prefix=".recovery-", suffix=".tmp")
+            try:
+                fd, tmp = tempfile.mkstemp(dir=target, prefix=".recovery-",
+                                           suffix=".tmp")
+            except OSError as exc:
+                raise RecoveryStateError("cannot write the recovery state %r: %s"
+                                         % (path, exc))
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(record, fh, sort_keys=True)
                 os.replace(tmp, path)
+            except OSError as exc:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise RecoveryStateError("cannot write the recovery state %r: %s"
+                                         % (path, exc))
             except BaseException:
                 try:
                     os.unlink(tmp)
@@ -1002,7 +1122,9 @@ def main(argv=None):
                    help="lane key sharing the attempt budget (default: the run's task, hashed)")
     p.add_argument("--stall-secs", dest="stall_secs", type=float, default=STALL_SECS,
                    help="quiet for this long is stalled (default %d)" % STALL_SECS)
-    r = sub.add_parser("record", help="record one continuation leg for a lane (exit 0)")
+    r = sub.add_parser("record", help="record one continuation leg for a lane "
+                                      "(exit 0; 4 when the lane state is corrupt "
+                                      "or contested — escalate)")
     r.add_argument("run_id")
     r.add_argument("--lane", dest="lane", required=True)
     a = ap.parse_args(argv)
@@ -1018,7 +1140,14 @@ def main(argv=None):
         out = record_attempt(a.lane, a.run_id)
         print(json.dumps(out, indent=1, sort_keys=True))
         return 0
+    except RecoveryStateError as exc:
+        # Corrupt / contested / non-regular / unwritable lane state: the spec's
+        # answer is a human, not a usage message (P4c-fixes3 exit contract).
+        print("autoos_recovery: %s; escalate" % exc, file=sys.stderr)
+        return 4
     except RecoveryError as exc:
+        # 2 stays ONLY for a usage error: an argument the caller passed in a
+        # shape this module refuses to touch.
         print("autoos_recovery: %s" % exc, file=sys.stderr)
         return 2
     except BrokenPipeError:
