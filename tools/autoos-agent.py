@@ -1502,6 +1502,34 @@ def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
     return {e[2] for e in entries}, accepted
 
 
+def _review_expansion_refuse(root: str, pair, kept) -> None:
+    """P1-FIX5 (attacker-reproduced): a LITERAL pathspec still matches as a DIRECTORY
+    PREFIX, so when `foo` is a tree at base (holding the excluded
+    `foo/secrets-generated/key.pem`) and a file at head, `kept` names `foo` and the
+    diff carries that child out as a removal hunk. Upstream predicates are path-level
+    and cannot see a name the pathspec expands to, so ask git what the same pathspec
+    covers and refuse on any name the filter dropped — before the patch is opened,
+    naming the first offending PATH only, never its content."""
+    rng = "%s..%s" % pair
+    kept_set = set(kept)
+    for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
+        try:
+            # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
+            out = subprocess.run(["git", "-C", root, "--literal-pathspecs", "diff",
+                                  "--no-renames", "--name-only", "-z", rng, "--"]
+                                 + kept[i:i + 200], capture_output=True, check=True,
+                                 stdin=subprocess.DEVNULL).stdout
+        except subprocess.CalledProcessError as exc:  # D3: vanished base = rc2 refusal
+            raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                    % (pair[0][:8], root, exc.returncode)) from None
+        for name in out.split(b"\0"):
+            name = name.decode("utf-8", "surrogateescape")
+            if name and name not in kept_set:
+                raise ReviewBaseRefused("review-base: the patch pathspec expands to %s, "
+                                        "which the exclude filter dropped; refusing to "
+                                        "build it" % name)
+
+
 def _review_diff_paths(root: str, pair, allowed) -> list:
     """The diff names that ride out: the allowed HEAD paths PLUS paths DELETED in
     the range (D1: `allowed` is HEAD-only, so removals were dropped and the seat -
@@ -1528,8 +1556,10 @@ def _review_diff_paths(root: str, pair, allowed) -> list:
     # neither side.
     pres_h, acc_h = _patch_side_accepted(root, pair[1], kept)
     pres_b, acc_b = _patch_side_accepted(root, pair[0], kept)
-    return [p for p in kept if (p not in pres_h or p in acc_h)
+    kept = [p for p in kept if (p not in pres_h or p in acc_h)
             and (p not in pres_b or p in acc_b)]
+    _review_expansion_refuse(root, pair, kept)  # P1-FIX5 backstop
+    return kept
 
 
 def write_review_diff(root: str, path: str, pair, allowed) -> None:

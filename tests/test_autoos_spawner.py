@@ -23065,6 +23065,53 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
                 self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4c", (base, head))
             self.assertFalse(os.path.lexists(tmp + "/s"))
 
+    # P1-FIX5 (attacker-reproduced; the test below FAILS on 671975d0).
+
+    def _dirfile_repo(self):
+        """BASE keeps `foo/` as a DIRECTORY holding the excluded
+        `foo/secrets-generated/key.pem`; HEAD replaces that tree with one regular
+        file `foo`. `kept` names `foo`, and a literal pathspec still matches as a
+        directory PREFIX, so the diff carried the excluded child out as a removal
+        hunk — which `review_base_preflight_refuse` never saw, as it only
+        iterates `kept`."""
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "foo/secrets-generated"))
+        io.open(os.path.join(self.root, "foo/secrets-generated/key.pem"), "w").write(
+            "EXCLUDEDKEYMATERIAL\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        base = self._commit("dir base")
+        shutil.rmtree(os.path.join(self.root, "foo"))
+        io.open(os.path.join(self.root, "foo"), "w").write("FOO-AT-HEAD\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        return base, self._commit("file head")
+
+    def test_a_directory_prefix_expansion_refuses_and_builds_nothing(self):
+        cli = self.cli
+        base, head = self._dirfile_repo()
+        allowed = cli._isolate_allowed_files(self.root)[1]
+        self.assertIn("foo", allowed, "the fixture needs foo as a HEAD file")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(cli.ReviewBaseRefused) as cm:
+                cli.write_review_diff(self.root, tmp, (base, head), allowed)
+            self.assertNotIn("EXCLUDEDKEYMATERIAL", str(cm.exception),
+                             "the refusal names a path, never content")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, cli.REVIEW_DIFF_FILE)),
+                             "refused before the patch was opened")
+            dest = tmp + "/s"
+            with self.assertRaises(cli.ReviewBaseRefused):
+                cli.isolate_clone(self.root, dest, "agent/p1f5", (base, head))
+            self.assertFalse(os.path.lexists(os.path.join(dest, cli.REVIEW_DIFF_FILE)))
+            self.assertFalse(os.path.lexists(dest))
+
+    def test_an_ordinary_range_still_passes_the_expansion_backstop(self):
+        # The backstop must not refuse a plain diff: its names are kept itself.
+        cli, root, base, head = self.cli, *self._repo()
+        kept = cli._review_diff_paths(root, (base, head),
+                                      cli._isolate_allowed_files(root)[1])
+        cli._review_expansion_refuse(root, (base, head), kept)
+        self.assertIn("keep.txt", kept)
+
 
 class P1PinnedWriterFamilyTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the
