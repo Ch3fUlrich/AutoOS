@@ -36,14 +36,20 @@ USER node
 # whose contents is ONE lone model turn was never stripped - the shape that reproduces the
 # 400. v2 pops every trailing model turn and refills an emptied contents with one synthetic
 # user turn (configuration/omniroute/vertex-trailing-turn-README.md).
-# v3 (lane VERTEX-GUARD, gate 06c19a): the counts this stage checked were the counts of the
+# v3 (lane VERTEX-LIVE, D-908): v2 still never looked INSIDE a turn, so a signed tool call
+# ending on a user turn that MIXES a functionResponse part with a text part 400'd with the
+# same "ends with a model turn" message although the body ends on user. v3 first splits
+# every mixed user turn into user[functionResponse parts], model["Noted."], user[other
+# parts], then runs the v2 pop/refill (the split's final turn is user, so the body ends on
+# user). The three guard generations are the SKIP/PATCH anchors of tools/apply-vertex-patch.py.
+# gate (lane VERTEX-GUARD, gate 06c19a): the counts this stage checked were the counts of the
 # 6 chunk names the patcher's table carries, which FAILS OPEN - a bump that adds a 13th
 # call site in a new chunk, or renames one of the 6, ships an unpatched gateway and every
 # number still matches, because the check never looked at that file. The counting now
 # lives in tools/vertex-patch-gate.py, which judges EVERY *.js chunk in the directory it is
-# given and stops the build unless: v2 guards == call sites == refill sites, call sites
-# >= 12, no v1 guard text survives, and both patcher runs add up to that same count. No
-# chunk name appears below - the text of the tree is the truth, not a list of files.
+# given and stops the build unless: v3 guards == call sites == refill sites == split sites,
+# call sites >= 12, no v1 guard text survives, and both patcher runs add up to that same
+# count. No chunk name appears below - the text of the tree is the truth, not a list of files.
 FROM python:3.12-slim-bookworm@sha256:7753c33391fc9f01d1984375bf375eb6686d52ba10db6043a86634a5ccf90dcf AS vertex-patch
 COPY --from=base /app/.build/next/server/chunks /chunks
 COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py
