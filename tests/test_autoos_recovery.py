@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -39,6 +40,14 @@ TASK = "Implement the widget and run the suite.\nEnd with your report.\n"
 SB = "/keep/worktrees/wt-1"            # a shape-only path: never a real directory
 BRANCH = "agent/20261009-182026-task-abc123"
 LANE = "lane/p4c"
+# A run id begins `YYYYMMDD-HHMMSS`: 15 characters, unique per second, which is the
+# shortest PREFIX a heading may name this run by (P4c-fixes5 (3)).
+STAMP = RUN[:15]                        # "20261009-182026"
+SHORT_OF_STAMP = RUN[:14]               # one character short: a minute, not a run
+OTHER_STAMP = "20261009-195001-wg-p4c-fixes2"   # a DIFFERENT run's stamp + slug
+# The bytes a client that believes it owns a terminal writes into its own stdout.
+ESC = "\x1b"
+GRN, RST, BOLD = ESC + "[32m", ESC + "[0m", ESC + "[1m"
 
 SKIP = object()                        # "do not create this file"
 
@@ -649,17 +658,24 @@ class ReportDetection(TempCase):
         """Not a quote case at all: a genuine report with a separator/control
         character somewhere in the worker's own lines is not believed — the text
         another reader could re-split or re-strip into a different verdict is no
-        verdict (has_report False, fail closed)."""
-        for bad in self.LINE_BREAK_LIKES + ("\r",):
+        verdict (has_report False, fail closed).
+
+        '\\r' is off this list since P4c-fixes5 (1): a carriage return is a terminal
+        REDRAW, and `_normalise_output` gives it that meaning before the screen runs.
+        What is left here is every character the normaliser may not explain away."""
+        for bad in self.LINE_BREAK_LIKES:
             self.assertFalse(self.classified([report_body(), "a%sb\n" % bad],
                                               state=self.other_state())["has_report"],
                              repr(bad))
 
     def test_a_crlf_log_still_reads_its_report(self):
         """One trailing '\\r' per line is dropped, so a CRLF output.log is a
-        normal log; a bare '\\r' inside a line is content and fails closed."""
+        normal log; a '\\r' inside a line is the terminal's in-place redraw, and only
+        what a screen would have left — the text after the last one — is read."""
         self.assertTrue(self.classified("# REPORT\r\ndone\r\n",
                                         state=self.other_state())["has_report"])
+        # 'REPORT <id>\ryes' redraws over the claim: the line reads 'yes', and a
+        # line that says 'yes' is not a report.
         self.assertFalse(self.classified(["REPORT %s\ryes\n" % RUN],
                                          state=self.other_state())["has_report"])
 
@@ -820,6 +836,385 @@ class ReportDetection(TempCase):
                            exit_json={"rc": 0})
         os.unlink(os.path.join(root, "job.json"))
         self.assertTrue(classify(root, probe=dead)["has_report"])
+
+
+class AnsiAndRedraws(TempCase):
+    """P4c-fixes5 (1): ``output.log`` is the CLIENT's raw captured stdout. A CLI that
+    believes it owns a terminal paints its progress in colour and redraws a line in
+    place, and `_suspect_line` — which refuses every Cc but '\\t' — read that as a
+    writer that printed control characters: WHOLE report suspect, a writer that
+    finished and reported classified 'died', two wasted legs, then an escalation.
+    The tail is normalised before any reader sees it, so the screen a reader with no
+    colour would have seen is what the line rules are asked about — and everything
+    the normaliser cannot explain (a lone ESC, an unterminated sequence, a U+2028)
+    still fails closed exactly as before."""
+
+    def classified(self, output, state=None, task=TASK):
+        return classify(make_record(state or self.other_state(), output=output,
+                                    task=task, exit_json={"rc": 0}), probe=dead)
+
+    def test_colour_and_a_progress_redraw_before_a_report_complete_the_run(self):
+        out = ["%srunning tests...%s\n" % (GRN, RST),
+               "%s12 passed%s in 1.4s\n" % (GRN, RST),
+               "resolving deps: 10%%\r25%%\r100%%\r\n",
+               "\n", report_body()]
+        info = self.classified(out)
+        self.assertTrue(info["has_report"])
+        self.assertEqual(info["state"], "completed")
+        self.assertEqual(r.next_action(0, info["state"]), "none")
+
+    def test_ansi_inside_the_report_heading_counts_after_the_strip(self):
+        """The real shape is a client that BOLDS the word itself: '\x1b[1mREPORT\x1b[0m
+        <id> · OK · green' is the heading once the paint is removed."""
+        self.assertTrue(self.classified(["%sREPORT%s %s \u00b7 OK \u00b7 green\n"
+                                         % (BOLD, RST, RUN)])["has_report"])
+
+    def test_an_osc_title_and_a_charset_designator_are_stripped_too(self):
+        for extra in (ESC + "]0;pytest \u2014 widget suite\x07",        # OSC, BEL-terminated
+                      ESC + "]2;title" + ESC + "\\",                    # OSC, ST-terminated
+                      ESC + "(B" + ESC + ")0",                          # nF charset sets
+                      ESC + "[?25l" + ESC + "[?25h"):                   # CSI private modes
+            self.assertTrue(self.classified([extra + "\n", report_body()],
+                                            state=self.other_state())["has_report"],
+                            repr(extra))
+
+    def test_a_forged_line_break_under_the_colour_is_still_suspect(self):
+        """The strip may remove paint and nothing else: the same coloured transcript
+        with a real U+2028 (or NEL, or FF) inside a worker line fails closed."""
+        for bad in ReportDetection.LINE_BREAK_LIKES:
+            out = ["%srunning tests...%s\n" % (GRN, RST),
+                   "worker says%sdone\n" % bad,
+                   "progress: 10%%\r100%%\r\n",
+                   report_body()]
+            self.assertFalse(self.classified(out, state=self.other_state())
+                             ["has_report"], repr(bad))
+
+    def test_a_lone_esc_is_not_a_sequence_and_is_still_suspect(self):
+        for bad in ("trailing esc " + ESC,
+                    "esc then a letter " + ESC + "ept",       # reserved Fp, not paint
+                    "esc then a space " + ESC + " d",
+                    "unterminated csi " + ESC + "[3",
+                    "unterminated osc " + ESC + "]0;title"):
+            self.assertFalse(self.classified([bad + "\n", report_body()],
+                                             state=self.other_state())["has_report"],
+                             repr(bad))
+
+    def test_an_unterminated_osc_cannot_swallow_a_line_break(self):
+        """An OSC payload may not cross a newline, so an escape that never terminated
+        leaves its ESC on line one and its BEL on line two — both Cc, both suspect —
+        instead of eating the break between them and handing back a joined claim."""
+        out = [ESC + "]0;evil\n", "REPORT %s \u00b7 OK \u00b7 green\x07\n" % RUN]
+        self.assertFalse(self.classified(out)["has_report"])
+        self.assertEqual(self.classified(out)["state"], "died")
+
+    def test_a_trailing_carriage_return_run_is_the_screen_not_a_forgery(self):
+        """One trailing '\\r' is the CRLF case; a RUN of them is a client that parked
+        its cursor at the column before the newline, and a screen shows the same text
+        either way. A trailing CR cannot add a character to a line, so it is not read
+        as a control character against the report — the suspect rule is for what a
+        re-split or re-strip COULD turn into another verdict."""
+        self.assertTrue(self.classified([report_body(), "done\r\r\n"])["has_report"])
+        self.assertTrue(self.classified([report_body(), "done\r\r\r\n"])["has_report"])
+
+    # --- the normaliser itself, as a unit -------------------------------------
+    def test_redraw_line_keeps_what_a_screen_would_have_shown(self):
+        for src, want in (("abc", "abc"),                       # no CR at all
+                          ("abc\r", "abc"),                     # the CRLF case
+                          ("10%\r25%\r100%\r", "100%"),          # progress redraw
+                          ("a\rb", "b"),                        # overwrite in place
+                          ("\rfirst", "first"),                 # CR at the line head
+                          ("a\rb\r", "b"),                      # redraw, then CRLF
+                          ("abc\r\r", "abc"),                   # a trailing run shows
+                          ("abc\r\r\r", "abc")):               # nothing, and erases
+            self.assertEqual(r._redraw_line(src), want, repr(src))
+        # No carriage return survives the normaliser, so none can reach the suspect
+        # screen: what is left to reject there is a real separator or an ESC.
+        for src in ("abc\r", "abc\r\r", "a\rb\r\r\r", "\r", "\r\r\r"):
+            self.assertNotIn("\r", r._normalise_output(src), repr(src))
+
+    def test_normalising_never_changes_the_physical_line_count(self):
+        """The property the fail-closed rules are built on: the strip removes bytes
+        INSIDE a line, so a log's line structure — the one thing `_report_view`, the
+        quote logic and the heading column all count on — is invariant."""
+        samples = ["%sa\x1b[0m\r\nb\n\n%s\r\nc%d\n" % (GRN, ESC, 7),
+                   ESC + "]0;t\x07one\ntwo\r" + ESC + "[2Kthree\n\n",
+                   "plain\nlines\nwith no escapes at all\n",
+                   ""]
+        for s in samples:
+            once = r._normalise_output(s)
+            self.assertEqual(once.count("\n"), s.count("\n"), repr(s))
+            self.assertEqual(r._normalise_output(once), once, repr(s))   # idempotent
+            self.assertEqual(len(r._lines(once)), len(r._lines(s)), repr(s))
+
+    def test_normalise_output_is_the_agent_ansi_rule_extended_not_replaced(self):
+        """The CSI half is the SAME alternation `tools/autoos-agent.py` strips with
+        (its `_ANSI_RE`, mirrored here because that launcher is not importable), so
+        what that reader calls colour this reader calls colour too."""
+        for painted in ("\x1b[31mError: 429\x1b[0m", "\x1b[2K", "\x1b[1;38;5;214mx\x1b[m",
+                        "\x1b[?25l", "\x1b[1A"):
+            self.assertEqual(r._ANSI_ESCAPE_RE.sub("", painted),
+                             re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]").sub("", painted),
+                             repr(painted))
+
+
+class HeadingDecorations(TempCase):
+    """P4c-fixes5 (2): the allowlist of DECORATIONS around the word REPORT is exactly
+    two things — an ATX ``#{1,6} `` heading prefix, and markdown bold around the word,
+    which is what the real writers print (`REPORT <id> · OK · green` and
+    `**REPORT** <id> · status **completed**`). The old ``[#>*-]+`` class also accepted
+    a LIST MARKER, so a bullet in the writer's own summary list — `- REPORT <id> ·
+    completed …` — read as the return contract's heading and granted a 'completed'."""
+
+    ACCEPTED = ["REPORT %s \u00b7 OK \u00b7 green" % RUN,
+                "**REPORT** %s \u00b7 status **completed**" % RUN,
+                "**REPORT**",
+                "# REPORT",
+                "## REPORT %s \u00b7 OK" % RUN,
+                "###### REPORT %s" % RUN,
+                "**REPORT**: done"]
+    REFUSED = ["- REPORT %s \u00b7 completed \u00b7 green" % RUN,
+               "-- REPORT %s" % RUN,
+               "* REPORT %s \u00b7 completed" % RUN,
+               "** REPORT %s" % RUN,
+               "*** REPORT %s" % RUN,
+               "+ REPORT %s \u00b7 completed" % RUN,
+               "> REPORT %s \u00b7 completed" % RUN,
+               ">> REPORT %s" % RUN,
+               "\u2022 REPORT %s \u00b7 completed" % RUN,        # a real bullet glyph
+               "#REPORT %s" % RUN,                               # no ATX space
+               "#. REPORT %s" % RUN,
+               " - REPORT %s" % RUN,                              # indented anyway
+               "REPORTED %s" % RUN,
+               "REPORT.md"]
+
+    def matched(self, shape):
+        return r._REPORT_HEADING_RE.match(shape)
+
+    def test_only_an_atx_prefix_and_bold_decorate_a_claim(self):
+        for shape in self.ACCEPTED:
+            self.assertIsNotNone(self.matched(shape), shape)
+
+    def test_a_list_marker_or_quote_is_not_a_decoration(self):
+        for shape in self.REFUSED:
+            self.assertIsNone(self.matched(shape), shape)
+
+    def test_a_bulleted_report_line_does_not_complete_the_run(self):
+        """The exact false positive: rc 0, and the only REPORT-shaped line in the
+        transcript is a bullet in the writer's own list of what it did."""
+        for bullet in ("- ", "* ", "+ ", "\u2022 "):
+            out = self.classified(["worker text\n", "\n",
+                                   bullet + "REPORT %s \u00b7 completed \u00b7 green\n" % RUN],
+                                  state=self.other_state())
+            self.assertFalse(out["has_report"], bullet)
+            self.assertEqual(out["state"], "died", bullet)
+            self.assertEqual(r.next_action(0, out["state"]), "rerun", bullet)
+
+    def test_a_quoted_report_line_does_not_complete_the_run(self):
+        out = self.classified(["> REPORT %s \u00b7 completed\n" % RUN],
+                              state=self.other_state())
+        self.assertFalse(out["has_report"])
+
+    def classified(self, output, state=None, task=TASK):
+        return classify(make_record(state or self.other_state(), output=output,
+                                    task=task, exit_json={"rc": 0}), probe=dead)
+
+    def test_the_two_real_writer_shapes_complete(self):
+        """Plain `REPORT <id> · OK · green` and the bold `**REPORT** <id> · status
+        **completed**` block are the shapes the finished runs of this lane printed."""
+        for head in ("REPORT %s \u00b7 OK \u00b7 green\n" % RUN,
+                     "**REPORT** %s \u00b7 status **completed**\n" % RUN,
+                     "# REPORT %s \u00b7 OK \u00b7 green\n" % RUN):
+            info = self.classified(["worker prose\n", "\n", head,
+                                    "all checks green\n"], state=self.other_state())
+            self.assertTrue(info["has_report"], head)
+            self.assertEqual(info["state"], "completed", head)
+
+
+class RunIdPrefix(TempCase):
+    """P4c-fixes5 (3): a writer shortens the id it copies out of its brief — real run
+    `20261009-195001-wg-p4c-fixes2-qoder-d2e0c1` printed
+    `REPORT 20261009-195001-wg-p4c-fixes2 · OK · green`. A heading's id counts when it
+    is the run id, or a PREFIX of it at least `RUN_ID_STAMP_MIN_CHARS` (15) characters
+    long — `YYYYMMDD-HHMMSS`, which is unique per second. Everything else stays
+    refused: another run's id or stamp-prefix, a longer id, a case variant, an id that
+    merely CONTAINS this one. A bare heading with no id keeps naming no run (D-938
+    CHECK 3)."""
+
+    def classified(self, body, state=None, task=TASK):
+        return classify(make_record(state or self.other_state(), output=[body],
+                                    task=task, exit_json={"rc": 0}), probe=dead)
+
+    def test_the_prefix_rule_as_a_unit(self):
+        for declared, want in (("", True),                       # no id: D-938 CHECK 3
+                               (RUN, True),                      # exact
+                               (STAMP, True),                    # the 15-char stamp
+                               (RUN[:16], True),                 # stamp + one
+                               (RUN[:22], True),                 # stamp + slug
+                               (SHORT_OF_STAMP, False),          # 14: a minute, not a run
+                               (RUN[:8], False),                 # a day
+                               (RUN.upper(), False),             # a case variant
+                               (RUN + "-leg-two", False),        # longer than this run
+                               ("run-" + RUN, False),            # contains, not a prefix
+                               (OTHER_STAMP, False),             # another run's prefix
+                               (OTHER_RUN, False),               # another run's id
+                               ("20261009-18202", False)):
+            self.assertEqual(r._names_this_run(declared, RUN), want, repr(declared))
+
+    def test_a_stamp_prefix_of_this_run_completes(self):
+        for declared in (STAMP, RUN[:22], "20261009-182026-task"):
+            info = self.classified(report_body(declared), state=self.other_state())
+            self.assertTrue(info["has_report"], declared)
+            self.assertEqual(info["state"], "completed", declared)
+
+    def test_the_bold_form_with_a_prefix_id_completes(self):
+        out = ["**REPORT** %s \u00b7 status **completed**\n" % STAMP, "\n",
+               "all checks green\n"]
+        info = self.classified("".join(out), state=self.other_state())
+        self.assertTrue(info["has_report"])
+        self.assertEqual(info["state"], "completed")
+
+    def test_another_runs_stamp_prefix_is_refused(self):
+        """A prefix of a DIFFERENT run's id is not a shortened form of this one."""
+        for declared in (OTHER_STAMP, OTHER_RUN, "20261009-182027"):
+            info = self.classified(report_body(declared), state=self.other_state())
+            self.assertFalse(info["has_report"], declared)
+            self.assertEqual(info["state"], "died", declared)
+            self.assertEqual(r.next_action(0, info["state"]), "rerun", declared)
+
+    def test_a_short_contained_or_overlong_id_is_refused(self):
+        for declared in (SHORT_OF_STAMP, "run-" + RUN, RUN.upper(), RUN + "-more"):
+            info = self.classified(report_body(declared), state=self.other_state())
+            self.assertFalse(info["has_report"], declared)
+
+    def test_a_bare_heading_still_names_no_run_and_counts(self):
+        info = self.classified("**REPORT**\nall checks green\n",
+                               state=self.other_state())
+        self.assertTrue(info["has_report"])
+        self.assertEqual(info["state"], "completed")
+
+    def test_a_prose_heading_that_names_no_id_is_still_refused(self):
+        """The shape the earlier rounds' writers really printed: `REPORT — <title>,
+        committed <sha>`. Its first token is prose, so it names a run the reader
+        cannot match and is refused — one needless leg, never a false 'completed'."""
+        for head in ("REPORT \u2014 the fix is done\n", "REPORT: the field list\n"):
+            info = self.classified(head + "all green\n", state=self.other_state())
+            self.assertFalse(info["has_report"], head)
+
+
+class RealCorpusShapes(TempCase):
+    """P4c-fixes5 (4): the allowlist must be measured against the transcripts real
+    finished runs produce, not only against the forgeries. Each fixture below mirrors
+    a shape taken from this lane's own rc==0 records — writer prose, then the REPORT
+    block (plain heading or `**REPORT**` with bullet details and a markdown table),
+    then the spawner's closing block (`writer:` / `scope:` / `sandbox changes` /
+    `sandbox commits:` / `review:` / `take it:` / `discard:`) — and the expected
+    verdict is the one a human reading the same log would give. An allowlist that has
+    become over-strict fails HERE, in the suite, instead of re-running a finished
+    writer twice and escalating the lane."""
+
+    TRAILER = [
+        "writer: qoder/qwen3-flash (qwen) source=client-reported\n",
+        "scope: inherited unit=autoos-worker-20261009-182026-task-abc123.scope\n",
+        "sandbox changes (uncommitted):\n",
+        "  M tools/x.py\n",
+        "sandbox commits:\n",
+        "abc1234 fix: the two guards, committed on the clone branch\n",
+        "review:  git -C /tmp/wg-corpus/sandbox diff\n",
+        "take it: git fetch /tmp/wg-corpus/sandbox %s"
+        "   (then: git cherry-pick abc1234..FETCH_HEAD)\n" % BRANCH,
+        "discard: rm -rf /tmp/wg-corpus/sandbox\n"]
+
+    PROSE = ["worker thinking about the widget\n",
+             "patched the guard and ran the suite\n"]
+
+    @classmethod
+    def report_block(cls, run_id=RUN):
+        """The `**REPORT**` block of a real finished writer: heading, bold files line,
+        bullet details, a markdown table."""
+        return ["**REPORT** %s \u00b7 status **completed**\n" % run_id,
+                "\n",
+                "**Files** `tools/x.py`; `tests/test_x.py` (nothing else touched)\n",
+                "\n",
+                "| # | defect | old | new |\n",
+                "|---|---|---|---|\n",
+                "| 1 | bullet counted | `- REPORT` granted | refused |\n",
+                "| 2 | colour made it suspect | 'died' | 'completed' |\n",
+                "\n",
+                "**Tests** `python3 -m pytest tests/test_x.py` \u2192 210 passed\n",
+                "- the strip runs before the suspect screen\n"]
+
+    def classified(self, lines):
+        return classify(make_record(self.other_state(), output=lines, task=TASK,
+                                    exit_json={"rc": 0}), probe=dead)
+
+    def fixtures(self):
+        crlf = [line.replace("\n", "\r\n")
+                for line in (self.PROSE + ["\n"] + self.report_block() + self.TRAILER)]
+        painted = ([self.PROSE[0]] +
+                   ["%srunning tests...%s\n" % (GRN, RST),
+                    "resolving deps: 10%%\r25%%\r100%%\r\n",
+                    ESC + "]0;pytest \u2014 widget suite\x07\n"] +
+                   self.PROSE[1:] + ["\n"] +
+                   ["%s**REPORT**%s %s \u00b7 status **completed**\n"
+                    % (BOLD, RST, RUN)] +
+                   self.report_block()[1:] + self.TRAILER)
+        return [
+            ("plain heading, spawner trailer",
+             self.PROSE + ["\n", report_body()] + self.TRAILER,
+             True, "completed"),
+            ("bold REPORT block with bullets and a table",
+             self.PROSE + ["\n"] + self.report_block() + self.TRAILER,
+             True, "completed"),
+            ("ANSI-coloured progress, bold heading, OSC title",
+             painted, True, "completed"),
+            ("CRLF transcript (a Windows client's own stdout)",
+             crlf, True, "completed"),
+            ("report with no run id at all",
+             self.PROSE + ["\n", "# REPORT\n", "status: done\n"] + self.TRAILER,
+             True, "completed"),
+            ("heading names this run by its 15-char stamp",
+             self.PROSE + ["\n", "REPORT %s \u00b7 OK \u00b7 green\n" % STAMP]
+             + self.TRAILER, True, "completed"),
+            ("a bullet list is not the contract",
+             self.PROSE + ["\n", "- REPORT %s \u00b7 completed \u00b7 green\n" % RUN]
+             + self.TRAILER, False, "died"),
+            ("the heading names another run (its own stamp prefix)",
+             self.PROSE + ["\n", "REPORT %s \u00b7 OK \u00b7 green\n" % OTHER_STAMP]
+             + self.TRAILER, False, "died"),
+            ("a reviewer's VERDICT block: no writer REPORT at all",
+             ["verdict notes\n", "\n", "VERDICT: APPROVE\n",
+              "checks: 210 passed, shellcheck clean\n",
+              "no blocking findings\n"] + self.TRAILER,
+             False, "died"),
+        ]
+
+    def test_every_real_shape_gets_the_verdict_a_human_would_give(self):
+        self.assertGreaterEqual(len(self.fixtures()), 6)
+        for name, lines, want_report, want_state in self.fixtures():
+            info = self.classified(lines)
+            self.assertEqual(info["has_report"], want_report, name)
+            self.assertEqual(info["state"], want_state, name)
+            self.assertEqual(r.next_action(0, info["state"]),
+                             "none" if want_state == "completed" else "rerun", name)
+
+    def test_the_reviewer_verdict_shape_is_refused_because_it_is_not_a_report(self):
+        """Documented, not accidental: `VERDICT: APPROVE` is a REVIEWER's return
+        contract (`tools/review-call.py`), and this module reads a WRITER's record. A
+        run that printed only a verdict never reported, so a writer seat that ends
+        this way is re-run rather than counted as done."""
+        info = self.classified(["VERDICT: APPROVE\n", "no blocking findings\n"])
+        self.assertFalse(info["has_report"])
+        self.assertEqual((info["rc"], info["state"]), (0, "died"))
+
+    def test_the_corpus_is_read_through_the_same_normalised_text_as_the_rules(self):
+        """Every fixture that should complete still completes with the spawner's
+        trailer stripped of its paths (no disk), and none of them relies on a
+        sandbox path being trusted — the report verdict and the worktree hint are
+        read from the same normalised tail by design."""
+        for name, lines, want_report, _state in self.fixtures():
+            info = self.classified(lines)
+            self.assertEqual(info["has_report"], want_report, name)
+            self.assertIsNone(info["sandbox"], name)   # /tmp/wg-corpus is not a root
 
 
 class SuspectRecords(TempCase):

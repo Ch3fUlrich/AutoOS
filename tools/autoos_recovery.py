@@ -64,8 +64,14 @@ Residuals, stated rather than hidden:
   (P4c-fixes4: rounds 1-3 chased one construct per round — fence, quote, comment,
   separator character — and each new one was a fresh false 'completed'). A claim is
   the heading, and a heading counts only when it is at COLUMN 0 with no leading
-  whitespace at all, is the LAST such heading of the worker's own output and BEFORE
-  the spawner's closing block, names this run or no run, and has no further
+  whitespace at all and wears no decoration but an ATX ``#{1,6} `` prefix or markdown
+  bold around the word — a list bullet ``- REPORT <id> · completed`` is the writer
+  summarising its own list, not the contract (P4c-fixes5 (2)) —, is the LAST such
+  heading of the worker's own output and BEFORE
+  the spawner's closing block, names this run or no run (a heading may name it in
+  full, or by a PREFIX of at least 15 characters — ``YYYYMMDD-HHMMSS``, the stamp a
+  writer copies out of its brief and the shortest one that identifies a single run
+  — P4c-fixes5 (3)), and has no further
   column-0 ``REPORT <id>`` heading of another run under it; and it only counts on a
   line that survived `_report_view`: fences, HTML comment regions (a REPORT inside
   `<!--` ... `-->` is not a claim and an unclosed `<!--` swallows the rest), whole
@@ -83,11 +89,32 @@ Residuals, stated rather than hidden:
   reads the same rebuilt text and can only REFUSE, never grant — the block it finds
   must name the run the heading named. Any separator/control character that still
   reaches the report view — any Zs other than ' ', any Zl/Zp, any Cc other than '\t'
-  — makes the WHOLE report suspect: has_report False, fail closed (P4c-fixes3). A
+  — makes the WHOLE report suspect: has_report False, fail closed (P4c-fixes3). What
+  reaches that screen is text `_normalise_output` has already produced (P4c-fixes5
+  (1)): ``output.log`` is the CLIENT's raw captured stdout, and a CLI that believes it
+  owns a terminal paints its progress with colour and redraws a line in place, which
+  used to read as a writer that printed control characters — finished, reported, and
+  classified 'died'. The strip removes well-formed ANSI escape sequences (the CSI
+  family `tools/autoos-agent.py` strips with its own `_ANSI_RE`, mirrored here because
+  that launcher is a 12 000-line script this module imports none of, plus the OSC and
+  nF/Fe forms a client emits), and a carriage return gets its terminal meaning: inside
+  one physical '\n' line only the text after the last '\r' that is followed by
+  something survives, and the line's trailing run of '\r' is dropped — a cursor parked
+  at the column shows nothing and erases nothing, and that is the CRLF case too. No
+  sequence the strip knows may cross a newline, and an
+  unterminated `\x1b[` / `\x1b]` or a lone ESC is not a sequence at all, so the
+  normaliser cannot hide a forged line break — a leftover ESC, \x0b, \x0c, NEL or
+  U+2028 in a worker's line is still suspect. A
   heading that carries a run id must name THIS run, so a heading naming something
   else — including prose like ``REPORT: the field list`` — is not believed: the cost
   is one needless continuation leg on a run that wrote an unusual heading, never a
-  false 'completed'. So is every other refusal above: a writer that reported from
+  false 'completed'. Measured over this host's own rc==0 records the same refusal
+  still bites on the heading a writer prints INSTEAD of its id —
+  ``REPORT — <title>, committed <sha>`` names no run a reader may match, so it reads
+  'died' by design (D-938 CHECK 3): the contract wants the id, or its stamp, right
+  after the word. And a heading that gives ONLY the 15-character stamp names every
+  run started in that same second as well — the reader cannot tell them apart, which
+  it buys back by never granting 'completed' without rc==0 on top of the claim. So is every other refusal above: a writer that reported from
   inside an indented block, an HTML block or under a forged `writer:` trailer loses
   its claim and buys a leg. The strict protocol gate belongs to `ready`, not to
   recovery; a false 'completed' needs rc==0 on top of it.
@@ -153,6 +180,13 @@ TASK_MAX_BYTES = 200 * 1024
 KEY_TASK_CHARS = 2000
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
+# A REPORT heading may name this run by a PREFIX of its id, but only from this many
+# characters up: a run id begins `YYYYMMDD-HHMMSS` — exactly 15, and unique per
+# second — so a prefix this long has left the ambiguous part of the stamp behind.
+# Shorter than that ("20261009-18202" cuts the stamp mid-minute, and a dozen runs
+# share a minute) is a prefix other runs share, which is not a claim about THIS run
+# (P4c-fixes5 (3)).
+RUN_ID_STAMP_MIN_CHARS = 15
 PATH_MAX_CHARS = 4096
 BRANCH_MAX_CHARS = 200
 _INF = float("inf")          # the bound `_is_finite` compares against, no math import
@@ -200,7 +234,16 @@ _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLL
 # trailer, a quoted example and a pasted transcript put a REPORT they did not mean.
 # The reader is an allowlist now: this line is the shape a claim must have.
 _REPORT_HEADING_RE = re.compile(
-    r"^(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])[ \t]*:?[ \t]*(?P<tail>.*)$")
+    r"^(?:#{1,6} )?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])[ \t]*:?[ \t]*(?P<tail>.*)$")
+# P4c-fixes5 (2): the decoration set above is EXACTLY two things — an ATX heading
+# prefix (`#{1,6} `, the `#` run followed by its required space) and markdown bold
+# around the word, which is how the real writers print it: `REPORT <id> · OK · green`
+# and `**REPORT** <id> · status **completed**`. The old `[#>*-]+` class also accepted
+# a LIST MARKER, so a bullet in the writer's own summary list
+# (`- REPORT <id> · completed …`) read as the return contract's heading and granted
+# a 'completed' to a run that never claimed one. A bullet, a `+`, a `*` alone and a
+# quote `>` are not decorations the contract allows; neither is `#REPORT` with no
+# space, which is not an ATX heading.
 # The heading `tools/autoos_report.py`'s parser reads a block from — kept here only
 # so the body under an accepted heading can be checked against it (rule 5).
 _BLOCK_HEAD_RE = re.compile(r"^REPORT\s+(?P<id>\S+)")
@@ -216,6 +259,48 @@ _BLANK_STRIP = " \t"
 # silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
 # a real line legitimately carries; every other member makes a report suspect.
 _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
+# --- output.log normalisation (P4c-fixes5 (1)) --------------------------------
+#
+# ``output.log`` is the CLIENT's raw captured stdout. A CLI that believes it owns a
+# terminal paints its progress with colour (CSI), sets the window title (OSC),
+# selects a charset (nF/Fe) and REDRAWS a line in place with a carriage return.
+# `_suspect_line` refuses every Cc but '\t', so ESC and a non-trailing CR made the
+# WHOLE report suspect — a writer that finished and reported read as 'died' and
+# bought two continuation legs before it escalated. `tools/autoos-agent.py` strips
+# the same bytes before it reads a tail: its `_ANSI_RE` (that file :7806, applied at
+# :7835 and :8835). That launcher is a 12 000-line script this module imports none
+# of, so the CSI half is copied here verbatim and extended with the OSC and nF/Fe
+# forms a client also emits. The agent's `|^\r` half is deliberately NOT copied:
+# there it strips a CR at the head of a single line, here `_redraw_line` decides CR
+# semantics for a whole physical line, which is what a progress bar needs.
+_ANSI_CSI = r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+# Well-formed sequences ONLY, and none of them may span a line break: every final
+# byte is 0x40..0x7E, the intermediates are 0x20..0x2F, and the OSC payload excludes
+# BEL, ESC, '\r' and '\n'. So the strip can never eat a newline, and what it leaves
+# behind — a lone ESC, an unterminated `\x1b[`/`\x1b]`, a U+2028 — is exactly what
+# `_suspect_line` then rejects. An escape is not a licence to forge a line break.
+_ANSI_ESCAPE_RE = re.compile(
+    _ANSI_CSI                                   # CSI: colour, cursor, erase-line
+    + r"|\x1b\][^\x07\x1b\r\n]*(?:\x07|\x1b\\)"  # OSC, terminated by BEL or ST
+    + r"|\x1b[!-/]+[0-~]"                        # nF: ESC ( B, ESC ) 0, ESC $ B —
+    #                                               charset designators: an
+    #                                               intermediate, never a space, then
+    #                                               a final byte
+    + r"|\x1b(?:[@-Z\\^_=>0-9]|c)")              # Fe and the one Fp that ships: ESC 7,
+    #                                               ESC 8 (xterm save/restore cursor),
+    #                                               ESC \, ESC =, ESC >, ESC c (reset)
+# What is deliberately NOT a sequence here, and stays visible for `_suspect_line`:
+#   * `\x1b[` / `\x1b]` — the two introducers of a longer sequence, so an
+#     unterminated one is malformed output, and its ESC must be seen, not eaten;
+#   * ESC + a space, and ESC + any lowercase letter but 'c' — ECMA-48 reserves those
+#     as private Fp/Fs escapes and nothing a client really prints uses them, so
+#     reading `\x1bept` as `\x1be` + `pt` would silently rewrite the worker's prose. A
+#     lone
+#     ESC before an ordinary character is damaged output, and damaged output is
+#     suspect, which is the answer that costs a leg rather than hiding a line break.
+# No class above can match '\r' or '\n' (or any Cc), so the strip cannot join two
+# physical lines or swallow one: it removes bytes INSIDE a line and nothing else.
+
 # P4c-fixes4 (A/B): markdown constructs that INDENT text and are therefore no place
 # for a claim. An indented code block is a run of lines indented by a tab or by this
 # many spaces, and a run only becomes code when a blank line (or the start of the
@@ -257,11 +342,51 @@ def _is_blank(line):
     return line.strip(_BLANK_STRIP) == ""
 
 
+def _redraw_line(line):
+    """`line` as a terminal would leave it on the screen: the text after the LAST
+    '\\r' that is followed by something, and the line's trailing run of '\\r'
+    dropped so a CRLF log reads like an LF one.
+
+    A client that redraws a progress bar writes '10%\\r20%\\r100%\\r' inside ONE
+    physical '\\n' line; what the reader may believe is what the user saw, '100%'. A
+    carriage return at the END of a line only parks the cursor at the column — it
+    erases nothing and shows nothing — so the whole trailing run goes, exactly as the
+    one CR of a CRLF log has always gone in `_lines`. Nothing that survives here can
+    carry a claim the screen would not have shown, and no '\\r' reaches
+    `_suspect_line` any more (P4c-fixes5 (1)).
+    """
+    body = line.rstrip("\r")
+    cut = body.rfind("\r")
+    return body[cut + 1:] if cut >= 0 else body
+
+
+def _normalise_output(text):
+    """The client's raw captured stdout as the text every reader of this module
+    sees: ANSI escape sequences stripped (`_ANSI_ESCAPE_RE`), then carriage returns
+    given their terminal-redraw meaning (`_redraw_line`), line by line on '\\n'
+    ONLY — the same cut `_lines` uses, so normalising cannot invent or destroy a
+    physical line, and a forged U+2028/U+0085/\\x0c stays inside the line it was
+    written into and is still rejected as suspect.
+
+    This runs at the one place the log enters the module (`classify_run`), so the
+    report reader and the spawner's `sandbox:` / trailer reader agree on the same
+    text. Idempotent: applying it to its own output changes nothing.
+    """
+    return "\n".join(_redraw_line(_ANSI_ESCAPE_RE.sub("", line))
+                     for line in (text or "").split("\n"))
+
+
 def _suspect_line(line):
     """Whether `line` carries a character the reader cannot count line breaks or
     blankness on: any Zs other than ' ', any Zl/Zp, any Cc other than '\\t'. A
     report whose lines contain one of these could be re-split or re-stripped
-    into a different verdict, so the WHOLE report is read as no report."""
+    into a different verdict, so the WHOLE report is read as no report.
+
+    It is asked only of text that `_normalise_output` has already produced, which
+    is what keeps its own rule intact: ESC and a bare '\\r' are no longer evidence
+    against a writer that merely coloured its progress or redrew a line, but
+    anything the strip could not account for — a lone ESC, a NEL, a FF, a U+2028 —
+    still is (P4c-fixes5 (1))."""
     for ch in line:
         if ch == " " or ch == "\t":
             continue
@@ -805,9 +930,25 @@ def _heading_id(match):
 
 
 def _names_this_run(declared, run_id):
-    """'' names no run (the bare `**REPORT**` heading form) and counts; anything
-    else must be THIS run's id, or the block is another run's report."""
-    return not declared or declared == run_id
+    """Whether a heading's declared id is this run's — '' names no run (the bare
+    `**REPORT**` heading form) and counts.
+
+    A writer that copies the id out of its own brief sometimes shortens it to the
+    stamp-and-slug it was given (`REPORT 20261009-195001-wg-p4c-fixes2` for the run
+    `20261009-195001-wg-p4c-fixes2-qoder-d2e0c1`), and refusing that re-runs a
+    writer that reported (P4c-fixes5 (3)). So a declared id counts when it is the
+    run id EXACTLY, or a PREFIX of it at least `RUN_ID_STAMP_MIN_CHARS` characters
+    long. Every other shape is refused, as before: another run's id — including
+    another run's stamp-prefix — an id longer than this run's, a case variant, and
+    an id that merely CONTAINS this one (`run-<id>`, which is what a real writer
+    printed and is not a prefix).
+    """
+    if not declared:
+        return True
+    if declared == run_id:
+        return True
+    return (len(declared) >= RUN_ID_STAMP_MIN_CHARS
+            and run_id.startswith(declared))
 
 
 def _last_heading(lines):
@@ -861,6 +1002,17 @@ def _has_report(tail, task, run_id):
     other than ' ', any Zl/Zp, any Cc other than '\\t') makes the WHOLE report
     suspect: has_report False, fail closed, because a text another reader could split
     or strip differently is not a claim to believe.
+
+    `tail` is what `_normalise_output` returned (P4c-fixes5 (1)) — ANSI stripped, CR
+    redraws collapsed — so the screen a colour-blind reader would have seen is what
+    the rules above are asked about, and the suspect screen only ever fires on a
+    character the strip could not account for. The heading is matched by an
+    allowlist of DECORATIONS too: `REPORT` at column 0, optionally behind an ATX
+    ``#{1,6} `` and optionally wrapped in ``**`` — a list bullet ``- REPORT …`` is
+    the writer's own prose list and is not a claim (P4c-fixes5 (2)) — and a heading
+    that names a run may name it in full or by a prefix of at least
+    `RUN_ID_STAMP_MIN_CHARS` characters, the stamp a writer copies out of its brief
+    (P4c-fixes5 (3)).
     """
     lines = _report_view(tail, task)
     if not lines:
@@ -980,6 +1132,11 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     job, job_ok = _read_json_dict(os.path.join(path, "job.json"))
     ex, ex_ok = _read_json_dict(os.path.join(path, "exit.json"))
     tail = _read_tail(os.path.join(path, "output.log"))
+    # The client's raw bytes are normalised here, once, before ANY reader sees them:
+    # `_has_report` and `_parse_sandbox` then work on the same text, and a writer
+    # whose CLI painted its progress in colour or redrew a line is not read as a
+    # writer that printed control characters (P4c-fixes5 (1)).
+    tail = _normalise_output(tail)
     # The record's own state root: <state>/agents/<run_id> -> <state>. A sandbox
     # path printed in the log is trusted only inside that root, so the tree the
     # caller named decides it, not the caller's environment on top of that.
