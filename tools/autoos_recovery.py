@@ -137,7 +137,12 @@ Residuals, stated rather than hidden:
   it as it stands gives each leg a new key, each key reads attempts 0, and the
   ``MAX_ATTEMPTS`` cap is bypassable: three dead writers and no escalation. What a
   worker forges inside its own task text is cut the same way, so the key depends on
-  the prefix alone and the cap still holds.
+  the prefix alone and the cap still holds. Because the key is the ORIGINAL's hash,
+  usability is judged on the ORIGINAL too (`_original_is_usable`, P4c-fixes8): a
+  footer-only record has an empty original, and hashing it would put every such
+  record on the fleet onto one sha256-of-'' budget — one unrelated death moving
+  another lane's counter. Such a record names no work: 'unknown' + suspect, which
+  escalates, and the default key is refused unless the caller names `--lane`.
 * the CLI's exit contract (P4c-fixes3): 0 none/wait and a recorded leg, 3 rerun,
   4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
   unwritable recovery state raises `RecoveryStateError`, which `main` answers
@@ -195,6 +200,10 @@ KEY_TASK_CHARS = 2000
 # chain instead of drifting one key per leg. The leading "\n\n" is load-bearing: a
 # task that merely mentions the heading inside a line of prose is not cut there.
 CONTINUE_MARKER = "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt "
+# The same footer without the blank line that separates it from a brief — the shape
+# a record wears when the separator is lost. Only used to RECOGNISE a footer-only
+# task as naming no work (`_original_is_usable`), never to cut a key (P4c-fixes8).
+CONTINUE_HEADING = CONTINUE_MARKER.lstrip("\n")
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
 # A REPORT heading may name this run by a PREFIX of its id, but only from this many
@@ -1093,24 +1102,41 @@ def _has_visible_text(task):
     return False
 
 
+def _original_is_usable(task):
+    """Whether a task says anything once its continuation footer is cut.
+
+    The judgement runs on `original_task`, not the raw text, because that is what
+    the default lane key is hashed from: a task that IS nothing but the footer has
+    an EMPTY original, so every footer-only record on the fleet would hash to
+    sha256 of the empty string and share one attempt budget — one unrelated run's
+    death would move another lane's counter. A footer that lost the blank line
+    separating it from its brief is the same record with the marker's prefix
+    instead of its separator, and names no work either (P4c-fixes8)."""
+    head = original_task(task)
+    if not _has_visible_text(head):
+        return False
+    return not _normalise_output(head).lstrip().startswith(CONTINUE_HEADING)
+
+
 def _usable_task(job, job_ok):
     """The task a record can be continued from, or None when it cannot say what
     it ran: no readable ``job.json`` (absent, unreadable, not an object) or no task
-    of its own (absent, not a str, or nothing but whitespace, control characters
-    and escapes) after the type guard.
+    whose ORIGINAL part — what `original_task` keeps once the footer is cut — holds
+    anything a writer could act on (absent, not a str, or nothing but whitespace,
+    control characters and escapes, or a bare footer).
 
     A continuation brief needs a brief. Without a task the only text that would
     reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer, and every
     such run would additionally hash to the same default lane key — sha256 of the
     empty string — so unrelated runs would share one attempt budget. Both are
     answered the same way: 'unknown' with `record_suspect`, which escalates (P4c-
-    fixes6)."""
+    fixes6, the empty-original half closed by P4c-fixes8)."""
     if not job_ok:
         return None
     task = (job or {}).get("task")
     if type(task) is not str or not task:
         return None
-    return task if _has_visible_text(task) else None
+    return task if _original_is_usable(task) else None
 
 
 def _job_record_suspect(job):
@@ -1157,9 +1183,10 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     read is never 'completed'. A job.json field of the wrong type sets
     `record_suspect` and holds the state at 'unknown' — a record that misuses its
     own fields cannot attest to anything, not even an exit 0 with a REPORT. So does
-    a record with no usable task (`_usable_task`: no readable job.json, or no task
-    in it) — there is nothing to continue, so 'died'/'rerun' would only spawn a
-    writer holding a footer instead of a brief (P4c-fixes6). With no
+    a record with no usable task (`_usable_task`: no readable job.json, no task in
+    it, or a task that is nothing but the continuation footer) — there is nothing to
+    continue, so 'died'/'rerun' would only spawn a writer holding a footer instead
+    of a brief (P4c-fixes6, footer-only closed by P4c-fixes8). With no
     ``exit.json`` the run is judged on its pid and its output age: a live pid quiet
     past `stall_secs` is 'stalled', a dead pid is 'died', a pid this host cannot
     probe is 'unknown'. `stall_secs` must be a FINITE number of seconds between 1
@@ -1543,10 +1570,13 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
     has_report, last_output_age, lane_key, state_corrupt, record_suspect,
     run_id}. Without
     `lane_key` the lane is the run's own task, hashed; with one, every writer on
-    that lane shares the budget. A run whose record cannot supply a task has no
-    derivable lane either — hashing an empty task would hand every such run the
-    same budget — so it is refused with a `RecoveryStateError` (the CLI's escalate
-    exit 4) unless the caller names `--lane`. `spawn_hint.cwd` is the kept worktree
+    that lane shares the budget. A run whose record cannot supply a task — none, or
+    nothing but a continuation footer, whose ORIGINAL part is empty — has no
+    derivable lane either: hashing that empty original would hand every such run
+    sha256 of the empty string and one shared budget. It is refused with a
+    `RecoveryStateError` (the CLI's escalate exit 4) unless the caller names
+    `--lane`; with an explicit lane the record is still suspect, so the plan
+    escalates rather than continuing a footer. `spawn_hint.cwd` is the kept worktree
     for the L2/L1 to hand to `spawn` — this module never calls it.
     """
     path = run_dir_for(run_id, state)
