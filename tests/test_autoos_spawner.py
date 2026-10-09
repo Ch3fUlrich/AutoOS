@@ -10683,6 +10683,87 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         self.assertEqual(calls, [(self.REPO, "origin/main", self.SHA)], calls)
 
 
+class LaneDiffPathsTests(unittest.TestCase):
+    """`lane_diff_paths` (AO-WRITER-GUARDS P4b) reads the lane's diff through the
+    injectable `subprocess.run` — the same shape `ci_run_status` uses, because
+    `ready`'s tests must not run real git (HERMETIC, D-852). Two facts come back:
+    the file list and the added lines; anything that stopped git answering comes
+    back as a non-None error, never as an empty list that reads as "touched
+    nothing"."""
+
+    def setUp(self):
+        self.agent = load_agent()
+
+    def read(self, procs=None, exc=None):
+        seen = []
+
+        def runner(argv, **kw):
+            seen.append((list(argv), kw))
+            if exc is not None:
+                raise exc
+            return procs[len(seen) - 1]
+
+        with mock.patch.object(self.agent.subprocess, "run", runner):
+            res = self.agent.lane_diff_paths("/repo", "origin/main", "abc")
+        return res, seen
+
+    def proc(self, stdout, rc=0, stderr=""):
+        return subprocess.CompletedProcess(["git"], rc, stdout=stdout, stderr=stderr)
+
+    def test_it_asks_git_for_the_two_reads_of_one_merge_base_range(self):
+        (_p, _a, err), seen = self.read([self.proc("a.py\n"), self.proc("+x\n")])
+        self.assertIsNone(err)
+        self.assertEqual([argv for argv, _kw in seen], [
+            ["git", "-C", "/repo", "diff", "--name-only", "--no-renames",
+             "origin/main...abc"],
+            ["git", "-C", "/repo", "diff", "-U0", "origin/main...abc"]])
+        for _argv, kw in seen:
+            self.assertLessEqual(kw.get("timeout", 10 ** 9), 120)
+            self.assertIn("stdin", kw)
+
+    def test_it_keeps_the_paths_and_the_added_lines_only(self):
+        paths, added, err = self.read([
+            self.proc("playbooks/x.yml\ninventory.yml\n"),
+            self.proc("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n"
+                      "+password: rotate\n-not-this\n")])[0]
+        self.assertIsNone(err)
+        self.assertEqual(paths, ["playbooks/x.yml", "inventory.yml"])
+        self.assertEqual(added, "password: rotate")
+
+    def test_a_git_that_refuses_is_an_error_not_an_empty_diff(self):
+        (_p, _a, err), _seen = self.read([
+            self.proc("", rc=128, stderr="fatal: bad revision 'origin/main...abc'"),
+            self.proc("")])
+        self.assertIn("bad revision", err)
+
+    def test_a_diff_bigger_than_the_cap_is_refused(self):
+        huge = "x" * (self.agent.LANE_DIFF_MAX_BYTES + 1)
+        (_p, _a, err), _seen = self.read([self.proc(huge), self.proc("")])
+        self.assertIn("over the", err)
+        self.assertIn("limit", err)
+
+    def test_a_git_that_cannot_start_or_times_out_is_an_error(self):
+        for exc in (OSError("No such file or directory"),
+                    subprocess.TimeoutExpired(["git"], 60)):
+            with self.subTest(exc=type(exc).__name__):
+                (_p, _a, err), _seen = self.read(exc=exc)
+                self.assertIn("git diff", err)
+
+    def test_a_base_or_sha_that_reads_as_an_option_is_refused_before_git(self):
+        # Git takes the range as one positional argument; a value starting with
+        # `-` would be parsed as an option, so it is refused here instead.
+        seen = []
+        with mock.patch.object(self.agent.subprocess, "run",
+                               lambda *a, **kw: seen.append(a)):
+            for base, sha in (("-b", "abc"), ("origin/main", ""),
+                              ("origin/main", " a "),
+                              ("origin/main", "--output=/tmp/pwn")):
+                paths, _added, err = self.agent.lane_diff_paths("/repo", base, sha)
+                self.assertIsNone(paths)
+                self.assertIn("plain rev tokens", err)
+        self.assertEqual(seen, [], "a refused range still asked git")
+
+
 class PreflightCommandTests(unittest.TestCase):
     """AO-WRITER-GUARDS P4b: `preflight` — the guard tools, checked and never
     installed. The lookup is injected (HERMETIC, D-852): the command reads no

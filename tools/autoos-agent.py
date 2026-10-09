@@ -5011,7 +5011,11 @@ def lane_diff_paths(repo, base, sha):
 
     Fail closed like every other unreadable gate: a git that errors, times out,
     cannot start, or prints more than LANE_DIFF_MAX_BYTES returns a non-None
-    ``error`` (exit 2 at the caller) and never a half-read allow-list. Injectable
+    ``error`` (exit 2 at the caller) and never a half-read allow-list. The two
+    argvs are written out literally, not built in a loop, because the spawner's
+    own subprocess audit (FF1b item 6) only exempts a *literal* ``git`` call as
+    plumbing -- a variable called argv is not git, and this reads the operator's
+    own checkout as the operator, like ``remote_branch_tip`` does. Injectable
     -- and REQUIRED to be injected in tests (HERMETIC, D-852): the ready tests
     stub it exactly as they stub ``remote_branch_tip`` and ``main_ci_status``,
     so no cmd_ready test ever shells out.
@@ -5020,25 +5024,25 @@ def lane_diff_paths(repo, base, sha):
     if rng is None:
         return None, None, ("cannot build a diff range from base %r and sha %r "
                             "(both must be plain rev tokens)" % (base, sha))
-    collected = []
-    for label, argv in (
-            ("--name-only", ["git", "-C", repo, "diff", "--name-only", "--no-renames", rng]),
-            ("-U0", ["git", "-C", repo, "diff", "-U0", rng])):
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True, timeout=60,
-                                  stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError) as exc:
-            return None, None, "git diff %s: %s" % (label, exc)
+    try:
+        named = subprocess.run(["git", "-C", repo, "diff", "--name-only",
+                                "--no-renames", rng], capture_output=True,
+                               text=True, timeout=60, stdin=subprocess.DEVNULL)
+        body = subprocess.run(["git", "-C", repo, "diff", "-U0", rng],
+                              capture_output=True, text=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git diff: %s" % exc
+    for label, proc in (("--name-only", named), ("-U0", body)):
         if proc.returncode != 0:
             return None, None, ((proc.stderr or proc.stdout or "").strip()
                                 or "git diff %s exited %d" % (label, proc.returncode))
         if len(proc.stdout) > LANE_DIFF_MAX_BYTES:
-            return None, None, ("git diff printed %d characters, over the %d limit; "
-                                "read the lane's diff another way"
-                                % (len(proc.stdout), LANE_DIFF_MAX_BYTES))
-        collected.append(proc.stdout)
-    paths = [line for line in collected[0].split("\n") if line.strip()]
-    added = [line[1:] for line in collected[1].split("\n")
+            return None, None, ("git diff %s printed %d characters, over the %d "
+                                "limit; read the lane's diff another way"
+                                % (label, len(proc.stdout), LANE_DIFF_MAX_BYTES))
+    paths = [line for line in named.stdout.split("\n") if line.strip()]
+    added = [line[1:] for line in body.stdout.split("\n")
              if line.startswith("+") and not line.startswith("+++")]
     return paths, "\n".join(added), None
 
@@ -5132,19 +5136,13 @@ def cmd_ready(args) -> int:
               % (args.branch, tip, args.sha))
         return 1
     ci_field = ""
-    # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, the P4a helpers in
-    # tools/autoos_ready_guards.py): the seventh gate reads the lane's own DIFF.
-    # It runs for every ready, because ops work is decided from the diff and not
-    # from the card's label -- a `docs` card that edited `playbooks/x.yml` is an
-    # ops lane. When the diff says ops (or the caller passed `--brief`), the
-    # brief is required and its `FILES` line is the allow-list: any path the diff
-    # touched outside it is refused naming every one (`scope-fence`), and an ops
-    # lane must also carry `--report` whose CHECK 1-6 evidence has to be there and
-    # PASS (`report-checks`). A lane that clears all of it rides the inbox line as
-    # ` guards=ok` (plus ` ops=1` for an ops lane); a lane that triggers no guard
-    # carries no new field, so existing lines parse exactly as before. git failing
-    # to answer the diff, or an unreadable --brief/--report file, is exit 2 -- the
-    # gate could not run, which is not the same as a lane that failed it.
+    # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, helpers in
+    # tools/autoos_ready_guards.py; the gate is documented in this function's
+    # docstring): ops work is decided from the DIFF, not from the card's label --
+    # a `docs` card that edited `playbooks/x.yml` is an ops lane. git failing to
+    # answer the diff, or an unreadable --brief/--report file, is exit 2 like
+    # every other unreadable gate: "the check never ran" is not "the lane failed
+    # it", and a writer that cannot be judged must not be allowed.
     guards_fields = ""
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
