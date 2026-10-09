@@ -192,10 +192,15 @@ python3 tools/oc_l2.py start  --repo PATH --phase NAME --brief PATH [--combo l2-
 python3 tools/oc_l2.py status --lane l2-<repo>-<checkout-tag>-<phase>
 python3 tools/oc_l2.py stop   --lane l2-<repo>-<checkout-tag>-<phase>
 python3 tools/oc_l2.py inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
+python3 tools/oc_l2.py resume --lane l2-<repo>-<checkout-tag>-<phase>
 ```
 
 Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
-4 health timeout, 5 `UNATTENDED-REFUSED`. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
+4 health timeout, 5 `UNATTENDED-REFUSED`. `status` adds one verdict of its own: `stalled` (exit 1) — the session is alive but its
+last turn ended in error, or it sits idle while a child run it recorded already exited. `resume` wakes a stalled lane once with
+the next action (`child <run-id> exited rc=N; read its result and continue with <next action>`), or stops and restarts it when
+the session is unrecoverable. Child state is the run's own `exit.json` under `logs/agents/<run>/` — never `pgrep -f`, which
+matches the caller's own argv. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
 `l2_stop`, `l2_inbox`), so an L1 coordinates phases without leaving its own session.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
@@ -224,7 +229,8 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
 - the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn workers — a
   tier-2 writer or a tier-3 reviewer, never tier 1 and never an `orchestrate` card, and always in an isolated clone — through the
   `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox with the `l2_report` tool, since a read-only
-  shell cannot append), and the launcher's hint line.
+  shell cannot append), wait on children via `autoos-agent status`/`result` (their run record under
+  `logs/agents/<run>/`, never `pgrep -f`), and the launcher's hint line.
 
 **Where the reports land.** The child env carries `AUTOOS_L1_INBOX` (lane key `inbox_file`), resolved from `--inbox` or that
 variable and refused when neither names one — a report that goes nowhere is a phase that silently never finishes. The L2 appends
@@ -234,7 +240,7 @@ in the other direction is `inbox`: one record appended to the lane's own inbox �
 is set, else `<lane dir>/inbox.md`, the path the append reports — and the live session nudged with the same
 `POST /api/session/{id}/prompt` the launcher uses for its first prompt. Only a session that proved itself guarded is woken: a lane
 whose recorded canary never denied, or that was never prompted, is refused (`refused: true`, exit 2) while the line stays in the
-inbox. The append happens whether or not the nudge lands, and the answer says which.
+inbox. A stalled-but-alive lane cleared its canary, so it is nudged, not refused. The append happens whether or not the nudge lands, and the answer says which.
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), one directory per lane with the generated config
 (0600 — it names host paths), the scratch dirs, the composed prompt and the lane inbox. **Nothing is merged into

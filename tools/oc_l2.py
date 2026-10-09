@@ -53,9 +53,10 @@ missing one is exit 2 with the remediation, never an invented value.
 
 Subcommands (each prints one JSON object on stdout):
   start  --repo PATH --phase NAME --brief PATH [--combo l2-orchestrator]
-  status --lane l2-<repo>-<checkout-tag>-<phase>
+  status --lane l2-<repo>-<checkout-tag>-<phase>   (live | silent | stalled | dead)
   stop   --lane l2-<repo>-<checkout-tag>-<phase>
   inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
+  resume --lane l2-<repo>-<checkout-tag>-<phase>
 
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
 already running, a missing binary or password env) - 4 server not healthy -
@@ -125,6 +126,14 @@ L2_PERMISSIONS = {
 }
 
 SKILL = "unattended-orchestration"
+# AO-L2-RESUME (P1): where a lane's spawned workers are remembered (the stall
+# check reads their exit.json), and the footer line telling the L2 how to wait.
+CHILD_RUNS_FILE = "child_runs.json"
+CHILD_WAIT_LINE = (
+    "Wait on children via `autoos-agent status`/`result` (their run record "
+    "under logs/agents/<run>/, exit.json when done) - never `pgrep -f`.")
+_SILENT_WINDOW_S = 10 * 60.0
+_ERROR_STATUSES = ("error", "failed")
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
 ROLE_LINES = (
@@ -313,8 +322,9 @@ def first_prompt_text(brief_text, name, l1_inbox):
         ROLE_LINES[1],
         ROLE_LINES[2] % str(l1_inbox),
     ])
-    return "%s\n\n---\n%s\n\n%s" % (brief_text.rstrip(), role,
-                                    oc_l1_serve.HINT_LINE)
+    return "%s\n\n---\n%s\n\n%s\n\n%s" % (brief_text.rstrip(), role,
+                                          CHILD_WAIT_LINE,
+                                          oc_l1_serve.HINT_LINE)
 
 
 # --- the lane spec -----------------------------------------------------------
@@ -437,6 +447,285 @@ def live_session(lane):
     if _data(payload).get("outcome") in oc_l1_serve.DEAD_OUTCOMES:
         return None
     return state
+
+
+# --- AO-L2-RESUME (P1): activity heartbeat, stall detection, resume -----------
+# The canary writes heartbeat.json with turn 0 and nothing moved it, so a live
+# lane read as turn 0. Every status poll merges the session's turn count and
+# newest message ts forward; a lane whose last turn errored, or that sits idle
+# while a recorded child run already exited, is `stalled` (wake it with
+# `resume`, which restarts the lane when the session is gone). Child state is
+# the run's own exit.json under logs/agents/<run>/ - never `pgrep -f`, whose
+# pattern sits in the caller's own argv and matches itself, so it never ends.
+
+def _session_messages(port, sid, password, limit=20):
+    """Newest-first messages, [] when empty, None when unreachable (never raises)."""
+    try:
+        status, payload = _request(
+            port, "GET", "/api/session/%s/message?order=desc&limit=%d" % (sid, limit),
+            password=password)
+    except ServerDown:
+        return None
+    if status != 200:
+        return None
+    items = _data(payload)
+    if isinstance(items, dict):
+        items = items.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _turn_activity(items):
+    """(progress-turn count, newest progress ts or None) over the messages."""
+    count, newest = 0, None
+    for item in items:
+        if not oc_l1_serve._is_progress(item):
+            continue
+        count += 1
+        ts = oc_l1_serve._item_ts(item)
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    return count, newest
+
+
+def note_activity(lane):
+    """Merge the session's turn count / newest message ts into heartbeat.json.
+
+    The turn only moves forward; only the turn/last-activity keys are touched.
+    Best-effort: returns (turn, last_message_ts) or None, never raises."""
+    try:
+        state = _read_state(lane.get("state_file") or "")
+        if not isinstance(state, dict):
+            return None
+        sid, port = state.get("session_id"), state.get("port")
+        if not isinstance(sid, str) or not sid or not port:
+            return None
+        items = _session_messages(
+            port, sid, os.environ.get(lane.get("password_env") or ENV_PW))
+        if items is None:
+            return None
+        count, newest = _turn_activity(items)
+        path = Path(lane.get("heartbeat_file") or
+                    str(Path(lane["scratch_dir"]) / "heartbeat.json"))
+        data = {}
+        if path.is_file():
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    data = loaded
+            except (OSError, ValueError):
+                data = {}
+        data["turn"] = max(int(data.get("turn") or 0), count)
+        if newest is not None:
+            data["last_message_ts"] = newest
+            data["last_activity_ts"] = _now_ts()
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return data["turn"], data.get("last_message_ts")
+    except (OSError, ValueError):
+        return None
+
+
+def child_exited(run_dir):
+    """The run's exit record: {"exited", "rc", "cancelled", "ended"}.
+
+    `run_dir` holds the spawner's exit.json ({rc, ended}, {"cancelled": true}
+    on cancel). Missing/unreadable is not exited - the child may still work.
+    `pgrep -f <run-id>` is never consulted: the pattern sits in the caller's
+    own argv, so it always "finds" the child and the wait never ends."""
+    out = {"exited": False, "rc": None, "cancelled": False, "ended": None}
+    try:
+        data = json.loads((Path(run_dir) / "exit.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return out
+    if not isinstance(data, dict):
+        return out
+    out["cancelled"] = data.get("cancelled") is True
+    out["rc"] = data.get("rc")
+    ended = data.get("ended")
+    if isinstance(ended, bool):
+        ended = None
+    elif isinstance(ended, (int, float)):
+        ended = float(ended) / 1000.0 if ended > 1e12 else float(ended)
+    elif isinstance(ended, str):
+        try:
+            ended = datetime.fromisoformat(ended.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            ended = None
+    else:
+        ended = None
+    out["ended"] = ended
+    out["exited"] = out["cancelled"] or "rc" in data or "ended" in data
+    return out
+
+
+def _child_entries(lane):
+    """The lane's recorded workers ({run_id, run_dir, next_action}): the config
+    list plus the scratch file. Both are data the lane owns - never a scan."""
+    raw = list((lane.get("l2") or {}).get("child_runs") or [])
+    path = Path(lane.get("scratch_dir") or "") / CHILD_RUNS_FILE
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                raw += [e for e in loaded if isinstance(e, dict)]
+        except (OSError, ValueError):
+            pass
+    entries, seen = [], set()
+    for e in raw:
+        if not isinstance(e, dict):
+            continue
+        key = e.get("run_id") or e.get("run_dir")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rd = e.get("run_dir")
+        if rd:
+            p = Path(rd)
+            e = dict(e, run_dir=str(p if p.is_absolute()
+                                    else Path(lane.get("cwd") or ".") / p))
+        elif e.get("run_id"):
+            e = dict(e, run_dir=str(Path(lane.get("cwd") or ".") / "logs"
+                                    / "agents" / str(e["run_id"])))
+        else:
+            continue
+        entries.append(e)
+    return entries
+
+
+def _last_turn_error(items):
+    """Did the newest turn end in error? (True, detail) or (False, "").
+
+    A dead turn is finish=error, or a tool item (top-level or in parts/content)
+    whose state is error - the shapes the transcript carries."""
+    for item in items:
+        if not oc_l1_serve._is_progress(item):
+            continue
+        cands = [item]
+        for key in ("parts", "content"):
+            parts = item.get(key)
+            if isinstance(parts, list):
+                cands += [p for p in parts if isinstance(p, dict)]
+        for cand in cands:
+            state = cand.get("state")
+            status = (state.get("status") if isinstance(state, dict) else None) \
+                or cand.get("status")
+            if status in _ERROR_STATUSES:
+                err = (state.get("error") if isinstance(state, dict) else None) \
+                    or cand.get("error") or ""
+                if isinstance(err, dict):
+                    err = err.get("message") or ""
+                return True, str(err)[:200] or "tool %s error" % (cand.get("tool") or "?")
+            if cand.get("finish") == "error" or item.get("finish") == "error":
+                return True, "finish=error"
+        return False, ""
+    return False, ""
+
+
+def stalled(name):
+    """Is the lane stuck? `last-turn-error`, `child-exited`, or not stalled.
+
+    A dead server is `dead`, not stuck - status already says so."""
+    name = check_lane(name)
+    lane = read_config(name)
+    if lane is None:
+        return {"lane": name, "stalled": False, "reason": "absent"}
+    state = live_session(lane)
+    if state is None:
+        return {"lane": name, "stalled": False, "reason": "not-live"}
+    items = _session_messages(state["port"], state["session_id"],
+                              os.environ.get(lane.get("password_env") or ENV_PW))
+    if items is None:
+        items = []
+    is_err, detail = _last_turn_error(items)
+    if is_err:
+        return {"lane": name, "stalled": True, "reason": "last-turn-error",
+                "detail": detail, "session_id": state.get("session_id"),
+                "port": state.get("port")}
+    _, newest = _turn_activity(items)
+    for entry in _child_entries(lane):
+        ex = child_exited(entry["run_dir"])
+        if not ex["exited"]:
+            continue
+        if newest is None or ex["ended"] is None or newest <= ex["ended"]:
+            return {"lane": name, "stalled": True, "reason": "child-exited",
+                    "run_id": entry.get("run_id"), "run_dir": entry["run_dir"],
+                    "rc": ex["rc"], "cancelled": ex["cancelled"],
+                    "next_action": entry.get("next_action"),
+                    "session_id": state.get("session_id"), "port": state.get("port")}
+    return {"lane": name, "stalled": False, "reason": "ok",
+            "session_id": state.get("session_id"), "port": state.get("port")}
+
+
+def _wake_text(info):
+    """The one short wake prompt: it names the next action, not the brief."""
+    nxt = info.get("next_action") or "the next phase step"
+    if info.get("reason") == "child-exited":
+        return ("Wake: child %s exited rc=%s; read its result with autoos-agent "
+                "status/result (logs/agents/%s/) and continue with %s. Reply with "
+                "one short line of what you do next."
+                % (info.get("run_id"), info.get("rc"), info.get("run_id"), nxt))
+    return ("Wake: your last turn ended in error (%s); read the error and continue "
+            "with %s. Reply with one short line of what you do next."
+            % (info.get("detail") or "unknown error", nxt))
+
+
+def cmd_resume(name):
+    """Wake a stalled lane once with its next action, or restart it.
+
+    Not stalled is a no-op. Exactly ONE prompt is ever posted; when the
+    session cannot take it the lane is stopped and started again from its
+    stored config, and the answer says restarted."""
+    name = check_lane(name)
+    lane = read_config(name)
+    if lane is None:
+        raise L2Error("no lane config at %s for '%s'" % (config_path(name), name))
+    info = stalled(name)
+    if not info.get("stalled"):
+        return {"lane": name, "resumed": False, "restarted": False, "noop": True,
+                "reason": info.get("reason"),
+                "detail": "not stalled (%s) - nothing to wake" % info.get("reason")}
+    state = live_session(lane)
+    wake_failed = None
+    if state is not None:
+        try:
+            status, _ = _request(
+                state["port"], "POST", "/api/session/%s/prompt" % state["session_id"],
+                body={"text": _wake_text(info)},
+                password=os.environ.get(lane.get("password_env") or ENV_PW))
+            if status == 200:
+                out = {"lane": name, "resumed": True, "restarted": False,
+                       "reason": info.get("reason"),
+                       "detail": "woke session %s (%s)"
+                                 % (state["session_id"], info["reason"])}
+                for key in ("run_id", "rc", "next_action"):
+                    if info.get(key) is not None:
+                        out[key] = info[key]
+                return out
+            wake_failed = "the wake prompt returned HTTP %s" % status
+        except ServerDown as e:
+            wake_failed = "the wake prompt did not reach the server (%s)" % e
+    else:
+        wake_failed = ("the session is unrecoverable (the server no longer "
+                       "answers for it)")
+    stopped = cmd_stop(name)
+    l2 = lane.get("l2") or {}
+    try:
+        result, rc = cmd_start(
+            l2.get("repo") or lane.get("cwd"), l2.get("phase") or name,
+            l2.get("brief") or lane.get("handoff"),
+            combo=l2.get("combo") or DEFAULT_COMBO,
+            l1_inbox=l2.get("l1_inbox"),
+            opencode_bin=lane.get("opencode_bin"),
+            password_env=lane.get("password_env") or ENV_PW,
+            port=lane.get("serve_port"), model=lane.get("model"),
+            child_env=lane.get("child_env"))
+    except (L2Error, oc_l1.LaneError) as e:
+        return {"lane": name, "resumed": False, "restarted": False,
+                "stop": stopped, "detail": "%s; restart failed: %s" % (wake_failed, e)}
+    return {"lane": name, "resumed": False, "restarted": rc == 0,
+            "stop": stopped, "start": result,
+            "detail": "%s; restarted (exit %s)" % (wake_failed, rc)}
 
 
 # --- stop / inbox ------------------------------------------------------------
@@ -668,6 +957,21 @@ def cmd_inbox(name, text):
                          "guarded, running lane"
                          % (canary.get("denied"), state.get("prompted")))
         return out
+    # AO-L2-RESUME: a stalled-but-alive lane cleared its canary, so it is
+    # nudged like any running lane - the refusal above stays for lanes that
+    # never cleared it. The flag tells the caller the nudge is a wake, and a
+    # nudge precedes a turn, so the heartbeat moves with it.
+    try:
+        info = stalled(name)
+    except Exception:
+        info = {"stalled": False}
+    out["stalled"] = bool(info.get("stalled"))
+    if info.get("stalled"):
+        out["stalled_reason"] = info.get("reason")
+    try:
+        note_activity(lane)
+    except Exception:
+        pass
     password = os.environ.get(lane.get("password_env") or ENV_PW)
     try:
         status, _ = _request(state["port"], "POST",
@@ -678,8 +982,12 @@ def cmd_inbox(name, text):
         out["detail"] = "inbox written; the nudge did not reach the server: %s" % e
         return out
     out["nudged"] = status == 200
-    out["detail"] = "nudged session %s" % state["session_id"] if out["nudged"] \
-        else "inbox written; the nudge returned HTTP %s" % status
+    if out["nudged"] and out.get("stalled"):
+        out["detail"] = "stalled (%s) - nudged session %s to wake it" \
+            % (out.get("stalled_reason"), state["session_id"])
+    else:
+        out["detail"] = "nudged session %s" % state["session_id"] if out["nudged"] \
+            else "inbox written; the nudge returned HTTP %s" % status
     return out
 
 
@@ -771,9 +1079,15 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
 
 
 def cmd_status(name):
-    """live | silent | dead for the phase lane, plus the last canary result the
-    state file still carries - an L2 that is silent with a denied canary is a
-    different problem from one whose guard was never proved."""
+    """live | silent | stalled | dead for the phase lane, plus the last canary
+    result the state file still carries - an L2 that is silent with a denied
+    canary is a different problem from one whose guard was never proved.
+
+    The poll also advances the heartbeat past the canary (turn count / newest
+    message ts, merged forward), so a live serve with recent turns reads
+    `live`, not `dead`. A live session whose last turn errored, or that sits
+    idle while a recorded child run already exited, reads `stalled` (exit 1):
+    wake it with `resume`."""
     name = check_lane(name)
     lane = read_config(name)
     if lane is None:
@@ -793,6 +1107,33 @@ def cmd_status(name):
     if isinstance(canary, dict):
         out["canary"] = {"denied": canary.get("denied"), "detail": canary.get("detail"),
                          "ts": canary.get("ts")}
+    try:
+        note_activity(lane)
+    except Exception:
+        pass
+    if verdict in ("silent", "dead"):
+        # A live serve with recent turns is live, not dead: the launcher's
+        # verdict off a stale poll does not overrule the session itself.
+        live_state = live_session(lane)
+        if live_state is not None:
+            msgs = _session_messages(
+                live_state["port"], live_state["session_id"],
+                os.environ.get(lane.get("password_env") or ENV_PW))
+            _, newest = _turn_activity(msgs or [])
+            if newest is not None and (time.time() - newest) <= _SILENT_WINDOW_S:
+                verdict, rc = "live", 0
+                out["verdict"], out["exit_code"] = verdict, rc
+    if verdict in ("live", "silent"):
+        try:
+            info = stalled(name)
+        except Exception:
+            info = None
+        if info and info.get("stalled"):
+            out["verdict"], out["exit_code"] = "stalled", 1
+            out["stalled"] = info
+            out["detail"] = "stalled (%s): %s - wake it with l2_resume" \
+                % (info.get("reason"), _wake_text(info))
+            return out, 1
     if verdict == "live":
         out["detail"] = "working on the phase"
     elif verdict == "silent":
@@ -813,7 +1154,7 @@ def build_parser():
         description="L2 phase lane: one OpenCode orchestrator per phase, built on tools/oc_l1.py.",
     )
     sub = ap.add_subparsers(dest="cmd", required=True,
-                            metavar="{start,status,stop,inbox}")
+                            metavar="{start,status,stop,inbox,resume}")
     p = sub.add_parser("start", help="start one phase lane")
     p.add_argument("--repo", required=True, help="the project the phase works in")
     p.add_argument("--phase", required=True, help="phase name (the lane's suffix)")
@@ -828,13 +1169,15 @@ def build_parser():
                    help="NAME of the server password variable (default %s)" % ENV_PW)
     p.add_argument("--port", type=int, default=None,
                    help="force serve_port (default: the hash of the lane name)")
-    st = sub.add_parser("status", help="live | silent | dead for a phase lane")
+    st = sub.add_parser("status", help="live | silent | stalled | dead for a phase lane")
     st.add_argument("--lane", required=True)
     sp = sub.add_parser("stop", help="kill the lane's process group and its state file")
     sp.add_argument("--lane", required=True)
     ib = sub.add_parser("inbox", help="append a line to the lane's inbox and nudge it")
     ib.add_argument("--lane", required=True)
     ib.add_argument("--text", required=True)
+    rs = sub.add_parser("resume", help="wake a stalled lane once, or restart it")
+    rs.add_argument("--lane", required=True)
     return ap
 
 
@@ -853,6 +1196,12 @@ def main(argv=None):
             # An orphan is not a stop: report it nonzero so a caller that only
             # reads the exit code cannot mistake a live server for a stopped one.
             rc = 0 if result.get("stopped") else 2
+        elif args.cmd == "resume":
+            result = cmd_resume(args.lane)
+            # A wake that went out, a restart that landed, or a lane that was
+            # never stuck are all success; anything else needs eyes on it.
+            rc = 0 if (result.get("resumed") or result.get("restarted")
+                       or result.get("noop")) else 2
         else:
             result = cmd_inbox(args.lane, args.text)
             # A refused nudge is not a delivered one: say so in the exit code as

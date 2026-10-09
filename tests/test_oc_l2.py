@@ -824,6 +824,280 @@ class LaneTest(unittest.TestCase):
             self.assertTrue(payload.get("detail") or payload.get("error"), payload)
 
 
+class ResumeTest(unittest.TestCase):
+    """AO-L2-RESUME (P1): heartbeat advance, stalled detection, resume, inbox.
+
+    Offline: the same FakeServer stands in for `opencode serve`, and child
+    runs are plain directories holding the spawner's exit.json - no live host
+    state, no process scan.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="oc_l2_resume_")
+        self.td = Path(self._td.name)
+        self.srv = FakeServer(PW_VALUE)
+        self.srv.start()
+        self.proj = self.td / "proj"
+        self.proj.mkdir()
+        self.brief = self.td / "brief.md"
+        self.brief.write_text(BRIEF, encoding="utf-8")
+        self.l1_inbox = self.td / "inbox" / "L1-routing.md"
+        (self.td / "fake_opencode.py").write_text(FAKE_PY, encoding="utf-8")
+        self.bin_ = make_fake_bin(self.td, self.td / "fake_opencode.py", sys.executable)
+        self.rec = self.td / "bin_record.json"
+        self._envs = {}
+        for k, v in ((PW_ENV, PW_VALUE), (RECORD_ENV, str(self.rec)),
+                     (oc_l2.ENV_STATE_DIR, str(self.td / "state")),
+                     (oc_l2.ENV_L1_INBOX, str(self.l1_inbox))):
+            self._envs[k] = os.environ.get(k)
+            os.environ[k] = v
+        os.environ.pop(oc_l2.ENV_RUN_DIR, None)
+        os.environ.pop(oc_l2.ENV_BIN, None)
+        mock.patch.object(oc_l1, "PORT_MIN", 1024).start()
+        mock.patch.object(oc_l1, "PORT_MAX", 65535).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def tearDown(self):
+        for k, v in self._envs.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.srv.stop()
+        self._td.cleanup()
+
+    def _start(self, **over):
+        kw = dict(combo="l2-orchestrator", opencode_bin=self.bin_,
+                  password_env=PW_ENV, port=self.srv.port,
+                  child_env=[RECORD_ENV])
+        kw.update(over)
+        return oc_l2.cmd_start(self.proj, "ao-deadrows", self.brief, **kw)
+
+    def _lane_name(self):
+        return oc_l2.lane_name(self.proj, "ao-deadrows")
+
+    def _heartbeat(self):
+        lane = oc_l2.read_config(self._lane_name())
+        return json.loads(Path(lane["heartbeat_file"]).read_text(encoding="utf-8"))
+
+    def _assistant_item(self, error=None, finish_error=False):
+        now = int(time.time())
+        if finish_error:
+            return {"type": "assistant", "finish": "error",
+                    "time": {"created": now, "updated": now},
+                    "content": [{"type": "text", "text": "stuck"}]}
+        if error is None:
+            content = [{"type": "text", "text": "working through the phase"}]
+        else:
+            content = [{"type": "tool", "tool": "shell",
+                        "state": {"status": "error",
+                                  "input": {"command": "make verify"},
+                                  "error": error}}]
+        return {"type": "assistant", "time": {"created": now, "updated": now},
+                "content": content}
+
+    def _record_child(self, name, run_id="run-t2-writer", rc=0,
+                      next_action="pick up the verdict", write_exit=True):
+        run_dir = self.proj / "logs" / "agents" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if write_exit:
+            (run_dir / "exit.json").write_text(
+                json.dumps({"rc": rc, "ended": time.time()}), encoding="utf-8")
+        entry = {"run_id": run_id, "run_dir": str(run_dir),
+                 "next_action": next_action}
+        scratch = oc_l2.lane_dir(name)
+        (scratch / oc_l2.CHILD_RUNS_FILE).write_text(
+            json.dumps([entry], indent=2) + "\n", encoding="utf-8")
+        return entry
+
+    def _prompts_to(self, sid):
+        return [r for r in self.srv.requests
+                if r["method"] == "POST" and sid in r["path"]
+                and r["path"].endswith("/prompt")]
+
+    # (1) the heartbeat moves past the canary on every status poll
+    def test_status_poll_advances_heartbeat_past_canary(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.assertEqual(self._heartbeat()["turn"], 0)
+        self.srv.items = [self._assistant_item(), self._assistant_item()]
+        out, src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out["verdict"], "live", out)
+        hb = self._heartbeat()
+        self.assertGreaterEqual(hb["turn"], 2, hb)
+        self.assertIsNotNone(hb.get("last_message_ts"))
+        self.assertIsNotNone(hb.get("last_activity_ts"))
+        self.assertTrue(hb["canary"]["denied"], "the canary record stays")
+
+    def test_live_serve_with_recent_turns_is_live_not_dead(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+        with mock.patch.object(oc_l2, "run_oc_l1", return_value=(2, "dead")):
+            out, src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out["verdict"], "live", out)
+        self.assertEqual(src, 0)
+
+    # (2) stalled: a dead turn, or idle while a recorded child already exited
+    def test_last_turn_error_is_stalled(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item(error="boom: cannot verify")]
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "last-turn-error")
+        out, src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out["verdict"], "stalled", out)
+        self.assertEqual(src, 1)
+        self.assertEqual(out["stalled"]["reason"], "last-turn-error")
+
+    def test_finish_error_is_stalled_too(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item(finish_error=True)]
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "last-turn-error")
+
+    def test_idle_lane_with_exited_child_is_stalled(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []  # the L2 never picked the result up
+        self._record_child(result["lane"], rc=3,
+                           next_action="read the failure and re-plan")
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "child-exited")
+        self.assertEqual(info["rc"], 3)
+        self.assertEqual(info["next_action"], "read the failure and re-plan")
+        out, src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out["verdict"], "stalled", out)
+        self.assertEqual(src, 1)
+
+    def test_lane_with_a_running_child_is_not_stalled(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._record_child(result["lane"], write_exit=False)
+        info = oc_l2.stalled(result["lane"])
+        self.assertFalse(info["stalled"], info)
+        out, src = oc_l2.cmd_status(result["lane"])
+        self.assertEqual(out["verdict"], "silent", out)
+        self.assertEqual(src, 1)
+
+    # resume: one wake prompt naming the next action, else a restart
+    def test_resume_sends_one_wake_prompt_naming_child_and_next_action(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._record_child(result["lane"], run_id="run-t2-writer", rc=0,
+                           next_action="pick up the verdict")
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertEqual(out["reason"], "child-exited")
+        prompts = self._prompts_to(FAKE_SESSION_ID)[before:]
+        self.assertEqual(len(prompts), 1, "exactly ONE wake prompt")
+        text = prompts[0]["body"]["text"]
+        for needle in ("run-t2-writer", "rc=0", "pick up the verdict"):
+            self.assertIn(needle, text, text)
+
+    def test_resume_of_a_healthy_lane_is_a_noop(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item()]
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertFalse(out["resumed"], out)
+        self.assertTrue(out["noop"], out)
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before,
+                         "a noop posts no prompt")
+
+    def test_resume_cli_wakes_and_prints_one_json_object(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._record_child(result["lane"])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_rc = oc_l2.main(["resume", "--lane", result["lane"]])
+        self.assertEqual(cli_rc, 0)
+        payload = json.loads(buf.getvalue())
+        self.assertTrue(payload["resumed"], payload)
+
+    def test_resume_restarts_when_the_wake_cannot_land(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._record_child(result["lane"])
+        real_request = oc_l2._request
+
+        def flaky(port, method, path, body=None, password=""):
+            if method == "POST" and path.endswith("/prompt"):
+                from oc_l1_http import ServerDown
+                raise ServerDown("gone")
+            return real_request(port, method, path, body=body, password=password)
+
+        with mock.patch.object(oc_l2, "_request", side_effect=flaky):
+            out = oc_l2.cmd_resume(result["lane"])
+        self.assertFalse(out.get("resumed"), out)
+        self.assertTrue(out["restarted"], out)
+        self.assertEqual(out["start"]["session_id"], FAKE_SESSION_ID)
+        live, _ = oc_l2.cmd_status(result["lane"])
+        self.assertIn(live["verdict"], ("live", "silent", "stalled"), live)
+        oc_l2.cmd_stop(result["lane"])
+
+    # (3) inbox nudges a stalled-but-alive lane; refusal stays canary-only
+    def test_inbox_nudges_a_stalled_but_alive_lane(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._record_child(result["lane"])
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_inbox(result["lane"], "child finished, carry on")
+        self.assertFalse(out["refused"], out)
+        self.assertTrue(out["nudged"], out)
+        self.assertTrue(out["stalled"], out)
+        self.assertEqual(out["stalled_reason"], "child-exited")
+        self.assertEqual(len(self._prompts_to(FAKE_SESSION_ID)), before + 1)
+        self.assertIn("child finished, carry on",
+                      Path(out["inbox"]).read_text(encoding="utf-8"))
+
+    # (4) exit.json shapes, the pgrep guard, and the footer line
+    def test_child_exited_reads_exit_json(self):
+        run = self.td / "run-shapes"
+        self.assertFalse(oc_l2.child_exited(run)["exited"], "missing is working")
+        run.mkdir(parents=True)
+        (run / "exit.json").write_text("{oops", encoding="utf-8")
+        self.assertFalse(oc_l2.child_exited(run)["exited"], "malformed is working")
+        (run / "exit.json").write_text(json.dumps({"rc": 3, "ended": time.time()}),
+                                       encoding="utf-8")
+        got = oc_l2.child_exited(run)
+        self.assertTrue(got["exited"])
+        self.assertEqual(got["rc"], 3)
+        self.assertFalse(got["cancelled"])
+        (run / "exit.json").write_text(
+            json.dumps({"cancelled": True, "rc": None, "ended": time.time()}),
+            encoding="utf-8")
+        got = oc_l2.child_exited(run)
+        self.assertTrue(got["exited"])
+        self.assertTrue(got["cancelled"])
+
+    def test_no_pgrep_f_wait_in_oc_l2(self):
+        # Lanes wait on children via exit.json, never `pgrep -f <run-id>`: the
+        # pattern sits in the caller's own argv, so that wait never ends. The
+        # only mentions allowed are the prose telling lanes exactly that.
+        src = Path(oc_l2.__file__).read_text(encoding="utf-8")
+        waits = [ln.strip() for ln in src.splitlines()
+                 if "pgrep" in ln and "never" not in ln.lower()]
+        self.assertEqual(waits, [], "a process wait on a run id is back")
+
+    def test_first_prompt_waits_via_status_result_not_pgrep(self):
+        text = oc_l2.first_prompt_text(BRIEF, "l2-proj-x-p1", self.l1_inbox)
+        self.assertIn("autoos-agent status", text)
+        self.assertIn("never `pgrep -f`", text)
+
+
 class McpToolTest(unittest.TestCase):
     """tools/autoos_agent_mcp.py's four wrappers: they hand the lane over as
     ARGV, give the child only the allowlisted environment, and return the
