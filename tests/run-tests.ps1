@@ -11097,6 +11097,109 @@ Test-Case 'the ZCode gateway postInstall writes nothing into an empty home' {
     }
 }
 
+# ─── omniroute apply.ps1 D-825 GO gate ──────────────────────────────────────
+# 2026-10-09 06:27Z a real apply run began with no judge GO — it stopped only on
+# a missing key file. apply.ps1 is the Windows twin of apply.sh and mutates the
+# same live gateway, so it carries the same D-825 gate: a run that is not -DryRun
+# refuses without -Go <ref> and -GoSha <sha> equal to this checkout's HEAD. The
+# refusals exit before any gateway contact; -DryRun is unchanged.
+Describe-Group 'omniroute apply D-825 GO gate'
+$gateApply = Join-Path $Root 'configuration/omniroute/apply.ps1'
+$gateOverrides = Join-Path $Root 'configuration/omniroute/apply-capability-overrides.ps1'
+$gateHost  = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell' }
+$gateKeys  = [IO.Path]::GetTempFileName()
+$gateHead  = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+if ($gateHead) { $gateHead = "$gateHead".Trim() }
+
+function Invoke-ChildApply {
+    param([string[]]$ScriptArgs, [string]$Path = $gateApply)
+    $prevEap  = $ErrorActionPreference
+    $prevUrl  = $env:AUTOOS_OMNIROUTE_URL
+    $prevKeys = $env:AUTOOS_KEYS_FILE
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop;
+        # the child writes its refusal to stderr, so run the call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:1'
+        $env:AUTOOS_KEYS_FILE = $gateKeys
+        $out = & $gateHost -NoProfile -NonInteractive -File $Path @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        $env:AUTOOS_OMNIROUTE_URL = $prevUrl
+        $env:AUTOOS_KEYS_FILE = $prevKeys
+    }
+}
+
+Test-Case 'apply.ps1 D-825: a live run with no -Go is refused before any gateway contact' {
+    $r = Invoke-ChildApply @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildApply @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildApply @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun')
+    Assert-True ($r.Out -match 'This is a dry run') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildApply @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    # A mutating run: bound it with a job timeout, so a runner that happens to
+    # carry the omniroute CLI can never leave the run talking to a real gateway.
+    $sb = {
+        param($exe, $path, $keys, $sha)
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:1'
+        $env:AUTOOS_KEYS_FILE = $keys
+        $o = & $exe -NoProfile -NonInteractive -File $path -Go 'D-825' -GoSha $sha 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $o }
+    }
+    $job = Start-Job -ScriptBlock $sb -ArgumentList $gateHost, $gateApply, $gateKeys, $gateHead
+    try {
+        if (-not (Wait-Job $job -Timeout 90)) { throw 'the gated run did not finish in 90s' }
+        $r = Receive-Job $job
+        Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+        Assert-True ($r.Out -notmatch 'refusing to change live') "a valid GO was refused: $($r.Out)"
+    } finally {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: a live run with no -Go is refused' {
+    # The standalone twin of apply.sh's override step PATCHes the live gateway,
+    # so it carries the same D-825 gate. The full ref/sha logic is apply.ps1's
+    # above; here the gate's presence and wiring are what is asserted.
+    $r = Invoke-ChildApply @() -Path $gateOverrides
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun') -Path $gateOverrides
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D') "a dry run without -Go printed a GO: $($r.Out)"
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

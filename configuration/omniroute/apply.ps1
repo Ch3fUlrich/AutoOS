@@ -29,11 +29,16 @@
   .\configuration\omniroute\apply.ps1 -DryRun
 .EXAMPLE
   .\configuration\omniroute\apply.ps1 -Probe   # one tiny request per combo
+.EXAMPLE
+  # A live (non -DryRun) run needs a judge GO naming this checkout's HEAD (fleet rule D-825):
+  .\configuration\omniroute\apply.ps1 -Go D-825 -GoSha (git rev-parse HEAD)
 #>
 [CmdletBinding()]
 param(
     [switch]$DryRun,
-    [switch]$Probe
+    [switch]$Probe,
+    [string]$Go = '',
+    [string]$GoSha = ''
 )
 
 Set-StrictMode -Version Latest
@@ -45,6 +50,50 @@ $ErrorActionPreference = 'Continue'
 
 $Here      = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root      = Split-Path -Parent (Split-Path -Parent $Here)
+
+# --- Fleet rule D-825: a live gateway change runs only on an explicit GO ---
+# 2026-10-09 06:27Z an apply real run began before any judge GO existed and
+# stopped only on a missing key file. Any run that MUTATES the live gateway
+# (not -DryRun; -Probe included) refuses unless -Go names the approving
+# artefact and -GoSha equals this checkout's git HEAD, so the GO covers the
+# exact code applied. -DryRun needs none and is unchanged; a -Go there is
+# echoed only. The gate runs before the module import or any gateway contact.
+if (-not $DryRun) {
+    if (-not $Go) {
+        [Console]::Error.WriteLine('apply.ps1: refusing to change live gateway state without -Go <ref> (fleet rule D-825).')
+        [Console]::Error.WriteLine('  Registering providers, creating or pruning combos, patching resilience and')
+        [Console]::Error.WriteLine('  starting the gateway all mutate shared infrastructure; one runs only on an')
+        [Console]::Error.WriteLine('  explicit judge GO naming the sha and scope it covers.')
+        [Console]::Error.WriteLine('  Pass -Go <ref> -GoSha <sha>, where <ref> is a judge run id')
+        [Console]::Error.WriteLine('  (YYYYMMDD-HHMMSS-...), a decision id (D-<n>) or an OS-<n> item, and <sha> is')
+        [Console]::Error.WriteLine("  'git rev-parse HEAD' of this checkout. To inspect without changing anything: -DryRun.")
+        exit 2
+    }
+    if ($Go -notmatch '^(?:\d{8}-\d{6}-\S+|D-\d+|OS-\d+)$') {
+        [Console]::Error.WriteLine("apply.ps1: -Go '$Go' is not a judge run id (YYYYMMDD-HHMMSS-...), a decision id (D-<n>) or an OS-<n> item.")
+        exit 2
+    }
+    if (-not $GoSha) {
+        [Console]::Error.WriteLine('apply.ps1: refusing to change live gateway state without -GoSha <sha> (fleet rule D-825).')
+        [Console]::Error.WriteLine("  <sha> must equal 'git rev-parse HEAD' of this checkout, so the GO names the exact code applied.")
+        exit 2
+    }
+    $CheckoutHead = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+    if ($CheckoutHead) { $CheckoutHead = "$CheckoutHead".Trim() }
+    if (-not $CheckoutHead) {
+        [Console]::Error.WriteLine("apply.ps1: cannot read this checkout's HEAD (git rev-parse failed in $Root) - refusing to mutate.")
+        exit 2
+    }
+    if ($GoSha -ne $CheckoutHead) {
+        [Console]::Error.WriteLine("apply.ps1: -GoSha '$GoSha' is not this checkout's HEAD '$CheckoutHead'.")
+        [Console]::Error.WriteLine('  The GO must name the exact sha of the code being applied (fleet rule D-825).')
+        exit 2
+    }
+    Write-Host "GO: $Go sha=$CheckoutHead"
+} elseif ($Go) {
+    $goShaShown = if ($GoSha) { $GoSha } else { 'none' }
+    Write-Host "GO: $Go sha=$goShaShown (read-only run - no gate applies)"
+}
 # The gateway client key comes from the one PowerShell helper
 # (Get-AutoOSClientKey in lib/windows/AutoOS.Install.psm1): the
 # gateway-named field, then the legacy field with a deprecation line.

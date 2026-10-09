@@ -31,7 +31,8 @@
 # whole, reported lost rather than restored short — never reported as untouched
 # (see the Combos loop).
 #
-#   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift]
+#   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift] \
+#                                      [--go <ref> --go-sha <sha>]
 #
 # --probe sends one tiny request per combo and reports what answered
 # (spends a few hundred tokens; skipped under --dry-run).
@@ -39,6 +40,14 @@
 # ordered models; retired ids ignored), prints one line per difference and
 # exits 0 in sync, 1 on drift, 3 when the live store is unreadable. It skips
 # the provider, resilience and combo steps below.
+# --go <ref> + --go-sha <sha> — fleet rule D-825. A run that MUTATES the live
+# gateway (any run that is neither --dry-run nor --drift, --probe included)
+# refuses with exit 2 unless it carries an explicit judge GO: <ref> names the
+# approving artefact (a judge run id YYYYMMDD-HHMMSS-…, a decision id D-<n>, or
+# an OS-<n> item) and <sha> equals `git rev-parse HEAD` of this checkout, so the
+# GO covers the exact code being applied. --dry-run and --drift need no GO and
+# are unchanged; a --go on a read-only run is harmless and only echoed. The
+# first line a gated run prints is `GO: <ref> sha=<sha>`.
 # Requires python3 for JSON parsing and the probe's HTTP calls.
 set -euo pipefail
 
@@ -54,14 +63,68 @@ OVERRIDES_FILE="$HERE/context-overrides.json"
 DRY=0
 PROBE=0
 DRIFT=0
-for arg in "$@"; do
-    case "$arg" in
+GO_REF=""
+GO_SHA=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --dry-run) DRY=1 ;;
         --probe)   PROBE=1 ;;
         --drift)   DRIFT=1 ;;
+        --go)
+            [[ $# -ge 2 ]] || { echo "apply.sh: --go needs a reference (a judge run id YYYYMMDD-HHMMSS-…, a decision id D-<n> or an OS-<n> item)." >&2; exit 2; }
+            GO_REF="$2"; shift ;;
+        --go=*)    GO_REF="${1#--go=}" ;;
+        --go-sha)
+            [[ $# -ge 2 ]] || { echo "apply.sh: --go-sha needs this checkout's HEAD sha ('git rev-parse HEAD')." >&2; exit 2; }
+            GO_SHA="$2"; shift ;;
+        --go-sha=*) GO_SHA="${1#--go-sha=}" ;;
     esac
+    shift
 done
 PROBE_COMBOS=()
+
+# ─── Fleet rule D-825: a live/infra step runs only on an explicit GO ──────────
+# 2026-10-09 06:27Z an apply.sh real run started before any judge GO existed and
+# stopped only because api-keys.yml was missing. Any run that MUTATES the live
+# gateway (not --dry-run, not --drift) now refuses unless --go names the approving
+# artefact AND --go-sha equals this checkout's HEAD, so the GO covers the exact
+# code being applied. Read-only runs are unchanged; a --go there is echoed only.
+if [[ $DRY -ne 1 && $DRIFT -ne 1 ]]; then
+    [[ -n "$GO_REF" ]] || {
+        echo "apply.sh: refusing to change live gateway state without --go <ref> (fleet rule D-825)." >&2
+        echo "  Registering providers, creating or pruning combos, patching resilience and" >&2
+        echo "  starting the gateway all mutate shared infrastructure; one runs only on an" >&2
+        echo "  explicit judge GO naming the sha and scope it covers." >&2
+        echo "  Pass --go <ref> --go-sha <sha>, where <ref> is a judge run id" >&2
+        echo "  (YYYYMMDD-HHMMSS-…), a decision id (D-<n>) or an OS-<n> item, and <sha> is" >&2
+        echo "  'git rev-parse HEAD' of this checkout." >&2
+        echo "  To inspect without changing anything: --dry-run or --drift." >&2
+        exit 2
+    }
+    [[ "$GO_REF" =~ ^([0-9]{8}-[0-9]{6}-[^[:space:]]+|D-[0-9]+|OS-[0-9]+)$ ]] || {
+        echo "apply.sh: --go '$GO_REF' is not a judge run id (YYYYMMDD-HHMMSS-…), a decision id (D-<n>) or an OS-<n> item." >&2
+        exit 2
+    }
+    [[ -n "$GO_SHA" ]] || {
+        echo "apply.sh: refusing to change live gateway state without --go-sha <sha> (fleet rule D-825)." >&2
+        echo "  <sha> must equal 'git rev-parse HEAD' of this checkout, so the GO names the exact code applied." >&2
+        exit 2
+    }
+    CHECKOUT_HEAD="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+    [[ -n "$CHECKOUT_HEAD" ]] || {
+        echo "apply.sh: cannot read this checkout's HEAD ('git -C $ROOT rev-parse HEAD' failed)." >&2
+        echo "  Refusing to mutate live gateway state against an unverifiable sha." >&2
+        exit 2
+    }
+    [[ "$GO_SHA" == "$CHECKOUT_HEAD" ]] || {
+        echo "apply.sh: --go-sha '$GO_SHA' is not this checkout's HEAD '$CHECKOUT_HEAD'." >&2
+        echo "  The GO must name the exact sha of the code being applied (fleet rule D-825)." >&2
+        exit 2
+    }
+    echo "GO: $GO_REF sha=$CHECKOUT_HEAD"
+elif [[ -n "$GO_REF" ]]; then
+    echo "GO: $GO_REF sha=${GO_SHA:-none} (read-only run — no gate applies)"
+fi
 # Always say so up front: with a live gateway and a key file no later line
 # mentions the dry run, and the plan then reads like a real run.
 [[ $DRY -eq 1 ]] && echo "This is a dry run - nothing is registered, created or started."

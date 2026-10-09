@@ -154,3 +154,49 @@ PY
         [[ $rc -eq 0 ]] && pass || fail "$(printf '%s\n' "$out" | head -3)"
     fi
 fi
+
+# ─── Fleet rule D-825: apply-cluster.sh converges the live store only on a GO ──
+# apply-cluster.sh has no read-only mode — every run applies cluster/ to the live
+# MinIO-backed omnigraph store and restarts the server — so it must refuse without
+# --go <ref> and --go-sha <sha> equal to this checkout's HEAD. The refusals exit at
+# the very top, before the cd/docker/snapshot, so they touch nothing; the happy path
+# is exercised here only against a throwaway tree (no live store exists in the suite).
+describe "omnigraph cluster apply gate"
+
+APC_SH="$ROOT/infra/mcp-servers/scripts/apply-cluster.sh"
+
+if it "apply-cluster: refuses to converge with no --go and touches nothing"; then
+    d="$(mktemp -d)"
+    out="$( ( cd "$d" && bash "$APC_SH" ) 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a --go-less converge exited 0" >&2; }
+    [[ "$out" == *"refusing to converge the live omnigraph store without --go"* ]] \
+        || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -e "$d/.graph-backup" ]] || { ok=0; echo "the refused run wrote a backup dir" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-cluster converged the live store with no --go"; fi
+fi
+
+if it "apply-cluster: refuses a malformed --go reference"; then
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(bash "$APC_SH" --go "not-a-ref" --go-sha "$sha" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a malformed --go reference exited 0" >&2; }
+    [[ "$out" == *"is not a judge run id"* ]] || { ok=0; echo "no ref-format refusal: $out" >&2; }
+    if (( ok )); then pass; else fail "apply-cluster accepted a malformed --go"; fi
+fi
+
+if it "apply-cluster: refuses when --go-sha is not this checkout's HEAD"; then
+    out="$(bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a wrong --go-sha exited 0" >&2; }
+    [[ "$out" == *"is not this checkout's HEAD"* ]] || { ok=0; echo "no sha-mismatch refusal: $out" >&2; }
+    if (( ok )); then pass; else fail "apply-cluster converged on a --go-sha that is not HEAD"; fi
+fi
+
+if it "apply-cluster: --go=OS-0 with a non-HEAD --go-sha= still refuses"; then
+    out="$(bash "$APC_SH" --go=OS-0 --go-sha=abcdef 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
+        || fail "the =-form args were not gated: rc=$rc out=$out"
+fi

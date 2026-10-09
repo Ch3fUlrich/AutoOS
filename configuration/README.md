@@ -23,13 +23,18 @@ git-ignored, only the template is tracked.
 
 ```bash
 cp configuration/api-keys.example.yml configuration/api-keys.yml   # fill in
-./configuration/omniroute/apply.sh          # register keys + build combos
+./configuration/omniroute/apply.sh --dry-run   # preview what it would change (no GO needed)
+# A live apply mutates the gateway, so fleet rule D-825 requires an explicit judge GO
+# naming the sha it covers (a judge run id, D-<n> or OS-<n>):
+./configuration/omniroute/apply.sh --go <ref> --go-sha "$(git rev-parse HEAD)"   # register keys + build combos
 ./configuration/start-stack.sh opencode     # gateway + app
 ```
 
 ```powershell
 Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml
-.\configuration\omniroute\apply.ps1
+.\configuration\omniroute\apply.ps1 -DryRun
+# -Go <ref> -GoSha (git rev-parse HEAD) on the live run (fleet rule D-825):
+.\configuration\omniroute\apply.ps1 -Go <ref> -GoSha (git rev-parse HEAD)
 .\configuration\start-stack.ps1 -App opencode
 ```
 

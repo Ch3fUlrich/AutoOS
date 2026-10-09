@@ -235,6 +235,31 @@ fi
 # padded name, [strategy], status) and logs every other call to calls.log,
 # plus a loopback stand-in gateway serving a static /api/health. Nothing here
 # reaches the live gateway or its store.
+# _is_readonly_run [apply args] — is this apply.sh invocation read-only (--dry-run
+# or --drift)? apply.sh's fleet-rule D-825 gate skips those; a mutating run refuses
+# without --go/--go-sha. The sandbox helpers below run real (mutating) apply.sh, so
+# they add a valid GO for the code under test, and no GO to a read-only run.
+_is_readonly_run() {
+    local a
+    for a in "$@"; do
+        [[ "$a" == --dry-run || "$a" == --drift ]] && return 0
+    done
+    return 1
+}
+
+# _go_flags <root> — the --go/--go-sha flags that clear apply.sh's D-825 gate for a
+# mutating run against this checkout, as an array (empty for a read-only run). <ref>
+# is OS-0, a valid OS-<n> item; the sha is the real HEAD so apply.sh's own
+# `git rev-parse HEAD` matches it.
+_go_flags() {
+    local root="$1"
+    shift
+    if _is_readonly_run "$@"; then
+        return
+    fi
+    printf '%s\0' "--go=OS-0" "--go-sha=$(git -C "$root" rev-parse HEAD)"
+}
+
 _prune_sandbox() {
     local d
     d="$(mktemp -d)"
@@ -453,8 +478,10 @@ _prune_apply() {
         echo "no stand-in gateway"
         return 1
     fi
+    local -a _go_arr=()
+    mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
     PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
     kill "$pid" 2>/dev/null
 }
 # _omitted_combo - one orphaned id, read from combos.json's own "omitted" list.
@@ -892,10 +919,12 @@ NODECURL
 _node_apply() {
     local d="$1"
     shift
+    local -a _go_arr=()
+    mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
     PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" \
-        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
 }
 # _node_post_count <dir> - how many provider nodes the run created.
 _node_post_count() {
@@ -1056,7 +1085,7 @@ if it "svc: apply removes the REST temp files when a call is interrupted"; then
     PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
-        bash "$ROOT/configuration/omniroute/apply.sh" >"$d/run.out" 2>&1 &
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" >"$d/run.out" 2>&1 &
     apply_pid=$!
     set +m
     ok=1
@@ -1294,7 +1323,7 @@ json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
           open(sys.argv[1], "w"), indent=1)
 PY
     out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        bash "$ROOT/configuration/omniroute/apply.sh" 2>&1)"
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" 2>&1)"
     ok=1
     grep -q '^providers list' "$d/calls.log" \
         || { ok=0; echo "the CLI list never decided: $(cat "$d/calls.log")" >&2; }
@@ -1433,6 +1462,126 @@ if it "svc: apply --dry-run plans the catalog refresh for the provider it would 
         || { ok=0; echo "refresh plan: $out" >&2; }
     [[ "$out" != *"nothing new registered"* ]] || { ok=0; echo "claimed a current catalog: $out" >&2; }
     if (( ok )); then pass; else fail "the dry run does not plan the catalog refresh"; fi
+fi
+
+# ─── Fleet rule D-825: apply.sh mutates live gateway state only on an explicit GO ──
+# 2026-10-09 06:27Z a real apply run began with no judge GO — it stopped only on a
+# missing key file. The gate refuses a mutating run without --go/--go-sha, checks the
+# reference's shape and that the sha IS this checkout's HEAD, and leaves --dry-run and
+# --drift untouched. These drive apply.sh directly (no GO added) so each case asserts
+# exactly the D-825 args it means to test; the _prune_apply/_node_apply helpers add a
+# valid GO to the mutating runs they issue.
+# _gate_run <dir> [apply args] — apply.sh against the prune stand-ins with the args
+# verbatim. Returns apply's exit code; prints its merged stdout+stderr.
+_gate_run() {
+    local d="$1" pid port out rc
+    shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    kill "$pid" 2>/dev/null
+    printf '%s' "$out"
+    return "$rc"
+}
+
+if it "D-825: apply refuses a live run with no --go and mutates nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a mutating run with no --go exited 0" >&2; }
+    [[ "$out" == *"refusing to change live gateway state without --go"* ]] \
+        || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -s "$d/listed" ]] || { ok=0; echo "the refused run listed the live store" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ran live mutations with no --go"; fi
+fi
+
+if it "D-825: apply refuses a malformed --go reference"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --go "not-a-real-ref" --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a malformed --go reference exited 0" >&2; }
+    [[ "$out" == *"is not a judge run id"* ]] || { ok=0; echo "no reference-format refusal: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply accepted a malformed --go reference"; fi
+fi
+
+if it "D-825: apply refuses when --go-sha is not this checkout's HEAD"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --go D-825 --go-sha 0000000000000000000000000000000000000000)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a wrong --go-sha exited 0" >&2; }
+    [[ "$out" == *"is not this checkout's HEAD"* ]] || { ok=0; echo "no sha-mismatch refusal: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply mutated on a --go-sha that is not HEAD"; fi
+fi
+
+if it "D-825: a valid --go + --go-sha echoes GO first and lets the live run proceed"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --go "20261009-064139-goref-fix" --go-sha "$sha")"; rc=$?
+    ok=1
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO: 20261009-064139-goref-fix sha=$sha" ]] \
+        || { ok=0; echo "GO line was not first: [$first_line]" >&2; }
+    [[ "$out" != *"refusing to change live"* ]] || { ok=0; echo "a GO'd run was refused: $out" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the GO'd run never reached the live store" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a valid GO did not let the run proceed"; fi
+fi
+
+if it "D-825: --dry-run needs no --go and never hits the gate"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --dry-run)"; rc=$?
+    ok=1
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "no dry-run banner: $out" >&2; }
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--dry-run hit the D-825 gate: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "the dry run mutated the store: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--dry-run was gated or mutated state"; fi
+fi
+
+if it "D-825: --drift needs no --go and stays read-only"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --drift)"; rc=$?
+    ok=1
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--drift hit the D-825 gate: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "--drift mutated the store: $(cat "$d/calls.log")" >&2; }
+    # --drift exits 0/1/3 (sync/drift/unreadable) — never a bare gate refusal.
+    [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 3 ]] || { ok=0; echo "--drift exited $rc" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift was gated or mutated state"; fi
+fi
+
+if it "D-825: --go on a --dry-run is echoed and stays read-only"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --dry-run --go D-825 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$out" == *"GO: D-825 sha=$sha"* ]] || { ok=0; echo "the --go was not echoed on a dry run: $out" >&2; }
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "not a dry run: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "the dry run mutated the store" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go on a --dry-run was refused or mutated state"; fi
 fi
 
 # ─── apply.sh --drift: live combos vs combos.json ───────────────────────────
