@@ -9970,6 +9970,92 @@ print('%s|%s|%s' % (
     Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
 }
 
+# ─── Fleet rule D-852: the stand-in directory every gate case runs inside ──────
+# A D-825 case that CLEARS a gate is not finished at the gate. The tool it names
+# goes on to exec docker/systemctl/ssh off PATH and to dial a gateway URL, and one
+# such case restarted the live omnigraph-server on the host on 2026-10-09 while
+# still printing a green tick. So every case that spawns a run does it with this
+# directory first on PATH — one script per binary that appends the call to
+# calls.log and exits 0 — and with every gateway/graph URL env var pointed at a
+# discard port. The bash twin is gate_stubs_make in tests/run-tests.sh; the guard
+# cases at the end of the D-825 groups test the shadow itself, not the convention.
+$GateUrlSink = 'http://127.0.0.1:9'          # discard port: nothing listens
+$GateStubUrlVars = @('AUTOOS_OMNIROUTE_URL', 'OMNIROUTE_BASE_URL',
+                     'AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')
+$GateStubAllBins = @('docker', 'curl', 'systemctl', 'ssh', 'omniroute', 'npx', 'node')
+# The host-only set, for a case that must keep a real curl against its own loopback
+# stand-in (a curl stand-in there would answer the request the case needs to fail).
+$GateStubHostBins = @('docker', 'systemctl', 'ssh', 'npx', 'node')
+
+function New-GateStubDir {
+    param([string[]]$Bins = $GateStubAllBins, [string]$Dir = '')
+    $root = if ($Dir) { $Dir } else {
+        Join-Path ([IO.Path]::GetTempPath()) ('gate_stub_' + [Guid]::NewGuid().ToString('N'))
+    }
+    $bin = Join-Path $root 'bin'
+    $null = New-Item -ItemType Directory -Path $bin
+    $log = Join-Path $bin 'calls.log'
+    [IO.File]::WriteAllText($log, '')
+    $isWin = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    foreach ($b in $Bins) {
+        if ($isWin) {
+            # cmd.exe runs the .cmd twin; %~dp0 keeps the log path out of the body.
+            $body = @('@echo off', ('>>"%~dp0calls.log" echo ' + $b + ' %*'), 'exit /b 0')
+            $text = (($body -join "`n") -replace "`r", '') -replace "`n", "`r`n"
+            [IO.File]::WriteAllText((Join-Path $bin ($b + '.cmd')), $text)
+        } else {
+            $body = @('#!/bin/sh',
+                      ('printf "%s %s\n" "' + $b + '" "$*" >>"' + $log + '"'), 'exit 0')
+            $text = ($body -join "`n") -replace "`r", ''
+            $path = Join-Path $bin $b
+            [IO.File]::WriteAllText($path, $text)
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            & chmod '+x' $path 2>$null
+            $ErrorActionPreference = $prevEap
+        }
+    }
+    [pscustomobject]@{ Dir = $root; Bin = $bin; Log = $log; Bins = @($Bins) }
+}
+
+function Get-GateStubEnv {
+    # The environment a spawned run gets: stand-ins first on PATH, every gateway and
+    # graph URL at the discard port. -Extra wins — that is how a case points a run at
+    # its own loopback stand-in — but a host name never reaches these vars.
+    param($Stub, [hashtable]$Extra = @{})
+    $values = @{}
+    $values['PATH'] = $Stub.Bin + [IO.Path]::PathSeparator +
+                      [Environment]::GetEnvironmentVariable('PATH')
+    foreach ($k in $GateStubUrlVars) { $values[$k] = $GateUrlSink }
+    foreach ($k in @($Extra.Keys)) { $values[$k] = $Extra[$k] }
+    $values
+}
+
+function Set-GateStubEnv {
+    param([hashtable]$Values)
+    foreach ($k in @($Values.Keys)) { [Environment]::SetEnvironmentVariable($k, $Values[$k]) }
+}
+
+function Get-GateStubCalls {
+    param($Stub)
+    if (Test-Path -LiteralPath $Stub.Log) { return [IO.File]::ReadAllText($Stub.Log) }
+    ''
+}
+
+function Test-GateStubRecord {
+    # True when the record names a call to $Bin — the proof a cleared gate stopped
+    # at the stand-in. An empty record proves the opposite: nothing was execed.
+    param([string]$Calls, [string]$Bin)
+    @(($Calls -split "`r?`n") | Where-Object { $_ -like ($Bin + ' *') }).Count -gt 0
+}
+
+function Remove-GateStubDir {
+    param($Stub)
+    if ($Stub) {
+        Remove-Item -LiteralPath $Stub.Dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case 'apply --dry-run registers nothing and starts nothing' {
     # The suite runs $ErrorActionPreference = 'Stop', but the omniroute CLI
     # writes a harmless warning to stderr on every call, which 5.1 promotes
@@ -9983,16 +10069,23 @@ Test-Case 'apply --dry-run registers nothing and starts nothing' {
     $before = Get-Content $combosPath -Raw -Encoding utf8
     # Hermetic: a dead gateway port and no key file - the dry run must never
     # read the live gateway or the machine's keys (the child inherits both).
-    $oldUrl = $env:AUTOOS_OMNIROUTE_URL; $oldKeys = $env:AUTOOS_KEYS_FILE
+    # D-852: the host-only stand-ins shadow the container tools too; the real
+    # omniroute CLI stays on PATH because the case is about what it announces.
+    $stub = New-GateStubDir -Bins $GateStubHostBins
+    $oldUrl = $env:AUTOOS_OMNIROUTE_URL; $oldKeys = $env:AUTOOS_KEYS_FILE; $oldPath = $env:PATH
     $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:1'
     $env:AUTOOS_KEYS_FILE = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-api-keys.yml'
+    $env:PATH = $stub.Bin + [IO.Path]::PathSeparator + $oldPath
     try {
         $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
             (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
     } finally {
-        $env:AUTOOS_OMNIROUTE_URL = $oldUrl; $env:AUTOOS_KEYS_FILE = $oldKeys
+        $env:AUTOOS_OMNIROUTE_URL = $oldUrl; $env:AUTOOS_KEYS_FILE = $oldKeys; $env:PATH = $oldPath
+        $reached = Get-GateStubCalls $stub
+        Remove-GateStubDir $stub
     }
     Assert-True ($out -match 'dry run stops here|dry run continues|would create|would register|already registered') 'dry run announced nothing'
+    Assert-Equal $reached '' ("the dry run execed a host binary: $reached")
     Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
 }
 
@@ -10012,6 +10105,12 @@ function New-AutoOSPruneSandbox {
     [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
     [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "# no keys: every provider is skipped`n")
     [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+    # D-852: these runs carry a judge GO (see Invoke-AutoOSPruneApply), so a cleared
+    # gate hands them to apply.ps1's live path. The host-only stand-ins shadow
+    # docker/systemctl/ssh/npx/node — host-only, because `combo list` and the health
+    # probe above are the real thing this battery is testing. Lives under $d so the
+    # case's own cleanup removes it.
+    $null = New-GateStubDir -Bins $GateStubHostBins -Dir (Join-Path $d 'hstub')
     # The live connection list as `omniroute providers list` prints it (hex id,
     # name). Empty means the store holds nothing; a test writes a row to make
     # apply take its "already registered" branch.
@@ -10099,6 +10198,20 @@ function Set-AutoOSPruneList {
     [IO.File]::WriteAllText((Join-Path $Dir 'list.txt'), (($lines -join "`n") + "`n"))
 }
 
+# One managed orphan, read from combos.json's own "omitted" list. Derived rather than
+# pinned, exactly as the bash twin's _omitted_combo does it: which route is orphaned
+# right now is registry data, and a name written into a test goes stale the moment a
+# re-cut gates a leg again (AO-DENYLEGS D2 did that to the l1-orchestrator-clean pin
+# this replaces — the Windows suite still carried it and pruned nothing).
+function Get-AutoOSOmittedCombo {
+    $doc = [IO.File]::ReadAllText(
+        [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'combos.json')) | ConvertFrom-Json
+    if (-not $doc.PSObject.Properties['omitted']) { throw 'combos.json holds no omitted list to prune from' }
+    $orphan = @($doc.omitted)[0]
+    if (-not $orphan) { throw 'combos.json: the omitted list holds no combo to prune' }
+    $orphan
+}
+
 # apply.ps1 in a child of the shell running the suite, with the stand-ins
 # first on PATH. A child, because the suite runs under Stop and 5.1 promotes
 # any native stderr to a terminating error; only the captured text counts.
@@ -10106,17 +10219,40 @@ function Invoke-AutoOSPruneApply {
     param([string]$Dir, [string]$Gateway, [switch]$DryRun)
     $ErrorActionPreference = 'Continue'
     $saved = @{}
-    foreach ($k in @('PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE')) {
+    foreach ($k in @('PATH', 'AUTOOS_OMNIROUTE_URL', 'OMNIROUTE_BASE_URL', 'AUTOOS_KEYS_FILE',
+                     'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR',
+                     'AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')) {
         $saved[$k] = [Environment]::GetEnvironmentVariable($k)
     }
     try {
-        $path = (Join-Path $Dir 'bin') + [IO.Path]::PathSeparator + $saved['PATH']
+        # The case's own stand-in CLI first (it answers `combo list` and marks the
+        # store), then the D-852 host stand-ins, and nothing after them is reachable.
+        $path = (Join-Path $Dir 'bin') + [IO.Path]::PathSeparator +
+                (Join-Path (Join-Path $Dir 'hstub') 'bin') + [IO.Path]::PathSeparator + $saved['PATH']
         [Environment]::SetEnvironmentVariable('PATH', $path)
         [Environment]::SetEnvironmentVariable('AUTOOS_OMNIROUTE_URL', $Gateway)
+        [Environment]::SetEnvironmentVariable('OMNIROUTE_BASE_URL', $Gateway)
+        foreach ($k in @('AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')) {
+            [Environment]::SetEnvironmentVariable($k, $GateUrlSink)
+        }
         [Environment]::SetEnvironmentVariable('AUTOOS_KEYS_FILE', (Join-Path $Dir 'keys.yml'))
         $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
             [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'apply.ps1'))
-        if ($DryRun) { $argList += '-DryRun' }
+        if ($DryRun) {
+            $argList += '-DryRun'
+        } else {
+            # Fleet rule D-825: a run that is not -DryRun converges the live gateway, so
+            # the stand-in cases carry a judge GO naming this checkout's HEAD, exactly as
+            # the bash twins in tests/linux/34-ai-services.sh do. The ref is proved against
+            # the checked-in artefact tree, never a host's own ~/code/routing.
+            [Environment]::SetEnvironmentVariable('AUTOOS_ROUTING_DIR',
+                (Join-Path $Root 'tests/fixtures/go-gate/routing'))
+            [Environment]::SetEnvironmentVariable('AUTOOS_WORKERS_DIR',
+                (Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'))
+            $goSha = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+            if ($goSha) { $goSha = "$goSha".Trim() }
+            $argList += @('-Go', 'D-825', '-GoSha', $goSha)
+        }
         & (Get-Process -Id $PID).Path @argList 2>&1 | Out-String
     } finally {
         foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
@@ -10126,6 +10262,16 @@ function Invoke-AutoOSPruneApply {
 function Get-AutoOSPruneCalls {
     param([string]$Dir)
     @(Get-Content -LiteralPath (Join-Path $Dir 'calls.log') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# D-852: the host stand-in record for a prune run. Such a run clears the D-825 gate
+# and goes on with the live path, but it has no business execing docker, systemctl or
+# ssh — a non-empty record here names the binary it reached.
+function Get-AutoOSPruneHostCalls {
+    param([string]$Dir)
+    $log = Join-Path (Join-Path (Join-Path $Dir 'hstub') 'bin') 'calls.log'
+    if (-not (Test-Path -LiteralPath $log)) { return '' }
+    [IO.File]::ReadAllText($log)
 }
 
 # The stand-in gateway, proven to answer before apply runs: a gateway that
@@ -10207,19 +10353,18 @@ Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, nev
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        # PROVFIX3 verify: the example id follows the registry — T1FREE/MUSEAPI
-        # re-serviced l1-orchestrator-free-only, and DSBACK 2026-09-28 re-serviced
-        # deepseek-v4.1-flash (the operator top-up made providers.deepseek
-        # available again), so the orphan on show today is l1-orchestrator-clean.
-        # Same rule, real id.
-        Set-AutoOSPruneList $d @('l1-orchestrator-clean', 'l2-worker', 'my-own-combo')
+        # The orphan comes from combos.json itself (see Get-AutoOSOmittedCombo): the
+        # rule is what is asserted, the id is registry data of the moment.
+        $orphan = Get-AutoOSOmittedCombo
+        Set-AutoOSPruneList $d @($orphan, 'l2-worker', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
-        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete l1-orchestrator-clean --yes'
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') "combo delete $orphan --yes"
         Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
-        Assert-True ($out -like '*  - l1-orchestrator-clean: omitted, deleted*') "no omitted-deletion line in: $out"
+        Assert-True ($out -like "*  - ${orphan}: omitted, deleted*") "no omitted-deletion line in: $out"
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+        Assert-Equal (Get-AutoOSPruneHostCalls $d) '' 'the prune run execed a host binary'
     } finally {
         Stop-AutoOSTestHttpServer $srv
         Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
@@ -10231,18 +10376,21 @@ Test-Case 'apply prune: --dry-run names the omitted combo and never names a live
     $srv = $null
     try {
         $srv = Start-AutoOSPruneGateway $d
-        # DSBACK 2026-09-28: deepseek-v4.1-flash is a live combo again, so the
-        # orphan on show is l1-orchestrator-clean (see the case above).
-        Set-AutoOSPruneList $d @('l1-orchestrator-clean', 'auto', 'l2-worker-paid', 'my-own-combo')
+        # The orphan is read from combos.json (see Get-AutoOSOmittedCombo), so this
+        # names whatever is orphaned right now, not whatever was orphaned when the
+        # case was written.
+        $orphan = Get-AutoOSOmittedCombo
+        Set-AutoOSPruneList $d @($orphan, 'auto', 'l2-worker-paid', 'my-own-combo')
         $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
         $calls = @(Get-AutoOSPruneCalls $d)
         Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
         Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
-        Assert-True ($out -like '*  - l1-orchestrator-clean: omitted, would delete*') "no omitted would-delete line in: $out"
+        Assert-True ($out -like "*  - ${orphan}: omitted, would delete*") "no omitted would-delete line in: $out"
         Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
         Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
         Assert-True ($out -notlike '*- l2-worker-paid:*') 'a live "l2-worker-paid" combo was named'
         Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+        Assert-Equal (Get-AutoOSPruneHostCalls $d) '' 'the prune dry run execed a host binary'
     } finally {
         Stop-AutoOSTestHttpServer $srv
         Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
@@ -11115,6 +11263,586 @@ Test-Case 'the ZCode gateway postInstall writes nothing into an empty home' {
         Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
+}
+
+# ─── omniroute apply.ps1 D-825 GO gate ──────────────────────────────────────
+# 2026-10-09 06:27Z a real apply run began with no judge GO — it stopped only on
+# a missing key file. apply.ps1 is the Windows twin of apply.sh and mutates the
+# same live gateway, so it carries the same D-825 gate: a run that is not -DryRun
+# refuses without -Go <ref> and -GoSha <sha> equal to this checkout's HEAD. The
+# refusals exit before any gateway contact; -DryRun is unchanged.
+Describe-Group 'omniroute apply D-825 GO gate'
+$gateApply = Join-Path $Root 'configuration/omniroute/apply.ps1'
+$gateOverrides = Join-Path $Root 'configuration/omniroute/apply-capability-overrides.ps1'
+$gateHost  = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell' }
+$gateKeys  = [IO.Path]::GetTempFileName()
+$gateHead  = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+if ($gateHead) { $gateHead = "$gateHead".Trim() }
+# A GO of the right shape is no longer enough — the gate proves the ref names an
+# artefact that EXISTS, read from the routing dir and the workers tree. Point the
+# child runs at the checked-in fixture tree, never at the host's own
+# $HOME/code/routing: a suite that passes only on the machine it was written on
+# proves nothing, and a CI box with no routing dir must decide exactly like this one.
+$gateRouting = Join-Path $Root 'tests/fixtures/go-gate/routing'
+$gateWorkers = Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'
+$gateEnvKeys = @(
+    'PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE',
+    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG'
+) + $GateStubUrlVars
+function Push-GateEnv {
+    # [Environment] rather than $env: because a $null read under Set-StrictMode
+    # is a variable error, and these keys are legitimately unset most of the time.
+    $saved = @{}
+    foreach ($key in $gateEnvKeys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key) }
+    $saved
+}
+function Pop-GateEnv {
+    param($Saved)
+    foreach ($key in $gateEnvKeys) { [Environment]::SetEnvironmentVariable($key, $Saved[$key]) }
+}
+
+function Test-GatePython {
+    # The shared gate is python, and the PowerShell front proves each candidate by
+    # running it — a Windows Store 'python3' alias answers a shrug. Do the same here,
+    # so these cases are skipped on a host that genuinely cannot read an artefact tree
+    # rather than passing on a refusal for the wrong reason.
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        foreach ($cand in @('python', 'python3')) {
+            if (-not (Get-Command $cand -CommandType Application -ErrorAction SilentlyContinue)) { continue }
+            & $cand -c 'import sys' *> $null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+    } finally { $ErrorActionPreference = $prevEap }
+    return $false
+}
+$gatePy = Test-GatePython
+
+function Invoke-ChildApply {
+    # Every run goes out inside the D-852 stand-in directory: the binaries it could
+    # exec are shadowed first on PATH and every gateway/graph URL is the discard
+    # port. -Gateway replaces the sink for a case that brings its own loopback
+    # stand-in; -StubBins narrows the shadow (the host-only set) for a case that
+    # needs one real binary. The record comes back as 'Calls' and the directory is
+    # removed here, so a case asserts without leaking temp state: an empty record is
+    # the proof a refusal touched nothing, a non-empty one the proof a cleared gate
+    # stopped at the stand-in.
+    param([string[]]$ScriptArgs, [string]$Path = $gateApply, [hashtable]$Extra = @{},
+          [string[]]$StubBins = $GateStubAllBins, [string]$Gateway = '')
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $stub = New-GateStubDir -Bins $StubBins
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop;
+        # the child writes its refusal to stderr, so run the call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $values = Get-GateStubEnv -Stub $stub -Extra @{
+            'AUTOOS_OMNIROUTE_URL' = 'http://127.0.0.1:1'
+            'AUTOOS_KEYS_FILE'     = $gateKeys
+            'AUTOOS_ROUTING_DIR'   = $gateRouting
+            'AUTOOS_WORKERS_DIR'   = $gateWorkers
+        }
+        if ($Gateway) {
+            $values['AUTOOS_OMNIROUTE_URL'] = $Gateway
+            $values['OMNIROUTE_BASE_URL'] = $Gateway
+        }
+        foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
+        Set-GateStubEnv -Values $values
+        $out = & $gateHost -NoProfile -NonInteractive -File $Path @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out; Calls = (Get-GateStubCalls $stub) }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+}
+
+function Assert-GateUntouched {
+    # A refused gate must not have execed anything at all.
+    param($Run)
+    $calls = ($Run.Calls -replace "`r", '')
+    Assert-Equal $calls '' ("a refused run reached a host binary: $calls")
+}
+
+Test-Case 'apply.ps1 D-825: a live run with no -Go is refused before any gateway contact' {
+    $r = Invoke-ChildApply @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildApply @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildApply @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a -Go decision id that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # D-9999 has the right SHAPE and the right sha; only the decisions log says no.
+    $r = Invoke-ChildApply @('-Go', 'D-9999', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D-9999') "a ref that names nothing printed a GO: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a decision id matches exactly — D-82 is not D-825' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # The fixture log holds D-825 alone: a prefix match would let D-82 through.
+    $r = Invoke-ChildApply @('-Go', 'D-82', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "D-82 matched the D-825 line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: an unreadable decisions log refuses the -Go' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-no-such-decisions-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    # A named AUTOOS_DECISIONS_LOG is the WHOLE source: no fallback read, no verdict, no GO.
+    $r = Invoke-ChildApply -ScriptArgs @('-Go', 'D-825', '-GoSha', $gateHead) `
+        -Extra @{ 'AUTOOS_DECISIONS_LOG' = $missing }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'cannot read') "out: $($r.Out)"
+    Assert-True ($r.Out -match 'GO-OFFLINE|go-offline|-GoOffline') "the refusal did not name the way out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: -GoOffline does not lower the sha bar' {
+    # Offline waives the artefact lookup only — a GO naming the wrong code is still a
+    # refusal, and the sha check runs first, so this never reaches the gateway.
+    $r = Invoke-ChildApply @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000', '-GoOffline')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO-OFFLINE') "the offline line was logged before the sha check: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: -GoOffline gates nothing on a -DryRun' {
+    $r = Invoke-ChildApply @('-DryRun', '-GoOffline')
+    Assert-True ($r.Out -match 'This is a dry run') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO-OFFLINE') "the offline flag logged on a read-only run: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun')
+    Assert-True ($r.Out -match 'This is a dry run') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildApply @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    # A cleared gate hands the run to the real apply.ps1, which would spawn a real
+    # gateway and wait two minutes for a port. Everything it can reach is a stand-in:
+    # the host binaries and the omniroute CLI first on PATH (D-852), and a loopback
+    # gateway answering /api/health so the health probe passes without a start. The
+    # CLI record is the proof the run reached the stand-in and not the host, and it
+    # is bounded by a job timeout so a hang can never outlive the case.
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $stub = New-GateStubDir
+    $srv = $null
+    try {
+        $gw = Join-Path $stub.Dir 'gw'
+        $api = Join-Path $gw 'api'
+        $null = New-Item -ItemType Directory -Path $api
+        [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
+        $srv = Start-AutoOSTestHttpServer -Directory $gw
+        $gateway = "http://127.0.0.1:$($srv.Port)"
+        # A gateway that only looked down would make the run start the real thing.
+        $ok = $false
+        try {
+            $ok = (Invoke-WebRequest -Uri "$gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+        } catch { $ok = $false }
+        if (-not $ok) { throw 'the stand-in gateway does not answer /api/health' }
+        $sb = {
+            param($exe, $path, $keys, $sha, $routing, $workers, $gatewayUrl, $stubBin, $sink)
+            $ErrorActionPreference = 'Continue'
+            # A job gets its own session state: the stand-in dir and the fixture tree
+            # are passed in, so the run reaches neither the host's binaries nor the
+            # host's routing dir.
+            $env:PATH = $stubBin + [IO.Path]::PathSeparator + $env:PATH
+            $env:AUTOOS_OMNIROUTE_URL = $gatewayUrl
+            $env:OMNIROUTE_BASE_URL = $gatewayUrl
+            $env:AUTOOS_KEYS_FILE = $keys
+            $env:AUTOOS_ROUTING_DIR = $routing
+            $env:AUTOOS_WORKERS_DIR = $workers
+            $env:AUTOOS_OMNIGRAPH_URL = $sink
+            $env:OMNIGRAPH_URL = $sink
+            $env:OMNI_S3 = $sink
+            $o = & $exe -NoProfile -NonInteractive -File $path -Go 'D-825' -GoSha $sha 2>&1 | Out-String
+            [pscustomobject]@{ Code = $LASTEXITCODE; Out = $o }
+        }
+        $job = Start-Job -ScriptBlock $sb -ArgumentList $gateHost, $gateApply, $gateKeys, `
+            $gateHead, $gateRouting, $gateWorkers, $gateway, $stub.Bin, $GateUrlSink
+        try {
+            if (-not (Wait-Job $job -Timeout 120)) { throw 'the gated run did not finish in 120s' }
+            $r = Receive-Job $job
+            Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+            Assert-True ($r.Out -notmatch 'refusing to change live') "a valid GO was refused: $($r.Out)"
+            $calls = Get-GateStubCalls $stub
+            Assert-True (Test-GateStubRecord $calls 'omniroute') `
+                "the cleared run reached no stand-in CLI: [$($calls -replace "`r", ' / ')]"
+        } finally {
+            Stop-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-GateStubDir $stub
+    }
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: a live run with no -Go is refused' {
+    # The standalone twin of apply.sh's override step PATCHes the live gateway,
+    # so it carries the same D-825 gate. The full ref/sha logic is apply.ps1's
+    # above; here the gate's presence and wiring are what is asserted.
+    $r = Invoke-ChildApply @() -Path $gateOverrides
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: a -Go that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # Proof that this twin calls the shared gate rather than keeping its own regex:
+    # a well-shaped ref with the right sha still stops at the artefact lookup.
+    $r = Invoke-ChildApply @('-Go', 'D-9999', '-GoSha', $gateHead) -Path $gateOverrides
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun') -Path $gateOverrides
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D') "a dry run without -Go printed a GO: $($r.Out)"
+}
+
+# ─── infra/mcp-servers/scripts/compact-graphs.ps1 D-825 GO gate ───────────────
+# Compaction stops and restarts the live omnigraph-server and rewrites each graph's
+# manifest against the running store, so it is a live converging step (fleet rule D-825)
+# like apply-cluster.sh. The gate runs before any docker call, so a refused run touches
+# nothing; D-852 puts a stand-in directory first on PATH for every run here, so even a
+# cleared gate (and -DryRun, which reaches the same step) stops at the stand-in docker
+# instead of the host's.
+Describe-Group 'compact-graphs D-825 GO gate'
+$gateCompact = Join-Path $Root 'infra/mcp-servers/scripts/compact-graphs.ps1'
+
+function Invoke-ChildCompact {
+    # D-852: compaction is a docker-first tool — it inspects, stops and restarts the
+    # live omnigraph-server — so the stand-in directory is the only thing this case
+    # family can honestly run against. The record comes back as 'Calls'.
+    param([string[]]$ScriptArgs, [hashtable]$Extra = @{})
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $stub = New-GateStubDir
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop; the
+        # refusal is written to stderr, so run the child call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $values = Get-GateStubEnv -Stub $stub -Extra @{
+            'AUTOOS_ROUTING_DIR' = $gateRouting
+            'AUTOOS_WORKERS_DIR' = $gateWorkers
+        }
+        foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
+        Set-GateStubEnv -Values $values
+        $out = & $gateHost -NoProfile -NonInteractive -File $gateCompact @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out; Calls = (Get-GateStubCalls $stub) }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a live compaction with no -Go is refused before any docker call' {
+    $r = Invoke-ChildCompact @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to compact the live omnigraph store without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a -Go that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $r = Invoke-ChildCompact @('-Go', 'D-9999', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D-9999') "a ref that names nothing printed a GO: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: an unreadable decisions log refuses the -Go' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-compact-no-such-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    $r = Invoke-ChildCompact -ScriptArgs @('-Go', 'D-825', '-GoSha', $gateHead) `
+        -Extra @{ 'AUTOOS_DECISIONS_LOG' = $missing }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'cannot read') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -GoOffline does not lower the sha bar' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000', '-GoOffline')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildCompact @('-DryRun')
+    Assert-True ($r.Out -notmatch 'refusing to compact the live omnigraph store') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildCompact @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # A cleared gate lets the run on to the store, and on a host with the stack up that
+    # is a live stop/start of omnigraph-server — shared infrastructure a test does not
+    # own. The stand-in directory Invoke-ChildCompact installs is what stops it: the
+    # stand-in docker answers an empty inspect, so the run throws one step past the
+    # gate at 'resolve the live stack', and its record is the proof the run got there
+    # through the shadow instead of the host's docker (D-852).
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "a valid GO was refused: $($r.Out)"
+    Assert-True (Test-GateStubRecord $r.Calls 'docker') `
+        "the cleared run reached no stand-in docker: [$(($r.Calls) -replace "`r", ' / ')]"
+    Assert-True ($r.Out -match 'omnigraph-server not found') "the stand-in did not stop the run: $($r.Out)"
+}
+
+# ─── D-852: the shadow itself is a tested property ────────────────────────────
+# Every case above either clears a gate or refuses one, and a cleared gate goes on to
+# exec docker/systemctl/curl/ssh off PATH. If the stand-in dir ever stops being first
+# — a case that forgot New-GateStubDir, a PATH rebuilt from the host's own, a stub that
+# lost its execute bit — the same case would silently reach the host's live stack and
+# still print a green tick. That is how omnigraph-server got restarted on 2026-10-09,
+# so these three cases assert the shadow, the record and the URL sink directly.
+function Get-GateFlatPath {
+    # Compare a resolved path against the stand-in's own: one separator, and case
+    # folded only where the filesystem is case-insensitive.
+    param([string]$Path)
+    $flat = $Path -replace '\\', '/'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $flat = $flat.ToLowerInvariant() }
+    $flat
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) every stand-in binary resolves inside the shadow dir' {
+    $stub = New-GateStubDir
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $bad = @()
+    try {
+        $ErrorActionPreference = 'Continue'
+        Set-GateStubEnv -Values (Get-GateStubEnv -Stub $stub)
+        # Resolved by a child of the same shell the cases spawn, so what is asserted
+        # is what a run sees — not what this process happens to remember.
+        $names = @($GateStubAllBins | ForEach-Object { "'" + $_ + "'" }) -join ','
+        $probe = 'foreach ($b in @(' + $names + ')) { $c = Get-Command $b -CommandType Application ' +
+                 '-ErrorAction SilentlyContinue | Select-Object -First 1; ' +
+                 'if ($c) { "$b $($c.Source)" } else { "$b missing" } }'
+        $out = & $gateHost -NoProfile -NonInteractive -Command $probe 2>&1 | Out-String
+        $lines = @(($out -split "`r?`n") | Where-Object { $_ })
+        $isWin = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        foreach ($b in $GateStubAllBins) {
+            $line = @($lines | Where-Object { $_ -like "$b *" }) | Select-Object -First 1
+            if (-not $line) { $bad += "${b}:absent"; continue }
+            $got = $line.Substring($b.Length + 1).Trim()
+            $want = if ($isWin) { Join-Path $stub.Bin ($b + '.cmd') } else { Join-Path $stub.Bin $b }
+            if ((Get-GateFlatPath $got) -ne (Get-GateFlatPath $want)) { $bad += "${b}:$got" }
+        }
+        # docker and systemctl are the two that restarted the live server.
+        foreach ($b in @('docker', 'systemctl')) {
+            if (@($bad | Where-Object { $_ -like "$b*" }).Count -eq 0) { continue }
+            $bad += "$b-outside-the-stand-in-dir"
+        }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' ("resolved outside the stand-in dir: $($bad -join ' ')")
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) a stand-in records the call and never runs the host binary' {
+    # The record is the whole guard: a stub that shadows PATH but stays silent cannot
+    # prove a cleared gate stopped there, and one that fell through to the host would
+    # restart the stack while still logging.
+    $stub = New-GateStubDir
+    $prevEap = $ErrorActionPreference
+    $bad = @()
+    try {
+        $ErrorActionPreference = 'Continue'
+        foreach ($b in $GateStubAllBins) {
+            $exe = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                Join-Path $stub.Bin ($b + '.cmd')
+            } else { Join-Path $stub.Bin $b }
+            $shown = & $exe --pretend-argument 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { $bad += "${b}:exited-$LASTEXITCODE" }
+            if ($shown.Trim()) { $bad += "${b}:printed [$($shown.Trim())]" }
+            if (-not (Test-GateStubRecord (Get-GateStubCalls $stub) $b)) { $bad += "${b}:not-recorded" }
+        }
+        $calls = Get-GateStubCalls $stub
+        if ($calls -notmatch '--pretend-argument') { $bad += 'the record lost the arguments' }
+        # The host's docker answers `inspect` with a StartedAt; the stand-in answers
+        # nothing at all. Asking for the live container is the incident, directly.
+        $exe = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            Join-Path $stub.Bin 'docker.cmd'
+        } else { Join-Path $stub.Bin 'docker' }
+        $shown = & $exe inspect -f '{{.State.StartedAt}}' omnigraph-server 2>&1 | Out-String
+        if ($shown -match '20') { $bad += "the stand-in answered with a real container: $($shown.Trim())" }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' "a stand-in did not behave like one: $($bad -join ' ')"
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) the gateway URL env points at a closed port' {
+    $stub = New-GateStubDir
+    $bad = @()
+    try {
+        $values = Get-GateStubEnv -Stub $stub
+        foreach ($k in $GateStubUrlVars) {
+            if ($values[$k] -ne $GateUrlSink) { $bad += "$k=[$($values[$k])]" }
+        }
+        # A case that names its own stand-in overrides the sink — that is how the
+        # apply battery talks to its loopback gateway — but never a host name.
+        $overridden = Get-GateStubEnv -Stub $stub -Extra @{ 'AUTOOS_OMNIROUTE_URL' = 'http://127.0.0.1:20128' }
+        if ($overridden['AUTOOS_OMNIROUTE_URL'] -ne 'http://127.0.0.1:20128') {
+            $bad += 'the per-case override did not win'
+        }
+        if ($GateUrlSink -ne 'http://127.0.0.1:9') { $bad += "the sink is not the discard port: $GateUrlSink" }
+    } finally {
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' "the URL sink is not what a run sees: $($bad -join ' ')"
+}
+
+# ─── the shared PowerShell front (invoke-go-gate.ps1) ─────────────────────────
+# apply.ps1, apply-capability-overrides.ps1 and compact-graphs.ps1 all ask one front
+# whether a -Go names something that exists; the front is the only place the answer is
+# decided. Asserted here directly because it writes nothing and talks to nothing: every
+# verdict is reachable without clearing a live gate on real infrastructure.
+Describe-Group 'go-gate ref existence front'
+$gateFront = Join-Path $Root 'infra/mcp-servers/scripts/invoke-go-gate.ps1'
+
+function Invoke-GateFront {
+    param([string]$Ref, [switch]$Offline)
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    try {
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_ROUTING_DIR = $gateRouting
+        $env:AUTOOS_WORKERS_DIR = $gateWorkers
+        # In-process, exactly as the callers invoke it: the front returns {Code,Out,Err}
+        # and writes nothing, so there is no child to capture and no stream to merge.
+        & $gateFront -Tool 'apply.ps1' -Ref $Ref -Root $Root -Offline:$Offline
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+    }
+}
+
+Test-Case 'go-gate front: a ref that exists clears with no output of its own' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'D-825'
+    Assert-Equal $v.Code 0
+    Assert-Equal (@($v.Out).Count) 0
+    Assert-Equal (@($v.Err).Count) 0
+}
+
+Test-Case 'go-gate front: an absent decision refuses with the searched sources' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'D-9999'
+    Assert-Equal $v.Code 2
+    Assert-True (($v.Err -join "`n") -match "-Go 'D-9999' names no decision") "err: $($v.Err -join ' / ')"
+    Assert-True (($v.Err -join "`n") -match 'searched:') "the refusal named no source: $($v.Err -join ' / ')"
+}
+
+Test-Case 'go-gate front: the flag names are PowerShell-side' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $err = (Invoke-GateFront -Ref 'OS-9').Err -join "`n"
+    Assert-True ($err -match '-Go ') "the refusal used a bash flag name: $err"
+    Assert-True ($err -notmatch '\-\-go ') "the refusal leaked --go into a PowerShell gate: $err"
+    Assert-True ($err -match '-GoOffline') "the way out was not named: $err"
+}
+
+Test-Case 'go-gate front: -Offline clears an unreadable tree and logs the unverified ref' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-front-no-such-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    try {
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_ROUTING_DIR = $gateRouting
+        $env:AUTOOS_WORKERS_DIR = $gateWorkers
+        $env:AUTOOS_DECISIONS_LOG = $missing
+        $blocked = & $gateFront -Tool 'apply.ps1' -Ref 'D-825' -Root $Root
+        $waived = & $gateFront -Tool 'apply.ps1' -Ref 'D-825' -Root $Root -Offline
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+    }
+    Assert-Equal $blocked.Code 2
+    Assert-Equal $waived.Code 0
+    Assert-Equal ($waived.Out -join '') 'GO-OFFLINE: D-825 unverified'
+}
+
+Test-Case 'go-gate front: a malformed ref is refused whatever the tree holds' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'not-a-real-ref' -Offline
+    Assert-Equal $v.Code 2
+    Assert-True (($v.Err -join "`n") -match 'is not a judge run id') "err: $($v.Err -join ' / ')"
+}
+
+Test-Case 'go-gate front: the gate script is imported, not restated' {
+    # One implementation: the front holds no ref grammar and no artefact lookup of its
+    # own — it only resolves python and runs `verify-ref` on _go_gate.py.
+    $text = Get-Content -LiteralPath $gateFront -Raw
+    Assert-True ($text -match 'verify-ref') 'the front does not call the shared gate'
+    # No restated grammar: the ref pattern is the only thing here that could look like
+    # one, and a quantifier written into this file means a second copy of the rule.
+    Assert-True ($text -notmatch 'd\{\d\}') 'the front restates the ref grammar'
+    Assert-True ($text -notmatch 'def verify_go_ref|verify_go_ref\(') 'the front restates the verdict logic'
 }
 
 # ─── Summary ────────────────────────────────────────────────────────────────

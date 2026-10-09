@@ -7,7 +7,7 @@
 # name this script appends would otherwise be published by a public repository.
 #
 #   ./scripts/add-project-graph.sh my-new-project
-#   ./scripts/apply-cluster.sh          # converge it into the live cluster
+#   ./scripts/apply-cluster.sh --go <ref> --go-sha "$(git rev-parse HEAD)"   # converge it (fleet rule D-825)
 set -euo pipefail
 [ $# -eq 1 ] || { echo "usage: $0 <project-graph-name>"; exit 1; }
 name="$1"
@@ -44,7 +44,7 @@ s = re.sub(r'(project-graphs\.policy\.yaml\n    applies_to: )\[([^\]]*)\]',
 open(cfg, "w").write(s)
 PY
 
-echo "→ now run: ./scripts/apply-cluster.sh"
+echo "→ now run: ./scripts/apply-cluster.sh --go <ref> --go-sha \"\$(git rev-parse HEAD)\"   (fleet rule D-825: no live converge without a judge GO)"
 echo "→ then migrate any existing data out of the shared graph:"
 echo "     python3 scripts/split-project-graph.py $name --apply"
 echo "→ point a repo's agent at it by setting OMNIGRAPH_GRAPH_ID=$name in that repo's"

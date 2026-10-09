@@ -23,15 +23,41 @@ git-ignored, only the template is tracked.
 
 ```bash
 cp configuration/api-keys.example.yml configuration/api-keys.yml   # fill in
-./configuration/omniroute/apply.sh          # register keys + build combos
+./configuration/omniroute/apply.sh --dry-run   # preview what it would change (no GO needed)
+# A live apply mutates the gateway, so fleet rule D-825 requires an explicit judge GO
+# naming the sha it covers (a judge run id, D-<n> or OS-<n>). The reference must name an
+# artefact that EXISTS, not merely look like one — see "The GO reference" below.
+./configuration/omniroute/apply.sh --go <ref> --go-sha "$(git rev-parse HEAD)"   # register keys + build combos
 ./configuration/start-stack.sh opencode     # gateway + app
 ```
 
 ```powershell
 Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml
-.\configuration\omniroute\apply.ps1
+.\configuration\omniroute\apply.ps1 -DryRun
+# -Go <ref> -GoSha (git rev-parse HEAD) on the live run (fleet rule D-825):
+.\configuration\omniroute\apply.ps1 -Go <ref> -GoSha (git rev-parse HEAD)
 .\configuration\start-stack.ps1 -App opencode
 ```
+
+### The GO reference
+
+`--go`/`-Go` is checked against the artefact tree before a live run proceeds:
+
+| ref | must exist as | read from |
+|---|---|---|
+| `D-<n>` | a line with that exact id | `$AUTOOS_DECISIONS_LOG`, else `$AUTOOS_ROUTING_DIR/docs/decisions-log.md` and `$AUTOOS_ROUTING_DIR/DECISIONS.md` |
+| `OS-<n>` | a line with that exact id | `$AUTOOS_ROUTING_DIR/QUESTIONS.md` or `ANSWERS.md` |
+| `YYYYMMDD-HHMMSS-…` | a worker record | `$AUTOOS_WORKERS_DIR/<id>.json`, else `logs/workers/<id>.json` and `logs/agents/<id>/` under the checkout |
+
+`AUTOOS_ROUTING_DIR` defaults to `~/code/routing`. The match is on the whole id, so
+`D-82` never matches a `D-825` line. An unreadable or missing tree refuses the same way
+an absent id does; `--go-offline` / `-GoOffline` is the declared exception — the run
+proceeds and logs `GO-OFFLINE: <ref> unverified` as its first line, and `--go-sha`/`-GoSha`
+is still verified against `git rev-parse HEAD`. `apply.sh`, `apply.ps1`,
+`apply-capability-overrides.ps1`, `apply-cluster.sh`, `compact-graphs.ps1`, `dedup-graph.py`,
+`populate-embeddings.py` and `split-project-graph.py` all ask the same implementation,
+[`../infra/mcp-servers/scripts/_go_gate.py`](../infra/mcp-servers/scripts/_go_gate.py)
+(PowerShell through `invoke-go-gate.ps1`), so the rule cannot drift between them.
 
 Key origins: [docs/api-keys.md](../docs/api-keys.md). Tier meanings and the
 training-data rules: [docs/models.md](../docs/models.md). Phone reachability:

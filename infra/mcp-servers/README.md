@@ -357,11 +357,12 @@ mcp-servers/
 │
 ├── scripts/                             # Platform scripts
 │   ├── _omni_env.py                     # Resolve the LIVE stack (network, MinIO store)
+│   ├── _go_gate.py                      # Fleet rule D-825 GO gate shared by the live-store tools
 │   ├── add-project-graph.sh             # Declare a new per-repo graph in cluster.yaml
-│   ├── apply-cluster.sh                 # Converge the declaration into the server
-│   ├── split-project-graph.py           # Split a repo out of a shared graph / refresh a seed
-│   ├── dedup-graph.py                   # Remove duplicate edges (node-delete + merge-load)
-│   ├── populate-embeddings.py           # Compute Decision vectors via local Ollama, overwrite-load
+│   ├── apply-cluster.sh                 # Converge the declaration into the server            (D-825 gated)
+│   ├── split-project-graph.py           # Split a repo out of a shared graph / refresh a seed (D-825 gated on --apply/--prune-source)
+│   ├── dedup-graph.py                   # Remove duplicate edges (node-delete + merge-load)   (D-825 gated)
+│   ├── populate-embeddings.py           # Compute Decision vectors via local Ollama, overwrite-load (D-825 gated on the overwrite)
 │   ├── patch-graphify-ollama-bugs.py    # Patch graphify's malformed-response crashes
 │   ├── windows/                         # PowerShell scripts for Windows
 │   │   ├── init-serena-projects.ps1     # Pre-index all repos with Serena
