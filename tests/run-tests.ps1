@@ -5141,6 +5141,15 @@ Test-Case 'sync_memory_graph: ledger-gated NDJSON emit, hub edges, merge-only lo
     Assert-Equal $rc 0 "sync_memory_graph unit tests failed: $out"
 }
 
+Test-Case 'serena_shared_server_no_memory: shared SSE server hides memory tools (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_serena_shared_server_no_memory.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "serena_shared_server_no_memory unit tests failed: $out"
+}
+
 Test-Case 't1-credit fix2: narrow guards, total fallback, usage exit 3 (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

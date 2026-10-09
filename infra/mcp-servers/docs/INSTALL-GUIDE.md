@@ -52,9 +52,19 @@ mcp_serena_find_symbol(name_path_pattern="train_model")
 mcp_serena_find_references(name_path_pattern="train_model", relative_path="src/")
 mcp_serena_get_symbols_overview(relative_path="src/models.py")
 
-# Step 3: Store project-level notes (persistent across sessions)
-mcp_serena_write_memory(memory_name="training-pipeline", content="Uses PyTorch Lightning with custom callbacks")
-mcp_serena_read_memory(memory_name="training-pipeline")
+# Step 3: Store project-level notes (persistent across sessions) — in Omnigraph.
+# Serena has no memory layer, at all (D-869): its write_memory / read_memory /
+# list_memories / edit_memory / rename_memory / delete_memory are excluded on the
+# shared server, together with onboarding, which writes them. Omnigraph is the
+# only memory layer (ADR 0003); the `structured-memory` skill owns the protocol
+# (hub edges, casing, verification) - these two calls are only the shape:
+mcp_omnigraph_mutate(branch="main", params={"slug": "deeplabcut-training-pipeline"}, query="""
+  query note($slug: String) {
+    insert Decision { slug: $slug, title: "Training runs on PyTorch Lightning with custom callbacks",
+                      rationale: "Chosen for checkpoint/callback discipline", status: "accepted" }
+  }""")
+mcp_omnigraph_query(branch="main", params={"slug": "deeplabcut-training-pipeline"}, query="""
+  query read($slug: String) { match { $d: Decision { slug: $slug } } return { $d.title, $d.rationale } }""")
 ```
 
 The agent skill at `skills/mcp-servers-setup/SKILL.md` contains the full
@@ -71,7 +81,8 @@ server can answer graph-level questions without rereading the whole codebase.
 
 Recommended order for a new repo:
 
-1. Activate Serena and run onboarding.
+1. Activate Serena (no onboarding — it writes Serena memories, and Serena has no
+   memory layer here; see step 3 above).
 2. Build the Graphify graph.
 3. Register the `graphify` server into Claude Code's own config:
    `scripts/windows/register-claude-code-mcp.ps1 -Server graphify`, then
