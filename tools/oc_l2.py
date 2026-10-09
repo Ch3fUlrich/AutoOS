@@ -62,7 +62,8 @@ Subcommands (each prints one JSON object on stdout):
   inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
   resume --lane l2-<repo>-<checkout-tag>-<phase>
      one wake prompt per stall; restarts the lane when its session is gone and
-     leaves a lane that merely refused the prompt (HTTP 409 busy) alone.
+     leaves a lane that merely refused the prompt (HTTP 409 busy) alone. A
+     restart whose stop was refused reports `restart_failed` and starts nothing.
 
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
 already running, a missing binary or password env) - 4 server not healthy -
@@ -772,6 +773,7 @@ def stalled(name):
         return dict(base, stalled=False, reason="ok")
     if _already_woken(_read_heartbeat(lane), verdict, newest):
         return dict(base, stalled=False, reason="already-woken")
+    verdict["next_action"] = _next_action(verdict)
     return dict(base, stalled=True, **verdict)
 
 
@@ -802,6 +804,20 @@ def _poll_activity(lane, out):
         out["activity_error"] = type(e).__name__
 
 
+def _next_action(verdict):
+    """What the stall says to do next, in one clause.
+
+    A wake that only names the stall leaves the lane to invent the step, and it
+    invented the same filler every time. The action belongs on the verdict so
+    the wake prompt, `resume`'s answer and `status`'s detail all carry the one
+    wording."""
+    if verdict.get("reason") == "child-exited":
+        return ("read %s result via autoos-agent result and continue the phase "
+                "plan" % verdict.get("run_id"))
+    return ("re-read the last tool error, retry the failed step once, then "
+            "continue the phase plan")
+
+
 def _wake_text(info):
     """The one short wake prompt: it names the next action, not the brief.
 
@@ -810,12 +826,11 @@ def _wake_text(info):
     would otherwise end the wake line and start an instruction of its own."""
     nxt = _safe_text(info.get("next_action") or "the next phase step")
     if info.get("reason") == "child-exited":
-        return ("Wake: child %s exited rc=%s; read its result with autoos-agent "
-                "result and continue with %s. Reply with "
+        return ("Wake: child %s exited rc=%s; %s. Reply with "
                 "one short line of what you do next."
                 % (_safe_text(info.get("run_id")), _safe_text(info.get("rc")), nxt))
-    return ("Wake: your last turn ended in error (%s); read the error and continue "
-            "with %s. Reply with one short line of what you do next."
+    return ("Wake: your last turn ended in error (%s); %s. Reply with one short "
+            "line of what you do next."
             % (_safe_text(info.get("detail") or "unknown error"), nxt))
 
 
@@ -855,8 +870,20 @@ def _clear_wakes(lane):
 def _restart_lane(name, lane, why):
     """Stop the lane and start it again from its stored config, reporting the
     pair as one answer. `why` is what made a wake impossible - the restart is
-    the caller's only remaining move, so it is named in the detail."""
+    the caller's only remaining move, so it is named in the detail.
+
+    A stop that was REFUSED (R-coord-10: an unverifiable pid, a state file that
+    would not go) leaves the old server running, so `start` would only answer
+    `already running` and the pair would report that as the restart's own
+    failure. The refusal is the finding, so it is what gets reported and no
+    start is attempted. A lane whose process is already gone is not a refusal -
+    `cmd_stop` calls that `stopped`, and it restarts."""
     stopped = cmd_stop(name)
+    if not stopped.get("stopped"):
+        refused = "stop refused (%s)" % (stopped.get("detail") or "no reason given")
+        return {"lane": name, "resumed": False, "restarted": False,
+                "restart_failed": refused, "stop": stopped, "exit_code": 2,
+                "detail": "%s; restart failed: %s" % (why, refused)}
     l2 = lane.get("l2") or {}
     try:
         result, rc = cmd_start(

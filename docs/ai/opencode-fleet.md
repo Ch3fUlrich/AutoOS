@@ -206,8 +206,11 @@ lane or wake it for someone else's process. They are read from the spawner's own
 lane config as `l2.agents_root` at start, because a lane tool's CLI child gets an allowlist that does not carry that variable), and
 child state is the run's own `exit.json` — never `pgrep -f`, which matches the caller's own argv.
 
-`resume` wakes a stalled lane with one short prompt naming the child or the error (`child <run-id> exited rc=N; read its result
-with autoos-agent result and continue with <next action>`), and the three outcomes are distinguishable in that one JSON object.
+`resume` wakes a stalled lane with one short prompt naming the child or the error and the next action the stall implies (`child
+<run-id> exited rc=N; read <run-id> result via autoos-agent result and continue the phase plan`, and for an errored turn `re-read
+the last tool error, retry the failed step once, then continue the phase plan`) — `stalled` puts that on the verdict as `next_action`
+so the wake, the answer and the `status` detail all say the same thing — and the three outcomes are distinguishable in that one JSON
+object.
 ONE wake per stall (F2): the prompt is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
 while it stands — no turn activity newer than the wake and the 10-minute wake window unexpired — `stalled` reads `already-woken` and
 a second `resume` is a no-op instead of a prompt per poll. The marker belongs to the session that wrote it: `start` clears every
@@ -216,7 +219,10 @@ its predecessor's marker would report its first stall of the same key `already-w
 turn count merges forward and the canary record stays.
 A RESTART is for a lane that cannot take a prompt at all (F3): the
 session is gone (`live_session` answers nothing, or ended `failed`/`interrupted`) or the connection itself failed, and then `resume`
-stops and starts the lane from its stored config and reports `restarted`. An HTTP status that is merely a refusal (409 busy is the
+stops and starts the lane from its stored config and reports `restarted`. A lane whose process is already gone counts as stopped —
+nothing to kill, the state file goes, the start brings it back. A stop that was REFUSED (R-coord-10: a pid it cannot prove is the
+lane, a state file that would not go) leaves the old server holding the port, so no start is attempted: the answer is
+`restart_failed: stop refused (<cmd_stop's detail>)` with exit 2, not `start`'s `already running`. An HTTP status that is merely a refusal (409 busy is the
 server answering a working lane) reports `wake_rejected` with `http_status` and leaves the lane, its state file and its process
 alone — a healthy lane is never restarted for being busy. What the record and the transcript held is forced through one printable
 capped line before it is interpolated (F6), so an error string with a newline cannot end the wake sentence and start an instruction

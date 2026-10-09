@@ -1211,6 +1211,51 @@ class ResumeTest(unittest.TestCase):
                        "autoos-agent result"):
             self.assertIn(needle, text, text)
 
+    # (2c2) the stall carries its own next action; the wake says it verbatim
+    def test_a_child_stall_wakes_with_its_exact_next_action(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child(run_id="20261009-120000-writer-a1b2c3", rc=0)
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(
+            info["next_action"],
+            "read 20261009-120000-writer-a1b2c3 result via autoos-agent result "
+            "and continue the phase plan", info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertEqual(out["next_action"], info["next_action"], out)
+        self.assertEqual(
+            self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"],
+            "Wake: child 20261009-120000-writer-a1b2c3 exited rc=0; read "
+            "20261009-120000-writer-a1b2c3 result via autoos-agent result and "
+            "continue the phase plan. Reply with one short line of what you do "
+            "next.")
+        oc_l2.cmd_stop(result["lane"])
+
+    def test_an_errored_turn_wakes_with_its_exact_next_action(self):
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = [self._assistant_item(error="boom")]
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["reason"], "last-turn-error")
+        self.assertEqual(
+            info["next_action"],
+            "re-read the last tool error, retry the failed step once, then "
+            "continue the phase plan", info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertEqual(
+            self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"],
+            "Wake: your last turn ended in error (boom); re-read the last tool "
+            "error, retry the failed step once, then continue the phase plan. "
+            "Reply with one short line of what you do next.")
+        oc_l2.cmd_stop(result["lane"])
+
     # (2d) F2: one wake per stall, recorded in the heartbeat
     def test_two_resumes_post_exactly_one_wake_prompt(self):
         result, rc = self._start()
@@ -1415,6 +1460,69 @@ class ResumeTest(unittest.TestCase):
         self.assertEqual(out["start"]["session_id"], FAKE_SESSION_ID)
         live, _ = oc_l2.cmd_status(result["lane"])
         self.assertIn(live["verdict"], ("live", "silent", "stalled"), live)
+        oc_l2.cmd_stop(result["lane"])
+
+    # (2e3) a restart is not attempted over a stop that was REFUSED
+    def test_resume_reports_a_refused_stop_instead_of_starting_over_it(self):
+        # cmd_stop will not signal a pid it cannot prove is the lane, and that
+        # process stays up with its state file: cmd_start's only answer for it is
+        # "already running", which would be reported as a failed restart that
+        # names neither the refusal nor the lane still holding the port.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child()
+        self.srv.session_outcome = "failed"
+        lane = oc_l2.read_config(result["lane"])
+        sf = Path(lane["state_file"])
+        sleeper = subprocess.Popen([sys.executable, "-c", _SLEEP_CODE])
+        try:
+            st = json.loads(sf.read_text(encoding="utf-8"))
+            st["pid"] = sleeper.pid
+            st.pop("argv", None)
+            st.pop("start_time", None)
+            sf.write_text(json.dumps(st), encoding="utf-8")
+            out = oc_l2.cmd_resume(result["lane"])
+            self.assertFalse(out["restarted"], out)
+            self.assertIn("stop refused", out["restart_failed"], out)
+            self.assertIn("cannot be verified", out["restart_failed"], out)
+            self.assertIn("restart failed: stop refused", out["detail"], out)
+            self.assertIs(out["stop"]["stopped"], False, out)
+            self.assertNotIn("start", out, "a refused stop started the lane again")
+            self.assertTrue(sf.is_file(), "the refused stop removed the state file")
+            self.assertIsNone(sleeper.poll(), "the restart killed a foreign pid")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                cli_rc = oc_l2.main(["resume", "--lane", result["lane"]])
+            self.assertEqual(cli_rc, 2, buf.getvalue())
+            self.assertEqual(json.loads(buf.getvalue())["exit_code"], 2)
+        finally:
+            sleeper.kill()
+            sleeper.wait()
+            oc_l2.cmd_stop(result["lane"])
+
+    def test_resume_restarts_a_lane_whose_process_is_already_gone(self):
+        # The other half: a lane with nothing left to kill is not a refusal.
+        # cmd_stop calls the dead pid stopped and the state file goes, so the
+        # start that follows brings the lane back instead of failing on it.
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.srv.items = []
+        self._spawn_child()
+        self.srv.session_outcome = "failed"
+        pid = result["pid"]
+        if os.name == "nt":
+            oc_l1_serve._kill_pid(pid)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+        self.assertTrue(oc_l2._wait_gone(pid, 5.0), "the lane process survived")
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["restarted"], out)
+        self.assertNotIn("restart_failed", out, out)
+        self.assertTrue(out["stop"]["stopped"], out)
+        self.assertEqual(out["start"]["session_id"], FAKE_SESSION_ID)
+        self._pids.append(out["start"]["pid"])
+        self.srv.session_outcome = "succeeded"
         oc_l2.cmd_stop(result["lane"])
 
     # (2f) F6: what another process recorded cannot reformat the wake line
