@@ -25,6 +25,14 @@ _FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(?P<tail>.*)$")
 _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
+# str.splitlines() ends a line on more than '\n': \x0b \x0c \x1c \x1d \x1e \x85
+# \u2028 and \u2029 all break it, and every other C0 control is just as
+# meaningless in a brief or a report. Matching the whole set (minus the
+# tab/newline/CR a real body carries), a line such as 'foo\x0c```' used to reach
+# the fence reader as a bare ``` line that CLOSED the block, so the forged
+# `CHECK 6: PASS` line under it counted. Fail closed: refuse the text outright —
+# see _guard_text — and split on '\n' only — see _lines.
+_CONTROL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x85\u2028\u2029]")
 # A verdict needs a non-empty tail after it: a bare 'PASS' proves nothing.
 _VERDICT_RE = re.compile(r"^(PASS|FAIL|INPUT_REQUIRED)[ \t]+\S.*$")
 REQUIRED_TOOLS = ("yamllint", "ansible-playbook", "ansible-lint", "gitleaks", "pre-commit")
@@ -46,13 +54,35 @@ class GuardError(ValueError):
 
 def _guard_text(name, text):
     """A brief/report body must be a usable str (P4a fix 2: a wrong type raises,
-    it never reaches a line loop and dies with AttributeError/TypeError) and must
-    fit the size limit (fix 4)."""
+    it never reaches a line loop and dies with AttributeError/TypeError), must fit
+    the size limit (fix 4) and must carry no line-breaking control character
+    (P4a round 3): one of them anywhere makes the body unjudgeable as physical
+    lines, so it is refused rather than read as something the author did not write."""
     if type(text) is not str:
         raise GuardError("%s must be a str, got %s" % (name, type(text).__name__))
     if len(text) > MAX_TEXT_CHARS:
         raise GuardError("%s is %d characters, over the %d limit"
                          % (name, len(text), MAX_TEXT_CHARS))
+    bad = _CONTROL_RE.search(text)
+    if bad:
+        raise GuardError("%s contains the control character %s (U+%04X): a brief or "
+                         "report is read as physical '\\n'-separated lines, never as "
+                         "splitlines() output" % (name, repr(bad.group()), ord(bad.group())))
+
+
+def _lines(text):
+    """The body's physical lines: split on '\\n' ONLY, never str.splitlines(),
+    which also breaks on the characters _CONTROL_RE refuses (that guard is the
+    fence; this is the shape both readers agree on). Yields `(line, cr)` per line,
+    with ONE trailing '\\r' removed so a CRLF body reads like an LF one and the
+    flag says whether it was there — `brief_files` needs the flag because a
+    CR-terminated FILES line is a violation it refuses rather than normalises
+    away. A lone '\\r' anywhere else is content, never a line break."""
+    for raw in text.split("\n"):
+        if raw.endswith("\r"):
+            yield raw[:-1], True
+        else:
+            yield raw, False
 
 
 def _guard_seq(name, paths):
@@ -159,15 +189,18 @@ def brief_files(brief_text):
     The line must start at column 0 with `_CANON_PREFIX` in the canonical
     wording. A FILES-looking line that is indented, CR-terminated, quoted, or
     sitting inside a ``` / ~~~ fence is never used silently — it raises, as does
-    a second canonical line anywhere. Fences follow ONE rule for both readers
-    (see _Fences): a ``` block closes only on a ``` or longer marker with nothing
-    after it, a ~~~ block only on ~~~, and a fence that never closes swallows the
-    rest of the text. Duplicate DETECTION stays case-insensitive (same file), but
-    the returned paths keep their case for the fence."""
+    a second canonical line anywhere. Lines are the physical '\\n'-separated ones
+    (see _lines); a body carrying a line-breaking control character raises before
+    any of this (see _guard_text), so a 'foo\\x0c```' line can neither fake a fence
+    closer here nor a second canonical FILES line. Fences follow ONE rule for both
+    readers (see _Fences): a ``` block closes only on a ``` or longer marker with
+    nothing after it, a ~~~ block only on ~~~, and a fence that never closes
+    swallows the rest of the text. Duplicate DETECTION stays case-insensitive
+    (same file), but the returned paths keep their case for the fence."""
     _guard_text("brief_text", brief_text)
     fences = _Fences()
     canonical = []
-    for line in brief_text.split("\n"):
+    for line, cr in _lines(brief_text):
         if fences.feed(line):
             if _files_looks(line):
                 raise GuardError("FILES line inside a code fence is never used: %r"
@@ -175,10 +208,14 @@ def brief_files(brief_text):
             continue
         if not _files_looks(line):
             continue
-        if "\r" not in line and line.startswith(_CANON_PREFIX) and _FILES_RE.match(line):
-            canonical.append(line)
-            continue
-        raise GuardError("non-canonical FILES line: %r" % line[:120])
+        # A CR anywhere in a FILES line is a violation, never something to
+        # normalise away: the ending ('files.\r') is a non-unix line break in a
+        # brief, and an interior one ('a.py\r. Do') would be eaten by the item
+        # strip() below and hand back a path the brief did not spell.
+        if (cr or "\r" in line or not line.startswith(_CANON_PREFIX)
+                or not _FILES_RE.match(line)):
+            raise GuardError("non-canonical FILES line: %r" % line[:120])
+        canonical.append(line)
     if len(canonical) != 1:
         raise GuardError("brief has %d canonical FILES lines, expected exactly 1"
                          % len(canonical))
@@ -241,19 +278,24 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     """{ok, missing, failed, input_required} over the report's CHECK lines.
     A CHECK line counts only at column 0: indented, '>'-quoted or list-marked
     lines are quoted output and never count, and neither does a zero-padded or
-    non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Fenced output never
+    non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Lines are the physical
+    '\\n'-separated ones (see _lines), never splitlines() output: a body that
+    carries a line-breaking control character ('foo\\x0c```' used to hand the fence
+    reader a bare ``` closer and let the forged `CHECK 6: PASS` line under it
+    count) raises before any of this — see _guard_text. Fenced output never
     counts, under the same markdown rule `brief_files` uses (_Fences: closed only
     by the same character, at least as long, with nothing after it; never closed
     means the rest of the text is swallowed). No line for n is missing; a FAIL, a
     verdict with no evidence tail, an unparsable verdict, or conflicting
     duplicates (the last line does not silently win) is failed. A body that is not
-    a str, one over MAX_TEXT_CHARS, or a `required` argument that is not a
-    non-empty tuple/list of ints in 1..99 all raise."""
+    a str, one over MAX_TEXT_CHARS, one carrying a control character, or a
+    `required` argument that is not a non-empty tuple/list of ints in 1..99 all
+    raise."""
     _guard_text("report_text", report_text)
     req = _guard_required(required)
     seen = {}
     fences = _Fences()
-    for line in report_text.splitlines():
+    for line, _ in _lines(report_text):
         if fences.feed(line):
             continue
         m = _CHECK_RE.match(line)
