@@ -4289,6 +4289,8 @@ class CardV2Tests(unittest.TestCase):
             "spec": ("exact", "partial", "vague"),
             "privacy": ("public", "sensitive"),
             "mode": ("cost-first", "balanced", "quality-first"),
+            # AO-WRITER-GUARDS P1: optional card field, no default.
+            "task_type": ("ops", "code", "docs", "infra"),
         })
         self.assertEqual(routing.CARD_V2_DEFAULTS, {
             "kind": "implement", "risk": "normal", "spec": "partial",

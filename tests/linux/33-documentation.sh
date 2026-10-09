@@ -692,6 +692,13 @@ if it "autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tes
     out="$(python3 tests/test_autoos_risk.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-WRITER-GUARDS P1 (0007 follow-up): the pre-spawn writer guard --
+# R-scale judgement plus the policy.writers allow-list. Fixtures are inline
+# dicts plus the committed registry; nothing is spawned.
+if it "autoos_writer_rule: R-scale judgement plus writer allow-list (unit tests)"; then
+    out="$(python3 tests/test_autoos_writer_rule.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
