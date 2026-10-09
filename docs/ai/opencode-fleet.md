@@ -143,16 +143,17 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
   from the LANE and never inherited. A lane that genuinely needs one more variable names it in `child_env`; a credential-shaped
   name there is a validation error, and a value never belongs in a lane config. What was left behind is printed by NAME at spawn,
   so a missing variable is diagnosable instead of silent.
-- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same four lane tools are on it, so
+- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same lane tools are on it, so
   without a fence an L2 could start, stop or nudge lanes — relaunch its own supervisor, or switch off a phase it does not own. The
   L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env AND in the MCP server's own rendered
   env), and that one marker does two things. It picks the server's TOOL PROFILE: an L2 registers the spawner and its read-only
   companions — `spawn`, `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — and lists no lane tool, no
   `cancel`, no `respond` at all (an unknown profile falls back to this narrowest list, never to the full one). And it fences what
-  remains: `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they read `L2` back,
-  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-2
-  or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller passed), while tier 1 and
-  any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was a dead end: tier 3 is the
+  remains: `l2_start`, `l2_stop`, `l2_resume`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they
+  read `L2` back, because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from
+  an L2 is a tier-2 or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller
+  passed), while tier 1 and any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was
+  a dead end: tier 3 is the
   review-only seat and refuses an implement card, so an L2 could never start a writer (found live by AO-L2-PRODTEST). A spawn that
   passes that fence is stamped `AUTOOS_AGENT_LAYER=L3` — the child's layer is decided by the spawner, from the spawner's own
   environment, never inherited and never a plan entry or a caller's `extra`, because a child that chooses its own mark chooses its
@@ -192,11 +193,64 @@ python3 tools/oc_l2.py start  --repo PATH --phase NAME --brief PATH [--combo l2-
 python3 tools/oc_l2.py status --lane l2-<repo>-<checkout-tag>-<phase>
 python3 tools/oc_l2.py stop   --lane l2-<repo>-<checkout-tag>-<phase>
 python3 tools/oc_l2.py inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
+python3 tools/oc_l2.py resume --lane l2-<repo>-<checkout-tag>-<phase>
 ```
 
 Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
-4 health timeout, 5 `UNATTENDED-REFUSED`. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
-`l2_stop`, `l2_inbox`), so an L1 coordinates phases without leaving its own session.
+4 health timeout, 5 `UNATTENDED-REFUSED`. `status` adds one verdict of its own: `stalled` (exit 1) — the session is alive but its
+last turn ended in error, or it sits idle while a child run it spawned already exited. Children are discovered, not recorded, and
+attributed by IDENTITY (AO-L2-RESUME F1): the lane's own environment carries `AUTOOS_L2_LANE=<lane>`, the spawner records that as
+`parent_lane` at the top of every run's `job.json`, and only a run whose `parent_lane` is the lane is its child — the same-cwd and
+start-time filters narrow a match, they never make one. A run anyone else starts in the lane's directory therefore cannot stall the
+lane or wake it for someone else's process. They are read from the spawner's own root (`AUTOOS_STATE_DIR`/agents, recorded in the
+lane config as `l2.agents_root` at start, because a lane tool's CLI child gets an allowlist that does not carry that variable), and
+child state is the run's own `exit.json` — never `pgrep -f`, which matches the caller's own argv.
+
+`resume` wakes a stalled lane with one short prompt naming the child or the error and the next action the stall implies (`child
+<run-id> exited rc=N; read <run-id> result via autoos-agent result and continue the phase plan`, and for an errored turn `re-read
+the last tool error, retry the failed step once, then continue the phase plan`) — `stalled` puts that on the verdict as `next_action`
+so the wake, the answer and the `status` detail all say the same thing — and the three outcomes are distinguishable in that one JSON
+object.
+ONE wake per stall (F2): the wake is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
+while it stands — no turn activity newer than the wake and the 10-minute wake window unexpired — `stalled` reads `already-woken` and
+a second `resume` is a no-op instead of a prompt per poll. An `inbox` nudge that lands on a stalled lane records that same marker
+under the same key (P1): the nudge posts a prompt, so it IS the wake for the stall it named, and the `resume` sent straight after it
+answers `already_woken` with no second prompt — a nudge that only the append landed (a refused HTTP status) records nothing, and the
+stall stays wakeable. The marker belongs to the session that wrote it: `start` clears every
+`last_wake_*` key from the heartbeat the canary merged forward (and a restart goes through `start`), because a new session reading
+its predecessor's marker would report its first stall of the same key `already-woken` and never be woken. Only the markers go — the
+turn count merges forward and the canary record stays.
+A RESTART is for a lane that cannot take a prompt at all (F3), and the session probe names which of
+three it is (`probe_session` → `live` / `gone` / `unknown`): the session is PROVABLY gone (`live_session`
+answers nothing because nothing listens, the session replies 404, or it ended `failed`/`interrupted`) or
+the connection itself failed, and then `resume` stops and starts the lane from its stored config and
+reports `restarted`. An unreadable probe is not a gone session: the password env unset, a 401/403/5xx or
+a reply that will not parse answers `restart_refused` with the `probe` reason and exit 2 while touching
+nothing at all — the stop it would have run needs no password and the `start` after it is refused for that
+same missing password, so an unknown read would kill a working lane and leave it dead. `stalled` answers
+`probe-unknown` for the same case, so an unreadable lane never becomes a restart trigger off a poll.
+A lane whose process is already gone counts as stopped —
+nothing to kill, the state file goes, the start brings it back. A stop that was REFUSED (R-coord-10: a pid it cannot prove is the
+lane, a state file that would not go) leaves the old server holding the port, so no start is attempted: the answer is
+`restart_failed: stop refused (<cmd_stop's detail>)` with exit 2, not `start`'s `already running`. An HTTP status that is merely a refusal (409 busy is the
+server answering a working lane) reports `wake_rejected` with `http_status` and leaves the lane, its state file and its process
+alone — a healthy lane is never restarted for being busy. What the record and the transcript held is forced through one printable
+capped line before it is interpolated (F6), so an error string with a newline cannot end the wake sentence and start an instruction
+of its own. The five are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`, `l2_stop`, `l2_resume`, `l2_inbox`), so an
+L1 coordinates phases without leaving its own session.
+
+`stalled` judges exactly one turn of the transcript: the newest progress item, decided by its timestamp (`order=desc` position only
+breaks a tie), so an errored turn the lane already spoke past is history, not a stall. An exited child
+is likewise not a stall while the newest message is an assistant turn that has not ended (no `finish`,
+no completed time): the lane is mid-turn, not quiet, and the turn that reads the result is the one it is
+writing. The `status` and `inbox` polls treat a stall
+probe and a heartbeat merge as decoration: what the lane state can legitimately fail with (`L2Error`, `ServerDown`, `OSError`,
+`ValueError`) is named in the answer as `stalled_error` / `activity_error` and the poll carries on with its ordinary verdict, while
+anything else raises — a bug in the probe is not reported as a lane that is simply not stalled.
+Both polls also merge the transcript into `heartbeat.json`, and the stamps there are the messages' own, never the moment of the
+poll (P1): `last_message_ts` and `last_activity_ts` both carry the newest progress item's timestamp, so a poll that sees no new
+message leaves the lane exactly as stale as it was — which is what an external monitor watching one needs to read a stalled lane off
+the file at all, instead of a fresh `last_activity_ts` per ask.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
 
@@ -224,7 +278,8 @@ The lane it renders — and an L2 has nothing else, which is the point (R-coord-
 - the first prompt is the WHOLE brief plus a fixed footer (load `unattended-orchestration`, never edit code, spawn workers — a
   tier-2 writer or a tier-3 reviewer, never tier 1 and never an `orchestrate` card, and always in an isolated clone — through the
   `autoos-agent` MCP, report `REPORT`/`DONE` to the L1 inbox with the `l2_report` tool, since a read-only
-  shell cannot append), and the launcher's hint line.
+  shell cannot append), wait on children via `autoos-agent status`/`result` (their run record under
+  `logs/agents/<run>/`, never `pgrep -f`), and the launcher's hint line.
 
 **Where the reports land.** The child env carries `AUTOOS_L1_INBOX` (lane key `inbox_file`), resolved from `--inbox` or that
 variable and refused when neither names one — a report that goes nowhere is a phase that silently never finishes. The L2 appends
@@ -234,7 +289,9 @@ in the other direction is `inbox`: one record appended to the lane's own inbox �
 is set, else `<lane dir>/inbox.md`, the path the append reports — and the live session nudged with the same
 `POST /api/session/{id}/prompt` the launcher uses for its first prompt. Only a session that proved itself guarded is woken: a lane
 whose recorded canary never denied, or that was never prompted, is refused (`refused: true`, exit 2) while the line stays in the
-inbox. The append happens whether or not the nudge lands, and the answer says which.
+inbox. A stalled-but-alive lane cleared its canary, so it is nudged, not refused. The append happens whether or not the nudge lands, and the answer says which.
+A nudge that lands on a stalled lane is that stall's wake and records the `heartbeat.json` marker `resume` would have left, so the
+`resume` after it is a no-op rather than a second prompt (F2, P1).
 
 State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), one directory per lane with the generated config
 (0600 — it names host paths), the scratch dirs, the composed prompt and the lane inbox. **Nothing is merged into

@@ -637,6 +637,13 @@ if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
     out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-REDACT-SPAN (2026-10-09): tools/autoos_redact.py must mask the PEM *span*
+# it matched, not the whole line and not every line after an unterminated BEGIN.
+# Pure in-memory strings; nothing spawned, no file read.
+if it "autoos_redact span: PEM block masking keeps the report and its VERDICT (unit tests)"; then
+    out="$(python3 tests/test_autoos_redact_span.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner asks the host for
 # permission before it starts another worker - the live count from the records
 # `ps` reads, MemAvailable from /proc/meminfo, both against catalog's
