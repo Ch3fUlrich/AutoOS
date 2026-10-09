@@ -5195,11 +5195,13 @@ def cmd_ready(args) -> int:
             try:
                 checks = ready_guards.report_checks(report_text)
                 if not checks["ok"]:
+                    def named(ids):
+                        return ", ".join(str(n) for n in ids) or "none"
                     print("ready: not appended -- writer-guards report-checks: "
                           "missing CHECK %s; failed CHECK %s; input_required "
-                          "CHECK %s" % (", ".join(str(n) for n in checks["missing"]) or "none",
-                                         ", ".join(str(n) for n in checks["failed"]) or "none",
-                                         ", ".join(str(n) for n in checks["input_required"]) or "none"))
+                          "CHECK %s" % (named(checks["missing"]),
+                                        named(checks["failed"]),
+                                        named(checks["input_required"])))
                     return 1
             except ready_guards.GuardError as exc:
                 print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)

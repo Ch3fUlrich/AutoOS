@@ -89,9 +89,9 @@ class MainCiFreezeTests(unittest.TestCase):
         self.addCleanup(self._restore_state)
         # AO-WRITER-GUARDS P4b (HERMETIC, D-852): the writer-guards gate reads the
         # lane's diff through `lane_diff_paths` on EVERY ready — the same shared
-        # patch tests/test_autoos_spawner.py's ReadyCommandTests.setUp installs
-        # (stub_lane_diff there, stub_lane_diff here, one per class) — so no ready
-        # test in this file or its subclasses shells out to git.
+        # patch ReadyCommandTests.setUp installs in tests/test_autoos_spawner.py,
+        # one per ready class — so no ready test in this file or its subclasses
+        # shells out to git.
         self.stub_lane_diff()
 
     def stub_lane_diff(self, paths=(), added="", error=None):

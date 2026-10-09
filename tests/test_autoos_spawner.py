@@ -9834,7 +9834,9 @@ class ReadyCommandTests(unittest.TestCase):
     Real temp git repos (a bare `origin` plus a clone, as the --isolate
     containment tests use) and the real parser / main entry: this is a CLI
     contract, so a test that called cmd_ready directly could pass a command nobody
-    can type.
+    can type. The one thing NOT run for real is the diff — AO-WRITER-GUARDS P4b's
+    `lane_diff_paths` is stubbed in setUp for the whole class, because the guard
+    reads it on every `ready` and a fixture repo has no `origin/main` to diff.
     """
 
     BRANCH = "lane/work"
