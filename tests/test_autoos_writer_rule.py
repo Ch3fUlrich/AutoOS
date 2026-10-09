@@ -55,6 +55,31 @@ class RequiredLevelTests(unittest.TestCase):
             with self.subTest(paths=paths):
                 self.assertEqual(rule.required_r_level("code", paths), "R3")
 
+    def test_r3_camel_case_tokens_are_r3(self):
+        for paths in (["src/userAuth.py"], ["src/SessionStore.py"],
+                      ["src/PermissionCheck.ts"], ["src/apiKey.py"]):
+            with self.subTest(paths=paths):
+                self.assertEqual(rule.required_r_level("code", paths), "R3")
+        for paths in (["src/author.py"], ["docs/authority.md"],
+                      ["docs/authorize-docs.md"]):
+            with self.subTest(paths=paths):
+                self.assertNotEqual(rule.required_r_level("code", paths), "R3")
+
+    def test_r3_extended_secret_tokens_are_r3(self):
+        for paths in (["src/credentials.py"], ["src/api_token.py"],
+                      ["src/passwd"], ["src/ssh_keys.py"],
+                      ["home/user/.ssh/id_rsa"], ["certs/server.pem"],
+                      ["home/user/.ssh/authorized_keys"],
+                      ["src/private_key.py"], ["src/keystore.jks"]):
+            with self.subTest(paths=paths):
+                self.assertEqual(rule.required_r_level("code", paths), "R3")
+
+    def test_ops_dir_hints_are_r2(self):
+        for paths in (["ops/run.sh"], ["deploy/app.sh"], ["infra/main.py"],
+                      ["terraform/vpc.tf"], ["modules/vpc.tf"]):
+            with self.subTest(paths=paths):
+                self.assertEqual(rule.required_r_level("code", paths), "R2")
+
     def test_r3_secret_diff_lines_are_r3(self):
         for diff in ("+SECRET_KEY=x\n", "+PASSWORD=x\n", "+API_KEY=x\n"):
             with self.subTest(diff=diff.strip()):
@@ -82,7 +107,10 @@ class RequiredLevelTests(unittest.TestCase):
                     rule.required_r_level(bad, ["a.py"])
 
     def test_added_counts_plus_plus_plus_without_space(self):
+        # Intended: a '+++b/auth.py'-style header line carries no space, so it
+        # counts as an added line and its R3 token still raises the card.
         self.assertEqual(rule.required_r_level("code", ["a.py"], "+++SECRET_KEY=x\n"), "R3")
+        self.assertEqual(rule.required_r_level("code", ["a.py"], "+++b/auth.py\n"), "R3")
 
 
 class WriterAllowedTests(unittest.TestCase):
@@ -131,12 +159,19 @@ class WriterAllowedTests(unittest.TestCase):
                 self.assertFalse(rule.writer_allowed("some/model", "R1", "ops", regd))
                 self.assertFalse(rule.writer_allowed("some/model", "R0", "ops", regd))
 
-    def test_r3_requires_r3_list(self):
+    def test_r3_without_r3_key_falls_back_to_r2(self):
         no_r3 = {"policy": {"writers": {"sub40_models": SUBS, "R2": [VERTEX_LEG]}}}
-        self.assertFalse(rule.writer_allowed(VERTEX, "R3", "ops", no_r3))
+        self.assertTrue(rule.writer_allowed(VERTEX, "R3", "ops", no_r3))
         self.assertTrue(rule.writer_allowed(VERTEX, "R2", "ops", no_r3))
+        self.assertFalse(rule.writer_allowed(QWEN, "R3", "ops", no_r3))
         self.assertTrue(rule.writer_allowed(VERTEX, "R3", "ops", reg()))
         self.assertFalse(rule.writer_allowed(QWEN, "R3", "ops", reg()))
+
+    def test_r3_explicit_empty_list_still_denies(self):
+        empty_r3 = {"policy": {"writers": {"sub40_models": SUBS, "R2": [VERTEX_LEG],
+                                           "R3": []}}}
+        self.assertFalse(rule.writer_allowed(VERTEX, "R3", "ops", empty_r3))
+        self.assertTrue(rule.writer_allowed(VERTEX, "R2", "ops", empty_r3))
 
 
 class WritersPolicyTests(unittest.TestCase):

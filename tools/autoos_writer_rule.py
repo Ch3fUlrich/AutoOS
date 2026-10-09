@@ -13,6 +13,9 @@ _FLOOR = {"ops": "R2", "infra": "R2", "code": "R1", "docs": "R0"}
 # (a letter follows 'auth') never do. Lookarounds (?<![a-z0-9])...(?![a-z])
 # with re.I express exactly that: '_' passes both sides, a trailing digit
 # passes, 'oauth'/'password'/'api_key' are their own tokens.
+# camelCase/PascalCase is split first ('userAuth' -> 'user_Auth'), so the same
+# lowercase rule also catches 'userAuth'/'SessionStore'/'PermissionCheck'/
+# 'apiKey' while all-lowercase 'author'/'authority'/'authorize-docs' still miss.
 _R3 = re.compile(r"auth/|(?<![a-z0-9])oauth(?![a-z])"
                  r"|(?<![a-z0-9])auth(?:n|z)?(?![a-z])"
                  r"|(?<![a-z0-9])permissions?(?![a-z])"
@@ -21,9 +24,24 @@ _R3 = re.compile(r"auth/|(?<![a-z0-9])oauth(?![a-z])"
                  r"|(?<![a-z0-9])sessions?(?![a-z])"
                  r"|(?<![a-z0-9])passwords?(?![a-z])"
                  r"|(?<![a-z0-9])api[_-]?keys?(?![a-z])"
-                 r"|\.env(?![a-z])|(?:^|/)auth\.py(?![a-z])", re.I)
-_OPS = re.compile(r"\.ya?ml$|\bcompose\b|\.service\b|\bsystemd\b|\bcron|\bmail"
-                  r"|\bplaybooks?/|\bansible|\bhosts\b|\binventory\b", re.I)
+                 r"|(?<![a-z0-9])credentials?(?![a-z])"
+                 r"|(?<![a-z0-9])tokens?(?![a-z])"
+                 r"|(?<![a-z0-9])passwd(?![a-z])"
+                 r"|(?<![a-z0-9])ssh[_-]?keys?(?![a-z])"
+                 r"|(?<![a-z0-9])id_rsa(?![a-z])"
+                 r"|(?<![a-z0-9])authorized[_-]?keys?(?![a-z])"
+                 r"|(?<![a-z0-9])private[_-]?keys?(?![a-z])"
+                 r"|(?<![a-z0-9])keystores?(?![a-z])"
+                 r"|\.env(?![a-z])|\.pem(?![a-z])|(?:^|/)auth\.py(?![a-z])", re.I)
+_CAMEL_BOUND = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_OPS = re.compile(r"\.ya?ml$|\.tf$|\bcompose\b|\.service\b|\bsystemd\b|\bcron|\bmail"
+                  r"|\bplaybooks?/|\bansible|\bhosts\b|\binventory\b"
+                  r"|(?:^|/)ops/|\bdeploy|\binfra|\bterraform", re.I)
+
+
+def _r3_hit(text):
+    """True when text carries an R3 token, camel-split first (round 3)."""
+    return bool(_R3.search(text) or _R3.search(_CAMEL_BOUND.sub("_", text)))
 
 
 def _added(diff_text):
@@ -49,7 +67,7 @@ def required_r_level(task_type, paths, diff_text=""):
     """
     _checked(task_type)
     seen = [str(p) for p in (paths or [])]
-    if _R3.search("\n".join(seen)) or any(_R3.search(l) for l in _added(diff_text)):
+    if _r3_hit("\n".join(seen)) or any(_r3_hit(l) for l in _added(diff_text)):
         content = "R3"
     elif any(_OPS.search(p) for p in seen):
         content = "R2"
@@ -106,7 +124,8 @@ def _chain_match(model_id, legs):
 def writer_allowed(model_id, r_level, task_type, registry):
     """Sub-40 ids (containment on the normalized id) only at R0/R1, never on
     ops; R2 only for an available R2 chain leg, R3 only for an available R3
-    leg (absent R3 list denies); anything may do R0/R1.
+    leg (no R3 key falls back to the R2 chain; an explicit empty R3 list
+    still denies); anything may do R0/R1.
 
     Fail closed: with policy.writers or sub40_models absent/empty every R2/R3
     request and every ops request is denied.
@@ -124,5 +143,7 @@ def writer_allowed(model_id, r_level, task_type, registry):
     if r_level in ("R0", "R1"):
         return task_type != "ops" or bool(writers and subs)
     if r_level == "R3":
+        if "R3" not in writers:
+            return _chain_match(model_id, _chain(registry, "R2"))
         return _chain_match(model_id, _chain(registry, "R3"))
     return _chain_match(model_id, _chain(registry, "R2"))
