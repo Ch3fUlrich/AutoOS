@@ -122,9 +122,17 @@ def trailer_lines(path=SB, branch=BRANCH):
 
 
 def spawner_lines(path=SB, branch=BRANCH, report=None):
-    """A whole completed run's tail: header, worker stream, closing block, REPORT."""
+    """A whole completed run's tail: header, worker stream, closing block, REPORT.
+
+    The report sits behind a blank line on purpose: under the block rule
+    `_report_view` applies (P4c-fixes D1), a bare line right after the
+    '> thinking' marker is that quote block's lazy continuation, and a genuine
+    REPORT in a real transcript is its own paragraph after the quoted stream
+    ends.
+    """
     out = header_lines(path, branch) + worker_lines("thinking") + trailer_lines(path, branch)
     if report:
+        out.append("\n")
         out.append(report_body())
     return out
 
@@ -543,6 +551,41 @@ class ReportDetection(TempCase):
             self.assertFalse(self.classified([line + "\n"], state=self.other_state())
                              ["has_report"], line)
 
+    def test_a_lazy_continuation_report_under_a_quote_is_not_a_report(self):
+        """The REPORT line carries no '>' of its own — CommonMark continues the
+        block-quote block over every following NON-BLANK line — so it is quoted
+        text inside the worker's own blockquote, not a claim (P4c-fixes D1)."""
+        out = self.classified("> worker quoting a report:\n"
+                              "REPORT %s · OK · green\n" % RUN,
+                              task="Implement the widget.\n")
+        self.assertFalse(out["has_report"])
+        self.assertEqual(out["state"], "died")
+        self.assertEqual(r.next_action(0, out["state"]), "rerun")
+
+    def test_a_report_after_a_blank_line_following_a_quote_counts(self):
+        """The blank line is what closes the block: a REPORT after it is the
+        worker's own line again."""
+        self.assertTrue(self.classified(["> worker quoting a report:\n", "\n",
+                                         report_body()],
+                                        state=self.other_state())["has_report"])
+
+    def test_nested_and_tab_and_space_indented_markers_open_the_same_block(self):
+        for head in (">> quoted:\n", ">\tquoted:\n", "\t> quoted:\n", "   > quoted:\n"):
+            self.assertFalse(self.classified([head,
+                                              "REPORT %s · OK · green\n" % RUN],
+                                              state=self.other_state())["has_report"], head)
+
+    def test_a_quote_block_directly_followed_by_a_fence_does_not_count(self):
+        """No blank line between them: the fence opens inside the still-live
+        quote block, and its content is quoted text twice over."""
+        self.assertFalse(self.classified(["> note\n", "```\n", report_body(), "```\n"],
+                                         state=self.other_state())["has_report"])
+
+    def test_a_fence_after_a_closed_quote_still_leaves_a_report_counting(self):
+        self.assertTrue(self.classified(["> note\n", "\n", "```sh\n", "pytest -q\n",
+                                         "```\n", report_body()],
+                                        state=self.other_state())["has_report"])
+
     def test_a_report_naming_another_run_is_not_this_run_s_report(self):
         self.assertFalse(self.classified([report_body(OTHER_RUN)],
                                          state=self.other_state())["has_report"])
@@ -550,7 +593,9 @@ class ReportDetection(TempCase):
                                          state=self.other_state())["has_report"])
 
     def test_the_genuine_report_of_this_run_still_completes(self):
-        info = self.classified(worker_lines("thinking") + [report_body()])
+        # The blank line ends the '> thinking' quote block; the report after it
+        # is the worker's own paragraph (see spawner_lines).
+        info = self.classified(worker_lines("thinking") + ["\n", report_body()])
         self.assertTrue(info["has_report"])
         self.assertEqual(info["state"], "completed")
 
@@ -566,6 +611,72 @@ class ReportDetection(TempCase):
                            exit_json={"rc": 0})
         os.unlink(os.path.join(root, "job.json"))
         self.assertTrue(classify(root, probe=dead)["has_report"])
+
+
+class SuspectRecords(TempCase):
+    """P4c-fixes D2: job.json is worker-writable. A field of the wrong type is
+    never a crash, never a traceback out of the CLI, and never a 'completed' —
+    the record is `record_suspect`, classifies 'unknown' and escalates."""
+
+    def classified_job(self, job):
+        st = self.other_state()
+        root = make_record(st, exit_json={"rc": 0}, output=[report_body()],
+                           job_json=json.dumps(job, sort_keys=True))
+        return classify(root, probe=dead)
+
+    def healthy_job(self, **over):
+        base = {"run_id": RUN, "task": TASK, "cwd": "/repo", "started": NOW,
+                "pid": 4242}
+        return self.classified_job(dict(base, **over))
+
+    def test_a_non_string_task_is_suspect_not_a_crash(self):
+        for bad in (123, [], {}, 1.5, True, None):
+            info = self.healthy_job(task=bad)
+            self.assertTrue(info["record_suspect"], bad)
+            self.assertEqual(info["state"], "unknown", bad)
+
+    def test_a_str_task_alone_is_not_suspect(self):
+        info = self.healthy_job(task="do the work\n")
+        self.assertFalse(info["record_suspect"])
+        self.assertEqual(info["state"], "completed")   # rc 0 and a real REPORT
+
+    def test_wrongly_typed_fields_elsewhere_are_suspect_too(self):
+        for over in ({"pid": "12"}, {"pid": True}, {"pid": 1.5},
+                     {"started": "x"}, {"started": True},
+                     {"cwd": 7}, {"run_id": 7}):
+            info = self.healthy_job(**over)
+            self.assertTrue(info["record_suspect"], over)
+            self.assertEqual(info["state"], "unknown", over)
+
+    def test_a_string_rc_is_no_zero_but_is_not_a_suspect_shape(self):
+        """rc is type-checked before use (it never reads as 0), and the record
+        still says what it says: died, not a crash."""
+        for bad in ("0", 0.0, True):
+            st2 = self.other_state()
+            info = classify(make_record(st2, task=TASK, output=[report_body()],
+                                        exit_json={"rc": bad}), probe=dead)
+            self.assertEqual((info["state"], info["rc"], info["record_suspect"]),
+                             ("died", None, False), bad)
+
+    def test_absent_fields_are_not_suspect(self):
+        info = self.classified_job({"task": TASK})
+        self.assertFalse(info["record_suspect"])
+
+    def test_next_action_refuses_none_and_rerun_for_a_suspect_record(self):
+        self.assertEqual(r.next_action(0, "completed", record_suspect=True), "escalate")
+        self.assertEqual(r.next_action(0, "died", record_suspect=True), "escalate")
+        self.assertEqual(r.next_action(0, "running", record_suspect=True), "escalate")
+        self.assertEqual(r.next_action(0, "completed", record_suspect=False), "none")
+        for bad in (1, "yes", None):
+            with self.assertRaises(r.RecoveryError):
+                r.next_action(0, "completed", record_suspect=bad)
+
+    def test_the_plan_carries_the_flag_and_escalates(self):
+        make_record(self.state, task=123, exit_json={"rc": 0}, output=[report_body()])
+        p = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertTrue(p["record_suspect"])
+        self.assertEqual((p["action"], p["state"]), ("escalate", "unknown"))
+        self.assertIsNone(p["continue_task"])
 
 
 class PidBounds(TempCase):
@@ -932,6 +1043,120 @@ class Attempts(TempCase):
             r.record_attempt(LANE, RUN, self.state)
 
 
+class LaneLockTimeout(TempCase):
+    """P4c-fixes D3: the POSIX flock is taken with LOCK_NB inside the same
+    bounded retry loop Windows pays, so a LIVE holder delays a recorder and is
+    then refused — it never hangs `record_attempt` unboundedly. POSIX only."""
+
+    def guarded(self, fn, what):
+        """Run `fn` on a watchdog thread: a blocking-flock regression fails the
+        test instead of hanging the suite."""
+        box = {}
+
+        def work():
+            t0 = time.monotonic()
+            try:
+                box["value"] = fn()
+            except BaseException as exc:                # noqa: BLE001
+                box["error"] = exc
+            box["elapsed"] = time.monotonic() - t0
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        thread.join(10)
+        if thread.is_alive():
+            self.fail("%s blocked: flock waits unbounded for the holder" % what)
+        return box
+
+    def small_budget(self, retries=5, secs=0.001):
+        old = (r.LOCK_RETRIES, r.LOCK_RETRY_SECS)
+        self.addCleanup(setattr, r, "LOCK_RETRIES", old[0])
+        self.addCleanup(setattr, r, "LOCK_RETRY_SECS", old[1])
+        r.LOCK_RETRIES, r.LOCK_RETRY_SECS = retries, secs
+
+    def holder(self, path):
+        """A thread that takes the lane lock and holds it until told to let go."""
+        acquired, release, errors = threading.Event(), threading.Event(), []
+
+        def hold():
+            try:
+                fd = r._acquire_lock(path)
+                acquired.set()
+                release.wait(30)
+                r._release_lock(fd)
+            except BaseException as exc:                # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        self.assertTrue(acquired.wait(10), "the holder never took the lock")
+        return thread, release, errors
+
+    @unittest.skipIf(os.name == "nt", "flock; POSIX only")
+    def test_a_held_lock_is_refused_within_the_retry_budget(self):
+        os.makedirs(r.recovery_dir(self.state))
+        self.small_budget()
+        thread, release, errors = self.holder(r._lock_path(LANE, self.state))
+        try:
+            box = self.guarded(lambda: r.record_attempt(LANE, RUN, self.state),
+                               "record_attempt")
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertIsInstance(box.get("error"), r.RecoveryError)
+        self.assertLess(box["elapsed"], 1.0, "the lock wait was not bounded")
+        self.assertFalse(os.path.exists(r.path_of(LANE, self.state)))
+
+    @unittest.skipIf(os.name == "nt", "flock; POSIX only")
+    def test_a_lock_released_mid_wait_is_acquired(self):
+        os.makedirs(r.recovery_dir(self.state))
+        self.small_budget(retries=200, secs=0.01)   # room to wait; the release ends it
+        thread, release, errors = self.holder(r._lock_path(LANE, self.state))
+        box = {}
+
+        def record():
+            try:
+                box["value"] = r.record_attempt(LANE, RUN, self.state)
+            except BaseException as exc:                # noqa: BLE001
+                box["error"] = exc
+
+        recorder = threading.Thread(target=record, daemon=True)
+        recorder.start()
+        time.sleep(0.05)                          # let the recorder start spinning
+        release.set()
+        recorder.join(10)
+        thread.join(10)
+        self.assertFalse(recorder.is_alive(), "the recorder never woke to the release")
+        self.assertEqual(errors, [])
+        self.assertNotIn("error", box, box.get("error"))
+        self.assertEqual(box["value"]["attempts"], 1)
+        self.assertLess(box["value"]["attempts"], r.MAX_ATTEMPTS + 1)
+
+    @unittest.skipIf(os.name == "nt", "flock; POSIX only")
+    def test_the_lock_fd_is_closed_whether_the_lock_came_or_not(self):
+        if not os.path.isdir("/proc/self/fd"):
+            self.skipTest("/proc/self/fd; Linux only")
+
+        def fd_count():
+            return len(os.listdir("/proc/self/fd"))
+
+        os.makedirs(r.recovery_dir(self.state))
+        before = fd_count()
+        r.record_attempt(LANE, RUN, self.state)          # uncontended: take and release
+        self.assertEqual(fd_count(), before)
+        self.small_budget()
+        thread, release, errors = self.holder(r._lock_path("lane/fd", self.state))
+        try:
+            box = self.guarded(lambda: r.record_attempt("lane/fd", RUN, self.state),
+                               "contended record")
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertIsInstance(box.get("error"), r.RecoveryError)
+        self.assertEqual(fd_count(), before, "a lock fd leaked on the refusal path")
+
+
 class RunIdsAndDirs(TempCase):
     def test_accepted_ids(self):
         for run in (RUN, "a", "a" * r.RUN_ID_MAX_CHARS, "task-1_2.3"):
@@ -992,8 +1217,8 @@ class RunIdsAndDirs(TempCase):
 
 class Plan(TempCase):
     KEYS = {"run_id", "lane_key", "action", "state", "attempts", "rc", "has_report",
-            "sandbox", "branch", "last_output_age", "state_corrupt", "continue_task",
-            "spawn_hint"}
+            "sandbox", "branch", "last_output_age", "state_corrupt", "record_suspect",
+            "continue_task", "spawn_hint"}
 
     def plan(self, state=None, **over):
         kw = {"state": state or self.state, "now": NOW, "pid_probe": dead}
@@ -1011,6 +1236,7 @@ class Plan(TempCase):
         self.assertEqual(p["spawn_hint"]["cwd"], sb)
         self.assertIn("record_attempt", p["spawn_hint"]["note"])
         self.assertFalse(p["state_corrupt"])
+        self.assertFalse(p["record_suspect"])
         self.assertEqual(p["lane_key"], LANE)
 
     def test_the_default_lane_is_the_runs_own_task_hash(self):
@@ -1180,6 +1406,58 @@ class Cli(TempCase):
             code, _, err = self.cli(argv)
             self.assertEqual(code, 2, argv)
             self.assertIn("autoos_recovery:", err)
+
+    def test_a_forged_report_under_a_lazy_quote_exits_three_not_zero(self):
+        """The blockquote-lazy-continuation case end to end (P4c-fixes D1): the
+        quoted REPORT line names this run, rc is 0 — the plan must still not
+        read it as completed."""
+        task = "Implement the widget.\n"
+        make_record(self.state, task=task, exit_json={"rc": 0},
+                    output="> worker quoting a report:\n"
+                           "REPORT %s · OK · green\n" % RUN)
+        code, text, err = self.cli(["plan", RUN, "--lane", LANE])
+        out = json.loads(text)
+        self.assertEqual((code, out["action"], out["state"], out["has_report"]),
+                         (3, "rerun", "died", False))
+
+    def test_a_suspect_record_exits_four_with_a_message_not_a_traceback(self):
+        """A job.json whose task is a number (P4c-fixes D2): the CLI answers
+        escalate/4, never a crash and never a 0."""
+        make_record(self.state, task=123, exit_json={"rc": 0}, output=[report_body()])
+        code, text, err = self.cli(["plan", RUN])
+        out = json.loads(text)
+        self.assertEqual((code, out["action"], out["record_suspect"]), (4, "escalate", True))
+        self.assertIn("wrong type", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_an_unexpected_fault_exits_four_never_zero_or_three(self):
+        make_record(self.state, exit_json={"rc": 1})
+        real_plan = r.plan
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("unexpected fault")
+
+        r.plan = boom
+        try:
+            code, _, err = self.cli(["plan", RUN])
+        finally:
+            r.plan = real_plan
+        self.assertEqual(code, 4)
+        self.assertIn("internal error", err)
+
+    def test_keyboard_interrupt_and_broken_pipe_keep_their_own_exits(self):
+        make_record(self.state, exit_json={"rc": 1})
+        real_plan = r.plan
+        for exc in (KeyboardInterrupt, BrokenPipeError):
+            def raiser(*args, _exc=exc, **kwargs):
+                raise _exc
+
+            r.plan = raiser
+            try:
+                with self.assertRaises(exc):
+                    self.cli(["plan", RUN])
+            finally:
+                r.plan = real_plan
 
     def test_usage_errors_exit_two(self):
         for argv in (["record", RUN], ["plan"], []):

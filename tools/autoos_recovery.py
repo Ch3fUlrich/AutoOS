@@ -43,7 +43,10 @@ Every read goes through `_open_regular`: ``O_NOFOLLOW`` (a symlinked record is a
 damaged record, not a record elsewhere) and ``O_NONBLOCK`` with an ``S_ISREG``
 check on the fd, so a FIFO planted at ``job.json`` / ``exit.json`` /
 ``output.log`` / the attempt file is refused rather than blocking this process
-forever. Fail closed everywhere: an unreadable record, a corrupt attempt file or
+forever. Fail closed everywhere: an unreadable record, a corrupt attempt file, a
+job.json field of the wrong type (`record_suspect` — the file is worker-writable,
+so every field is type-checked before use and a misshapen record never answers
+'completed') or
 a pid this host cannot probe is 'unknown', and 'unknown' is 'escalate'. It is
 never 'completed'.
 
@@ -59,8 +62,10 @@ Residuals, stated rather than hidden:
   reported), but the L1 that cancelled on purpose must not ask for a plan.
 * report detection reuses tools/autoos_report.py's parser on the output tail and
   falls back to a REPORT heading line, both read over only the worker's own
-  lines (fences, blockquotes and the task's echoed text excluded, see
-  `_report_view`). A heading that carries a run id must name THIS run, so a
+  lines (fences, whole block-quote blocks — a quote continues lazily over every
+  following non-blank line, marker or no marker, and the task's echoed text
+  excluded, see `_report_view`). A heading that carries a run id must name THIS
+  run, so a
   heading naming something else — including prose like ``REPORT: the field
   list`` — is not believed: the cost is one needless continuation leg on a run
   that wrote an unusual heading, never a false 'completed'. The strict protocol
@@ -136,9 +141,11 @@ FLEET_SANDBOX_SUBPATH = os.path.join("fleet", "sandboxes")
 # Above this a number is not a pid on this host (Linux's default kernel.pid_max
 # is 2**22), and `os.kill` answers OverflowError rather than a verdict.
 PID_MAX = 2 ** 22
-# How long a contended lane lock is waited for before the record is refused. Only
-# Windows pays it in a loop (msvcrt.locking is non-blocking by nature); POSIX
-# `flock` sleeps in the kernel until the holder is gone.
+# How long a contended lane lock is waited for before the record is refused, on
+# BOTH platforms: `LOCK_RETRIES` tries `LOCK_RETRY_SECS` apart (2 s < 3 s total).
+# POSIX pays it with a non-blocking `flock` (LOCK_NB) in the same retry loop
+# Windows needs anyway — a blocking flock would hang the recorder for as long as
+# the holder liked.
 LOCK_RETRIES = 200
 LOCK_RETRY_SECS = 0.01
 # The one open mode every record, log and state file is read with.
@@ -513,22 +520,31 @@ def _report_view(tail, task):
     (`autoos_ready_guards._Fences`: a fence opens on 3+ of the same ` or ~ after at
     most three leading spaces and closes only on the same character at least as
     long with nothing after it, so a fence that is never closed swallows the rest
-    of the tail); blockquoted lines, '>'-stripped and compared, because a quote is
-    not a claim; and every line that also occurs in the task — a client that cats
-    its brief back has echoed the return contract's own REPORT line, and that is
-    the brief's text, not a report on the work.
+    of the tail); WHOLE block-quote blocks, because a quote is not a claim — a
+    block starts at a line that, once stripped of its leading blanks (spaces or
+    tabs; CommonMark's own rule is at most three spaces), begins with '>', and it
+    continues over EVERY following non-blank line until the first blank one,
+    marked or not: a REPORT line sitting under a '>' line with no blank between is
+    a lazy continuation of the quote, not a claim of its own; and every line that
+    also occurs in the task — a client that cats its brief back has echoed the
+    return contract's own REPORT line, and that is the brief's text, not a report
+    on the work.
     """
     echoed = {line.strip() for line in (task or "").splitlines() if line.strip()}
     fences = ready_guards._Fences()
     out = []
+    in_quote = False
     for raw in (tail or "").splitlines():
         # The tracker must see EVERY line: its state is the fence structure, and
         # skipping a line here would re-open a block that is still shut.
         fenced = fences.feed(raw)
         line = raw.strip()
-        if fenced or not line or line in echoed:
+        if not line:
+            in_quote = False       # a blank line is what closes a quote block
             continue
-        if ready_guards._unquote(line) != line:
+        if not fenced and line.startswith(">"):
+            in_quote = True        # '>' inside a fence is code text, not a marker
+        if fenced or in_quote or line in echoed:
             continue
         out.append(raw)
     return out
@@ -588,12 +604,39 @@ def _output_age(run_dir, now):
     return None
 
 
+def _job_record_suspect(job):
+    """Whether a present job.json carries a field of the WRONG type.
+
+    job.json is worker-writable: a writer (or a bug in the runner) can put 123
+    where the task string belongs. Every field this module reads is type-checked
+    before use — a non-str is never fed to the echo filter or the pid probe — and
+    a record that misuses a field it is supposed to carry is 'suspect': too
+    damaged to answer 'completed', so it classifies 'unknown' and escalates.
+    Absent fields are not suspect (a missing job.json is an unfinished record,
+    judged elsewhere); a present-but-wrong-typed one is.
+    """
+    if job is None:
+        return False
+    for name in ("run_id", "task", "cwd"):
+        if name in job and type(job[name]) is not str:
+            return True
+    if "pid" in job and (type(job["pid"]) is bool or not isinstance(job["pid"], int)):
+        return True
+    if ("started" in job and (type(job["started"]) is bool
+                              or not isinstance(job["started"], (int, float)))):
+        return True
+    return False
+
+
 def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     """What one run record says: {state, rc, has_report, sandbox, branch,
-    last_output_age}.
+    record_suspect, last_output_age}.
 
     `state` is one of STATES and 'unknown' is fail-closed: a record this cannot
-    read is never 'completed'. With no ``exit.json`` the run is judged on its pid
+    read is never 'completed'. A job.json field of the wrong type sets
+    `record_suspect` and holds the state at 'unknown' — a record that misuses its
+    own fields cannot attest to anything, not even an exit 0 with a REPORT. With
+    no ``exit.json`` the run is judged on its pid
     and its output age: a live pid quiet past `stall_secs` is 'stalled', a dead
     pid is 'died', a pid this host cannot probe is 'unknown'. With an
     ``exit.json`` it takes rc==0 AND a REPORT to be 'completed'; anything else
@@ -627,12 +670,18 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     # caller named decides it, not the caller's environment on top of that.
     root = os.path.dirname(os.path.dirname(path))
     sandbox, branch = _parse_sandbox(tail, root)
+    # A non-str task is '' for the echo filter (and a suspect record never
+    # reaches a verdict anyway); a non-int pid is not a number the probe can
+    # answer for — both are refused on type, never handed on unchecked.
+    task = (job or {}).get("task") if job_ok else None
+    if type(task) is not str:
+        task = ""
+    suspect = bool(job_ok) and _job_record_suspect(job)
     out = {"state": "unknown", "rc": None,
-           "has_report": _has_report(tail, (job or {}).get("task") if job_ok else "",
-                                     os.path.basename(path)),
-           "sandbox": sandbox, "branch": branch,
+           "has_report": _has_report(tail, task, os.path.basename(path)),
+           "sandbox": sandbox, "branch": branch, "record_suspect": suspect,
            "last_output_age": _output_age(path, ref)}
-    if not job_ok or not ex_ok:
+    if not job_ok or not ex_ok or suspect:
         return out
 
     if ex is not None:
@@ -641,7 +690,8 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
         out["state"] = "completed" if (out["rc"] == 0 and out["has_report"]) else "died"
         return out
 
-    alive = probe((job or {}).get("pid"))
+    pid = (job or {}).get("pid")
+    alive = probe(pid if (type(pid) is int and type(pid) is not bool) else None)
     if alive is None or out["last_output_age"] is None:
         return out
     if not alive:
@@ -651,13 +701,15 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     return out
 
 
-def next_action(attempts, state, max_attempts=MAX_ATTEMPTS):
+def next_action(attempts, state, max_attempts=MAX_ATTEMPTS, record_suspect=False):
     """The move for a classified run: 'none' / 'wait' / 'rerun' / 'escalate'.
 
     A completed run needs nothing, a running one needs patience, a died/stalled
     one gets a continuation leg while `attempts` is under `max_attempts` and the
     lane after that, and 'unknown' — a record that could not be read — goes to a
-    human instead of another spawn.
+    human instead of another spawn. `record_suspect` (a job.json field of the
+    wrong type) escalates outright: no 'none' and no leg spent on a record that
+    cannot say what it ran.
     """
     if type(attempts) is bool or not isinstance(attempts, int) or attempts < 0:
         raise RecoveryError("attempts: a non-negative int, got %r" % (attempts,))
@@ -665,6 +717,10 @@ def next_action(attempts, state, max_attempts=MAX_ATTEMPTS):
         raise RecoveryError("state %r: expected %s" % (state, "|".join(STATES)))
     if type(max_attempts) is bool or not isinstance(max_attempts, int) or max_attempts < 0:
         raise RecoveryError("max_attempts: a non-negative int, got %r" % (max_attempts,))
+    if type(record_suspect) is not bool:
+        raise RecoveryError("record_suspect: bool, got %r" % (record_suspect,))
+    if record_suspect:
+        return "escalate"
     if state == "completed":
         return "none"
     if state == "running":
@@ -787,8 +843,10 @@ def _acquire_lock(path):
     The lock is the same ``.lock`` name on both platforms and is held by the open
     file description, so a holder that dies — killed, crashed, or the interpreter
     exiting — loses the lock with its fds and the lane is never blocked by a stale
-    file. POSIX uses ``flock``; Windows has no flock (and this module must stay
-    importable there), so it uses ``msvcrt.locking`` on one byte of the same fd.
+    file. POSIX uses ``flock`` with ``LOCK_NB``, Windows has no flock (and this
+    module must stay
+    importable there) so it uses ``msvcrt.locking`` on one byte of the same fd;
+    both platforms then pay the same bounded retry loop.
     A lock still contested after `LOCK_RETRIES` tries raises: refusing to record
     escalates the lane, which is safe, where recording anyway spends a leg nobody
     counted, which is not.
@@ -812,13 +870,29 @@ def _acquire_lock(path):
     else:
         import fcntl  # inside the platform check: no fcntl on Windows
 
+        # LOCK_NB, in the SAME bounded retry loop as Windows: a blocking
+        # LOCK_EX sleeps in the kernel for as long as the holder likes, and a
+        # live holder (a recorder mid-write, or one hung on a slow disk) would
+        # hang `record_attempt` unboundedly — the docstring promises refusal
+        # after `LOCK_RETRIES`, and an escalate-not-hang lane needs that promise
+        # kept. The fd is opened once and closed on EVERY exit path.
         fd = _lock_open(path, flags)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except OSError as exc:
+            for _ in range(LOCK_RETRIES):
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    # Another writer holds the description: try again, bounded.
+                    time.sleep(LOCK_RETRY_SECS)
+                    continue
+                except OSError as exc:
+                    raise RecoveryError("cannot take the lane lock %r: %s" % (path, exc))
+                return fd
+            raise RecoveryError("lane lock %r is held by another writer (%d tries)"
+                                % (path, LOCK_RETRIES))
+        except BaseException:
             _close(fd)
-            raise RecoveryError("cannot take the lane lock %r: %s" % (path, exc))
-        return fd
+            raise
 
 
 def _release_lock(fd):
@@ -879,7 +953,8 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
     """The recovery plan for one run, and nothing else happens.
 
     {action, state, attempts, sandbox, branch, continue_task, spawn_hint, rc,
-    has_report, last_output_age, lane_key, state_corrupt, run_id}. Without
+    has_report, last_output_age, lane_key, state_corrupt, record_suspect,
+    run_id}. Without
     `lane_key` the lane is the run's own task, hashed; with one, every writer on
     that lane shares the budget. `spawn_hint.cwd` is the kept worktree for the
     L2/L1 to hand to `spawn` — this module never calls it.
@@ -892,7 +967,8 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
     key = lane_key_for_task(task) if lane_key is None else _check_key(lane_key)
     info = classify_run(path, now=now, stall_secs=stall_secs, pid_probe=pid_probe)
     cur = read_attempts(key, state)
-    action = next_action(cur["attempts"], info["state"])
+    action = next_action(cur["attempts"], info["state"],
+                         record_suspect=info["record_suspect"])
     cont, hint = None, None
     if action == "rerun":
         cont = continuation_task(task, cur["attempts"] + 1, info["sandbox"])
@@ -907,8 +983,8 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
             "state": info["state"], "attempts": cur["attempts"], "rc": info["rc"],
             "has_report": info["has_report"], "sandbox": info["sandbox"],
             "branch": info["branch"], "last_output_age": info["last_output_age"],
-            "state_corrupt": cur["corrupt"], "continue_task": cont,
-            "spawn_hint": hint}
+            "state_corrupt": cur["corrupt"], "record_suspect": info["record_suspect"],
+            "continue_task": cont, "spawn_hint": hint}
 
 
 _EXIT_FOR_ACTION = {"none": 0, "wait": 0, "rerun": 3, "escalate": 4}
@@ -934,6 +1010,10 @@ def main(argv=None):
         if a.cmd == "plan":
             out = plan(a.run_id, lane_key=a.lane, stall_secs=a.stall_secs)
             print(json.dumps(out, indent=1, sort_keys=True))
+            if out["record_suspect"]:
+                print("autoos_recovery: job.json carries a field of the wrong "
+                      "type; the record is suspected and the lane escalates",
+                      file=sys.stderr)
             return _EXIT_FOR_ACTION[out["action"]]
         out = record_attempt(a.lane, a.run_id)
         print(json.dumps(out, indent=1, sort_keys=True))
@@ -941,6 +1021,15 @@ def main(argv=None):
     except RecoveryError as exc:
         print("autoos_recovery: %s" % exc, file=sys.stderr)
         return 2
+    except BrokenPipeError:
+        raise                                   # the reader went away: the shell's answer
+    except KeyboardInterrupt:
+        raise                                   # somebody pressed Ctrl-C: not our verdict
+    except Exception:                           # noqa: BLE001 - fail closed, never a traceback
+        # An unexpected fault is 'needs a human' (4), never 'nothing to do' (0)
+        # or 'spend a leg' (3). SystemExit is a BaseException and stays itself.
+        print("autoos_recovery: internal error; escalate", file=sys.stderr)
+        return 4
 
 
 if __name__ == "__main__":
