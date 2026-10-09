@@ -13,6 +13,15 @@ _RANK = {"R0": 0, "R1": 1, "R2": 2, "R3": 3}
 _TASK_TYPES = {"ops", "code", "docs", "infra"}
 _PATH_FIELDS = {"paths", "files", "playbooks", "test_files"}
 _SINGLE_PATH_FIELDS = {"keys_file", "reference_playbook", "state_path"}
+_RESERVED_BASENAMES = (
+    {"CON", "PRN", "AUX", "NUL"}
+    | {"COM%d" % i for i in range(1, 10)}
+    | {"LPT%d" % i for i in range(1, 10)}
+)
+# Unicode categories that must never appear in any value: controls,
+# surrogates, private-use, unassigned, format (zero-width, bidi, soft
+# hyphen), and line/paragraph separators. NUL (Cc) is included here.
+_BAD_CATS = ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp")
 # Template section keywords: a value line starting with one of these could
 # break out of its field and forge a new section when rendered.
 _KEYWORDS = (
@@ -51,7 +60,7 @@ def _check_controls(field, text, allow_nl=False, allow_tab=False):
             continue
         if allow_tab and ch == "\t":
             continue
-        if unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
+        if unicodedata.category(ch) in _BAD_CATS:
             raise ValueError(
                 "%s has control char U+%04X" % (field, ord(ch))
             )
@@ -76,6 +85,12 @@ def _reject_keyword_lines(field, text):
 
 def _check_single_path(field, s, allow_absolute=False):
     _check_controls(field, s)
+    try:
+        s.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("%s must be ASCII-only: %r" % (field, s))
+    if s != s.strip():
+        raise ValueError("%s has leading/trailing whitespace: %r" % (field, s))
     if "\\" in s:
         raise ValueError("%s has backslash: %r" % (field, s))
     if re.match(r"^[A-Za-z]:", s):
@@ -84,6 +99,10 @@ def _check_single_path(field, s, allow_absolute=False):
         raise ValueError("%s has glob: %r" % (field, s))
     if s.endswith("/"):
         raise ValueError("%s is a directory (trailing /): %r" % (field, s))
+    if s.endswith("."):
+        raise ValueError("%s has trailing '.': %r" % (field, s))
+    if len(s) > 200:
+        raise ValueError("%s exceeds 200 chars: %r" % (field, s[:60]))
     if s.startswith("/") or s.startswith("\\"):
         if not allow_absolute:
             raise ValueError("%s is absolute: %r" % (field, s))
@@ -95,6 +114,17 @@ def _check_single_path(field, s, allow_absolute=False):
         raise ValueError("%s has dot component: %r" % (field, s))
     if ".." in parts:
         raise ValueError("%s has '..' component: %r" % (field, s))
+    for comp in body:
+        if comp != comp.strip():
+            raise ValueError(
+                "%s component has whitespace: %r" % (field, s))
+        if comp.endswith("."):
+            raise ValueError(
+                "%s component has trailing '.': %r" % (field, s))
+        stem = comp.split(".")[0]
+        if stem.upper() in _RESERVED_BASENAMES:
+            raise ValueError(
+                "%s has reserved device name: %r" % (field, s))
     if posixpath.normpath(s) != s:
         raise ValueError("%s is not normalised: %r" % (field, s))
     _reject_keyword_lines(field, s)
@@ -105,6 +135,9 @@ def _validate_paths(field, value, allow_absolute=False):
         _check_controls(field, value)
         if "\n" in value or "\r" in value:
             raise ValueError("%s must be single-line" % field)
+        if value != value.strip():
+            raise ValueError(
+                "%s has leading/trailing whitespace: %r" % (field, value))
         norm = []
         for raw in value.split(","):
             s = raw.strip()
@@ -121,7 +154,7 @@ def _validate_paths(field, value, allow_absolute=False):
         if len(norm) > 3:
             raise ValueError("%s has %d entries, max 3" % (field, len(norm)))
         return norm
-    if isinstance(value, (list, tuple)):
+    if type(value) is list:
         items = list(value)
         if len(items) == 0:
             raise ValueError("%s is empty" % field)
@@ -134,7 +167,11 @@ def _validate_paths(field, value, allow_absolute=False):
                 )
             if not p.strip():
                 raise ValueError("%s has empty/whitespace entry" % field)
-            s = p.strip()
+            if p != p.strip():
+                raise ValueError(
+                    "%s entry has leading/trailing whitespace: %r"
+                    % (field, p))
+            s = p
             _check_controls(field, s)
             if "\n" in s or "\r" in s:
                 raise ValueError("%s entry must be single-line" % field)
@@ -161,10 +198,13 @@ def _validate_single_path(field, value, allow_absolute=False):
         )
     if not value.strip():
         raise ValueError("%s is empty" % field)
+    if value != value.strip():
+        raise ValueError(
+            "%s has leading/trailing whitespace: %r" % (field, value))
     _check_controls(field, value)
     if "\n" in value or "\r" in value:
         raise ValueError("%s must be single-line" % field)
-    s = value.strip()
+    s = value
     if "," in s:
         raise ValueError("%s must be a single path: %r" % (field, s))
     _check_single_path(field, s, allow_absolute)
@@ -188,7 +228,7 @@ def render_brief(task_type, r_level, fields):
         raise ValueError(
             "no template for task_type=%r r_level=%r" % (task_type, r_level)
         )
-    if not isinstance(fields, dict):
+    if type(fields) is not dict:
         raise ValueError("fields must be a dict, got %r" % (type(fields).__name__,))
     text = _read("ops.md")
     wants = sorted(set(_PAT.findall(text)))
@@ -203,7 +243,7 @@ def render_brief(task_type, r_level, fields):
             empty.append(k)
         elif type(v) is str and not v.strip():
             empty.append(k)
-        elif isinstance(v, (list, tuple)) and (
+        elif type(v) is list and (
             len(v) == 0
             or all(
                 el is None or (type(el) is str and not el.strip())
@@ -214,7 +254,8 @@ def render_brief(task_type, r_level, fields):
     if missing or unknown or empty:
         raise ValueError("missing=%s unknown=%s empty=%s" % (missing, unknown, empty))
     # Strict types: no str() coercion; lists only for path-like fields.
-    # Exact str required (str subclasses rejected).
+    # Exact str required (str subclasses rejected). Exact dict/list
+    # required (subclasses, tuples, sets, generators refused).
     for k, v in fields.items():
         if k in _PATH_FIELDS or k in _SINGLE_PATH_FIELDS:
             continue
@@ -224,10 +265,14 @@ def render_brief(task_type, r_level, fields):
                 % (k, type(v).__name__)
             )
         if k != "invariants":
+            if len(v) > 500:
+                raise ValueError("%s exceeds 500 chars" % k)
             _check_controls(k, v)
             if "\n" in v or "\r" in v:
                 raise ValueError("%s must be single-line" % k)
         else:
+            if len(v) > 2000:
+                raise ValueError("%s exceeds 2000 chars" % k)
             _check_controls(k, v, allow_nl=True, allow_tab=True)
         _reject_keyword_lines(k, v)
     path_norm = {}
@@ -249,6 +294,9 @@ def render_brief(task_type, r_level, fields):
             shown[k] = single_norm[k]
         elif k == "invariants":
             shown[k] = "\n".join("  - " + ln.strip() for ln in v.splitlines()) if ("\n" in v or "\r" in v) else "  - " + v.strip()
+            for ln in shown[k].splitlines():
+                if not ln.startswith("  - "):
+                    raise ValueError("invariants render missing bullet prefix")
         else:
             shown[k] = v
     out = _PAT.sub(lambda m: shown[m.group(1)], text)
