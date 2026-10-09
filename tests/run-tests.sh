@@ -173,6 +173,67 @@ httpd.serve_forever()
     printf '%s %s\n' "$pid" "$port"
 }
 
+# ─── Fleet rule D-852: a test of an apply/deploy tool runs HERMETIC ───────────
+# The D-825 gate is what these cases test, and CLEARING it hands the tool
+# straight to the live stack: `docker inspect omnigraph-server`, `systemctl`,
+# ssh, the gateway URL. On 2026-10-09T08:46:48Z a gate test that cleared the bar
+# did exactly that and restarted the host's running omnigraph-server. So every
+# case that runs one of the apply/deploy tools gets a stand-in directory on PATH
+# — one script per binary, each appending its name and arguments to the case's
+# own log and exiting 0 — and every gateway/omnigraph URL env points at a closed
+# loopback port. Nothing can reach a real service, and the log is the proof that
+# a cleared gate got as far as the test meant. The guard case in
+# tests/linux/40-omnigraph-images.sh fails if any of these resolve outside the
+# stand-in directory, so a case that lost it cannot pass quietly.
+GATE_URL_SINK='http://127.0.0.1:9'                  # discard port: nothing listens
+GATE_STUB_ALL_BINS='docker curl systemctl ssh omniroute npx node'
+GATE_STUB_HOST_BINS='docker systemctl ssh npx node'
+
+# gate_stubs_make <dir> [bin ...] — fill <dir> with a stand-in for every named
+# binary (the full set when none are given) and an empty <dir>/calls.log. A
+# binary the case already stand-ins itself must NOT be named here: the case's own
+# directory stays first on PATH and answers instead (it just records elsewhere).
+gate_stubs_make() {
+    local _d="$1" _b _bins
+    shift
+    _bins="${*:-$GATE_STUB_ALL_BINS}"
+    mkdir -p "$_d"
+    : >"$_d/calls.log"
+    for _b in $_bins; do
+        printf '#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >>"%s/calls.log"\nexit 0\n' \
+            "$_b" "$_d" >"$_d/$_b"
+        chmod +x "$_d/$_b"
+    done
+}
+
+# gate_stub_run <dir> [KEY=VAL ...] -- <command> [args...] — run <command> with
+# <dir>/bin (the case's own stand-ins) then <dir>/stub first on PATH, ahead of
+# anything the host offers, and every gateway/omnigraph URL at the sink. A
+# KEY=VAL before `--` overrides the sink for one case — that is how a case aims
+# itself at its own loopback stand-in instead of the sink. Prints merged
+# stdout+stderr; returns the command's exit code.
+gate_stub_run() {
+    local _d="$1" _envs=()
+    shift
+    while [[ $# -gt 0 && "$1" != "--" ]]; do _envs+=("$1"); shift; done
+    [[ "${1:-}" == "--" ]] && shift
+    PATH="$_d/bin:$_d/stub:$PATH" \
+        AUTOOS_OMNIROUTE_URL="$GATE_URL_SINK" OMNIROUTE_BASE_URL="$GATE_URL_SINK" \
+        AUTOOS_OMNIGRAPH_URL="$GATE_URL_SINK" OMNIGRAPH_URL="$GATE_URL_SINK" \
+        OMNI_S3="$GATE_URL_SINK" \
+        env ${_envs[@]+"${_envs[@]}"} "$@"
+}
+
+# gate_stub_saw <stub-dir> <bin> — did the stand-in record a call to <bin>?
+gate_stub_saw() {
+    grep -q "^$2 " "$1/calls.log" 2>/dev/null
+}
+
+# gate_stub_log <stub-dir> — the record itself, for a failure message.
+gate_stub_log() {
+    cat "$1/calls.log" 2>/dev/null
+}
+
 # Function shellcheck_limit_kb. (Keep comment lines from starting with the linter's
 # name: it parses those as directives and stops with SC1073.)
 # Prints the address-space limit (KiB) run_shellcheck puts on shellcheck: 90% of
@@ -275,6 +336,17 @@ SHELLCHECK_FILES=(setup.sh lib/linux/*.sh tests/run-tests.sh)
 . lib/linux/download.sh
 # shellcheck source=../lib/linux/usb.sh
 . lib/linux/usb.sh
+
+# ─── Fleet rule D-825: the GO gate reads the fake artefact tree, never a host's ──
+# A --go reference now has to name an artefact that EXISTS, and the sources it is
+# looked up in are a host's own files (~/code/routing/..., this checkout's
+# logs/workers/...). Set, not defaulted: an unfiltered suite run must reach the same
+# verdicts on the operator's machine as on a CI runner with no routing dir at all,
+# and must never pass by accident because the host happened to hold the id. A case
+# that wants other content (or an unreadable source) points the env somewhere else
+# for its own child process. See tests/fixtures/go-gate/README.md.
+export AUTOOS_ROUTING_DIR="$ROOT/tests/fixtures/go-gate/routing"
+export AUTOOS_WORKERS_DIR="$ROOT/tests/fixtures/go-gate/worker-tree/workers"
 
 AUTOOS_NO_COLOR=1
 ui_init

@@ -34,10 +34,24 @@
 .PARAMETER DryRun
   Report only. Omits --confirm, so `cleanup` prints its policy and exits.
 
+.PARAMETER Go
+  Fleet rule D-825: a judge GO naming this change — a judge run id (YYYYMMDD-HHMMSS-...),
+  a decision id D-<n> or an OS-<n> item. Required for any run that is not -DryRun; the
+  live compaction refuses without it.
+
+.PARAMETER GoSha
+  'git rev-parse HEAD' of this checkout. Must equal the checkout's HEAD so the GO names
+  the exact code being applied. Required with -Go on a live run.
+
+.PARAMETER GoOffline
+  Proceed although this machine cannot read the artefact the GO names (a missing or
+  unreadable routing dir, no worker record on disk). The run logs 'GO-OFFLINE: <ref>
+  unverified' as its first line; -GoSha is still verified.
+
 .EXAMPLE
   ./compact-graphs.ps1 -DryRun
-  ./compact-graphs.ps1 -Keep 5
-  ./compact-graphs.ps1 -Graphs agent-skills
+  ./compact-graphs.ps1 -Keep 5 -Go D-825 -GoSha (git rev-parse HEAD)
+  ./compact-graphs.ps1 -Graphs agent-skills -Go <ref> -GoSha <sha>
 
 .NOTES
   Take a logical backup first -- this is the same safety bar dedup-graph.py uses:
@@ -51,12 +65,67 @@
 param(
   [int]$Keep = 5,
   [string[]]$Graphs,
-  [switch]$DryRun
+  [switch]$DryRun,
+  [string]$Go = '',
+  [string]$GoSha = '',
+  [switch]$GoOffline
 )
 
 $ErrorActionPreference = 'Stop'
 $Image = 'modernrelay/omnigraph-server:v0.8.1'
 $Stopped = @()
+
+# --- Fleet rule D-825: compaction converges the live store only on an explicit GO ---
+# A non-dry run stops and restarts the live omnigraph-server and rewrites each graph's
+# manifest storage (cleanup + optimize --yes) against the running store, so it mutates
+# shared infrastructure. It refuses without -Go <ref> naming the approving artefact (a
+# judge run id YYYYMMDD-HHMMSS-..., a decision id D-<n> or an OS-<n> item) and -GoSha
+# equal to 'git rev-parse HEAD' of this checkout, so the GO covers the exact code applied.
+# -DryRun needs none and is unchanged; a -Go there is echoed only. This runs before the
+# docker calls below, so a refused run touches nothing. A GO of the right SHAPE is not
+# yet a GO: the ref must name an artefact that EXISTS - a line with that exact id in the
+# routing decisions log, a QUESTIONS.md / ANSWERS.md item, a worker record for a judge
+# run id - and an unreadable source refuses too, unless -GoOffline declared the
+# exception, which logs 'GO-OFFLINE: <ref> unverified' and still verifies -GoSha.
+if (-not $DryRun) {
+    $ErrorActionPreference = 'Continue'
+    if (-not $Go) {
+        [Console]::Error.WriteLine('compact-graphs.ps1: refusing to compact the live omnigraph store without -Go <ref> (fleet rule D-825).')
+        [Console]::Error.WriteLine('  Stopping and restarting the running server and rewriting every graph manifest mutates shared infrastructure; one runs only on an explicit judge GO naming the sha and scope it covers.')
+        [Console]::Error.WriteLine("  Pass -Go <ref> -GoSha <sha>, where <ref> is a judge run id (YYYYMMDD-HHMMSS-...), a decision id D-<n> or an OS-<n> item, and <sha> is 'git rev-parse HEAD' of this checkout. Use -DryRun to inspect.")
+        exit 2
+    }
+    if (-not $GoSha) {
+        [Console]::Error.WriteLine('compact-graphs.ps1: refusing to compact the live omnigraph store without -GoSha <sha> (fleet rule D-825).')
+        [Console]::Error.WriteLine("  <sha> must equal 'git rev-parse HEAD' of this checkout, so the GO names the exact code applied.")
+        exit 2
+    }
+    $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path
+    $CheckoutHead = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+    if ($CheckoutHead) { $CheckoutHead = "$CheckoutHead".Trim() }
+    if (-not $CheckoutHead) {
+        [Console]::Error.WriteLine("compact-graphs.ps1: cannot read this checkout's HEAD (git rev-parse failed in $Root) - refusing to mutate.")
+        exit 2
+    }
+    if ($GoSha -ne $CheckoutHead) {
+        [Console]::Error.WriteLine("compact-graphs.ps1: -GoSha '$GoSha' is not this checkout's HEAD '$CheckoutHead'.")
+        [Console]::Error.WriteLine('  The GO must name the exact sha of the code being applied (fleet rule D-825).')
+        exit 2
+    }
+    # The reference's shape and its EXISTENCE are one implementation, the same
+    # _go_gate.py the bash gates exec and the Python live-store tools import, reached
+    # here through invoke-go-gate.ps1 - never re-derived in this file.
+    $goVerdict = & (Join-Path $PSScriptRoot 'invoke-go-gate.ps1') `
+        -Tool 'compact-graphs.ps1' -Ref $Go -Root $Root -Offline:$GoOffline
+    foreach ($goLine in $goVerdict.Err) { [Console]::Error.WriteLine($goLine) }
+    if ($goVerdict.Code -ne 0) { exit 2 }
+    foreach ($goLine in $goVerdict.Out) { Write-Host $goLine }
+    Write-Host "GO: $Go sha=$CheckoutHead"
+    $ErrorActionPreference = 'Stop'
+} elseif ($Go) {
+    $goShaShown = if ($GoSha) { $GoSha } else { 'none' }
+    Write-Host "GO: $Go sha=$goShaShown (read-only run - no gate applies)"
+}
 
 function Get-DirMB($path) {
   if (-not (Test-Path $path)) { return 0.0 }

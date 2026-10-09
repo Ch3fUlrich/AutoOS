@@ -22,8 +22,10 @@ Run manually, or wire it into omnigraph-setup/omnigraph-sync.sh after a branch m
 
 Examples:
   python scripts/dedup-graph.py --dry-run          # report duplicates only
-  python scripts/dedup-graph.py                    # dedup + rebuild if needed
-  python scripts/dedup-graph.py --map Finance-Repo=finance-repo # force a specific merge
+  # A live dedup resets the store and overwrite-loads every graph, so it now needs a
+  # judge GO naming this checkout's HEAD (fleet rule D-825):
+  python scripts/dedup-graph.py --go <ref> --go-sha "$(git rev-parse HEAD)"
+  python scripts/dedup-graph.py --map Finance-Repo=finance-repo --go D-825 --go-sha "$(git rev-parse HEAD)"  # force a merge
 """
 import argparse
 import json
@@ -35,6 +37,7 @@ import time
 from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _go_gate import add_go_args, enforce  # noqa: E402
 from _omni_env import LOCAL_MINIO_VOLUME, LOCAL_NET, describe, detect_minio_store, detect_network, site_env  # noqa: E402
 
 LABEL = {"Project": "name", "Decision": "title", "Rule": "statement",
@@ -201,7 +204,14 @@ def main():
     ap.add_argument("--graphs", default=os.environ.get("GRAPHS", ""),
                     help="comma-separated graphs to dedup (default: all graphs the server exposes)")
     ap.add_argument("--dry-run", action="store_true")
+    add_go_args(ap)
     a = ap.parse_args()
+    # Fleet rule D-825: dedup resets the store and `load --mode overwrite`s every graph,
+    # so a run that is not --dry-run proceeds only on a judge GO naming this checkout's
+    # HEAD. The gate runs before any docker call, so a refused run touches nothing.
+    _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    enforce("dedup-graph.py", "dedup the live omnigraph store", not a.dry_run, a.go,
+            a.go_sha, _root, go_offline=a.go_offline)
     a.graphs = [g.strip() for g in a.graphs.split(",") if g.strip()]
 
     # Ask docker what is actually here rather than assuming the local stack: central

@@ -194,10 +194,21 @@ Automated by [`../scripts/populate-embeddings.py`](../scripts/populate-embedding
 
 ```bash
 cd infra/mcp-servers
+# Fleet rule D-825: the overwrite-load changes the live store, so it runs only on an
+# explicit judge GO naming this checkout's HEAD. Add --no-load to write the embedded
+# NDJSON locally without touching the store — that path needs no GO.
 python scripts/populate-embeddings.py \
   --seeds cluster/seed/sibling-analysis-repo.jsonl cluster/seed/finance-repo.jsonl \
-  --ollama http://localhost:11434 --graph memory
+  --ollama http://localhost:11434 --graph memory \
+  --go D-825 --go-sha "$(git rev-parse HEAD)"
 ```
+
+`--go D-825` is checked against the artefact tree, not just its shape: the id must appear
+as an exact line in the routing decisions log (`D-<n>`), in `QUESTIONS.md`/`ANSWERS.md`
+(`OS-<n>`), or as a worker record (a judge run id). A machine that cannot read that tree
+refuses; `--go-offline` says so on the record — the run proceeds and logs
+`GO-OFFLINE: <ref> unverified`, with `--go-sha` still verified. The table is in
+[configuration/README.md](../../../configuration/README.md#the-go-reference).
 
 It: (1) embeds every `Decision.rationale` via the local Ollama
 (`/v1/embeddings`, `nomic-embed-text`), (2) writes a combined embedded NDJSON,

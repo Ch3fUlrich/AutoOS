@@ -1,0 +1,8 @@
+{
+  "id": "20261009-064139-goref-fix",
+  "title": "D-825 gate fake worker record (test fixture, never a real run)",
+  "state": "completed",
+  "lane": "fixture",
+  "client": "opencode",
+  "model": "fake/model"
+}

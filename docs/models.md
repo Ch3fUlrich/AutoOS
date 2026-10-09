@@ -484,10 +484,17 @@ want short prompts (TPM caps), sambanova legs are $5-credit overflow.
 ## Apply the config (first run and after edits)
 
 ```bash
-./configuration/omniroute/apply.sh          # registers keys, builds combos
-./configuration/omniroute/apply.sh --dry-run
+./configuration/omniroute/apply.sh --dry-run   # preview what it would change (no GO needed)
+# A live apply mutates the gateway, so fleet rule D-825 requires an explicit judge GO
+# naming this checkout's sha (a judge run id, D-<n> or OS-<n>):
+./configuration/omniroute/apply.sh --go <ref> --go-sha "$(git rev-parse HEAD)"   # registers keys, builds combos
 omniroute simulate --combo l1-orchestrator            # shows the resolved fallback tree
 ```
+
+The ref must name an artefact that EXISTS — a decisions-log line, a QUESTIONS/ANSWERS
+item, a worker record — not merely look like one; `--go-offline` waives the lookup and
+logs it. What each shape is checked against is in
+[the GO reference](../configuration/README.md#the-go-reference).
 
 ```powershell
 .\configuration\omniroute\apply.ps1
@@ -600,7 +607,7 @@ combo and reports what answered. Cheap (a few hundred tokens per combo),
 idempotent, and the right way to check after provider or key changes:
 
 ```bash
-./configuration/omniroute/apply.sh --probe
+./configuration/omniroute/apply.sh --probe --go <ref> --go-sha "$(git rev-parse HEAD)"
 ```
 
 ```powershell

@@ -66,6 +66,7 @@ CARD_V2_VALUES = {
     "spec": ("exact", "partial", "vague"),
     "privacy": ("public", "sensitive"),
     "mode": ("cost-first", "balanced", "quality-first"),
+    "task_type": ("ops", "code", "docs", "infra"),
 }
 CARD_V2_DEFAULTS = {"kind": "implement", "risk": "normal", "spec": "partial",
                     "privacy": "public", "mode": "balanced", "deferrable": False,
@@ -73,7 +74,8 @@ CARD_V2_DEFAULTS = {"kind": "implement", "risk": "normal", "spec": "partial",
                     "author": None, "critical": False}
 CARD_V1_ONLY = frozenset({"role", "complexity", "ctx", "spend"})
 CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
-                          "deadline", "paths", "override", "critical"})
+                          "deadline", "paths", "override", "critical",
+                          "task_type"})
 # privacy and author belong to both dialects: REVROUTE (S2) item 2 put the
 # author on the card so a review can be resolved to a different-family
 # reviewer, and role=review is how most lanes already spell a review.
@@ -294,7 +296,7 @@ def normalize_v2(card: dict) -> dict:
             out["author"] = _check_author(v1["author"])
         return out
 
-    for key in ("kind", "risk", "spec", "privacy", "mode"):
+    for key in ("kind", "risk", "spec", "privacy", "mode", "task_type"):
         if key in flat:
             out[key] = _check_choice(key, flat[key], CARD_V2_VALUES[key])
     if "author" in flat:
