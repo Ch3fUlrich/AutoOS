@@ -991,6 +991,30 @@ def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
                                  head_files)
 
 
+def _isolate_sparse_keeps_deleted(root: str, deleted) -> set | None:
+    """G2: HEAD's index answers nothing for a path DELETED at HEAD, so a sparse
+    source dropped EVERY deletion from the patch; the pattern-level matcher —
+    the same `_isolate_cone_allowed` over the pattern file
+    `_isolate_sparse_allowed`'s fallback reads — decides instead. None when the
+    source is not sparse."""
+    cfg = subprocess.run(["git", "-C", root, "config", "--bool", "core.sparseCheckout"],
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if cfg.stdout.strip() != "true":
+        return None
+    gd = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
+                        capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    try:
+        with io.open(os.path.join(gd if os.path.isabs(gd) else os.path.join(root, gd),
+                                  "info", "sparse-checkout"), encoding="utf-8") as fh:
+            patterns = [ln.strip() for ln in fh.read().splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+    except OSError:
+        return None
+    return _isolate_cone_allowed([p for p in patterns if not p.startswith("!")],
+                                 [p[1:] for p in patterns if p.startswith("!")],
+                                 deleted) if patterns else None
+
+
 def _isolate_path_excluded(rel: str, agentignore: list) -> bool:
     """Whether a HEAD path stays out of the sandbox.
 
@@ -1208,6 +1232,17 @@ def _isolate_link_inside(path: str, target: str) -> bool:
     return rel != ".." and not rel.startswith("../") and rel != "."
 
 
+def _isolate_entry_refusal(path: str, mode: str, target) -> "str | None":
+    """Why `_isolate_materialise` would skip this entry, or None when it would
+    write it. ONE predicate shared with the review-diff filter (G1) so the two
+    cannot drift — and the refusal strings stay what materialise prints."""
+    if not _isolate_safe_path(path):
+        return "unsafe path"
+    if mode == "120000" and not _isolate_link_inside(path, target):
+        return "symlink target escapes the sandbox"
+    return None
+
+
 def _isolate_clear_below(dest: str, rel: str) -> bool:
     """Whether `rel` can be written under `dest` without leaving it (R1c).
 
@@ -1278,12 +1313,10 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
         data = blobs.get(sha)
         if data is None:
             continue
-        if not _isolate_safe_path(path):
-            _isolate_refuse_path(path, "unsafe path")
-            continue
         target = data.decode("utf-8", "surrogateescape")
-        if mode == "120000" and not _isolate_link_inside(path, target):
-            _isolate_refuse_path(path, "symlink target escapes the sandbox")
+        refusal = _isolate_entry_refusal(path, mode, target)
+        if refusal:
+            _isolate_refuse_path(path, refusal)
             continue
         if not _isolate_clear_below(dest, path):
             _isolate_refuse_path(path, "an ancestor is a symlink or outside")
@@ -1456,6 +1489,19 @@ def resolve_review_base(root: str, base):
     return tuple(proc.stdout.split()) if proc.returncode == 0 else None
 
 
+def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
+    """G1: `(present, accepted)` for side `sha` — accepted means the
+    materialiser's OWN entry list (`_isolate_batch_entries`) passes its OWN
+    predicate (`_isolate_entry_refusal`), so patch and seat cannot drift. Only
+    symlink blobs are read: the refused target string itself is the leak."""
+    entries = _isolate_batch_entries(root, sha, paths)
+    blobs = _isolate_batch_blobs(root, [e for e in entries if e[0] == "120000"])
+    accepted = {path for mode, blob, path in entries if mode != "120000"
+                or (blobs.get(blob) is not None and _isolate_entry_refusal(
+                    path, mode, blobs[blob].decode("utf-8", "surrogateescape")) is None)}
+    return {e[2] for e in entries}, accepted
+
+
 def _review_diff_paths(root: str, pair, allowed) -> list:
     """The diff names that ride out: the allowed HEAD paths PLUS paths DELETED in
     the range (D1: `allowed` is HEAD-only, so removals were dropped and the seat -
@@ -1473,10 +1519,17 @@ def _review_diff_paths(root: str, pair, allowed) -> list:
                                     % (pair[0][:8], root, exc.returncode)) from None
         return {n.decode("utf-8", "surrogateescape") for n in out.split(b"\0") if n}
     deleted, ignore = names("--diff-filter=D"), _isolate_agentignore_patterns(root)
-    sparse = _isolate_sparse_allowed(root, sorted(deleted))
-    return sorted((names() & set(allowed)) | {p for p in deleted
+    sparse = _isolate_sparse_keeps_deleted(root, deleted)  # G2: not HEAD's index
+    kept = sorted((names() & set(allowed)) | {p for p in deleted
                if not _isolate_path_excluded(p, ignore)
                and (sparse is None or p in sparse)})
+    # G1: drop (not refuse) paths whose own side's entry the materialiser would
+    # skip — HEAD for adds/mods, BASE for deletions; a type change leaks on
+    # neither side.
+    pres_h, acc_h = _patch_side_accepted(root, pair[1], kept)
+    pres_b, acc_b = _patch_side_accepted(root, pair[0], kept)
+    return [p for p in kept if (p not in pres_h or p in acc_h)
+            and (p not in pres_b or p in acc_b)]
 
 
 def write_review_diff(root: str, path: str, pair, allowed) -> None:
@@ -1491,6 +1544,12 @@ def write_review_diff(root: str, path: str, pair, allowed) -> None:
     # D2: the SOURCE may track this very name, and io.open("wb") writes THROUGH
     # such a symlink: unlink, then create O_EXCL|O_NOFOLLOW - never write through.
     target = os.path.join(path, REVIEW_DIFF_FILE)
+    if os.path.isdir(target) and not os.path.islink(target):
+        # G3: the source tracks `REVIEW-DIFF.patch/x`; materialise built it and
+        # os.remove() raised IsADirectoryError past cmd_run. Refusing (rc2) is
+        # the smaller, fail-closed choice over deleting the seat's own tree.
+        raise ReviewBaseRefused("review-base: source tracks a directory named "
+                                "%s; the patch cannot ride" % REVIEW_DIFF_FILE)
     if os.path.lexists(target):
         os.remove(target)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -6498,7 +6557,10 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
                     "family_reason": "the gateway call log named no model for "
                                      "this run"}
         if found is None:
-            provider = free_provider(pin) or plan.get("client") or WRITER_UNRESOLVED
+            # G4: a pin without a `provider/` prefix names the client, not a
+            # provider — as the non-gateway branch (:6529) already records it.
+            provider = ((free_provider(pin) if "/" in pin else plan.get("client"))
+                        or WRITER_UNRESOLVED)
             model = pin.rpartition("/")[2]
             served_id, source = pin, WRITER_SOURCE_PIN
         else:

@@ -23005,6 +23005,66 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             with self.assertRaises(self.cli.ReviewBaseRefused):
                 self.cli.write_review_diff(root, tmp, (gone, head), allowed)
 
+    # P1-FIX4 (attacker-reproduced; each test below FAILS on 2b76296a).
+
+    @unittest.skipIf(os.name == "nt", "tracked symlinks are a POSIX shape")
+    def test_a_refused_symlink_never_leaks_its_target_through_the_patch(self):
+        # G1: materialise refuses an escaping link yet `git diff` still named the
+        # path, so the TARGET STRING rode in the patch for a file the seat does
+        # not hold — HEAD side (add) and BASE side (delete, same one leak shape).
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        os.symlink("/etc/TARGET-FROM-BASE-LINK", os.path.join(self.root, "oldlink"))
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "oldlink"))
+        os.symlink("/home/victim/.ssh/id_ed25519", os.path.join(self.root, "escape"))
+        os.symlink("keep.txt", os.path.join(self.root, "inside"))
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        head = self._commit("head")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4a", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertNotIn("/home/victim/.ssh/id_ed25519", patch)
+            self.assertNotIn("TARGET-FROM-BASE-LINK", patch)
+            self.assertIn("inside", patch, "an in-sandbox link is not refused")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, "s", "escape")))
+
+    def test_a_sparse_source_still_carries_its_visible_deletions(self):
+        # G2: HEAD's index answers nothing for a path deleted at HEAD, so a
+        # sparse source dropped EVERY deletion; the pattern matcher decides.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "sub/deep"))
+        io.open(os.path.join(self.root, "gone-visible.txt"), "w").write("GONE-VISIBLE\n")
+        io.open(os.path.join(self.root, "sub/deep/gone-hidden.txt"), "w").write("GONE-HIDDEN\n")
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "gone-visible.txt"))
+        os.remove(os.path.join(self.root, "sub/deep/gone-hidden.txt"))
+        head = self._commit("deletions")
+        subprocess.run(self.git + ["-C", self.root, "sparse-checkout", "set",
+                                   "--cone", "pkg"], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4b", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("-GONE-VISIBLE", patch, "a visible deletion must ride")
+            self.assertNotIn("GONE-HIDDEN", patch, "sparse-hidden stays out (F1)")
+
+    def test_a_directory_shaped_patch_name_refuses_instead_of_traceback2(self):
+        # G3: HEAD tracks `REVIEW-DIFF.patch/x`; materialise builds that directory
+        # and os.remove() on it was an uncaught IsADirectoryError past cmd_run.
+        # A rc2 refusal is the smaller, fail-closed choice over deleting the tree.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        base = self._out("-C", self.root, "rev-parse", "HEAD")
+        os.makedirs(os.path.join(self.root, self.cli.REVIEW_DIFF_FILE))
+        io.open(os.path.join(self.root, self.cli.REVIEW_DIFF_FILE, "x"), "w").write("X\n")
+        head = self._commit("dir-shaped")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4c", (base, head))
+            self.assertFalse(os.path.lexists(tmp + "/s"))
+
 
 class P1PinnedWriterFamilyTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the
@@ -23035,6 +23095,15 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
         writer = self._log_named_nothing(agent)
         self.assertEqual(writer["source"], agent.WRITER_UNRESOLVED)
         self.assertIsNone(writer["family"])
+
+    def test_a_no_slash_pin_records_the_client_as_provider(self):
+        # G4: free_provider("gemini-3.8-flash") returned the whole id as provider;
+        # a native pin's provider half is the client name (as the :6529 branch).
+        agent = load_agent()
+        writer = self._log_named_nothing(agent, model="gemini-3.8-flash",
+                                         model_source=agent.WRITER_SOURCE_PIN)
+        self.assertEqual(writer["provider"], "opencode")
+        self.assertEqual(writer["model"], "gemini-3.8-flash")
 
 
 if __name__ == "__main__":
