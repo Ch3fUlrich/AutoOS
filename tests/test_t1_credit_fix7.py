@@ -37,6 +37,26 @@ VERTEX_PRICE = (1.5e-06, 7.5e-06)
 BIG = {"in": 100_000_000, "out": 30_000_000}
 
 
+def _vertex_tool_calls_unproven(route):
+    """Probe overlay that refuses every vertex leg of `route` for tool calls.
+
+    The implement-card legs of R5 / C4 / T2-C4 need a vertex leg that is
+    SKIPPED, and the shipped registry used to skip one for them on its own:
+    the vertex model carried no proven tool_calls verdict, which is the reason
+    text those tests assert on. D-657 (2026-10-08) probed
+    vertex/gemini-3.8-flash with a real tool call and recorded it `proven` in
+    catalog/ai-registry.json, so no shipped route skips a vertex leg for an
+    implement card any more — the fact moved, not the behaviour under test.
+    The skip is therefore driven through `tools/probe-toolcalls.py`'s own
+    overlay shape, which `_tool_calls_value` reads ahead of the registry
+    verdict, and every assertion below stays exactly as it was: what a skipped
+    leg must never print.
+    """
+    return {"legs": {leg: {"tool_calls": {"value": "unproven"}}
+                     for leg in (route.get("legs") or [])
+                     if leg.split("/")[0] in ("vertex", "vertex_ai")}}
+
+
 def _reg():
     return {
         "providers": {
@@ -242,7 +262,8 @@ class R5LoudLineOnlyForSurvivors(unittest.TestCase):
             route, {"kind": "implement", "privacy": "public"},
             {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
-            reg, {}, credit_guards=guards, credit_warns=warns)
+            reg, _vertex_tool_calls_unproven(route),
+            credit_guards=guards, credit_warns=warns)
         skipped_ids = [s[0] if isinstance(s, (list, tuple)) else s
                        for s in skipped]
         vertex_skipped = [str(x) for x in skipped_ids
@@ -498,7 +519,8 @@ class C4UnknownWarnOnlyForSurvivors(unittest.TestCase):
             route, {"kind": "implement", "privacy": "public"},
             {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
-            reg, {}, credit_guards=self._guards(reg), credit_warns=warns)
+            reg, _vertex_tool_calls_unproven(route),
+            credit_guards=self._guards(reg), credit_warns=warns)
         vertex_skipped = [leg for leg in skipped
                           if str(leg).split("/")[0] in ("vertex", "vertex_ai")]
         self.assertTrue(vertex_skipped,
@@ -730,7 +752,8 @@ class T2WindowLimitedCaveat(unittest.TestCase):
             route, {"kind": "implement", "privacy": "public"},
             {"need_tokens": 10},
             {"opencode": {"installed": True, "signed_in": True, "reason": ""}},
-            reg, {}, credit_guards=guards, credit_warns=warns)
+            reg, _vertex_tool_calls_unproven(route),
+            credit_guards=guards, credit_warns=warns)
         vertex_skipped = [leg for leg in skipped
                           if str(leg).split("/")[0] in ("vertex", "vertex_ai")]
         self.assertTrue(vertex_skipped,

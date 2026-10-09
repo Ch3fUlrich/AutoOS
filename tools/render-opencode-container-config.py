@@ -134,9 +134,18 @@ GH_READONLY = {
 # OmniRoute (fast, not rate-limited). These are pins because the host source
 # (~/.config/opencode/opencode.json) is projected from an older opencode.jsonc
 # and would otherwise revert the live fixes on the next `ai-stack.sh init`.
+# D657-D2 (AO-DENYLEGS D2, operator D-657) supersedes the orchestrator choice:
+# `deepseek/deepseek-flash` answers in neither probe-d657 TSV, so the
+# `deepseek-v4.1-flash` route renders no combo and apply.sh prunes it from the
+# gateway store — an agent pinned to it would start against a combo the gateway
+# no longer serves. It moves to `l1-orchestrator`, the D-657 L1 chain (1M, head
+# `bzl/deepseek/deepseek-v4-flash-0731free:free` ack ok + tool ok, priced
+# `vertex/gemini-3.8-flash` tail), which is also the route `tools/autoos-agent.py`
+# TIERS[1] spawns. The variant/context pinning below still applies to any host
+# that declares the deepseek row.
 FLEET_AGENT_MODELS = {
-    "orchestrator": "omniroute/deepseek-v4.1-flash",
-    "suborchestrator": "omniroute/deepseek-v4.1-flash",
+    "orchestrator": "omniroute/l1-orchestrator",
+    "suborchestrator": "omniroute/l1-orchestrator",
     # Operator D-255 (2026-10-01): NEVER a Gemini Pro model; only Gemini
     # 3.6/3.7/3.8 Flash. leaf-implementer is re-pinned from the old
     # vertex-gemini-3.1-pro-preview to the Vertex 3.8 Flash leg. The 2026-09-30

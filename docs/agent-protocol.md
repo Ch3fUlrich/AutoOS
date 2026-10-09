@@ -159,6 +159,12 @@ MCP spawn:
 | opencode `big-pickle` (spawner `--free` default) | works | asked, `respond()` answered, REPORT completed |
 | opencode `omniroute/deepseek-v4.1-flash` | works | same |
 | opencode `omniroute/spark-1.3-contributor` (Muse Spark 1.3) | works | same |
+
+The last two rows measure the 2026-09-27 gateway, and both combos render nothing
+today: D-657 omits every route whose legs no probe-d657 gateway acked, so
+`deepseek/deepseek-flash` and `meta_api/muse-spark-1.3-contributor` are gated and
+`policy.reviewers` no longer names the Muse head. The measurements stand; the
+model names are not selectable. See `docs/models.md` for what serves now.
 | qoder (`--permission-mode dont_ask`, no shell) | no | printed the stdout QUESTION + REPORT `input_required` |
 | qoder writer (`--permission-mode bypass_permissions`, Qwen3.8-Flash, sandbox forced) | not measured | shell + write work headless (2026-09-27, scratch repo); ask-back not yet measured |
 | agy (default model) | not measured | Gemini quota 429 before the task ran |

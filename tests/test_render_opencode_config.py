@@ -79,7 +79,14 @@ class TestRenderOpencodeConfig(unittest.TestCase):
         for mid in module.FLEET_ALIAS_MODELS:
             self.assertIn(mid, models)
         self.assertEqual(cfg['agent']['orchestrator']['model'],
-                         'omniroute/deepseek-v4.1-flash')
+                         # D657-D2 (AO-DENYLEGS D2, 2026-10-08): the paid
+                         # deepseek combo the operator pinned on 2026-09-30
+                         # renders nothing now (no probe-d657 gateway acked
+                         # deepseek/deepseek-flash, so apply.sh prunes it), and
+                         # an agent pointed at a pruned combo starts against an
+                         # empty store. The L1 chain is the D-657 answer, and it
+                         # is what tools/autoos-agent.py TIERS[1] spawns.
+                         'omniroute/l1-orchestrator')
         # Operator 2026-09-30: vertex/claude-sonnet-4-5 answers 501 on the live
         # gateway, so the reviewer defaults to a working other-family leg.
         self.assertEqual(cfg['agent']['leaf-reviewer']['model'],

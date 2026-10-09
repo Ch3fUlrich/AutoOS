@@ -282,12 +282,18 @@ class RuleThreePrivacyTests(unittest.TestCase):
     the leg that actually heads `l2-worker-clean` on this base —
     deepseek/deepseek-flash — which is the head the privacy rule exists to keep
     clean.
+
+    D657-D2 (2026-10-08) re-cut the chains: every `-clean` route now heads
+    `vertex/gemini-3.8-flash`, whose leg prefix is that provider's omniroute_id,
+    not its registry key (`vertex_ai`). The leg is therefore resolved with
+    `registry.resolve_leg()` rather than split on the slash — dirtying a
+    provider row that does not exist would test nothing.
     """
 
     def setUp(self):
         reg = load_registry()
         self.leg = reg["routes"]["l2-worker-clean"]["legs"][0]
-        self.provider, _, self.model = self.leg.partition("/")
+        self.provider, self.model = registry.resolve_leg(self.leg, reg)
 
     def test_clean_route_with_a_training_leg_is_flagged(self):
         reg = mutated()
@@ -308,17 +314,17 @@ class RuleThreePrivacyTests(unittest.TestCase):
     def test_unavailable_leg_of_a_clean_route_is_still_checked(self):
         # PRIV2, 2026-09-26 (supersedes the old review-a3 "not checked"
         # behaviour): the gateway does not consult unavailable_legs/
-        # available:false, so rule 3 must not either. TORDER-OR 2026-10-01:
-        # openrouter paid legs removed (no credits -> :free only), so use
-        # l2-worker-clean deepseek leg (still in legs) flagged here.
+        # available:false, so rule 3 must not either. D657-D2 2026-10-08: the
+        # clean routes' head is now vertex/gemini-3.8-flash (deepseek/deepseek-
+        # flash left every chain under spec SS8), so gate the route's own head.
         reg = mutated()
-        reg["providers"]["deepseek"]["trains_on_prompts"] = True
+        reg["providers"][self.provider]["trains_on_prompts"] = True
         reg["routes"]["l2-worker-clean"].setdefault("unavailable_legs", {})[
-            "deepseek/deepseek-flash"] = {"available": False}
+            self.leg] = {"available": False}
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("privacy: l2-worker-clean" in p
-                and "deepseek/deepseek-flash" in p
+                and self.leg in p
                 for p in problems), problems)
 
     def test_unknown_trains_on_prompts_is_flagged(self):
@@ -658,14 +664,15 @@ class CleanRouteExemptionTests(unittest.TestCase):
     check_registry() problem."""
 
     def test_unavailable_leg_of_a_non_exempt_clean_route_is_now_checked(self):
-        # TORDER-OR: openrouter paid removed; use deepseek trains=True to make
-        # l2-worker-clean deepseek leg unsafe (still in legs).
+        # D657-D2 2026-10-08: l2-worker-clean heads vertex/gemini-3.8-flash, so
+        # dirty that leg's own provider row (registry key `vertex_ai`).
         reg = mutated()
-        reg["providers"]["deepseek"]["trains_on_prompts"] = True
+        leg = reg["routes"]["l2-worker-clean"]["legs"][0]
+        provider, _model = registry.resolve_leg(leg, reg)
+        reg["providers"][provider]["trains_on_prompts"] = True
         problems = registry.check_registry(reg)
         self.assertTrue(
-            any("privacy: l2-worker-clean" in p
-                and "deepseek/deepseek-flash" in p
+            any("privacy: l2-worker-clean" in p and leg in p
                 for p in problems), problems)
 
     def test_t1_orchestrator_clean_is_in_the_exemption_table(self):
@@ -871,13 +878,16 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
                       problems)
 
     def test_an_unparsable_until_on_an_unavailable_leg_is_flagged(self):
+        # D657-D2 2026-10-08: the committed registry's remaining leg gates are
+        # on the routes that still declare a gated tail; l1-orchestrator-clean
+        # keeps its contributor tail gated, so dirty that entry.
         reg = mutated()
-        reg["routes"]["l2-worker-clean"]["unavailable_legs"][
-            "opencode-zen/deepseek-v4.1-flash"]["unavailable_until"] = "2026-13-01"
+        reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
+            "openrouter/meta/muse-spark-1.3-contributor"]["unavailable_until"] = "2026-13-01"
         problems = registry.check_registry(reg)
         self.assertTrue(any(p.startswith(
-            "bad unavailable_until: routes.l2-worker-clean.unavailable_legs."
-            "opencode-zen/deepseek-v4.1-flash") for p in problems), problems)
+            "bad unavailable_until: routes.l1-orchestrator-clean.unavailable_legs."
+            "openrouter/meta/muse-spark-1.3-contributor") for p in problems), problems)
 
     def test_a_non_string_until_is_flagged(self):
         reg = mutated()
@@ -968,15 +978,18 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
     def test_missing_available_on_unavailable_leg_is_flagged(self):
         reg = mutated()
-        leg = reg["routes"]["l2-worker-clean"]["unavailable_legs"][
-            "opencode-zen/deepseek-v4.1-flash"]
+        # D657-D2 2026-10-08: same gate as the rule-7 fixture — the route that
+        # still declares a gated tail.
+        leg = reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
+            "openrouter/meta/muse-spark-1.3-contributor"]
         del leg["available"]
         leg["unavailable_until"] = "2026-10-01T09:05:00Z"
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("entry with unavailable_until but no available: false: "
-                "routes.l2-worker-clean.unavailable_legs.opencode-zen/deepseek-v4.1-flash"
-                in p for p in problems),
+                "routes.l1-orchestrator-clean.unavailable_legs."
+                "openrouter/meta/muse-spark-1.3-contributor" in p
+                for p in problems),
             problems)
 
     def test_available_true_with_unavailable_until_is_flagged_too(self):
@@ -1007,9 +1020,14 @@ class OpenRouterByokLegTests(unittest.TestCase):
     def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
         # TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): paid
         # openrouter/openai/gpt-oss-120b removed from l2-worker (was already
-        # unavailable/gated; combos clean). Groq gpt-oss free leg remains.
+        # unavailable/gated; combos clean).
+        # D657-D2 2026-10-08 (spec combo-v2 SS2, judge rule "groq unknown cache
+        # -> L3 only"): the groq leg left the L2 chain and rides the L3 driver,
+        # so the presence pin moves there.
         self.assertNotIn("openrouter/openai/gpt-oss-120b", self.t2_worker_legs)
-        self.assertIn("groq/openai/gpt-oss-120b", self.t2_worker_legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", self.t2_worker_legs)
+        self.assertIn("groq/openai/gpt-oss-120b",
+                      self.reg["routes"]["l3-driver"]["legs"])
 
     def test_leg_resolves_to_a_model(self):
         # resolve_leg ignores route membership, so this pins the spelling only;
@@ -1031,11 +1049,14 @@ class OpenRouterByokLegTests(unittest.TestCase):
     def test_unavailable_entry_has_the_l0_comment(self):
         # TORDER-OR: paid leg removed; provenance lives in TORDER-OR registry
         # $comment + provider $comment (no credits -> :free only), not a gate.
-        # The $comment-provenance rule itself is pinned by other gated tails
-        # (morph/deepinfra still gated with price notes).
-        gated = self.reg["routes"]["l2-worker"].get("unavailable_legs") or {}
-        self.assertIn("morph/morph-dsv4flash", gated)
-        self.assertIn("price", (gated["morph/morph-dsv4flash"].get("$comment") or "").lower())
+        # D657-D2 2026-10-08: l2-worker's chain is re-cut to probe-acked legs, so
+        # the morph/deepinfra provenance gates left with the legs it no longer
+        # declares. The $comment-provenance rule is pinned on a gate that is still
+        # shipped: routes.faik-gpt-6-sol carries its price note.
+        gated = self.reg["routes"]["faik-gpt-6-sol"]["unavailable_legs"]
+        leg = "freeaiapikey/openai/gpt-6-sol"
+        self.assertIn(leg, gated)
+        self.assertIn("price", (gated[leg].get("$comment") or "").lower())
 
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         # TORDER-OR: paid leg removed from every route (except t1-clean kept
@@ -1533,13 +1554,18 @@ class CheaperinferenceUnavailableTests(unittest.TestCase):
             self.assertNotIn("cheaperinference/glm-4.5-air", kept, rid)
             self.assertNotIn("cheaperinference/deepseek-v4-flash", kept, rid)
 
-    def test_glm_4_5_air_is_route_gated_where_listed(self):
+    def test_glm_4_5_air_is_declared_nowhere_after_the_recut(self):
+        # D657-D2 2026-10-08 (spec combo-v2 SS8: kimi/glm/mimo off): the leg is
+        # not merely route-gated any more, it is out of every chain. The
+        # provider-level available:false still refuses it if it is re-added.
         reg = load_registry()
-        for rid in ("l2-worker", "l3-driver"):
-            entry = (reg["routes"][rid].get("unavailable_legs") or {}).get(
-                "cheaperinference/glm-4.5-air")
-            self.assertIsNotNone(entry, rid)
-            self.assertIs(entry.get("available"), False)
+        chains = [rid for rid, route in reg["routes"].items()
+                  if rid.startswith(("l1-", "l2-", "l3-", "t"))
+                  and any(leg.startswith("cheaperinference/")
+                          for leg in (route.get("legs") or []))]
+        self.assertEqual(chains, [])
+        self.assertTrue(registry._leg_is_unavailable(
+            "cheaperinference/glm-4.5-air", reg["routes"]["l2-worker"], reg))
 
     def test_leg_rules_allow_the_three_and_deny_the_rest(self):
         reg = load_registry()
@@ -1598,7 +1624,13 @@ class FreeAiProviderTests(unittest.TestCase):
     with model `qwen7b`, wired as the LAST free leg of both zero-spend routes
     so `l3-driver-free-only` serves again. `free_ai` is a public pool whose
     terms allow training on prompts, so it is never private-safe and never
-    enters a -clean route."""
+    enters a -clean route.
+
+    D657-D2 (2026-10-08) took it out of every chain: probe D-657 got the ack
+    back 200 on both gateways but the tool call never landed and its cache is
+    undocumented, and the judge rule admits a leg on prompt_cache
+    true|documented only. The provider row stays so a passing re-probe can
+    re-admit it; these tests pin the absence, the shape and the training rule."""
 
     @classmethod
     def setUpClass(cls):
@@ -1644,43 +1676,30 @@ class FreeAiProviderTests(unittest.TestCase):
         self.assertFalse(safe)
         self.assertTrue(reason)
 
-    def test_free_ai_leg_is_last_on_both_free_only_routes(self):
-        # TORDER 2026-10-01 (trial->free->credits->paid): free_ai/qwen7b moved
-        # into free band (no credits/paid in free-only). SCWREMOVAL 2026-10-06:
-        # with the scaleway tails gone it rides last among servable legs.
-        # Contract gates order.
-        for route_id in ("l2-worker-free-only", "l3-driver-free-only"):
-            legs = self.reg["routes"][route_id]["legs"]
-            self.assertIn("free_ai/qwen7b", legs, route_id)
-            # all legs free (free-only takes no credit/paid)
-            for leg in legs:
-                # gated tails (cerebras/sambanova) are free-tier but provider-off;
-                # servable band must be free
-                pass
-            # free_ai precedes scaleway tail (not heads, not last)
-            self.assertLess(legs.index("free_ai/qwen7b"), len(legs), route_id)
+    def test_free_ai_rides_no_chain_after_the_d657_tool_probe(self):
+        # D657-D2 2026-10-08: neither spelling may be declared by a chain route —
+        # the registry leg (free_ai/) and its rendered omniroute_id (free-ai/).
+        for rid, route in self.reg["routes"].items():
+            hits = [leg for leg in (route.get("legs") or [])
+                    if leg.startswith(("free_ai/", "free-ai/"))]
+            self.assertFalse(hits, "route %s still declares %s" % (rid, hits))
 
-    def test_t2_worker_ends_with_the_free_ai_stopgap_leg(self):
-        """BRIEF T2FREE (S1, urgent stopgap 2026-09-28): the routing-00 smoke
-        run got 503 ALL_TARGETS_SKIPPED from l2-worker — every leg ahead of
-        this one was down at the time (gemini 429 cooldown, agy out of quota,
-        meta-api not registered) — so the leg measured answering 200 is the
-        route's last resort. The free-only routes already carried it last.
-
-        FREEKEYS-2 (D-141 item 3) appended the gated `credit` tail fallbacks
-        behind it, so "last" is now read over the legs that can answer: a gated
-        leg renders nothing to the gateway (combo_free_legs drops it) and cannot
-        be reached at all until a price lands, so the stopgap is still the last
-        leg a real request can fall through to."""
+    def test_l2_worker_closes_with_the_vertex_leg(self):
+        """BRIEF T2FREE (S1, urgent stopgap 2026-09-28) put the leg that
+        measured answering 200 last, so a request always fell through to
+        something. D657-D2 (2026-10-08) keeps that shape and changes the name:
+        probe D-657 measured `vertex/gemini-3.8-flash` answering on both
+        gateways with a documented cache, and spec SS8's paid-deepseek ban took
+        the old tail out, so the vertex leg is now the last leg a real request
+        can fall through to."""
         route = self.reg["routes"]["l2-worker"]
-        # TORDER: paid deepseek LAST (was free_ai stopgap last). free_ai now in
-        # free band; last servable is deepseek paid.
-        self.assertEqual(live_legs(self.reg, "l2-worker")[-1], "deepseek/deepseek-flash")
-        # free_ai precedes credits (ovh/vertex) and paid (meta/deepseek)
+        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
+                         "vertex/gemini-3.8-flash")
         legs = route["legs"]
-        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("ovhcloud/gpt-oss-120b"))
-        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("meta_api/muse-spark-1.3-contributor"))
-        self.assertLess(legs.index("free_ai/qwen7b"), legs.index("deepseek/deepseek-flash"))
+        for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
+                     "ovhcloud/gpt-oss-120b",
+                     "meta_api/muse-spark-1.3-contributor"):
+            self.assertNotIn(gone, legs, gone)
 
     def test_no_clean_route_carries_free_ai(self):
         # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
@@ -1694,10 +1713,13 @@ class FreeAiProviderTests(unittest.TestCase):
                  if leg.startswith(("free_ai/", "free-ai/"))],
                 "clean route %s carries free_ai" % route_id)
 
-    def test_gateway_legs_keep_free_ai_on_the_free_only_routes(self):
+    def test_gateway_legs_drop_free_ai_from_the_free_only_routes(self):
+        # D657-D2 2026-10-08: the free-only chains are now the probe-acked free
+        # band (bazaarlink + openrouter :free, cohere, groq), with no free_ai leg.
         for route_id in ("l2-worker-free-only", "l3-driver-free-only"):
             kept = registry.gateway_legs(self.reg["routes"][route_id], self.reg)
-            self.assertIn("free_ai/qwen7b", kept, route_id)
+            self.assertNotIn("free_ai/qwen7b", kept, route_id)
+            self.assertTrue(kept, route_id)
 
     def test_t3_driver_free_only_serves_again(self):
         ids = registry.servable_route_ids(self.reg)
@@ -1721,7 +1743,14 @@ class MetaApiProviderTests(unittest.TestCase):
     contributor contract, so it is never private-safe and never enters a
     -clean route; on l2-worker/l3-driver it is a paid escalation placed AFTER
     that route's free legs (the trailing T2FREE stopgap free leg on l2-worker
-    excepted — it is last on purpose, see FreeAiProviderTests)."""
+    excepted — it is last on purpose, see FreeAiProviderTests).
+
+    D657-D2 (2026-10-08) closes that description with spec combo-v2 SS8: no paid
+    muse rides a chain, only the `-free` muse ids may, and probe D-657 left even
+    those unproved. The leg is therefore *declared but gated* on
+    l1-orchestrator-clean and spark-1.3-contributor, and `l1-orchestrator-paid`
+    carries no legs at all; the provider row and its transport stay for a
+    re-probe."""
 
     LEG = "meta_api/muse-spark-1.3-contributor"
 
@@ -1793,49 +1822,48 @@ class MetaApiProviderTests(unittest.TestCase):
         self.assertEqual(self.reg["models"]["muse-spark-1.3-contributor"]["tool_calls"],
                          "unproven")
 
-    def test_the_leg_heads_the_paid_routes(self):
-        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"][0], self.LEG,
-                             route_id)
+    def test_the_leg_is_declared_only_where_it_is_gated(self):
+        # D657-D2 2026-10-08 (spec SS8): the paid leg heads no chain. The meta-api
+        # spelling survives in exactly one route's `legs`, purely as a gated tail,
+        # and it is gated, so nothing renders it. (l1-orchestrator-clean declares
+        # the *openrouter* copy of the contributor, also gated — the exemption
+        # table names that one.)
+        routes = self.reg["routes"]
+        listing = sorted(rid for rid, route in routes.items()
+                         if self.LEG in (route.get("legs") or []))
+        self.assertEqual(listing, ["spark-1.3-contributor"])
+        self.assertNotIn(self.LEG,
+                         registry.gateway_legs(routes["spark-1.3-contributor"],
+                                               self.reg))
+        self.assertEqual(routes["l1-orchestrator-paid"]["legs"], [])
 
-    def test_on_t1_it_follows_the_600k_qualified_band(self):
+    def test_t1_keeps_only_the_600k_qualified_band(self):
         # TORDER 2026-10-01 (D-TORDER-1b, operator update 3): t1 keeps only legs
         # whose window is >= 600000 (explicit constant T1_MIN_WINDOW in
-        # tools/combo-contract.py; rendered result is still 1M). The band order
-        # is trial->free->credits->paid: no paid leg before a free one, credits
-        # before paid, deepseek/deepseek-flash LAST. Supersedes the FREEKEYS-2
-        # free-band-only assertion (which required every leg ahead of the paid
-        # contributor to be provider-tier free and failed the vertex credit leg).
+        # tools/combo-contract.py; rendered result is still 1M).
+        # D657-D2 2026-10-08 changed *which* legs qualify, not the bar: spec SS8
+        # took the paid deepseek tail (and the paid contributor) out of the
+        # chain, so the band is the free probe-acked head plus the credit vertex
+        # leg, every one of them >= 600000.
         legs = self.reg["routes"]["l1-orchestrator"]["legs"]
-        self.assertIn(self.LEG, legs)
-        self.assertEqual(legs[-1], "deepseek/deepseek-flash", "deepseek last")
-        # no paid before free; credits before paid
-        tiers = [leg_tier(self.reg, leg) for leg in legs]
-        # leg_tier is defined in this file (model override else provider tier)
-        self.assertNotIn("paid", tiers[:tiers.index("paid")] if "paid" in tiers else [], "paid before free")
-        # every t1 leg window >= 600000
+        self.assertNotIn(self.LEG, legs, "paid muse rides no chain (SS8)")
+        self.assertNotIn("deepseek/deepseek-flash", legs,
+                         "paid deepseek rides no chain (SS8)")
         for leg in legs:
             _, mid = registry.resolve_leg(leg, self.reg)
             w = self.reg["models"][mid].get("context_advertised")
             self.assertIsInstance(w, int, leg)
             self.assertGreaterEqual(w, 600000, leg)
-    def test_the_leg_follows_the_free_legs_on_t2_and_t3(self):
-        providers = self.reg["providers"]
-
-        def tier_of(leg):
-            provider_id = registry.resolve_leg(leg, self.reg)[0]
-            return providers[provider_id]["tier"]
-
-        # TORDER 2026-10-01: free_ai stopgap moved INTO free band (was LAST
-        # behind paid); gated free tails (cerebras/sambanova/cheaperinference)
-        # sit after paid but render nothing. Pin over servable legs only.
-        for route_id in ("l2-worker", "l3-driver"):
+    def test_the_paid_leg_escalates_no_chain(self):
+        # Was "the contributor follows that route's free legs on t2/t3"; SS8
+        # removed the paid leg from both chains outright (D657-D2 2026-10-08), so
+        # there is no position left to order — pin the absence over the legs that
+        # can actually answer.
+        for route_id in ("l2-worker", "l3-driver", "l2-orchestrator",
+                         "l3-implementer", "l3-researcher"):
             serving = live_legs(self.reg, route_id)
-            self.assertIn(self.LEG, serving, route_id)
-            last_free = max(i for i, leg in enumerate(serving)
-                            if leg != self.LEG
-                            and tier_of(leg) == "free")
-            self.assertGreater(serving.index(self.LEG), last_free, route_id)
+            self.assertNotIn(self.LEG, serving, route_id)
+            self.assertTrue(serving, route_id)
 
     def test_no_clean_route_carries_the_leg(self):
         for route_id, route in self.reg["routes"].items():
@@ -1852,16 +1880,20 @@ class MetaApiProviderTests(unittest.TestCase):
         self.assertFalse(safe)
         self.assertTrue(reason)
 
-    def test_the_three_headed_routes_are_servable_again(self):
+    def test_only_the_t1_chain_of_the_three_headed_routes_serves(self):
+        # D657-D2 2026-10-08: SS8 left the two muse-headed routes with nothing
+        # servable (legs: [] and two gated tails). OR1d gives a route that
+        # declares legs and serves none no declaration on any surface, so they
+        # must be absent from the servable set, not merely empty.
         ids = registry.servable_route_ids(self.reg)
-        for route_id in ("l1-orchestrator", "l1-orchestrator-paid",
-                         "spark-1.3-contributor"):
-            self.assertIn(route_id, ids, route_id)
+        self.assertIn("l1-orchestrator", ids)
+        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
+            self.assertNotIn(route_id, ids, route_id)
 
-    def test_gateway_legs_keep_the_contributor_first(self):
+    def test_gateway_legs_drop_the_gated_contributor(self):
         kept = registry.gateway_legs(self.reg["routes"]["spark-1.3-contributor"],
                                      self.reg)
-        self.assertEqual(kept[0], self.LEG)
+        self.assertEqual(kept, [])
 
     def test_real_registry_passes_check_with_meta_api(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -1874,11 +1906,18 @@ class ReviewerPolicyTests(unittest.TestCase):
     different-family rule (an author is never reviewed by its own family) is
     checkable without a vendor table in the resolver.
 
-    The operator's fixed order: the PAID Meta Muse contributor first (a
-    different family from every free author, and it is what the paid API was
-    bought for), the other free families next, Claude Haiku last and only as a
-    first-pass fallback. Sonnet stays the high-risk closer and is deliberately
-    absent -- it is not on a preference list, it closes.
+    The operator's fixed order (REVROUTE, 2026-09-27): the PAID Meta Muse
+    contributor first, the other free families next, Claude Haiku last and only
+    as a first-pass fallback. Sonnet stays the high-risk closer and is
+    deliberately absent -- it is not on a preference list, it closes.
+
+    D657-D2 (AO-DENYLEGS D2, 2026-10-08) cut the head: §8 keeps the paid Muse
+    leg out and probe-d657 never acked it, so `omniroute/spark-1.3-contributor`
+    renders no combo and the first entry the walk reaches would always be
+    refused. The list now leads free, which is also what `reviewer_for`'s
+    two-pass walk does with it (every non-paid entry in list order first, the
+    paid ones only as last resort -- pinned in tests/test_autoos_resolver.py),
+    and Haiku stays at the tail.
     """
 
     @classmethod
@@ -1906,12 +1945,24 @@ class ReviewerPolicyTests(unittest.TestCase):
                           "reviewers[%d] client %r is not a registry client"
                           % (index, entry["client"]))
 
-    def test_the_paid_muse_reviewer_leads(self):
+    def test_the_head_reviewer_is_a_free_row_that_can_close(self):
+        # D657-D2 replaced `test_the_paid_muse_reviewer_leads`: §8 keeps the paid
+        # Muse leg out and probe-d657 never acked it, so the head the walk reaches
+        # first was a row every card refused. The cost rule it carried stands --
+        # the preferred reviewer is a free one, and it is a real reviewer rather
+        # than a first pass, because it is where a review lands when nothing else
+        # rules it out.
         first = self.reviewers[0]
-        self.assertEqual(first["family"], "meta")
-        self.assertIs(first["paid"], True)
-        self.assertEqual(first["client"], "opencode")
-        self.assertIn("spark-1.3-contributor", first["model"])
+        self.assertIs(first["paid"], False, first["model"])
+        self.assertIsNot(first.get("first_pass_only"), True, first["model"])
+
+    def test_the_meta_seat_is_free_only(self):
+        # D657-D2 §8: "muse only free ids". Meta keeps a cross-family reviewer
+        # seat -- the paid contributor head is gone, the free grant is not.
+        meta = [e for e in self.reviewers if e["family"] == "meta"]
+        self.assertTrue(meta, "the meta family lost its reviewer seat")
+        for entry in meta:
+            self.assertIs(entry["paid"], False, entry["model"])
 
     def test_haiku_is_a_first_pass_only_fallback(self):
         haiku = [e for e in self.reviewers if e["family"] == "anthropic"]
@@ -2022,11 +2073,18 @@ class ReviewerPolicyTests(unittest.TestCase):
             self.assertIn(model_id, self.reg["models"], leg)
             self.assertIn(provider_id, self.reg["providers"], leg)
 
-    def test_the_list_is_ordered_paid_first_then_free(self):
-        # The operator's cost preference made visible: pay for the different
-        # family, fall back to free, and never let Haiku close.
-        self.assertIs(self.reviewers[0]["paid"], True)
-        self.assertEqual(self.reviewers[-1]["family"], "anthropic")
+    def test_the_list_ends_with_the_paid_fallback_that_closes_nothing(self):
+        # The old pin read "the list is ordered paid first, then free". D657-D2
+        # removed the paid head, and the cost preference it encoded lives in
+        # `reviewer_for` anyway (every non-paid entry in list order, then the
+        # paid ones as last resort -- pinned in tests/test_autoos_resolver.py).
+        # What the data still owes the operator's order is the tail: Haiku last,
+        # paid, and never the one who signs.
+        last = self.reviewers[-1]
+        self.assertEqual(last["family"], "anthropic")
+        self.assertIs(last["paid"], True)
+        self.assertIs(last["first_pass_only"], True)
+        self.assertEqual(self.reviewers.count(last), 1)
 
     def test_real_registry_passes_the_reviewers_check(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -2219,14 +2277,16 @@ class DeepSeekBackTests(unittest.TestCase):
     def test_the_zen_leg_keeps_its_own_route_gate(self):
         # DSBACK changes the PROVIDER, not the per-leg operator flags: the
         # tool-calling probe measured 402/429 on the zen leg and that verdict
-        # stands until someone re-probes it.
+        # stands until someone re-probes it. D657-D2 2026-10-08: the leg left
+        # every chain, so the gate now lives only on its own route.
         reg = self.reg
-        for rid in ("deepseek-v4.1-flash", "l2-worker", "l2-worker-clean",
-                    "l3-driver", "l3-driver-clean"):
-            entry = reg["routes"][rid]["unavailable_legs"].get(
-                "opencode-zen/deepseek-v4.1-flash")
-            self.assertIsInstance(entry, dict, rid)
-            self.assertIs(entry["available"], False, rid)
+        entry = reg["routes"]["deepseek-v4.1-flash"]["unavailable_legs"].get(
+            "opencode-zen/deepseek-v4.1-flash")
+        self.assertIsInstance(entry, dict)
+        self.assertIs(entry["available"], False)
+        listing = [rid for rid, route in reg["routes"].items()
+                   if "opencode-zen/deepseek-v4.1-flash" in (route.get("legs") or [])]
+        self.assertEqual(listing, ["deepseek-v4.1-flash"])
 
     def test_openrouter_serves_only_its_free_ids(self):
         # FREEWIRE 2026-09-30 (free-probe, L1-backlog/ws-free-probe-20260930):
@@ -2261,28 +2321,44 @@ class DeepSeekBackTests(unittest.TestCase):
             registry._leg_is_unavailable("deepseek/deepseek-flash",
                                          reg["routes"]["l2-worker-clean"], reg))
 
-    def test_t2_worker_clean_ends_with_the_native_deepseek_leg(self):
-        # L1-CLEAN (2026-10-01) replaced the DSBACK head: the trial credits
-        # lead the -clean twins and the native DeepSeek leg is the last paid
-        # fallback. The render, not the registry list, is what the gateway
-        # serves.
+    def test_the_clean_twins_close_with_the_private_safe_leg(self):
+        # L1-CLEAN (2026-10-01) put the native DeepSeek leg last as the paid
+        # fallback. SS8 (D657-D2 2026-10-08) bans paid DeepSeek from every chain,
+        # so the -clean twins now render exactly the one leg that is both
+        # private-safe and probe-acked. The render, not the registry list, is
+        # what the gateway serves.
         rendered = {c["name"]: c for c in
                     registry.render_omniroute(self.reg)["combos"]}
-        self.assertEqual(rendered["l2-worker-clean"]["models"][-1],
-                         "deepseek/deepseek-flash")
-        self.assertEqual(rendered["l3-driver-clean"]["models"][-1],
-                         "deepseek/deepseek-flash")
+        for name in ("l1-orchestrator-clean", "l2-orchestrator-clean",
+                     "l2-worker-clean", "l3-driver-clean",
+                     "l3-implementer-clean", "l3-researcher-clean"):
+            self.assertEqual(rendered[name]["models"],
+                             ["vertex/gemini-3.8-flash"], name)
+        served = [model for combo in rendered.values()
+                  for model in combo["models"]]
+        self.assertNotIn("deepseek/deepseek-flash", served)
 
-    def test_the_deepseek_route_is_servable_again(self):
-        # The route whose ONLY served leg was deepseek/* failed closed during
-        # the 402; it must be offered again.
-        self.assertIn("deepseek-v4.1-flash", registry.servable_route_ids(self.reg))
+    def test_the_deepseek_route_is_gated_out_of_every_surface(self):
+        # The route whose ONLY served leg was deepseek/* failed closed during the
+        # 402 and DSBACK re-opened it. SS8 (D657-D2 2026-10-08) closed it again
+        # for a different reason: both its legs (the paid native copy and the zen
+        # copy) are declared-but-gated, so it serves nothing and OR1d gives it no
+        # declaration anywhere.
+        self.assertNotIn("deepseek-v4.1-flash",
+                         registry.servable_route_ids(self.reg))
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
+                                  self.reg), [])
 
-    def test_models_doc_no_longers_strike_the_native_leg(self):
-        row = next(r for r in registry.render_models_doc(self.reg).splitlines()
-                   if "l2-worker-clean" in r)
-        self.assertNotIn("~~`deepseek-flash`~~ (unavailable)", row)
-        self.assertIn("`deepseek-flash`", row)
+    def test_models_doc_no_longers_lists_the_paid_deepseek_leg(self):
+        # The leg DSBACK un-struck is gone from the chain the doc prints, so the
+        # row cannot promise it to a reader any more.
+        rows = [r for r in registry.render_models_doc(self.reg).splitlines()
+                if "l2-worker-clean" in r]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertNotIn("deepseek-flash", row)
+            self.assertIn("gemini-3.8-flash", row)
 
     def test_real_registry_passes_check_after_the_flip(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -2316,13 +2392,17 @@ class DeepSeekFlashContext1MTests(unittest.TestCase):
         for mid in self.V41_ROWS:
             self.assertEqual(models[mid]["output_max"], 393216, mid)
 
-    def test_deepseek_route_declares_and_renders_1m(self):
+    def test_deepseek_route_declares_1m_but_renders_nothing(self):
+        # SS8 (D657-D2 2026-10-08) gated the route's only two legs, so the
+        # registry keeps the corrected 1M window the vendor states while OR1d
+        # gives the route no declaration on any surface.
         reg = self.reg
         surface = reg["routes"]["deepseek-v4.1-flash"]["surfaces"]["omniroute"]
         self.assertEqual(surface["context_declared"], "1M")
-        rendered = {c["name"]: c for c in
-                    registry.render_omniroute(reg)["combos"]}
-        self.assertEqual(rendered["deepseek-v4.1-flash"]["context"], "1M")
+        rendered = registry.render_omniroute(reg)
+        names = {c["name"] for c in rendered["combos"]}
+        self.assertNotIn("deepseek-v4.1-flash", names)
+        self.assertIn("deepseek-v4.1-flash", rendered["omitted"])
 
 
 class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
@@ -2690,39 +2770,42 @@ class MistralPlanLimitsTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_the_clean_twins_keep_the_native_deepseek_leg(self):
-        # L1-CLEAN (2026-10-01): the trial credits now lead both -clean twins
-        # and the native DeepSeek leg is the last paid fallback - still live.
+    def test_the_clean_twins_keep_no_paid_deepseek_tail(self):
+        # L1-CLEAN (2026-10-01) kept the native DeepSeek leg live as the last paid
+        # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
+        # chain, so the -clean twins are now the single probe-acked, private-safe
+        # leg -- and it is live, which is what the route-liveness invariant needs.
         for route_id in ("l2-worker-clean", "l3-driver-clean"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
-                             "deepseek/deepseek-flash", route_id)
-            self.assertEqual(
-                registry.plan_dead_reasons("deepseek", "deepseek-flash", self.reg),
-                [], route_id)
+            self.assertEqual(self.reg["routes"][route_id]["legs"],
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertTrue(live_legs(self.reg, route_id), route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(self.reg, route_id), route_id)
 
     def test_t3_driver_heads_with_the_free_band(self):
         # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
         # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
         # agentic combo, and a 429 on the head falls through the combo, so the
-        # head must be a grant, not the operator's money. MISTRALFIX's measurement
-        # still stands and still decides WHICH paid leg is first:
-        # mistral/mistral-code-latest answers 200 at 125 rpm (625k tpm) while
-        # mistral-small-latest is dead at 0 rpm, so it stays the first PAID leg -
-        # now behind the free band instead of ahead of it.
+        # head must be a grant, not the operator's money.
+        # D657-D2 (2026-10-08) kept the rule and changed who qualifies: the
+        # judge admits only a leg the D-657 probe saw answer, so the expiring
+        # grants that used to head the band (opencode_gateway glm-5.3-flash,
+        # ainative llama-4-maverick -- kimi/glm off under SS8 -- and the AI-Studio
+        # gemini leg, 401/402 on both gateways) are out, and the free band starts
+        # at the bazaarlink $0 copy. No paid leg rides the chain at all, so the
+        # "first PAID leg" question this test used to answer has no subject.
         legs = self.reg["routes"]["l3-driver"]["legs"]
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
-        # TORDER 2026-10-01: gemini restored head (operator reversal, GEMRESTORE
-        # + TASK2); nebius removed. SCWREMOVAL 2026-10-06: scaleway gone too.
-        # GLM55/AINATIVE 2026-10-05 (operator): the expiring grants lead the
-        # band ahead of gemini - oc/glm-5.3-flash (1M, OpenCode-served) then
-        # ainative/llama-4-maverick (FREEKEYS-proven tool calls).
-        self.assertEqual(legs[0], "opencode_gateway/glm-5.3-flash")
-        self.assertEqual(legs[1], "ainative/llama-4-maverick")
-        self.assertEqual(legs[2], "gemini/gemini-3.8-flash")
+        self.assertEqual(legs[0],
+                         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free")
+        self.assertEqual(legs[1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertNotIn("opencode_gateway/glm-5.3-flash", legs)
+        self.assertNotIn("ainative/llama-4-maverick", legs)
+        self.assertNotIn("gemini/gemini-3.8-flash", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
-        paid = [leg for leg in legs if leg_tier(self.reg, leg) == "paid"]
-        self.assertEqual(paid[0], "mistral/mistral-code-latest")
+        self.assertNotIn("mistral/mistral-code-latest", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
 
     # -- the invariant ------------------------------------------------------
 
@@ -2797,16 +2880,16 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertFalse(safe, route_id)
             self.assertEqual(reason, "model trains on prompts", route_id)
 
-    def test_the_clean_twins_keep_a_live_native_deepseek_fallback(self):
-        # L1-CLEAN (2026-10-01): both twins now lead with the trial credits and
-        # keep the native DeepSeek leg live as the last fallback - the twins
-        # still serve, which is what the route-liveness invariant needs.
+    def test_the_clean_twins_still_live_without_the_deepseek_tail(self):
+        # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
+        # twins. They still serve -- one leg each, the probe-acked private-safe
+        # vertex row -- which is what the route-liveness invariant needs.
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertIn("deepseek/deepseek-flash", live_legs(reg, route_id),
-                          route_id)
-            self.assertEqual(self.reg["routes"][route_id]["legs"][-1],
-                             "deepseek/deepseek-flash", route_id)
+            self.assertEqual(live_legs(reg, route_id),
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(reg, route_id), route_id)
 
     # -- the registered tested alternative ----------------------------------
 
@@ -2851,11 +2934,13 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_t3_driver_has_exactly_one_mistral_code_leg(self):
-        # mistral-code-latest is l3-driver's head already; the swap must not
-        # duplicate it into the body of the same route.
+    def test_t3_driver_has_no_mistral_code_leg(self):
+        # SS8 (D657-D2 2026-10-08) leaves no paid mistral leg in a chain; the
+        # "exactly one, never duplicated" pin becomes an absence pin, which a
+        # duplicate would still fail.
         legs = self.reg["routes"]["l3-driver"]["legs"]
-        self.assertEqual(legs.count("mistral/mistral-code-latest"), 1)
+        self.assertEqual(legs.count("mistral/mistral-code-latest"), 0)
+        self.assertEqual(legs.count("mistral/codestral-latest"), 0)
 
     def test_real_registry_passes_check_after_the_swap(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -3470,7 +3555,14 @@ def usable_legs(reg: dict, route_id: str) -> list:
     rev-freekeys2 finding 2 -- asked of `autoos_resolver.route_leg_context_fits`,
     the resolver's own promise check, never restated here: a 32k leg was counted
     as one of t1's three fallbacks for a 1M card, and three "usable" legs that
-    cannot carry the request are one usable leg and two 413s)."""
+    cannot carry the request are one usable leg and two 413s).
+
+    D657-D2 (2026-10-08) moved the price filter onto the resolver's own
+    `credit_leg_priced(model_id, registry, provider_id)` as well: one model id can
+    be served at two prices at once (T1-CREDIT-FIX-6, D-220) -- `gemini-3.8-flash`
+    is $0 through AI Studio and billed through Vertex -- so reading the
+    model-level `price_in` alone called a priced credit leg unpriced and counted
+    the chain one usable leg too few."""
     route = reg["routes"][route_id]
     out = []
     for leg in live_legs(reg, route_id):
@@ -3479,11 +3571,7 @@ def usable_legs(reg: dict, route_id: str) -> list:
         if model.get("tool_calls") != "proven":
             continue
         if leg_tier(reg, leg) == "credit":
-            try:
-                priced = float(model.get("price_in")) > 0.0 and float(model.get("price_out")) > 0.0
-            except (TypeError, ValueError):
-                priced = False
-            if not priced:
+            if not resolver.credit_leg_priced(model_id, reg, provider_id):
                 continue
         if not resolver.route_leg_context_fits(leg, route, reg):
             continue
@@ -3492,24 +3580,25 @@ def usable_legs(reg: dict, route_id: str) -> list:
 
 
 class ComboCrossProviderTests(unittest.TestCase):
-    """Each agentic tier route must keep two or three fallback legs on DIFFERENT
-    providers that a card can actually use, and the new free legs must sit in the
-    route's free band — ahead of the paid legs — so a run spends a free grant
-    before the operator's money."""
+    """Each agentic tier route must keep fallback legs on DIFFERENT providers
+    that a card can actually use, and the new free legs must sit in the route's
+    free band — ahead of the paid legs — so a run spends a free grant before the
+    operator's money. D657-D2 pins the usable band each re-cut chain really has
+    (see USABLE_LEG_BAND) instead of a fixed three, since the D-657 probe rules
+    removed legs rather than adding them."""
 
     @classmethod
     def setUpClass(cls):
         cls.reg = load_registry()
 
     def test_every_agentic_route_has_two_distinct_usable_providers(self):
-        # TORDER D-TORDER-2: l1-orchestrator keeps only >=600k legs (all
-        # 1048576 live) but none is tool_calls:proven yet, so usable_legs is 0.
-        # Exempt l1-orchestrator here; contract (d) still gates 1M + >=600k.
+        # TORDER D-TORDER-2 skipped l1-orchestrator here because none of its
+        # >=600k legs was tool_calls:proven. D657-D2 proved the vertex leg on
+        # both gateways (probe-d657-central/workstation ack ok + tool ok), so
+        # the skip is lifted: the route now answers with two providers.
         # l1-orchestrator-free-only is L0 ACCEPT single-provider (see
         # test_t1_free_only_single_provider_exemption below), not skipped here.
         for route_id in AGENTIC_TIER_ROUTES:
-            if route_id in ("l1-orchestrator",):
-                continue
             if route_id == "l1-orchestrator-free-only":
                 continue  # asserted in exemption test, not silently passed
             providers = {registry.resolve_leg(leg, self.reg)[0]
@@ -3522,7 +3611,8 @@ class ComboCrossProviderTests(unittest.TestCase):
 
     def test_t1_free_only_single_provider_exemption(self):
         # L0 D-TORDER-2 ACCEPT: l1-orchestrator-free-only is deliberately
-        # single-provider (gemini only). Passes ONLY via named exemption +
+        # single-provider. D657-D2 re-cut it from google_ai_studio (401 on both
+        # gateways) to the bazaarlink free leg. Passes ONLY via named exemption +
         # registry constraint note; a missing note fails (so a future
         # single-provider route without one still fails). Same style as
         # CLEAN_ROUTE_EXEMPTIONS.
@@ -3536,21 +3626,54 @@ class ComboCrossProviderTests(unittest.TestCase):
         # single servable provider
         provs = {registry.resolve_leg(leg, self.reg)[0]
                  for leg in registry.gateway_legs(route, self.reg)}
-        self.assertEqual(provs, {"google_ai_studio"})
+        self.assertEqual(provs, {"bazaarlink"})
+        # the exemption's own reason names the same provider, so the gate and
+        # the registry cannot drift apart silently
+        self.assertIn("bazaarlink", cc.SINGLE_PROVIDER_EXEMPTIONS["l1-orchestrator-free-only"])
         # exemption note present with required phrases (fails if missing)
         note = route.get("$comment") or ""
         for phrase in cc.REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES:
             self.assertIn(phrase, note, "constraint note missing %r" % phrase)
         self.assertIn("deliberately single-provider", note)
 
-    def test_every_agentic_route_has_three_usable_legs(self):
-        # TORDER D-TORDER-2: see two_distinct test - t1 pair exempt (0 usable
-        # proven; 5/2 servable 1M legs await probes).
-        for route_id in AGENTIC_TIER_ROUTES:
-            if route_id in ("l1-orchestrator", "l1-orchestrator-free-only"):
-                continue
-            self.assertGreaterEqual(
-                len(usable_legs(self.reg, route_id)), 3, route_id)
+    # D657-D2 (2026-10-08): the >=3-usable-legs bar was written when the chains
+    # still carried legs the D-657 probe rules removed. Counting what the
+    # resolver would actually plan (tool_calls proven, credit legs priced,
+    # context fitting the route's declared need), the bands are these; each
+    # shortfall names its cause instead of a floor the registry no longer
+    # supports. Shortfall != defect — inventing a leg to reach 3 would be.
+    USABLE_LEG_BAND = {
+        # the gemini AI-Studio leg 401s on both gateways and free-ai's tool call
+        # never landed, so the free band keeps one leg and stays exempt above.
+        "l1-orchestrator-free-only": 1,
+        # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
+        # second providers are all either paid (banned from a free-only band) or
+        # unproven, so two is what passes.
+        "l1-orchestrator": 2,
+        # the openrouter :free legs top out at 262144 < the route's 1M need, so
+        # only the two below are counted for a full-size card.
+        "l2-worker-free-only": 2,
+        "l2-worker": 3,
+        "l3-driver": 10,
+        "l3-driver-free-only": 9,
+    }
+
+    def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
+        """TORDER D-TORDER-2 wanted three fallbacks per agentic tier. D657-D2
+        pins the band each route really has and refuses drift in both
+        directions: a lost leg fails the count, and a leg that stops carrying
+        the route's promise (unproven tools, unpriced credit, too small a
+        window) fails the count too rather than quietly becoming a 413."""
+        for route_id, count in self.USABLE_LEG_BAND.items():
+            usable = usable_legs(self.reg, route_id)
+            self.assertEqual(
+                len(usable), count,
+                "%s plans %d usable leg(s) (%s), expected %d"
+                % (route_id, len(usable), usable, count))
+            if route_id != "l1-orchestrator-free-only":
+                # the named single-provider exemption is the one route allowed
+                # below two; every other band must still reach a fallback.
+                self.assertGreaterEqual(len(usable), 2, route_id)
 
     def test_a_new_free_leg_never_trails_a_paid_leg(self):
         # The band order the brief asks for: free -> credit -> paid. A new free
@@ -3576,21 +3699,37 @@ class ComboCrossProviderTests(unittest.TestCase):
         band AFTER all free legs and BEFORE paid (not last; deepseek is last),
         servable (not gated). Only UNPRICED credit legs (morph/deepinfra tails,
         price 0 = no price on file) are documented tail fallbacks: gated with
-        available:false so neither resolver nor render spends the grant."""
-        for route_id, route in self.reg["routes"].items():
-            legs = route.get("legs") or []
-            gated = route.get("unavailable_legs") or {}
-            for leg in legs:
-                if leg_tier(self.reg, leg) != "credit":
-                    continue
-                if leg not in gated:
-                    # servable credits band (priced ovh Qwen x2 + measured
-                    # vertex/ovh-gpt-oss grants): must sit after free, before paid
-                    continue
-                # gated tail (morph/deepinfra unpriced): must carry price note
-                entry = gated.get(leg)
-                self.assertIs(entry.get("available"), False, route_id)
-                self.assertIn("price", (entry.get("$comment") or "").lower(), leg)
+        available:false so neither resolver nor render spends the grant.
+
+        OVH-REPROBE 2026-10-08 adds a second, honest gate reason: a credit leg
+        whose id the WITHDREW upstream (providers.ovhcloud is live again while
+        ovhcloud/Qwen3-Coder-30B-A3B-Instruct 404s, so the provider-level gate no
+        longer covers it). A gate must therefore name a reason, not one reason —
+        the price note still pins every leg that is gated for money."""
+        reasons = ("price", "does not exist", "withdraw", "retire")
+
+        def problems(reg):
+            found = []
+            for route_id, route in reg["routes"].items():
+                gated = route.get("unavailable_legs") or {}
+                for leg in route.get("legs") or []:
+                    if leg_tier(reg, leg) != "credit" or leg not in gated:
+                        continue
+                    entry = gated[leg]
+                    note = (entry.get("$comment") or "").lower()
+                    if entry.get("available") is not False:
+                        found.append((route_id, leg, "gate does not say available:false"))
+                    elif not any(reason in note for reason in reasons):
+                        found.append((route_id, leg, "gate names no reason"))
+            return found
+
+        self.assertEqual(problems(self.reg), [])
+        # the scan bites: a gate whose prose loses its reason is a defect
+        mutated = copy.deepcopy(self.reg)
+        for route in mutated["routes"].values():
+            for entry in (route.get("unavailable_legs") or {}).values():
+                entry["$comment"] = "gated"
+        self.assertTrue(problems(mutated), "an unreasoned credit gate passed")
 
     def test_no_new_free_leg_enters_a_clean_route(self):
         # Rule 3: these providers' trains_on_prompts is null (unverified), which
@@ -3602,13 +3741,13 @@ class ComboCrossProviderTests(unittest.TestCase):
             for leg in NEW_FREE_LEGS:
                 self.assertNotIn(leg, route.get("legs") or [], route_id)
 
-    def test_the_three_usable_legs_carry_the_route_promise(self):
-        """FREEKEYS-2c (rev-freekeys2 finding 2): the >=3-usable-legs bar is only
+    def test_the_usable_legs_carry_the_route_promise(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 2): a usable-legs count is only
         worth having if those legs answer the requests this route's cards make.
         Measured 128k of `context_advertised` behind a 128k route, they do; drop
         one leg's window to 32k -- the shape the finding named, a small free
         model counted as a fallback for full-size cards -- and the filter stops
-        counting it, while the two legs that do carry the promise stay counted.
+        counting it, while the legs that do carry the promise stay counted.
         The small leg is the weak link, not the band."""
         reg = copy.deepcopy(self.reg)
         small = "groq/qwen/qwen3.8-27b"
@@ -3619,8 +3758,13 @@ class ComboCrossProviderTests(unittest.TestCase):
         self.assertNotIn(small, after,
                          "a 32k leg was still counted usable for a 128k route")
         # TORDER: nebius removed (6 legs); SCWREMOVAL 2026-10-06: scaleway gone
-        # too; remaining usable band still carries promise
-        self.assertIn("ovhcloud/Qwen3.8-27B", after)
+        # too; D657-D2: the ovhcloud leg leaves every chain (OVH credits out of
+        # L0-L2, no documented cache) — the band that remains still carries the
+        # promise, head and paid tail included.
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
+        self.assertIn("cohere/command-a-plus-05-2026", after)
+        self.assertIn("vertex/gemini-3.8-flash", after)
+        self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
         # `context`), so 128k is what a counted fallback must carry.
@@ -3640,6 +3784,16 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
     refuses any attempt to pin it. The measured rows stay, because the probe
     result is a fact worth keeping and a later operator decision may lift the
     rule — nothing routes there until then.
+
+    D657-D2 (2026-10-08) IS that later decision, and it lifted exactly the clause
+    the paragraph above hedged: operator D-657 (spec combo-v2 §7b/§8) bans the
+    PAID DeepSeek tails and admits the $0 free copy whose cache the D-657 probe
+    measured, so `bazaarlink/deepseek/deepseek-v4-flash-0731free:free` heads the
+    chains and policy carries `allow-bazaarlink-ds-v4-flash-0731-free` one slot
+    ahead of `deny-deepseek`. What the decision still owns, and what is pinned
+    here: the 0731 grant is V4 weights, never spelled as or folded into the
+    pinned V4.1 group; V4 Pro stays denied by the first rule in the list; and the
+    paid native `deepseek/deepseek-flash` leg rides no chain.
     """
 
     LEG = "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
@@ -3653,26 +3807,53 @@ class DeepseekV41OnlyDecisionTests(unittest.TestCase):
         self.assertEqual(self.reg["models"][model_id]["tool_calls"], "proven")
         self.assertEqual(self.reg["providers"]["bazaarlink"]["tier"], "free")
 
-    def test_no_combo_carries_the_leg(self):
-        for route_id, route in self.reg["routes"].items():
-            self.assertNotIn(self.LEG, route.get("legs") or [], route_id)
-        rendered = registry.render_omniroute(self.reg)
-        for combo in rendered["combos"]:
-            self.assertFalse([m for m in combo["models"]
-                              if "v4-flash-0731free" in m], combo["name"])
+    def test_the_leg_is_never_a_v41_spelling(self):
+        # The 0731 grant is V4 weights. D657-D2 admits it to the chains, so the
+        # guard that survives is that it never poses as, or joins, the pinned
+        # V4.1 group: its own model row names no V4.1 snapshot, and no rendered
+        # combo carries it beside one.
+        model_id = registry.resolve_leg(self.LEG, self.reg)[1]
+        self.assertNotIn("v4.1", model_id, model_id)
+        self.assertNotIn("v4.1", self.reg["models"][model_id].get("serves", ""))
+        for combo in registry.render_omniroute(self.reg)["combos"]:
+            carried = [m for m in combo["models"] if "0731free" in m]
+            v41 = [m for m in combo["models"] if "v4.1" in m]
+            self.assertFalse(carried and v41, combo["name"])
 
-    def test_the_blanket_deepseek_deny_governs_it(self):
-        self.assertTrue(registry.leg_denied(self.LEG, self.reg))
+    def test_the_named_allow_reopens_only_the_0731_spelling(self):
+        # Was "the blanket deny governs it" (no allow rule existed). D657-D2 added
+        # one allow, named to a single model id, ordered BEFORE deny-deepseek;
+        # every other DeepSeek spelling still falls through the blanket deny, and
+        # V4 Pro stays behind the first rule in the list.
         rules = self.reg["policy"]["leg_rules"]
-        self.assertFalse([r for r in rules if r["id"] == "allow-bazaarlink-deepseek-flash-free"])
+        ids = [r["id"] for r in rules]
+        allow = next(r for r in rules
+                     if r["id"] == "allow-bazaarlink-ds-v4-flash-0731-free")
+        self.assertEqual(allow["match"], "*deepseek-v4-flash-0731free*")
+        self.assertLess(ids.index(allow["id"]), ids.index("deny-deepseek"),
+                        "a leg_rule is only as strong as its position")
+        self.assertLess(ids.index("deny-deepseek-pro"), ids.index(allow["id"]),
+                        "the pro denial is first on purpose, ahead of any allow")
+        self.assertFalse(registry.leg_denied(self.LEG, self.reg))
+        for other in ("openrouter/deepseek/deepseek-v4-flash",
+                      "cheaperinference/deepseek-v4-flash",
+                      "ollama-cloud/deepseek-v4-flash",
+                      "deepseek/deepseek-v4-pro"):
+            self.assertTrue(registry.leg_denied(other, self.reg), other)
 
-    def test_the_pinned_group_stays_a_single_model_group(self):
+    def test_the_pinned_group_renders_nothing_and_stays_single(self):
         # deepseek-v4.1-flash is pinned per model on purpose (mapping doc Open
-        # choice 11): its job is weights fidelity, not redundancy, so it renders
-        # the native V4.1 leg alone and every leg of it is V4.1.
+        # choice 11): its job is weights fidelity, not redundancy. SS8 (D657-D2
+        # 2026-10-08) gated both of its legs, so it ships no combo at all -- which
+        # is the same guarantee in the other direction: it can never be diluted by
+        # a non-V4.1 leg, because it renders no legs.
         rendered = registry.render_omniroute(self.reg)
-        combo = next(c for c in rendered["combos"] if c["name"] == "deepseek-v4.1-flash")
-        self.assertEqual(len(combo["models"]), 1, combo["models"])
+        names = {c["name"] for c in rendered["combos"]}
+        self.assertNotIn("deepseek-v4.1-flash", names)
+        self.assertIn("deepseek-v4.1-flash", rendered["omitted"])
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
+                                  self.reg), [])
         # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
         # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
 
@@ -3796,7 +3977,21 @@ class CleanTierRouteTests(unittest.TestCase):
     risky to share (credentials and the like), nearly all projects are not
     privacy sensitive, so l2-orchestrator is no longer pinned to the trial
     legs and may carry the antigravity claude head (a privacy=sensitive CARD
-    is still filtered per-leg at routing time via private_safe)."""
+    is still filtered per-leg at routing time via private_safe).
+    D657-D2 (2026-10-08) supersedes both the trial-credit lead and the paid
+    deepseek tail: every OVH row 404s on both probe gateways (ack fail, so the
+    leg is omitted until a re-probe returns 200), the antigravity claude head
+    is 429 and agy is never a head, and spec SS8 bans a paid deepseek leg. What
+    survives both rules is the vertex credit, so a clean chain today is that one
+    leg - which is why the tail pin below asserts the *absence* of the banned
+    legs rather than a band the probes never confirmed.
+    OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) is the re-probe that rule
+    asked for and reopens the OVH half of it: gpt-oss-120b, Qwen3.8-27B and
+    Qwen3.5-397B-A17B answer 200 again, so the provider is available and OVH
+    rides - as an L3 leg only (OVH documents no prompt caching, so no l0-/l1-/l2-
+    chain may carry it and no -clean chain does), in the credit band's trial
+    position ahead of the vertex tail, never consecutive with another OVH leg.
+    The clean chains this class owns are unchanged: the vertex credit leg alone."""
 
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
@@ -3817,36 +4012,53 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self._leg(leg)
 
-    def test_sensitive_routes_lead_with_the_trial_credits(self):
+    def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
+        # D657-D2: the ovhcloud legs 404'd out of every chain (probe ack fail on
+        # both gateways), so the vertex credit leads and closes. OVH-REPROBE
+        # 2026-10-08 brought them back one layer up: an OVH leg rides L3 chains
+        # only, never a -clean or l0-/l1-/l2- chain (no documented cache). A clean
+        # route may never fall back onto a leg that trains on prompts.
         for rid in self.SENSITIVE:
-            if rid == "l2-orchestrator":
-                continue
-            self.assertEqual(self.reg["routes"][rid]["legs"][:3],
-                             list(self.TRIAL_LEGS), rid)
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
+            self.assertNotIn("ovhcloud/gpt-oss-120b", legs, rid)
+            self.assertNotIn("ovhcloud/Qwen3.8-27B", legs, rid)
 
-    def test_t2_orchestrator_is_1m_caching_with_the_claude_head(self):
+    def test_t2_orchestrator_is_1m_caching_with_the_free_head(self):
         # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
         # sessions, so only prompt-caching providers may serve them - the two
-        # OVH legs are gone (OVH does not cache; it is for implementation work
-        # only). CTX1M (same day): every serving leg advertises 1M, so the
-        # stale 128k declaration is raised to 1M. PRIVACY (same day): the
-        # sensitive-capable pin no longer applies to this route, so the
-        # antigravity claude sonnet 5-5 head is allowed (deepseek stays last).
+        # OVH legs are gone (OVH does not cache). CTX1M (same day): every
+        # serving leg advertises 1M, so the stale 128k declaration is raised.
+        # D657-D2 replaces the antigravity claude head (429 on both gateways,
+        # and agy is never a head per the D-657 rules) with the bazaarlink free
+        # leg, and drops the paid deepseek tail (spec SS8).
         legs = self.reg["routes"]["l2-orchestrator"]["legs"]
-        self.assertEqual(legs, ["antigravity/claude-sonnet-5-5-medium",
-                                "vertex/gemini-3.8-flash",
-                                "deepseek/deepseek-flash"])
+        self.assertEqual(legs, ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                "vertex/gemini-3.8-flash"])
         self.assertEqual(
             self.reg["routes"]["l2-orchestrator"]["surfaces"]["omniroute"]
             ["context_declared"], "1M")
-        self.assertEqual(legs[-1], "deepseek/deepseek-flash")
+        self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
 
-    def test_sensitive_routes_end_with_paid_deepseek(self):
+    def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
+        # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
+        # paid deepseek, no paid meta muse), so the closing leg is the vertex
+        # credit and the banned tail is asserted absent instead of pinned last.
         for rid in self.SENSITIVE:
-            self.assertEqual(self.reg["routes"][rid]["legs"][-1],
-                             "deepseek/deepseek-flash", rid)
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[-1], "vertex/gemini-3.8-flash", rid)
+            for banned in ("deepseek/deepseek-flash",
+                           "antigravity/claude-sonnet-5-5-medium"):
+                self.assertNotIn(banned, legs, "%s carries the SS8-banned %s"
+                                 % (rid, banned))
+            for leg in legs:
+                self._leg(leg)
 
     def test_clean_trial_legs_span_at_least_two_families(self):
+        # D657-D2 serves only the vertex leg on a clean chain, so this pins the
+        # REGISTERED trial band - the two families a re-probe 200 would put back
+        # on the lead, which is what the >=2-family promise needs to survive.
         families = {self.reg["models"][self._leg(leg)[1]]["family"]
                     for leg in self.TRIAL_LEGS}
         self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
@@ -3857,22 +4069,234 @@ class CleanTierRouteTests(unittest.TestCase):
             for leg in self.reg["routes"][rid]["legs"]:
                 self.assertFalse(leg.startswith(banned), (rid, leg))
 
+    def test_ovh_legs_ride_l3_chains_only_after_the_reprobe(self):
+        """L2-CLEAN kept ovhcloud/Qwen3-Coder-30B-A3B-Instruct in l2-worker and
+        l3-driver as an available:false gate ("not in OVH AI Endpoints catalog
+        2026-10-01"); D657-D2 deleted the gate with the leg it gated after
+        probe-d657 404'd all three ovhcloud spellings on both gateways.
+
+        OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief) is the
+        re-probe that rule asked for: gpt-oss-120b, Qwen3.8-27B and
+        Qwen3.5-397B-A17B answer 200 again, so providers.ovhcloud is available
+        and OVH rides again — with the three bounds the brief draws:
+
+          (1) L3 legs ONLY. OVH documents no prompt caching, and spec SS2 keeps
+              the cache lever on L0-L2, so no l0-/l1-/l2- chain may carry it
+              (combo-contract rule (f) fails one there anyway).
+          (2) the credit band's TRIAL position — the last leg before the vertex
+              credit tail, after every free leg, so rule (b) holds and a 429 on
+              the grant falls through to the paid-for leg rather than opening
+              the chain with it.
+          (3) never consecutive with another OVH leg — one rate-limit domain per
+              step (rule (g)), which is also why only ONE OVH id rides each L3
+              chain: the second priced id takes the other chain.
+
+        Qwen3-Coder-30B stays retired (OVHCODER-DROP: OVH withdrew the id, a
+        completion 404s "does not exist"); OVHCODER-DROP retired it outright — see
+        test_ovh_coder_leg_is_retired_not_merged, not a per-leg gate here.
+        ovh-gpt-oss-120b re-probed 200 but is UNPRICED, so rule
+        (h) keeps it out of every chain — same per-leg gate, and the price gap
+        is filed in logs/briefs/denylegs-gaps.md."""
+        self.assertIs(self.reg["providers"]["ovhcloud"].get("available"), True)
+        stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        unpriced = "ovhcloud/gpt-oss-120b"
+        priced = ("ovhcloud/Qwen3.8-27B", "ovhcloud/Qwen3.5-397B-A17B")
+        routes = self.reg["routes"]
+
+        for rid, route in routes.items():
+            legs = route.get("legs") or []
+            # (1) no orchestrator layer carries an OVH leg, and no retired or
+            # unpriced id rides a chain (an operator-facing `ovh-*` seat route
+            # may still declare one, gated, so apply prunes the live combo).
+            if rid.startswith(("l0-", "l1-", "l2-")):
+                for leg in legs:
+                    self.assertFalse(leg.startswith("ovhcloud/"), (rid, leg))
+            if rid.startswith(("l0-", "l1-", "l2-", "l3-", "t")):
+                self.assertNotIn(stale, legs, rid)
+                self.assertNotIn(unpriced, legs, rid)
+
+            # (3) one OVH leg per step, anywhere.
+            for i in range(1, len(legs)):
+                self.assertFalse(legs[i].startswith("ovhcloud/")
+                                 and legs[i - 1].startswith("ovhcloud/"),
+                                 (rid, legs[i - 1], legs[i]))
+
+        # (2) the two priced ids, one per L3 chain, in the trial position.
+        for rid in ("l3-driver", "l3-implementer"):
+            legs = routes[rid]["legs"]
+            carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
+            self.assertEqual(len(carried), 1, (rid, carried))
+            self.assertIn(carried[0], priced, rid)
+            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
+        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
+                            routes["l3-implementer"]["legs"][-2],
+                            "both L3 chains carry the same OVH id: one grant, "
+                            "not two seats")
+
+        # every -clean route stays off the grant, cached-tail or not.
+        for rid, route in routes.items():
+            if rid.endswith("-clean"):
+                for leg in route.get("legs") or []:
+                    self.assertFalse(leg.startswith("ovhcloud/"), rid)
+
+        # the unpriced id keeps its own operator-facing seat, gated per leg so
+        # nothing renders it; the retired one has no seat at all.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
+        self.assertIn(unpriced, routes["ovh-gpt-oss-120b"]["legs"])
+        gate = routes["ovh-gpt-oss-120b"]["unavailable_legs"][unpriced]
+        self.assertIs(gate["available"], False)
+        self.assertIn("price", (gate.get("$comment") or "").lower())
+        # and the seat whose leg is priced and live declares a servable leg
+        self.assertIn("ovhcloud/Qwen3.8-27B", routes["ovh-qwen3.8-27b"]["legs"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-qwen3.8-27b"], self.reg),
+                         ["ovhcloud/Qwen3.8-27B"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-gpt-oss-120b"], self.reg),
+                         [])
+
     def test_ovh_coder_leg_is_retired_not_merged(self):
-        # OVHCODER-DROP 2026-10-08 (replaces the L1-CLEAN 2026-10-01 pin that
-        # kept this leg declared-but-gated): OVH withdrew
-        # Qwen3-Coder-30B-A3B-Instruct upstream (measured 404), so a leg no
-        # provider serves stays in no route's legs and its single-leg route id
-        # retires, which is what makes apply prune the live combo (ORQWEN404
-        # precedent). The model row itself is kept for pricing history.
-        dead = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
-        for rid, route in self.reg["routes"].items():
-            self.assertNotIn(dead, route.get("legs") or [], rid)
-            self.assertNotIn(dead, route.get("unavailable_legs") or {}, rid)
-        self.assertNotIn("ovh-qwen3-coder-30b", self.reg["routes"])
+        """OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop).
+
+        OVH withdrew `Qwen3-Coder-30B-A3B-Instruct` upstream — a completion
+        request answers HTTP 404 "The model `Qwen3-Coder-30B-A3B-Instruct` does
+        not exist", and probe D-657 the same day 404'd both the `ovh/` and the
+        `ovhcloud/` spellings on central and on workstation. providers.ovhcloud
+        is AVAILABLE again the same day (OVH-REPROBE: gpt-oss-120b, Qwen3.8-27B
+        and Qwen3.5-397B-A17B answer 200), so a per-leg `available: false` gate
+        on a seat route would leave a declared route whose only leg can never
+        serve — a combo that renders nothing and an id that never stops
+        resolving. ORQWEN404's shape is the right one instead: the leg is out of
+        every chain (pinned by test_ovh_legs_ride_l3_chains_only_after_the_reprobe),
+        the seat ROUTE is deleted, and the id moves to
+        tools/registry.py OMNIROUTE_RETIRED_IDS so `apply` prunes the live combo.
+
+        So this pins the retirement, not the dead state: the id must be gone from
+        `routes`, named exactly once by the retire list, absent from every render
+        surface while present in combos.json's `retired`, and the models row is
+        kept — for its price history — carrying the dated note. Re-open only if
+        OVH re-lists the id and a fresh probe answers 200."""
+        leg = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        routes = self.reg["routes"]
+
+        # (1) the route is deleted, not gated.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
+        for rid, route in routes.items():
+            self.assertNotIn(leg, route.get("legs") or [], rid)
+            self.assertNotIn(leg, (route.get("unavailable_legs") or {}), rid)
+
+        # (2) the id retires, so apply prunes the live combo.
         self.assertIn("ovh-qwen3-coder-30b", registry.OMNIROUTE_RETIRED_IDS)
         self.assertNotIn("ovh-qwen3-coder-30b", registry.IDE_MODEL_ORDER)
-        self.assertIn("OVHCODER-DROP",
-                      self.reg["models"]["Qwen3-Coder-30B-A3B-Instruct"]["$comment"])
+
+        # (3) nothing on any render surface names it; combos.json says retired.
+        combos = json.loads((ROOT / "configuration" / "omniroute"
+                             / "combos.json").read_text(encoding="utf-8"))
+        self.assertIn("ovh-qwen3-coder-30b", combos["retired"])
+        self.assertNotIn("ovh-qwen3-coder-30b", combos["omitted"])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         [c["name"] for c in combos["combos"]])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         registry.servable_route_ids(self.reg))
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         json.dumps(registry.render_ide(self.reg)))
+        # opencode.jsonc's hand passthrough left with the model (D5 pricing).
+        self.assertNotIn("ovh-direct-qwen3-coder-30b",
+                         (ROOT / "opencode.jsonc").read_text(encoding="utf-8"))
+
+        # (4) the model row survives for pricing history and says why.
+        row = self.reg["models"]["Qwen3-Coder-30B-A3B-Instruct"]
+        self.assertGreater(row["price_in"], 0)
+        self.assertTrue(row["price_source"])
+        self.assertIn("OVHCODER-DROP", row.get("$comment") or "")
+
+
+class ReviewLensRouteTests(unittest.TestCase):
+    """SS3 (combo-v2, 2026-10-08) stacks four review lenses - diff, tests-run,
+    codebase, transcript - and D-657 (SS8 lane AO-DENYLEGS) chains them as
+    `l3-review-*` routes, one combo per lens. Open item 2 (2026-10-08) is the
+    audit of that set: the three lenses a gateway can serve are combos, and the
+    fourth is a declared route that renders nothing, because the bar SS3 draws
+    for it (intelligence index >= 44) is only met by legs SS7b/SS8 took out of
+    the gateway. A legless route is the honest shape (like the `*-paid` ones:
+    `legs: []`, no combo rendered, nothing orphaned); a sub-44 leg in its place
+    would be the defect - a transcript review by a model that cannot hold a
+    transcript is the failure the lens exists to catch.
+
+    So the transcript lens is carried by the spawner's own client, exactly as
+    SS7b (b) says: a `policy.reviewers` row naming the qoder client's
+    Qwen3.8-Max, no gateway leg, marked paid because Max spends Qoder credit.
+    That row is what makes the lens reachable to the resolver, so it is pinned
+    here together with the route that documents it."""
+
+    LENSES = ("l3-review-diff", "l3-review-tests", "l3-review-codebase",
+              "l3-review-transcript")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _route(self, rid):
+        route = self.reg["routes"].get(rid)
+        self.assertIsInstance(route, dict, "%s is not a declared route" % rid)
+        return route
+
+    def test_every_lens_of_the_spec_is_a_route(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            self.assertEqual(route["id"], rid, rid)
+            self.assertEqual(route["class"], "cheap", rid)
+            surface = route["surfaces"]["omniroute"]
+            self.assertIn("context_declared", surface, rid)
+            self.assertIn(rid, surface["display_name"], rid)
+
+    def test_the_three_servable_lenses_chain_probe_passed_legs(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            if rid == "l3-review-transcript":
+                continue
+            legs = route.get("legs") or []
+            self.assertTrue(legs, "%s declares a lens but no leg" % rid)
+            for leg in legs:
+                provider_id, model_id = registry.resolve_leg(leg, self.reg)
+                self.assertIn(model_id, self.reg["models"], leg)
+                # SS7b: a spawner-client leg never rides a gateway combo.
+                self.assertNotEqual(provider_id, "qoder_ai", (rid, leg))
+            self.assertFalse([leg for leg in legs if leg.startswith("ovhcloud/")],
+                             "%s: OVH documents no cache and 128k-clamps a 1M lens"
+                             % rid)
+
+    def test_the_transcript_lens_is_legless_and_says_why(self):
+        route = self._route("l3-review-transcript")
+        self.assertEqual(route.get("legs"), [],
+                         "a gateway leg now meets SS3's II >= 44 bar - re-chain "
+                         "the lens and give it legs")
+        self.assertEqual(list(route.get("unavailable_legs") or {}), [],
+                         "a legless lens carries no gate either")
+        note = route["$comment"]
+        for phrase in ("SS3", "44", "qoder", "legless"):
+            self.assertIn(phrase, note, note[:120])
+
+    def test_the_transcript_carrier_is_a_qoder_client_row_on_the_reviewer_list(self):
+        rows = [entry for entry in self.reg["policy"]["reviewers"]
+                if entry["client"] == "qoder"
+                and "max" in entry["model"].lower()]
+        self.assertTrue(rows, "SS7b(b): the transcript lens' carrier is the qoder "
+                              "client leg - policy.reviewers names no Qwen3.8-Max row")
+        entry = rows[0]
+        self.assertEqual(entry["family"], "qwen", entry["model"])
+        self.assertIs(entry["paid"], True,
+                      "Qwen3.8-Max spends Qoder credit (tools/autoos_clients.py)"
+                      ", so the last-resort pass is where it belongs")
+        self.assertNotIn("leg", entry,
+                         "a qoder row with a gateway leg would put a spawner-only "
+                         "client back into the combos (SS7b)")
+
+    def test_haiku_stays_the_tail_of_the_reviewer_list(self):
+        # SS8/REVROUTE's order: the free families first, the paid last-resorts
+        # after them, Claude Haiku at the very tail as the first-pass fallback.
+        # The transcript carrier joins the paid band, which must not push Haiku up.
+        reviewers = self.reg["policy"]["reviewers"]
+        self.assertEqual(reviewers[-1]["family"], "anthropic",
+                         "Haiku must stay the tail of the preference list")
 
 
 class ModelKeyCaseHygieneTests(unittest.TestCase):
@@ -4099,17 +4523,24 @@ _MISSING = object()
 # AO-PROBE-D657 data (D-658, 2026-10-08): the registry model rows the probe's
 # legs resolved to through tools/registry.py's resolve_leg, at the verdict the
 # two gateways' `cache` cells add up to - "true" on either gateway wins over
-# "false" on either, anything else is "unknown". gemini-3.8-flash is the one
-# documented value: Google's implicit caching covers its vertex legs, and the
-# probe never had to measure what the vendor already states.
+# "false" on either, anything else is "unknown". gemini-3.8-flash is the one row
+# the probe answered for only SOME of its providers, so it has no model-level
+# verdict at all: its Vertex leg is documented-cached (Google implicit caching)
+# and its AI-Studio leg was never measured - that split lives in
+# `prompt_cache_by_provider` (D1 judge nit: caching is a provider+model fact).
+# D657-D2 (2026-10-08) registers the two legs the re-cut chains need
+# (cohere/command-a-plus-05-2026, openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)
+# and takes their verdict from the same TSV cells: ack ok, tool ok, cache false
+# on both gateways, so both rows join the "false" group and ride no L0-L2 chain.
 _D657_BY_VALUE = {
     "true": ("deepseek/deepseek-v4-flash-0731free:free",
              "nvidia/nemotron-3-super-120b-a12b:free"),
-    "documented": ("gemini-3.8-flash",),
     "false": ("cohere/north-mini-code:free",
               "command-a-03-2025",
+              "command-a-plus-05-2026",
               "command-r-plus-08-2024",
               "mistral-code-latest",
+              "nvidia/nemotron-3-ultra-550b-a55b:free",
               "poolside/laguna-s-2.1:free"),
     "unknown": ("Qwen3-Coder-30B-A3B-Instruct",
                 "Qwen3.8-27B",
@@ -4188,9 +4619,13 @@ class PromptCacheFieldTests(unittest.TestCase):
     def test_a_source_must_name_something(self):
         for source in ("", "   ", None, 7, ["probe"]):
             problems = self.problems("true", source=source)
-            self.assertEqual(len(problems), 1, (repr(source), problems))
-            self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
-                          problems[0])
+            # gemini-3.8-flash is the one row that carries a per-provider
+            # verdict beside the model-level one, so a missing attribution is
+            # named by both rules -- same fact, two readers of it.
+            self.assertEqual(len(problems), 2, (repr(source), problems))
+            for problem in problems:
+                self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
+                              problem)
 
     def test_the_schema_permits_the_field_without_requiring_it(self):
         schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
@@ -4204,6 +4639,125 @@ class PromptCacheFieldTests(unittest.TestCase):
                          "string")
         for key in ("prompt_cache", "prompt_cache_source"):
             self.assertNotIn(key, model["required"])
+
+
+class PromptCachePerProviderTests(unittest.TestCase):
+    """AO-DENYLEGS D1 (D-658 judge nit, 2026-10-08): caching is a fact about a
+    PROVIDER+MODEL leg, not a model id -- gemini-3.8-flash is documented-cached
+    through Vertex AI and was never measured through AI-Studio. The per-provider
+    verdict lives in ``models.<id>.prompt_cache_by_provider`` (same shape as
+    ``provider_prices``) and ``leg_prompt_cache()`` is the one reader: provider
+    entry first, model row next, "unknown" last -- so a model-level verdict can
+    never claim caching for a provider no probe answered."""
+
+    _SOURCE = "probe D-657 2026-10-08 central+workstation"
+
+    def mini(self, model_row):
+        return {
+            "version": "2026-10-08",
+            "providers": {
+                "vertex_ai": {"omniroute_id": "vertex"},
+                "google_ai_studio": {"omniroute_id": "gemini"},
+                "bazaarlink": {"model_prefix": "bzl"},
+            },
+            "models": {"gemini-3.8-flash": model_row},
+            "routes": {}, "clients": {}, "policy": {},
+        }
+
+    def problems(self, model_row, source=_SOURCE):
+        row = dict(model_row)
+        if source is not _MISSING:
+            row.setdefault("prompt_cache_source", source)
+        return [p for p in registry.check_registry(self.mini(row))
+                if "prompt_cache" in p]
+
+    def test_the_provider_entry_beats_the_model_row(self):
+        reg = self.mini({"prompt_cache": "documented",
+                         "prompt_cache_source": "probe D-657 2026-10-08",
+                         "prompt_cache_by_provider":
+                             {"google_ai_studio": "unknown"}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+
+    def test_the_model_row_answers_for_a_provider_with_no_entry(self):
+        reg = self.mini({"prompt_cache": "false"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "false")
+
+    def test_absence_and_a_bad_leg_both_read_unknown(self):
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "gemini/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "nowhere/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}), "not-a-leg"),
+                         "unknown")
+
+    def test_a_malformed_verdict_is_not_promoted_to_the_fallback(self):
+        """"true" spelled as a boolean is the value set's own defect (rule
+        names it); the lookup must still not read it as a caching claim."""
+        reg = self.mini({"prompt_cache_by_provider": {"vertex_ai": True}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"), "unknown")
+
+    def test_the_committed_gemini_row_splits_by_provider(self):
+        """The move D1 makes: no model-level verdict for gemini-3.8-flash, a
+        documented Vertex leg and an unmeasured AI-Studio leg -- so the free
+        AI-Studio leg stops inheriting Vertex's caching claim."""
+        reg = load_registry()
+        row = reg["models"]["gemini-3.8-flash"]
+        self.assertNotIn("prompt_cache", row)
+        self.assertEqual(row["prompt_cache_by_provider"],
+                         {"google_ai_studio": "unknown",
+                          "vertex_ai": "documented"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+
+    def test_a_known_provider_names_the_value_set(self):
+        problems = self.problems({"prompt_cache_by_provider": {"nope": "true"}})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("unknown provider", problems[0])
+
+    def test_a_bad_per_provider_value_is_named_with_model_and_provider(self):
+        for value in (True, "True", None, "", "yes", 1, ["true"]):
+            problems = self.problems(
+                {"prompt_cache_by_provider": {"vertex_ai": value}})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("prompt_cache_by_provider.vertex_ai", problems[0])
+
+    def test_an_empty_or_non_object_map_is_rejected(self):
+        for value in ({}, [], None, "true"):
+            problems = self.problems({"prompt_cache_by_provider": value})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("must be a non-empty object", problems[0])
+
+    def test_a_verdict_other_than_unknown_must_name_where_it_came_from(self):
+        for value in ("true", "documented", "false"):
+            problems = self.problems({"prompt_cache_by_provider":
+                                      {"vertex_ai": value}}, source=_MISSING)
+            self.assertEqual(len(problems), 1, (value, problems))
+            self.assertIn("prompt_cache_source must name", problems[0])
+        # "unknown" is the absence of an answer, so it owes no attribution.
+        self.assertEqual(self.problems({"prompt_cache_by_provider":
+                                        {"vertex_ai": "unknown"}},
+                                       source=_MISSING), [])
+
+    def test_the_schema_permits_the_map_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        prop = model["properties"]["prompt_cache_by_provider"]
+        self.assertEqual(prop["type"], "object")
+        self.assertEqual(prop["additionalProperties"]["enum"],
+                         ["true", "documented", "false", "unknown"])
+        self.assertNotIn("prompt_cache_by_provider", model["required"])
 
 
 class ProviderSpellingTests(unittest.TestCase):

@@ -128,8 +128,18 @@ class RepoTests(unittest.TestCase):
         # every sub-1M leg moved out of t1 into t2/t3, so on this branch every
         # served leg of l1-orchestrator and l1-orchestrator-free-only is a 1M
         # leg and the honest promise is back to 1000000).
+        # D657-CHAIN 2026-10-08 adds the routes that now promise 1M and loses
+        # spark-1.3-contributor: spec SS8 gated its paid muse leg, so with the zen
+        # leg client-bound the route declares legs and serves none - OR1d drops it
+        # out of the catalog entirely (asserted below), which is a gap, not a
+        # narrower promise. The numbers differ per route because each surface
+        # declares its own (1,000,000 marketing band vs 1,048,576 native window).
         clamp = {"l1-orchestrator": 1000000, "l1-orchestrator-free-only": 1000000,
-                 "l1-orchestrator-paid": 1000000, "spark-1.3-contributor": 1000000}
+                 "l1-orchestrator-paid": 1000000, "l1-orchestrator-clean": 1000000,
+                 "l2-orchestrator": 1048576, "l2-orchestrator-clean": 1048576,
+                 "l3-researcher": 1000000, "l3-researcher-clean": 1000000,
+                 "l3-review-tests": 1048576, "l3-review-codebase": 1000000,
+                 "gemini-3.8-flash": 1048576}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
         seen = set()
         for m in doc["models"]:
@@ -137,6 +147,7 @@ class RepoTests(unittest.TestCase):
                 seen.add(m["id"])
                 self.assertEqual(m["context"], clamp[m["id"]], m["id"])
         self.assertEqual(seen, set(clamp), "a wide tier left the catalog")
+        self.assertNotIn("spark-1.3-contributor", {m["id"] for m in doc["models"]})
 
 
 class CheckTests(SandboxCase):
@@ -278,6 +289,12 @@ class WriteTests(SandboxCase):
         # and l1-orchestrator-free-only's served head is the gemini free leg
         # (ladder low/medium/high), so it carries variants too; l3-driver's
         # served head likewise carries low/medium/high now.
+        # D657-CHAIN + D657-EFFORT 2026-10-08 move that last case again: rule (b)
+        # puts the free bazaarlink DeepSeek mirror at the head of both
+        # l1-orchestrator-free-only and l1-orchestrator, and that model row
+        # documents no ladder, so neither carries variants now (the clean band,
+        # which still heads vertex/gemini-3.8-flash, keeps them). Pinning the drop
+        # is the point: an undeclared rung must not survive as a variant.
         # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
         # ladder is low/medium/high) and stays the low/medium/high case.
         free = oc["providers"]["omniroute"]["models"]["gemini-3.8-flash"]
@@ -285,10 +302,8 @@ class WriteTests(SandboxCase):
                          ["low", "medium", "high"])
         for v in free["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertEqual(
-            [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["l1-orchestrator-free-only"]["variants"]],
-            ["low", "medium", "high"])
+        for gone in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-orchestrator"):
+            self.assertNotIn("variants", oc["providers"]["omniroute"]["models"][gone], gone)
         clean = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
         self.assertEqual([v["id"] for v in clean["variants"]],
                          ["low", "medium", "high"])

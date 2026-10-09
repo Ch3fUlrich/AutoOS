@@ -52,7 +52,7 @@ max_output_tokens = 32768
 model = "openai/l2-worker"
 base_url = "http://127.0.0.1:20128/v1"
 temperature = 0.1
-max_input_tokens = 128000
+max_input_tokens = 131072
 max_output_tokens = 32768
 
 [llm.l3-driver]

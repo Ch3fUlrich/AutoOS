@@ -85,12 +85,17 @@
     "lane probed all 6 (ack + tool-call round trip, max_tokens=512): all",
     "6 passed ACK+TOOL+RT. Chosen 3 by operator suggestion: ovh/gpt-oss-120b",
     "(agentic), ovh/Qwen3-Coder-30B-A3B-Instruct (cheap code), ovh/Qwen3.8-27B",
-    "(fast). Placement: credits tier after free legs, before paid-as-you-go",
+    "(fast). OVHCODER-DROP 2026-10-08: the Qwen3-Coder-30B-A3B-Instruct leg was",
+    "dropped - OVH withdrew the id upstream (completion answers HTTP 404 'does",
+    "not exist'), so it rides no route and its single-leg combo is retired in",
+    "tools/registry.py OMNIROUTE_RETIRED_IDS; the other two OVH legs stayed.",
+    "Placement: credits tier after free legs, before paid-as-you-go",
     "(operator order trial -> free -> credits -> paid). deepseek/deepseek-flash",
     "remains as the paid fallback leg in both combos (deepseek-v4.1-flash",
     "combo). Non-chat OVH ids (embeddings/tts/stt/image) inventoried only,",
     "not wired. Registry ai-registry.json routes updated: ovhcloud/gpt-oss-120b,",
-    "ovhcloud/Qwen3-Coder-30B-A3B-Instruct, ovhcloud/Qwen3.8-27B added to",
+    "ovhcloud/Qwen3-Coder-30B-A3B-Instruct (later dropped, OVHCODER-DROP above),",
+    "ovhcloud/Qwen3.8-27B added to",
     "l2-worker and l3-driver route legs; Qwen3.8-27B model row added (was",
     "missing from f6f5e69). litellm/config.yaml and docs/models.md synced",
     "via sync-router-tiers.py and render models-doc.",
@@ -147,7 +152,8 @@
     "B2-PRUNE 2026-10-01: hf-glm-5.2/hf-qwen3.8-27b/opus-4-6 land in omitted (declared legs, none servable via hugging_face/antigravity+cc unavailable) and apply prunes stale live combos (mechanism exists: apply.ps1 prunes retired+omitted, apply.sh prunes retired+omitted at Prune block - no new code needed). l2-orchestrator renders [deepseek] (antigravity deleted, cc unavailable).",
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
     "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time).",
-    "OVHCODER-DROP 2026-10-08 (hotfix): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured 17:34Z central: HTTP 404 'The model Qwen3-Coder-30B-A3B-Instruct does not exist'; probe D-657 2026-10-08 had already 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b / Qwen3.8-27B / Qwen3.5-397B-A17B answered 200). TORDER's 4 credit singles is now 3: the ovh-qwen3-coder-30b combo is deleted and its id moved to `retired` so apply prunes the live combo (ORQWEN404 precedent); the leg was already gated out of l2-worker/l3-driver and is now struck from the registry there too. Rendered from the registry, hand $comment kept (render omniroute --check is semantic and excludes this key)."
+    "D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): every judged chain was re-cut from the probe union in configuration/omniroute/probes/probe-d657-{central,workstation}.tsv - only legs that answered ack 200 plus one tool call serve. The L1/L2 orchestrator chains are bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash (the cached pool is exactly those two free legs plus the vertex credit leg, so rule (b) free-before-credit moves vertex off the head spec SS7b put it at). The four SS3 lens combos land as l3-review-diff/-tests/-codebase; l3-review-transcript renders nothing because SS3's II>=44 bar has no probe-confirmed gateway leg (qoder legs left with SS7b, vertex claude 501s, muse free 403s). Every *-clean combo is one leg (vertex/gemini-3.8-flash): spec 3.1 rule 3 admits only a non-training paid/credit/subscription leg and rule (b-or) forces every openrouter leg :free, so the free band can never be clean - the clean band has no fallback until a second credit/paid leg passes a probe. policy.d657_combos (rendered through, like omitted/retired) is what tools/combo-contract.py --strict-d657 judges with its (f)-(i) gates.",
+    "OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured central: HTTP 404 'The model `Qwen3-Coder-30B-A3B-Instruct` does not exist'; probe D-657 the same day 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answered 200). The route is deleted from the registry and its id moved to tools/registry.py OMNIROUTE_RETIRED_IDS, so it left `omitted` and landed in `retired` here - apply prunes the live combo. TORDER's four credit singles are three; the models row stays for pricing history. providers.ovhcloud is available again (OVH-REPROBE same day), so this leg is retired, not provider-gated."
   ],
   "retired": [
     "tier1",
@@ -183,28 +189,45 @@
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
+    "deepseek-v4.1-flash",
     "faik-gpt-6-sol",
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
-    "l1-orchestrator-clean",
+    "opus-5-5",
+    "ovh-gpt-oss-120b",
     "samba/MiniMax-M3",
-    "samba/gpt-oss-120b"
+    "samba/gpt-oss-120b",
+    "spark-1.3-contributor"
+  ],
+  "d657_combos": [
+    "l1-orchestrator",
+    "l1-orchestrator-clean",
+    "l1-orchestrator-free-only",
+    "l2-orchestrator",
+    "l2-orchestrator-clean",
+    "l2-worker",
+    "l2-worker-clean",
+    "l2-worker-free-only",
+    "l2-researcher",
+    "l3-driver",
+    "l3-driver-clean",
+    "l3-driver-free-only",
+    "l3-implementer",
+    "l3-implementer-clean",
+    "l3-researcher",
+    "l3-researcher-clean",
+    "l3-review-diff",
+    "l3-review-tests",
+    "l3-review-codebase",
+    "t4-rag",
+    "gemini-3.8-flash"
   ],
   "combos": [
-    {
-      "name": "deepseek-v4.1-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "deepseek/deepseek-flash"
-      ]
-    },
     {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash",
         "vertex/gemini-3.8-flash"
       ]
     },
@@ -221,12 +244,16 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash",
-        "agy/claude-sonnet-5-5-medium",
-        "free-ai/google/gemini-3.8-flash",
-        "vertex/gemini-3.8-flash",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -234,16 +261,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "gemini/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l1-orchestrator-paid",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -251,9 +269,16 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "agy/claude-sonnet-5-5-medium",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l2-orchestrator-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -261,9 +286,8 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "free-ai/qwen7b"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ]
     },
     {
@@ -271,20 +295,9 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b",
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -292,10 +305,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -303,15 +313,8 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ]
     },
     {
@@ -319,21 +322,17 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
-        "groq/openai/gpt-oss-120b",
+        "groq/qwen/qwen3.8-27b",
         "openrouter/poolside/laguna-s-2.1:free",
-        "free-ai/qwen7b",
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "mistral/mistral-code-latest",
-        "meta-api/muse-spark-1.3-contributor",
-        "deepseek/deepseek-flash"
+        "cohere/command-a-03-2025",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/cohere/north-mini-code:free",
+        "cohere/command-a-plus-05-2026",
+        "ovh/Qwen3.5-397B-A17B",
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -341,10 +340,7 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ovh/gpt-oss-120b",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash",
-        "deepseek/deepseek-flash"
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -352,23 +348,87 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "ainative/llama-4-maverick",
-        "gemini/gemini-3.8-flash",
-        "groq/qwen/qwen3.8-27b",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/qwen/qwen3.8-27b",
         "openrouter/poolside/laguna-s-2.1:free",
-        "groq/openai/gpt-oss-20b",
-        "openrouter/cohere/north-mini-code:free",
+        "cohere/command-a-03-2025",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "groq/openai/gpt-oss-120b",
-        "free-ai/qwen7b"
+        "openrouter/cohere/north-mini-code:free",
+        "cohere/command-a-plus-05-2026"
       ]
     },
     {
-      "name": "opus-5-5",
+      "name": "l3-implementer",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "groq/qwen/qwen3.8-27b",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "cohere/command-a-03-2025",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "groq/openai/gpt-oss-120b",
+        "openrouter/cohere/north-mini-code:free",
+        "cohere/command-a-plus-05-2026",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-implementer-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-researcher",
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "agy/claude-opus-5-5-medium"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-researcher-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-review-codebase",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-review-diff",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "groq/qwen/qwen3.8-27b",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/poolside/laguna-s-2.1:free"
+      ]
+    },
+    {
+      "name": "l3-review-tests",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -396,14 +456,6 @@
       ]
     },
     {
-      "name": "ovh-gpt-oss-120b",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ovh/gpt-oss-120b"
-      ]
-    },
-    {
       "name": "ovh-qwen3.8-27b",
       "strategy": "priority",
       "context": "128k",
@@ -412,20 +464,13 @@
       ]
     },
     {
-      "name": "spark-1.3-contributor",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "meta-api/muse-spark-1.3-contributor"
-      ]
-    },
-    {
       "name": "t4-rag",
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "cohere/command-a-03-2025",
-        "cohere/command-r-plus-08-2024"
+        "cohere/command-r-plus-08-2024",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025"
       ]
     },
     {

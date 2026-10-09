@@ -1,0 +1,4 @@
+model	gateway	ack	tool	cache	ack_ms	served	error
+ovh/Qwen3.8-27B	central	empty	ok	-	578	Qwen3.8-27B	-
+ovh/Qwen3.5-397B-A17B	central	empty	ok	-	649	Qwen3.5-397B-A17B	-
+ovh/gpt-oss-120b	central	empty	ok	-	800	gpt-oss-120b	-

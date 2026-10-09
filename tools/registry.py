@@ -1351,10 +1351,18 @@ def render_omniroute(registry: dict) -> dict:
             "models": [gateway_ref(leg, registry) for leg in legs],
         })
 
+    # AO-DENYLEGS D2 / operator D-657: the ids tools/combo-contract.py judges with
+    # its (f)-(i) gates are registry data (policy.d657_combos), projected here so
+    # combos.json stays a pure render. An absent/empty policy list renders an empty
+    # list, which is what keeps the opt-in per-combo (no implicit "all").
+    policy = registry.get("policy")
+    d657 = (policy.get("d657_combos") if isinstance(policy, dict) else None) or []
+
     return {
         "$comment": OMNIROUTE_GENERATED_COMMENT,
         "retired": list(OMNIROUTE_RETIRED_IDS),
         "omitted": omitted,
+        "d657_combos": list(d657),
         "combos": combos,
     }
 
@@ -1669,8 +1677,15 @@ IDE_MODEL_ORDER = (
     "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
     "l1-orchestrator-free-only",
     "l2-worker", "l2-worker-clean", "l2-worker-paid", "l2-worker-free-only",
-    "l2-orchestrator",
+    "l2-orchestrator", "l2-orchestrator-clean",
     "l3-driver", "l3-driver-clean", "l3-driver-paid", "l3-driver-free-only",
+    # D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the SS2 layer twins and the SS3
+    # review lenses named by operator D-657. Listed here because render_ide()
+    # requires this constant to name every route id.
+    "l3-implementer", "l3-implementer-clean",
+    "l3-researcher", "l3-researcher-clean",
+    "l3-review-diff", "l3-review-tests", "l3-review-codebase",
+    "l3-review-transcript",
     "spark-1.3-contributor",
     "opus-5-5",
     "t4-rag",
@@ -1713,6 +1728,9 @@ def render_ide(registry: dict) -> dict:
     render_omniroute() above, there is no legs-non-empty filter here: mapping doc
     section 3, "every ide-models id gets a route even when combos.json has no
     matching combo" (the LiteLLM-only *-paid routes, the dynamic auto* routes).
+    Two routes get no entry: one that declares legs and serves none (OR1d), and
+    one a gateway offers to no client at all - a legless route is never given
+    omniroute membership, because it renders no combo (NOLEGS-OFFER).
     Each entry's id/name/context/output/reasoning_effort come from the first
     gateway present in IDE_GATEWAYS priority order among
     `routes.<id>.surfaces.<gateway>` (a dict carrying "clients" - excludes a
@@ -1753,8 +1771,9 @@ def render_ide(registry: dict) -> dict:
             # OR1d: a route that declares legs but can serve none through
             # either gateway is offered by no declaration - the same rule
             # render_omniroute() applies to combos.json. A deliberately
-            # legless route (legs: []) is NOT dropped: it never promised a
-            # gateway leg.
+            # legless route (legs: []) is not dropped here: it never promised a
+            # gateway leg. It does lose its gateway *membership* - see
+            # NOLEGS-OFFER below.
             continue
         surfaces = route.get("surfaces")
         surfaces = surfaces if isinstance(surfaces, dict) else {}
@@ -1765,6 +1784,21 @@ def render_ide(registry: dict) -> dict:
         if not gateways:
             raise ValueError(
                 "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
+        # NOLEGS-OFFER (2026-10-08, fix-ci-round2): a legless route is in no
+        # combo - render_omniroute() gives `legs: []` no combo at all - so its
+        # omniroute membership would advertise a picker entry the gateway cannot
+        # resolve, which is what tools/audit-router.py --offline calls DRIFT
+        # (l1-orchestrator-paid after SS8 emptied it, l3-review-transcript born
+        # legless). The surface block stays in the registry as the route's own
+        # record of its window and name; it grants no client membership. The
+        # auto/* bootstraps keep theirs - OmniRoute resolves them itself with no
+        # combo, and the audit exempts them by the same test.
+        if not (route.get("legs") or []) and not route_id.startswith("auto"):
+            gateways.pop("omniroute", None)
+            if not gateways:
+                # Offered through no gateway at all: like the OR1d route above,
+                # it gets no entry rather than a row nothing can serve.
+                continue
         canonical = gateways[next(gw for gw in IDE_GATEWAYS if gw in gateways)]
 
         # The ladder and the default effort describe the leg that will ANSWER.
@@ -3536,7 +3570,16 @@ def _check_provider_prices(registry) -> list:
     return problems
 
 
-PROMPT_CACHE_VALUES = ("true", "documented", "false", "unknown")
+PROMPT_CACHE_UNKNOWN = "unknown"
+PROMPT_CACHE_VALUES = ("true", "documented", "false", PROMPT_CACHE_UNKNOWN)
+
+
+def _names_its_cache_source(model) -> bool:
+    """True when a model row attributes its caching verdict: a non-empty string
+    in ``prompt_cache_source``. One predicate, because both caching rules --
+    the model row's and the per-provider map's -- ask the same question of it."""
+    source = model.get("prompt_cache_source")
+    return isinstance(source, str) and bool(source.strip())
 
 
 def _check_prompt_cache(registry) -> list:
@@ -3571,11 +3614,82 @@ def _check_prompt_cache(registry) -> list:
                    value))
         if "prompt_cache_source" in model:
             source = model["prompt_cache_source"]
-            if not isinstance(source, str) or not source.strip():
+            if not _names_its_cache_source(model):
                 problems.append(
                     "models.%s.prompt_cache_source must be a non-empty string "
                     "naming the probe run or vendor document behind "
                     "prompt_cache (got %r)" % (model_id, source))
+    return problems
+
+
+def leg_prompt_cache(registry, leg) -> str:
+    """The prompt-caching verdict of ONE leg, keyed provider+model (D1, D-658).
+
+    ``models.<id>.prompt_cache`` is one row per model id, but a model served
+    through two providers is cached at one and unmeasured at the other, so
+    ``models.<id>.prompt_cache_by_provider.<provider_id>`` carries the
+    per-provider answer and is read FIRST; then the model-level row; then
+    "unknown". Absence is "unknown" -- same rule as ``prompt_cache`` itself, so
+    a caller never has to tell "no row" from "no answer".
+
+    Resolution accepts any leg spelling (``vertex_ai/``, ``vertex/``, a declared
+    ``model_prefix``, the gateway form ``combos.json`` carries) through
+    ``registry_ref()`` + ``resolve_leg()``; a leg that does not resolve reads
+    "unknown" rather than raising, because a gate that cannot name the provider
+    must not claim caching for it. A caller that needs a measured hit tests
+    ``== "true"``, never truthiness.
+    """
+    try:
+        provider_id, model_id = resolve_leg(registry_ref(leg, registry), registry)
+    except ValueError:
+        return PROMPT_CACHE_UNKNOWN
+    model = _section(registry, "models").get(model_id)
+    if not isinstance(model, dict):
+        return PROMPT_CACHE_UNKNOWN
+    scoped = model.get("prompt_cache_by_provider")
+    for value in ((scoped.get(provider_id)
+                   if isinstance(scoped, dict) else None),
+                  model.get("prompt_cache")):
+        if isinstance(value, str) and value in PROMPT_CACHE_VALUES:
+            return value
+    return PROMPT_CACHE_UNKNOWN
+
+
+def _check_prompt_cache_by_provider(registry) -> list:
+    """models.<id>.prompt_cache_by_provider, when present, answers one
+    provider's leg of a model the model row cannot answer (D1, D-658): a
+    non-empty object keyed by provider id, each value one of the four
+    ``prompt_cache`` strings, and any verdict other than "unknown" has to name
+    where it came from through the model row's ``prompt_cache_source`` -- the
+    same attribution rule ``prompt_cache`` follows.
+    """
+    problems = []
+    providers = _section(registry, "providers")
+    for model_id, model in sorted(_section(registry, "models").items()):
+        if not isinstance(model, dict) or "prompt_cache_by_provider" not in model:
+            continue
+        label = "models.%s.prompt_cache_by_provider" % model_id
+        scoped = model["prompt_cache_by_provider"]
+        if not isinstance(scoped, dict) or not scoped:
+            problems.append("%s must be a non-empty object" % label)
+            continue
+        for provider_id, value in sorted(scoped.items()):
+            entry_label = "%s.%s" % (label, provider_id)
+            if provider_id not in providers:
+                problems.append("%s: unknown provider %r" % (label, provider_id))
+            if not isinstance(value, str) or value not in PROMPT_CACHE_VALUES:
+                problems.append(
+                    "%s must be one of %s (got %r) - an unmeasured leg is "
+                    "\"unknown\", never true/false/null"
+                    % (entry_label,
+                       ", ".join(repr(v) for v in PROMPT_CACHE_VALUES), value))
+        answered = any(value != PROMPT_CACHE_UNKNOWN for value in scoped.values())
+        if answered and not _names_its_cache_source(model):
+            problems.append(
+                "%s carries a measured or documented verdict, so "
+                "models.%s.prompt_cache_source must name the probe run or "
+                "vendor document behind it (got %r)"
+                % (label, model_id, model.get("prompt_cache_source")))
     return problems
 
 
@@ -3617,6 +3731,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_monthly_caps(registry))
     problems.extend(_check_provider_prices(registry))
     problems.extend(_check_prompt_cache(registry))
+    problems.extend(_check_prompt_cache_by_provider(registry))
     problems.extend(_check_paid_local_cap(registry))
     problems.extend(_check_credit_guards(registry, today))
     problems.extend(_check_model_prefix(registry))

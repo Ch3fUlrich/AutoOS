@@ -320,6 +320,9 @@ Test-Case 'registry: no generated file drifts' {
         }
         $out = & python3 (Join-Path $Root 'tools\combo-contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-True ($rc -eq 0) "combo-contract failed: $out"
+        # AO-DENYLEGS D1 (2026-10-08): the (f)-(i) gate's own unit tests.
+        $out = & python3 (Join-Path $Root 'tests\test_combo_contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract unit tests failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE

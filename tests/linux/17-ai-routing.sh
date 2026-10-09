@@ -2412,7 +2412,12 @@ combos = {c["name"]: c["models"]
 # GLM55 2026-10-05 (operator): combos render the opencode_gateway legs under
 # the gateway's canonical `oc/*` prefix (providers.opencode_gateway
 # model_prefix), while LiteLLM addresses the provider by name.
-namespace = {"scw": "scaleway", "oc": "opencode_gateway"}
+# BZL (D657-CHAIN 2026-10-08): the same for bazaarlink, whose head free leg
+# every tier now carries — providers.bazaarlink.model_prefix is `bzl`, so the
+# render emits `bzl/deepseek/...` while the hand group addresses
+# `bazaarlink/deepseek/...` (the connection is registered as `bazaarlink`,
+# omniroute_id says so, and that is the spelling config.yaml already uses).
+namespace = {"scw": "scaleway", "oc": "opencode_gateway", "bzl": "bazaarlink"}
 transport = {"opencode-zen": "openai", "cheaperinference": "openai",
              "free-ai": "openai"}
 def litellm_model(ref):
@@ -2641,5 +2646,9 @@ fi
 
 if it "combo-contract gate passes (TORDER fail-closed)"; then
     out="$(python3 tools/combo-contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "combo-contract's D1 checks (f)-(i) unit tests pass (AO-DENYLEGS)"; then
+    out="$(python3 tests/test_combo_contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
