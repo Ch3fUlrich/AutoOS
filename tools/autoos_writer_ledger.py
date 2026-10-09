@@ -36,6 +36,7 @@ KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_mod
         "task_type", "risk", "reviewer", "fixer_model", "probe")
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
 _FUTURE_SKEW = datetime.timedelta(minutes=5)
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
 class LedgerError(ValueError):
@@ -53,7 +54,10 @@ def _open_ledger_ro(resolved):
     if not os.path.lexists(resolved):
         return None
 
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if NOFOLLOW == 0 and os.path.islink(resolved):
+        raise LedgerError("ledger %r is a symlink" % (resolved,))
+
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | NOFOLLOW
 
     try:
         fd = os.open(resolved, flags)
@@ -79,6 +83,25 @@ def _open_ledger_ro(resolved):
             pass
 
         raise LedgerError("ledger %r is not a regular file" % (resolved,))
+
+    if NOFOLLOW == 0:
+        try:
+            lst = os.lstat(resolved)
+        except OSError as ex:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+            raise LedgerError("ledger %r: %s" % (resolved, ex)) from None
+
+        if stat.S_ISLNK(lst.st_mode) or (lst.st_ino, lst.st_dev) != (st.st_ino, st.st_dev):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+            raise LedgerError("ledger %r is a symlink" % (resolved,))
 
     try:
         return os.fdopen(fd, "r", encoding="utf-8")
@@ -273,14 +296,19 @@ def record(e, path=None):
         os.makedirs(d, exist_ok=True)
 
     flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND
-             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+             | getattr(os, "O_NONBLOCK", 0) | NOFOLLOW)
+
+    if NOFOLLOW == 0 and os.path.islink(t):
+        raise LedgerError("ledger %r is a symlink" % (t,))
+
+    fd = None
 
     try:
-        fd = os.open(t, flags, 0o600)
-    except OSError as ex:
-        raise LedgerError("ledger %r: %s" % (t, ex)) from None
+        try:
+            fd = os.open(t, flags, 0o600)
+        except OSError as ex:
+            raise LedgerError("ledger %r: %s" % (t, ex)) from None
 
-    try:
         try:
             st = os.fstat(fd)
         except OSError as ex:
@@ -289,16 +317,30 @@ def record(e, path=None):
         if not stat.S_ISREG(st.st_mode):
             raise LedgerError("ledger %r is not a regular file" % (t,))
 
+        if NOFOLLOW == 0:
+            try:
+                lst = os.lstat(t)
+            except OSError as ex:
+                raise LedgerError("ledger %r: %s" % (t, ex)) from None
+
+            if stat.S_ISLNK(lst.st_mode) or (lst.st_ino, lst.st_dev) != (st.st_ino, st.st_dev):
+                raise LedgerError("ledger %r is a symlink" % (t,))
+
         buf = b"\n" + json.dumps(o, sort_keys=True).encode("utf-8") + b"\n"
-        n = os.write(fd, buf)
+
+        try:
+            n = os.write(fd, buf)
+        except OSError as ex:
+            raise LedgerError("ledger %r: %s" % (t, ex)) from None
 
         if n != len(buf):
-            raise OSError("short write on %r: %d of %d bytes" % (t, n, len(buf)))
+            raise LedgerError("ledger %r: short write %d of %d bytes" % (t, n, len(buf)))
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     return o
 

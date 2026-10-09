@@ -2,11 +2,13 @@
 """Tests for tools/autoos_writer_ledger.py (P3, hermetic: tmp dirs only)."""
 import contextlib
 import datetime
+import errno
 import inspect
 import io
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import threading
@@ -182,18 +184,237 @@ class LedgerTests(unittest.TestCase):
     def test_record_short_write_raises(self):
         target = path()
         real_write = os.write
+        real_close = os.close
+        opened = []
+        closed = []
+        real_open = os.open
+
+        def fake_open(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+
+        def fake_close(fd):
+            closed.append(fd)
+            return real_close(fd)
 
         def short(fd, buf):
             keep = len(buf) - 1 if len(buf) > 1 else 0
             return real_write(fd, buf[:keep]) if keep else 0
 
         os.write = short
+        os.open = fake_open
+        os.close = fake_close
 
         try:
-            with self.assertRaises(OSError):
+            with self.assertRaises(ledger.LedgerError):
                 ledger.record(entry(), path=target)
         finally:
             os.write = real_write
+            os.open = real_open
+            os.close = real_close
+
+        self.assertTrue(opened, "expected one open")
+        self.assertIn(opened[0], closed, "fd must be closed on short write")
+
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+
+    def test_record_write_error_is_ledger_error_and_closes_fd(self):
+        for code in (errno.ENOSPC, errno.EFBIG, errno.EIO):
+            target = path()
+            real_write = os.write
+            real_close = os.close
+            real_open = os.open
+            opened = []
+            closed = []
+
+            def fake_open(*args, **kwargs):
+                fd = real_open(*args, **kwargs)
+                opened.append(fd)
+                return fd
+
+            def fake_close(fd):
+                closed.append(fd)
+                return real_close(fd)
+
+            def boom(fd, buf, _code=code):
+                raise OSError(_code, os.strerror(_code))
+
+            os.write = boom
+            os.open = fake_open
+            os.close = fake_close
+
+            try:
+                with self.subTest(errno=code):
+                    with self.assertRaises(ledger.LedgerError):
+                        ledger.record(entry(), path=target)
+            finally:
+                os.write = real_write
+                os.open = real_open
+                os.close = real_close
+
+            self.assertTrue(opened, "expected one open")
+            self.assertIn(opened[0], closed, "fd must be closed on write error")
+
+            with self.assertRaises(OSError):
+                os.fstat(opened[0])
+
+    def test_record_write_error_cli_exits_4(self):
+        state = tempfile.mkdtemp()
+        os.environ["AUTOOS_STATE_DIR"] = state
+        real_write = os.write
+
+        def boom(fd, buf):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        os.write = boom
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                rc = ledger.main(["reject", "cli-werr-1", "--class", "syntax",
+                                  "--reviewer", "t3", "--task-type", "code",
+                                  "--writer-client", "c",
+                                  "--writer-model", MODEL])
+
+            self.assertEqual(rc, 4)
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            os.write = real_write
+            del os.environ["AUTOOS_STATE_DIR"]
+
+    def test_record_short_write_cli_exits_4(self):
+        state = tempfile.mkdtemp()
+        os.environ["AUTOOS_STATE_DIR"] = state
+        real_write = os.write
+
+        def short(fd, buf):
+            return len(buf) - 1 if len(buf) > 1 else 0
+
+        os.write = short
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                rc = ledger.main(["reject", "cli-short-1", "--class", "syntax",
+                                  "--reviewer", "t3", "--task-type", "code",
+                                  "--writer-client", "c",
+                                  "--writer-model", MODEL])
+
+            self.assertEqual(rc, 4)
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            os.write = real_write
+            del os.environ["AUTOOS_STATE_DIR"]
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlink ledger path")
+    def test_nofollow_fallback_write_rejects_symlink(self):
+        old = ledger.NOFOLLOW
+        ledger.NOFOLLOW = 0
+
+        try:
+            d = tempfile.mkdtemp()
+            real = os.path.join(d, "real.jsonl")
+            link = os.path.join(d, "link.jsonl")
+            ledger.record(entry(), path=real)
+            os.symlink(real, link)
+
+            with self.assertRaises(ledger.LedgerError):
+                ledger.record(entry(run_id="r-nofollow"), path=link)
+        finally:
+            ledger.NOFOLLOW = old
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlink ledger path")
+    def test_nofollow_fallback_read_rejects_symlink(self):
+        old = ledger.NOFOLLOW
+        ledger.NOFOLLOW = 0
+
+        try:
+            d = tempfile.mkdtemp()
+            real = os.path.join(d, "real.jsonl")
+            link = os.path.join(d, "link.jsonl")
+            ledger.record(entry(), path=real)
+            os.symlink(real, link)
+
+            with self.assertRaises(ledger.LedgerError):
+                ledger.load(link)
+
+            with self.assertRaises(ledger.LedgerError):
+                ledger.demoted(MODEL, "code", now=NOW, path=link)
+        finally:
+            ledger.NOFOLLOW = old
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlink ledger path")
+    def test_nofollow_fallback_detects_swap_after_open(self):
+        old = ledger.NOFOLLOW
+        ledger.NOFOLLOW = 0
+        real_lstat = os.lstat
+
+        try:
+            target = path()
+            ledger.record(entry(), path=target)
+            st = os.stat(target)
+
+            class FakeSt:
+                pass
+
+            fake = FakeSt()
+            fake.st_mode = stat.S_IFLNK | 0o777
+            fake.st_ino = st.st_ino + 1
+            fake.st_dev = st.st_dev
+            os.lstat = lambda *a, **k: fake
+
+            with self.assertRaises(ledger.LedgerError):
+                ledger.record(entry(run_id="r-swap"), path=target)
+
+            with self.assertRaises(ledger.LedgerError):
+                ledger.load(target)
+        finally:
+            os.lstat = real_lstat
+            ledger.NOFOLLOW = old
+
+    def test_creation_mode_is_0600_under_lax_umask(self):
+        old_mask = os.umask(0)
+
+        try:
+            target = os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
+            ledger.record(entry(), path=target)
+
+            if os.name != "nt":
+                mode = stat.S_IMODE(os.stat(target).st_mode)
+                self.assertEqual(mode & 0o077, 0,
+                                 "new ledger file must not be group/other-accessible: %o" % mode)
+        finally:
+            os.umask(old_mask)
+
+    def test_record_does_not_chmod_preexisting_file(self):
+        old_mask = os.umask(0)
+
+        try:
+            d = tempfile.mkdtemp()
+            target = os.path.join(d, "writer-ledger.jsonl")
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            os.close(fd)
+            real_chmod = os.chmod
+            chmods = []
+            os.chmod = lambda *a, **k: chmods.append(a) or real_chmod(*a, **k)
+
+            try:
+                ledger.record(entry(), path=target)
+            finally:
+                os.chmod = real_chmod
+
+            self.assertEqual(chmods, [], "record must not chmod a pre-existing file")
+
+            if os.name != "nt":
+                mode = stat.S_IMODE(os.stat(target).st_mode)
+                self.assertEqual(mode, 0o644,
+                                 "pre-existing mode must be left alone: %o" % mode)
+        finally:
+            os.umask(old_mask)
 
     def test_ledger_error_is_value_error(self):
         self.assertTrue(issubclass(ledger.LedgerError, ValueError))
