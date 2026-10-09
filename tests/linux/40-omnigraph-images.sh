@@ -161,42 +161,56 @@ fi
 # --go <ref> and --go-sha <sha> equal to this checkout's HEAD. The refusals exit at
 # the very top, before the cd/docker/snapshot, so they touch nothing; the happy path
 # is exercised here only against a throwaway tree (no live store exists in the suite).
+# D-852 (2026-10-09): and every case below runs with the stand-in binaries first on
+# PATH, so a gate that ever stops refusing mid-run meets a recording stub and a
+# closed port instead of `docker stop omnigraph-server` on the host. See
+# gate_stubs_make / gate_stub_run in tests/run-tests.sh.
 describe "omnigraph cluster apply gate"
 
 APC_SH="$ROOT/infra/mcp-servers/scripts/apply-cluster.sh"
 
 if it "apply-cluster: refuses to converge with no --go and touches nothing"; then
     d="$(mktemp -d)"
-    out="$( ( cd "$d" && bash "$APC_SH" ) 2>&1)"; rc=$?
+    gate_stubs_make "$d/stub"
+    out="$( ( cd "$d" && gate_stub_run "$d" -- bash "$APC_SH" ) 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a --go-less converge exited 0" >&2; }
     [[ "$out" == *"refusing to converge the live omnigraph store without --go"* ]] \
         || { ok=0; echo "no D-825 refusal: $out" >&2; }
     [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
     [[ ! -e "$d/.graph-backup" ]] || { ok=0; echo "the refused run wrote a backup dir" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] || { ok=0; echo "the refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "apply-cluster converged the live store with no --go"; fi
 fi
 
 if it "apply-cluster: refuses a malformed --go reference"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
     sha="$(git -C "$ROOT" rev-parse HEAD)"
-    out="$(bash "$APC_SH" --go "not-a-ref" --go-sha "$sha" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go "not-a-ref" --go-sha "$sha" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a malformed --go reference exited 0" >&2; }
     [[ "$out" == *"is not a judge run id"* ]] || { ok=0; echo "no ref-format refusal: $out" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "apply-cluster accepted a malformed --go"; fi
 fi
 
 if it "apply-cluster: refuses when --go-sha is not this checkout's HEAD"; then
-    out="$(bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a wrong --go-sha exited 0" >&2; }
     [[ "$out" == *"is not this checkout's HEAD"* ]] || { ok=0; echo "no sha-mismatch refusal: $out" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "apply-cluster converged on a --go-sha that is not HEAD"; fi
 fi
 
 if it "apply-cluster: --go=OS-0 with a non-HEAD --go-sha= still refuses"; then
-    out="$(bash "$APC_SH" --go=OS-0 --go-sha=abcdef 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go=OS-0 --go-sha=abcdef 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "the =-form args were not gated: rc=$rc out=$out"
 fi
@@ -204,68 +218,95 @@ fi
 # ─── The same D-825 gate on the Python live-store tools (dedup / populate / split) ──
 # They mutate the running omnigraph store (a reset + overwrite-load, an overwrite-load,
 # or a merge-load / node delete), so like apply-cluster.sh a mutating run refuses without
-# --go/--go-sha. The gate sits before any docker or token access, so each case below runs
-# the real script against no stack at all: a refusal never reaches docker, and a read-only
-# run (--dry-run / --no-load / no --apply) passes the gate and only then fails on the
-# absent stack — which is exactly the unchanged read-only behaviour.
+# --go/--go-sha. D-852: the gate is no longer the only thing that keeps a case off the
+# host — every case here runs against a fresh temp dir whose stand-in docker/curl/systemctl
+# record the call instead of making it, and the cases that CLEAR the gate assert the
+# record, because "the gate let it through" is only proven by what it then reached.
 OG_PY="$ROOT/infra/mcp-servers/scripts"
 _head() { git -C "$ROOT" rev-parse HEAD; }
 
 if it "D-825: dedup-graph refuses a live dedup with no --go and touches nothing"; then
-    out="$(python3 "$OG_PY/dedup-graph.py" 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a --go-less dedup exited 0" >&2; }
     [[ "$out" == *"refusing to dedup the live omnigraph store without --go"* ]] \
         || { ok=0; echo "no D-825 refusal: $out" >&2; }
     [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] || { ok=0; echo "the refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "dedup-graph deduped with no --go"; fi
 fi
 
 if it "D-825: dedup-graph refuses a malformed --go reference" ; then
-    out="$(python3 "$OG_PY/dedup-graph.py" --go not-a-ref --go-sha "$(_head)" 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go not-a-ref --go-sha "$(_head)" 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not a judge run id"* ]] && pass \
         || fail "a malformed --go reference was accepted: rc=$rc out=$out"
 fi
 
 if it "D-825: dedup-graph refuses when --go-sha is not this checkout's HEAD"; then
-    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "a wrong --go-sha was accepted: rc=$rc out=$out"
 fi
 
 if it "D-825: dedup-graph --dry-run needs no --go and is unchanged"; then
-    out="$(python3 "$OG_PY/dedup-graph.py" --dry-run 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --dry-run 2>&1)"; rc=$?
     [[ "$out" != *"refusing to dedup the live omnigraph store"* ]] && pass \
         || fail "the dry run hit the D-825 gate: $out"
 fi
 
 if it "D-825: dedup-graph a valid --go + --go-sha echoes GO first and proceeds"; then
-    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    # A CLEARED gate hands the script to the live stack next, so this is the case the
+    # 2026-10-09 incident turned on: the GO line proves the gate opened, and the stand-in
+    # log proves the run that followed it talked to a stub, never to docker on the host.
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
     first_line="$(printf '%s\n' "$out" | head -1)"
-    [[ "$first_line" == "GO: D-825 sha=$(_head)" ]] && pass \
-        || fail "the GO line was not first or the gate refused: [$first_line]"
+    ok=1
+    [[ "$first_line" == "GO: D-825 sha=$(_head)" ]] \
+        || { ok=0; echo "the GO line was not first or the gate refused: [$first_line]" >&2; }
+    gate_stub_saw "$d/stub" docker || { ok=0; echo "the cleared run never reached a stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a valid GO did not reach the stand-in stack"; fi
 fi
 
 if it "D-825: populate-embeddings refuses an overwrite-load with no --go"; then
-    out="$(python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"refusing to overwrite-load the live omnigraph graph without --go"* ]] \
         && pass || fail "a --go-less overwrite-load was not refused: rc=$rc out=$out"
 fi
 
 if it "D-825: populate-embeddings --no-load needs no --go and is unchanged"; then
-    out="$(python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl --no-load 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl --no-load 2>&1)"; rc=$?
     [[ "$out" != *"refusing to overwrite-load the live omnigraph graph"* ]] && pass \
         || fail "--no-load hit the D-825 gate: $out"
 fi
 
 if it "D-825: split-project-graph refuses --apply with no --go"; then
-    out="$(python3 "$OG_PY/split-project-graph.py" some-project --apply 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/split-project-graph.py" some-project --apply 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"refusing to write to the live omnigraph graph without --go"* ]] \
         && pass || fail "--apply was not refused: rc=$rc out=$out"
 fi
 
 if it "D-825: split-project-graph a dry run (no --apply) needs no --go and is unchanged"; then
-    out="$(python3 "$OG_PY/split-project-graph.py" some-project 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/split-project-graph.py" some-project 2>&1)"; rc=$?
     [[ "$out" != *"refusing to write to the live omnigraph graph"* ]] && pass \
         || fail "a dry run hit the D-825 gate: $out"
 fi
@@ -274,11 +315,14 @@ if it "D-825: compact-graphs.ps1 gate is present (refuses without -Go)"; then
     # The pwsh suite owns the full battery; the bash shard only proves the gate exists and
     # fires, so a Windows host that never runs pwsh still guards against the gate vanishing.
     command -v pwsh >/dev/null || { skip "no pwsh on this host"; }
-    out="$(pwsh -NoProfile -NonInteractive -File "$OG_PY/compact-graphs.ps1" 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- pwsh -NoProfile -NonInteractive -File "$OG_PY/compact-graphs.ps1" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a no-Go compact-graphs run exited 0" >&2; }
     [[ "$out" == *"refusing to compact the live omnigraph store without -Go"* ]] \
         || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "compact-graphs.ps1 ran live without a -Go: rc=$rc out=$out"; fi
 fi
 
@@ -297,23 +341,27 @@ fi
 
 if it "D-825: dedup-graph refuses a --go that names no decision, exact id only"; then
     d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
     printf '| D-825 | all L1s | only an explicit GO counts | router |\n' >"$d/log.md"
     ok=1
     for ref in D-9999 D-82; do
-        out="$(AUTOOS_DECISIONS_LOG="$d/log.md" python3 "$OG_PY/dedup-graph.py" \
-            --go "$ref" --go-sha "$(_head)" 2>&1)"; rc=$?
+        out="$(gate_stub_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- \
+            python3 "$OG_PY/dedup-graph.py" --go "$ref" --go-sha "$(_head)" 2>&1)"; rc=$?
         [[ $rc -ne 0 ]] || { ok=0; echo "--go $ref cleared the gate: $out" >&2; }
         [[ "$out" == *"names no decision"* ]] || { ok=0; echo "$ref: no existence refusal: $out" >&2; }
         [[ "$out" != *"GO:"* ]] || { ok=0; echo "$ref: printed a GO line for nothing: $out" >&2; }
     done
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "a refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "dedup-graph accepted a ref that names no artefact"; fi
 fi
 
 if it "D-825: dedup-graph refuses when the decisions log cannot be read"; then
     d="$(mktemp -d)"
-    out="$(AUTOOS_DECISIONS_LOG="$d/no-such-dir/log.md" python3 "$OG_PY/dedup-graph.py" \
-        --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/log.md" -- \
+        python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "an unreadable source cleared the gate: $out" >&2; }
     [[ "$out" == *"cannot read the routing decisions log"* ]] \
@@ -325,28 +373,115 @@ fi
 if it "D-825: dedup-graph --go-offline still refuses a bad --go-sha"; then
     # The offline flag waives the artefact lookup, never the sha the GO names — and the
     # refusal on the sha is what keeps this case safe to run with no stack at all.
-    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 \
-        --go-offline 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 \
+        --go-sha 0000000000000000000000000000000000000000 --go-offline 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "--go-offline waived the sha bar: rc=$rc out=$out"
 fi
 
 if it "D-825: apply-cluster refuses a --go that names no artefact, unknown flags still rc 2"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
     ok=1
-    out="$(bash "$APC_SH" --go D-9999 --go-sha "$(_head)" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go D-9999 --go-sha "$(_head)" 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"names no decision"* ]] \
         || { ok=0; echo "apply-cluster converged on a ref that names nothing: rc=$rc out=$out" >&2; }
     # The fixture tree (tests/fixtures/go-gate, exported by run-tests.sh) holds D-825:
     # an id that IS there must not be refused, or the suite's own mutating cases break.
-    out="$(bash "$APC_SH" --go D-82 --go-sha "$(_head)" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go D-82 --go-sha "$(_head)" 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"names no decision"* ]] \
         || { ok=0; echo "D-82 matched the fixture's D-825 line: rc=$rc out=$out" >&2; }
-    out="$(bash "$APC_SH" --bogus 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --bogus 2>&1)"; rc=$?
     [[ $rc -eq 2 && "$out" == *"unknown argument '--bogus'"* ]] \
         || { ok=0; echo "an unknown argument was not refused: rc=$rc out=$out" >&2; }
-    out="$(bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] \
         || { ok=0; echo "--go-offline waived the sha bar or was an unknown flag: rc=$rc out=$out" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "a refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "apply-cluster.sh accepted an unverifiable --go"; fi
+fi
+
+# ─── Fleet rule D-852: the stand-in directory is what these cases really run on ──
+# Every case above clears or refuses a gate, and a cleared gate goes on to exec
+# docker/systemctl/curl/ssh off PATH. If the stand-in dir ever stops being first —
+# a case that forgot gate_stubs_make, a PATH rebuilt from the host's own, a stub
+# that lost its shebang — the SAME case would silently reach the host's live stack
+# and still print a green tick, which is how omnigraph-server got restarted on
+# 2026-10-09. So the shadow itself is a tested property, for every binary and both
+# shells, and the call record is checked to be the stub's own.
+if it "D-825: guard (D-852) every host binary a gate tool execs resolves inside the stand-in dir"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    problems=""
+    for b in $GATE_STUB_ALL_BINS; do
+        resolved="$(PATH="$d/bin:$d/stub:$PATH"; command -v "$b")"
+        [[ -n "$resolved" ]] || { problems+=" $b:nothing-on-path;"; continue; }
+        [[ "$resolved" == "$d/stub/$b" ]] || problems+=" $b:$resolved;"
+    done
+    # docker and systemctl are the two that restarted the live server; name them
+    # explicitly so a regression says which one escaped, not just that one did.
+    for b in docker systemctl; do
+        [[ "$(PATH="$d/bin:$d/stub:$PATH"; command -v "$b")" == "$d/stub/$b" ]] \
+            || problems+=" $b-outside-the-stand-in-dir;"
+    done
+    rm -rf "$d"
+    [[ -z "$problems" ]] && pass || fail "resolved outside the stand-in dir: $problems"
+fi
+
+if it "D-825: guard (D-852) a stand-in records the call and never runs the host binary"; then
+    # The record is the whole guard: a stub that shadows PATH but stays silent
+    # cannot prove a cleared gate stopped there, and one that falls through to
+    # `exec` would restart the stack while still logging.
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub" "$GATE_STUB_HOST_BINS"
+    problems=""
+    for b in $GATE_STUB_HOST_BINS; do
+        out="$(gate_stub_run "$d" -- "$b" --pretend-argument 2>&1)"; rc=$?
+        [[ $rc -eq 0 ]] || problems+=" $b:exited-$rc;"
+        [[ -z "$out" ]] || problems+=" $b:printed [$out];"
+        gate_stub_saw "$d/stub" "$b" || problems+=" $b:not-recorded;"
+    done
+    grep -q -- "--pretend-argument" "$d/stub/calls.log" \
+        || problems+=" the record lost the arguments;"
+    # The host's real docker answers `inspect` with a StartedAt; the stub answers
+    # nothing at all. Asking for the live container is the direct test of the
+    # incident: it must produce no version string and no container.
+    real="$(PATH="$d/bin:$d/stub:$PATH"; docker inspect -f '{{.State.StartedAt}}' omnigraph-server 2>&1)"
+    [[ "$real" != *"20"* ]] || problems+=" the stub answered with a real container: $real;"
+    rm -rf "$d"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "D-825: guard (D-852) the gateway URL env points at a closed port, never a live gateway"; then
+    problems=""
+    for name in AUTOOS_OMNIROUTE_URL OMNIROUTE_BASE_URL AUTOOS_OMNIGRAPH_URL OMNIGRAPH_URL OMNI_S3; do
+        got="$(gate_stub_run /nonexistent-standin-dir -- printenv "$name")"
+        [[ "$got" == "$GATE_URL_SINK" ]] || problems+=" $name=[$got];"
+    done
+    # A case that passes its own stand-in overrides the sink — that is how the
+    # apply.sh battery talks to its loopback gateway — but never a host name.
+    got="$(gate_stub_run /nonexistent-standin-dir "AUTOOS_OMNIROUTE_URL=http://127.0.0.1:20128" -- printenv AUTOOS_OMNIROUTE_URL)"
+    [[ "$got" == "http://127.0.0.1:20128" ]] || problems+=" the per-case override did not win: [$got]"
+    [[ "$GATE_URL_SINK" == "http://127.0.0.1:9" ]] || problems+=" the sink is not the discard port: $GATE_URL_SINK"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "D-825: guard (D-852) pwsh resolves the stand-in dir first too (when pwsh exists)"; then
+    command -v pwsh >/dev/null || { skip "no pwsh on this host"; }
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- pwsh -NoProfile -NonInteractive -Command \
+        'foreach ($b in @("docker","systemctl","curl","ssh","omniroute","npx","node")) { $c = Get-Command $b -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($c) { "$b " + $c.Source } else { "$b missing" } }' 2>&1)"
+    problems=""
+    for b in $GATE_STUB_ALL_BINS; do
+        line="$(printf '%s\n' "$out" | grep "^$b " | head -1)"
+        [[ "$line" == "$b $d/stub/$b" ]] || problems+=" $b:[$([ -n "$line" ] && echo "${line#"$b "}" || echo none)];"
+    done
+    rm -rf "$d"
+    [[ -z "$problems" ]] && pass || fail "PowerShell resolved outside the stand-in dir: $problems"
 fi
 

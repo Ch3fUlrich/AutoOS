@@ -264,6 +264,16 @@ _prune_sandbox() {
     local d
     d="$(mktemp -d)"
     mkdir -p "$d/bin" "$d/gw/api"
+    # D-852: two stand-in sets, because the batteries differ in one binary.
+    # $d/stub is the full set (curl included) for the D-825 gate battery, whose
+    # cases must not open a socket at all; $d/hstub is the host-mutating set
+    # (docker, systemctl, ssh, npx, node) for the batteries that read their own
+    # loopback stand-in over a real curl — a down-gateway case there depends on
+    # curl FAILING, so a blind exit-0 stub in front of it would be a false green.
+    # Which one a run gets is the PATH it is launched with; both sit after $d/bin,
+    # so a case's own stand-in always answers first.
+    gate_stubs_make "$d/stub"
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
     printf 'ok\n' >"$d/gw/api/health"
     printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
     : >"$d/calls.log"
@@ -480,7 +490,7 @@ _prune_apply() {
     fi
     local -a _go_arr=()
     mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
-    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
         bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
     kill "$pid" 2>/dev/null
 }
@@ -593,7 +603,7 @@ fi
 if it "apply prune: a down gateway is never listed and nothing is pruned"; then
     d="$(_prune_sandbox)"
     _prune_list "$d" tier2
-    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$d/keys.yml" \
+    out="$(PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$d/keys.yml" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     ok=1
     [[ -e "$d/listed" ]] && { ok=0; echo "a down gateway was listed" >&2; }
@@ -673,6 +683,10 @@ _node_sandbox() {
     local d
     d="$(mktemp -d)"
     mkdir -p "$d/bin"
+    # D-852: a cleared D-825 gate hands apply.sh the gateway-start path next, and
+    # that is a docker/systemctl call through the ai-stack helper. The host-mutating
+    # set is stand-ins here; curl stays the case's own, which answers /api/health.
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
     : >"$d/calls.log"
     : >"$d/curl.log"
     : >"$d/argv.log"
@@ -921,7 +935,7 @@ _node_apply() {
     shift
     local -a _go_arr=()
     mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
-    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" \
         bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
@@ -1082,7 +1096,7 @@ if it "svc: apply removes the REST temp files when a call is interrupted"; then
     # the rm that follows it. Signalling just the script's pid lets the call
     # finish and clean up behind it, and the case proves nothing.
     set -m
-    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
         bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" >"$d/run.out" 2>&1 &
@@ -1322,7 +1336,7 @@ json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
             "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
           open(sys.argv[1], "w"), indent=1)
 PY
-    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+    out="$(PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" 2>&1)"
     ok=1
     grep -q '^providers list' "$d/calls.log" \
@@ -1472,7 +1486,11 @@ fi
 # exactly the D-825 args it means to test; the _prune_apply/_node_apply helpers add a
 # valid GO to the mutating runs they issue.
 # _gate_run <dir> [apply args] — apply.sh against the prune stand-ins with the args
-# verbatim. Returns apply's exit code; prints its merged stdout+stderr.
+# verbatim. Returns apply's exit code; prints its merged stdout+stderr. D-852: it runs
+# through gate_stub_run, so $d/bin (the store stand-in) and then $d/stub (docker, curl,
+# systemctl, ssh, npx, node) come before anything the host offers and the gateway URL is
+# this case's own loopback server — a run that clears the gate reaches a record, not the
+# live stack, which is what the cleared cases below assert.
 _gate_run() {
     local d="$1" pid port out rc
     shift
@@ -1482,8 +1500,8 @@ _gate_run() {
         echo "no stand-in gateway"
         return 1
     fi
-    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" "AUTOOS_OMNIROUTE_URL=http://127.0.0.1:$port" "AUTOOS_KEYS_FILE=$d/keys.yml" \
+        -- bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
     kill "$pid" 2>/dev/null
     printf '%s' "$out"
     return "$rc"
@@ -1530,6 +1548,8 @@ if it "D-825: apply refuses when --go-sha is not this checkout's HEAD"; then
 fi
 
 if it "D-825: a valid --go + --go-sha echoes GO first and lets the live run proceed"; then
+    # D-852: the GO line proves the gate opened; the stand-in record proves what the
+    # run reached afterwards was the case's own — never the host's curl or docker.
     d="$(_prune_sandbox)"
     _prune_list "$d" tier2
     sha="$(git -C "$ROOT" rev-parse HEAD)"
@@ -1540,6 +1560,7 @@ if it "D-825: a valid --go + --go-sha echoes GO first and lets the live run proc
         || { ok=0; echo "GO line was not first: [$first_line]" >&2; }
     [[ "$out" != *"refusing to change live"* ]] || { ok=0; echo "a GO'd run was refused: $out" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the GO'd run never reached the live store" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the cleared run resolved no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "a valid GO did not let the run proceed"; fi
 fi
@@ -1609,8 +1630,8 @@ _gate_ref_run() {
         echo "no stand-in gateway"
         return 1
     fi
-    out="$(PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        env ${envs[@]+"${envs[@]}"} bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" "AUTOOS_OMNIROUTE_URL=http://127.0.0.1:$port" "AUTOOS_KEYS_FILE=$d/keys.yml" \
+        ${envs[@]+"${envs[@]}"} -- bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
     kill "$pid" 2>/dev/null
     printf '%s' "$out"
     return "$rc"
@@ -1646,6 +1667,7 @@ if it "D-825: a decision id matches exactly — D-82 is not D-825"; then
     first_line="$(printf '%s\n' "$out" | head -1)"
     [[ "$first_line" == "GO: D-825 sha=$sha" ]] \
         || { ok=0; echo "the id that IS in the log was refused: [$first_line]" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the cleared run resolved no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the exact-id match is wrong in one direction"; fi
 fi
@@ -1667,6 +1689,7 @@ if it "D-825: an OS-<n> item is checked against QUESTIONS.md / ANSWERS.md"; then
     out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-9 --go-sha "$sha")"; rc=$?
     [[ $rc -ne 0 && "$out" == *"names no OS"* ]] \
         || { ok=0; echo "an absent OS item was accepted: rc=$rc out=$out" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "a cleared OS run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the OS-<n> source check is wrong"; fi
 fi
@@ -1690,6 +1713,7 @@ if it "D-825: a judge run id needs a worker record (json or agent dir)"; then
         --go 20261009-000000-nosuchrun --go-sha "$sha")"; rc=$?
     [[ $rc -ne 0 && "$out" == *"names no worker record"* ]] \
         || { ok=0; echo "a run id with no record was accepted: rc=$rc out=$out" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "a cleared run-id run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the run-id worker-record check is wrong"; fi
 fi
@@ -1722,6 +1746,7 @@ if it "D-825: --go-offline proceeds and logs the unverified ref first"; then
         || { ok=0; echo "the first line was not the offline log: [$first_line]" >&2; }
     [[ "$out" == *"GO: D-825 sha=$sha"* ]] || { ok=0; echo "the gate refused offline: $out" >&2; }
     [[ -s "$d/listed" ]] || { ok=0; echo "the offline run never reached the live store" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the offline run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
     # --go-offline still cannot carry a bad sha: the offline flag waives the
     # artefact lookup, not the sha the GO has to name.
     out="$(_gate_ref_run "$d" -- --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline)"; rc=$?
@@ -1749,13 +1774,18 @@ fi
 # has refused unknown arguments from the start). A typo'd --go-sha or a stale
 # --apply would be swallowed exactly that way.
 if it "apply.sh: an unknown flag is refused with rc 2 and runs nothing"; then
-    out="$(bash "$ROOT/configuration/omniroute/apply.sh" --bogus 2>&1)"; rc=$?
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- bash "$ROOT/configuration/omniroute/apply.sh" --bogus 2>&1)"; rc=$?
     ok=1
     [[ $rc -eq 2 ]] || { ok=0; echo "rc=$rc (expected 2)" >&2; }
     [[ "$out" == *"unknown argument '--bogus'"* ]] \
         || { ok=0; echo "no unknown-flag refusal: $out" >&2; }
     [[ "$out" != *"This is a dry run"* && "$out" != *"GO:"* ]] \
         || { ok=0; echo "the run went on past the parser: $out" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "a refused parse reached a host binary: $(gate_stub_log "$d/stub")" >&2; }
+    rm -rf "$d"
     if (( ok )); then pass; else fail "apply.sh accepted an unknown flag"; fi
 fi
 
@@ -1771,6 +1801,9 @@ _drift_sandbox() {
     local d
     d="$(mktemp -d)"
     mkdir -p "$d/bin" "$d/gw/api"
+    # D-852: the host-mutating set, so a --drift run that ever stopped reading and
+    # started converging could not reach the host's docker.
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
     printf 'ok\n' >"$d/gw/api/health"
     printf '# no keys: no provider step runs under --drift anyway\n' >"$d/keys.yml"
     cat >"$d/bin/omniroute" <<'SH'
@@ -1840,7 +1873,7 @@ _drift_apply() {
         echo "no stand-in gateway"
         return 1
     fi
-    PATH="$d/bin:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
         bash "$ROOT/configuration/omniroute/apply.sh" --drift 2>&1
     local rc=$?
     kill "$pid" 2>/dev/null
