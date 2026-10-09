@@ -32,7 +32,9 @@ So the strip belongs at the translation boundary, at every
 `mergeConsecutiveSameRoleContents` call site. In OmniRoute 3.8.50 those are 12 sites over
 6 compiled chunks — 2 per chunk, an expression site (`...,f.contents=merge(f.contents),f}`)
 and a statement site (`o.contents=merge(o.contents??[]);let _=t.tools`) — and one site in
-the `open-sse/translator/request/openai-to-gemini.ts` source.
+the `open-sse/translator/request/openai-to-gemini.ts` source. That sentence is a measurement
+of one release, not a contract on the next: `tools/vertex-patch-gate.py` counts the sites on
+disk instead of trusting it, which is what the count in it is a floor for.
 
 ## The two guards, and why v1 was wrong
 
@@ -85,8 +87,9 @@ parts:[{text:"Continue."}]}` — is appended instead of refusing the request.
 |---|---|
 | `tools/apply-vertex-patch.py <chunks-dir>` | the 12 compiled-chunk sites only |
 | `tools/vertex-trailing-turn-reapply.ps1` | those 12 **plus** the `.ts` source site (13) |
+| `tools/vertex-patch-gate.py <chunks-dir>` | nothing — it counts the sites, guards and refills in **every** chunk on disk and fails a build whose tree is not fully guarded |
 
-Both decide every site in exactly three states and refuse anything else:
+Both patchers decide every site in exactly three states and refuse anything else:
 
 ```
 the v2 guard is present                       -> SKIP   (idempotent)
@@ -94,10 +97,19 @@ pristine text, or the v1 guard as shipped     -> PATCH  (install, or upgrade in 
 anything else                                 -> ERROR  (exit 1; nothing is guessed)
 ```
 
-The v1 form is tried before the pristine form because the pristine anchor is a substring
-of the v1 text — matching it first would re-anchor a v1 site and leave the broken guard
-behind. A site whose anchor matches more than once is reported as an error rather than
-half-patched, because a chunk whose text moved is a chunk this table no longer describes.
+The v1 form is tried before the pristine form, and the reason is the `.ts` site, not the
+chunks. A chunk site is matched on its whole anchor — head *and* tail together — so a chunk
+holds exactly one of the two states and the order decides nothing: the v1 guard sits between
+the head and the tail, so the two never both match. The `.ts` site is the one where order is
+load-bearing: its pristine anchor `result.contents = mergeConsecutiveSameRoleContents(result.contents ?? []);`
+is the first line of the block v1 wrote, so the pristine find *does* occur inside v1 text,
+and matching it first would splice the v2 block in above the `if (result.contents.length > 1)`
+it is meant to remove — one site carrying both guards, the broken one still running. The
+chunk table is kept in the same order because the two tables are asserted byte-identical, so
+there is one rule to remember instead of two. `tests/test_vertex_patch_gate.py` measures both
+halves of that claim. A site whose anchor matches more than once is reported as an error
+rather than half-patched, because a chunk whose text moved is a chunk this table no longer
+describes.
 
 `npm update omniroute` (or a `FROM` bump of the gateway base image) reverts every patch;
 re-run the script, or rebuild the image, afterwards. Each modified file is copied to
@@ -107,17 +119,26 @@ re-run the script, or rebuild the image, afterwards. Each modified file is copie
 
 The runtime image has a read-only rootfs and no python, so the patch runs at **build**
 time: `configuration/docker/ai-stack/omniroute.Dockerfile` copies the chunks into a
-`python:3.12-slim` stage, runs `apply-vertex-patch.py` twice, and fails the build unless
-run 1 reports `Done: 12 patched, 0 skipped, 0 errors` and run 2 reports `0 patched,
-12 skipped` (idempotent).
+`python:3.12-slim` stage, runs `apply-vertex-patch.py` twice, and hands the tree to
+`tools/vertex-patch-gate.py`, which stops the build unless the v2 guard count equals the
+call-site count, the refill count equals it too, at least 12 call sites exist, no v1 guard
+text survives anywhere in the tree, and both run summaries account for exactly that many
+sites (run 2 patching anything at all is a failed build: the guard must be idempotent).
 
-The counts stayed **12** for v2 because the anchors did not move — only the guard
-inserted at them changed. That is also why the counts alone are not enough: the v1 patcher
-reports `12 patched` too. The stage therefore asserts the guard's own bytes over the 6
-named chunks — 12 `text:"Continue."` refill sites and no `contents.length>1&&"model"===`
-left — so a patcher that regressed to v1 fails the build instead of shipping a gateway
-that still 400s. Chunk names are build-specific: a `FROM` bump that renames them breaks
-the build rather than shipping an unpatched gateway.
+The gate counts **every** `*.js` chunk on disk, never the 6 names the patcher's table
+carries. That was the gate's own defect (lane VERTEX-GUARD, gate 06c19a): the stage used to
+grep `Done: 12 patched` and count refills over a hard-coded chunk list, so a `FROM` bump that
+added a 13th `mergeConsecutiveSameRoleContents` call site in a new chunk — or renamed one of
+the 6 — shipped a gateway unpatched at that site while every number still matched, because
+the check had only ever counted the files it named. A gate that reads the tree has nothing to
+know in advance: chunk names, chunk count and site count come from the text, and a mismatch
+fails the build with the counts and the offending file printed, which is what a human then
+adds to `tools/apply-vertex-patch.py`.
+
+The counts stayed **12** for v2 because the anchors did not move — only the guard inserted
+at them changed. That is also why the patcher's report alone is never enough: the v1 patcher
+reports `12 patched` too, and so does the v2 patcher on a tree with a 13th site it cannot
+see. The gate therefore judges the guard's own bytes as well as the arithmetic.
 
 ## Impact
 
@@ -137,6 +158,7 @@ is inside the OpenAI-to-Gemini translator, so other providers' requests never re
 
 On Windows the `.ps1` patches the global OmniRoute package at
 `%APPDATA%\npm\node_modules\omniroute`; pass `-Path` for any other install.
-The Docker build patches the chunks inside the image. Neither tool reads a credential,
-opens a socket, or invokes the container runtime — `tests/test_vertex_trailing_turn_patch.py`
-runs on fixture copies of the chunk and source text only (D-852).
+The build stage patches the chunks inside the image and the gate judges the same tree.
+None of the three reads a credential, opens a network connection, or invokes the container
+runtime — `tests/test_vertex_trailing_turn_patch.py` and `tests/test_vertex_patch_gate.py`
+run on fixture copies of the chunk and source text only (D-852).
