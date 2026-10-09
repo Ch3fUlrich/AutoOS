@@ -4984,6 +4984,34 @@ def main_ci_status(repo=None, runner=None):
 LANE_DIFF_MAX_BYTES = 2 << 20  # 2 MiB of git output; more is not a lane diff
 
 
+class LaneDiffRefusal(Exception):
+    """The lane diff ANSWERED the gate and the answer was no (P4b-fixes D2).
+
+    ``lane_diff_paths`` *returns* an ``error`` when git could not be read at all
+    -- which is `ready`'s exit 2, "the check never ran" -- and raises this when
+    the check ran and the lane failed it, which is exit 1: a ``--base`` that is
+    not a strict ancestor of ``--sha`` (the same commit included), and a range
+    with nothing in it. Both read as an empty diff, and an empty diff read as
+    "touched nothing risky", which is how ``--base == --sha`` walked a lane
+    straight past the writer guards."""
+
+
+def _git_out(raw, errors):
+    """Decode one git buffer, leniently (P4b-fixes D3).
+
+    git runs in bytes mode here on purpose. With ``text=True`` a lane diff that
+    carries a non-UTF-8 path or any binary-adjacent line makes CPython raise
+    UnicodeDecodeError *inside* ``subprocess.run`` -- a ValueError this gate's
+    ``except`` does not name -- so the caller got a traceback where it was owed a
+    verdict. ``surrogateescape`` is for the path list, so an odd byte is a NAME
+    that survives to the scope fence instead of being renamed into a match or a
+    miss (``git diff --name-only`` does not quote one away); ``replace`` is enough
+    for the diff body, which is only ever pattern-matched for risk tokens. git's
+    own buffers are bytes, so a runner injected by a test hands bytes too.
+    """
+    return (raw or b"").decode("utf-8", errors)
+
+
 def _diff_range(base, sha):
     """The one rev-range argument git will read, or None when either side is not
     a plain rev token. Git takes it as a single POSITIONAL argument, never
@@ -4999,52 +5027,114 @@ def _diff_range(base, sha):
 
 
 def lane_diff_paths(repo, base, sha):
-    """``(paths, added_text, error)`` -- what the lane's own diff changed.
+    """``(paths, raw_diff, error)`` -- what the lane's own diff changed.
 
-    Two reads of one range: ``git diff --name-only --no-renames <base>...<sha>``
-    for the file list, ``git diff -U0 <base>...<sha>`` for what landed (only the
-    added lines are kept, so a deletion cannot carry a signal the writer never
-    wrote). The gate asks the DIFF, not the card, because a card labelled
-    ``docs`` that edited a playbook is exactly what the guard has to catch.
-    ``--no-renames`` so a rename arrives as both of its paths and the scope fence
-    sees each half.
+    The reads of one range, in this order, each of them fail-closed:
+
+      1. ``git rev-parse --verify <base>^{commit}`` and the same for ``<sha>``
+         -- both sides have to name a commit;
+      2. ``git merge-base --is-ancestor <base-oid> <sha-oid>`` -- the base has to
+         sit BEHIND the sha, and (P4b-fixes D2) the two oids must differ, because
+         a commit is its own ancestor: ``--base`` equal to ``--sha`` makes
+         ``<sha>...<sha>`` empty, an empty diff means ``ops_required`` False, and
+         the lane clears a gate it never stood in front of. A range that is not
+         an ancestor, or is empty, raises LaneDiffRefusal (exit 1); a git that
+         cannot answer is an ``error`` (exit 2);
+      3. ``git diff --name-only --no-renames <base>...<sha>`` for the file list --
+         ``--no-renames`` so a rename arrives as both of its paths and the scope
+         fence sees each half;
+      4. ``git diff -U0 --no-color <base>...<sha>`` for the RAW body, handed back
+         verbatim (P4b-fixes D1).
+
+    That last point is the whole reason the body is not reduced here:
+    ``autoos_writer_rule._added``, which decides the risk level, is written for
+    RAW ``git diff`` text and strips the leading '+' itself -- and a text whose
+    lines *already* had the '+' stripped is read as a diff whose only added lines
+    are the ones that happen to start with '+', '--- ', '@@' or 'diff '. So a real
+    added line ``token: x`` sitting under one such source line disappeared from
+    the judge's view entirely and an ops lane was waved through as docs. The
+    ``--no-color`` keeps escape sequences out of the same text.
 
     Fail closed like every other unreadable gate: a git that errors, times out,
     cannot start, or prints more than LANE_DIFF_MAX_BYTES returns a non-None
-    ``error`` (exit 2 at the caller) and never a half-read allow-list. The two
-    argvs are written out literally, not built in a loop, because the spawner's
-    own subprocess audit (FF1b item 6) only exempts a *literal* ``git`` call as
-    plumbing -- a variable called argv is not git, and this reads the operator's
-    own checkout as the operator, like ``remote_branch_tip`` does. Injectable
-    -- and REQUIRED to be injected in tests (HERMETIC, D-852): the ready tests
-    stub it exactly as they stub ``remote_branch_tip`` and ``main_ci_status``,
-    so no cmd_ready test ever shells out.
+    ``error`` (exit 2 at the caller, reading "cannot read diff" / "diff too large
+    to judge") and never a half-read allow-list. The argvs are written out
+    literally, not built in a loop, because the spawner's own subprocess audit
+    (FF1b item 6) only exempts a *literal* ``git`` call as plumbing -- a variable
+    called argv is not git, and this reads the operator's own checkout as the
+    operator, like ``remote_branch_tip`` does. Injectable -- and REQUIRED to be
+    injected in tests (HERMETIC, D-852): the ready tests stub it exactly as they
+    stub ``remote_branch_tip`` and ``main_ci_status``, so no cmd_ready test ever
+    shells out.
     """
     rng = _diff_range(base, sha)
     if rng is None:
         return None, None, ("cannot build a diff range from base %r and sha %r "
                             "(both must be plain rev tokens)" % (base, sha))
     try:
+        resolves_base = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                                        "%s^{commit}" % base], capture_output=True,
+                                       timeout=60, stdin=subprocess.DEVNULL)
+        resolves_sha = subprocess.run(["git", "-C", repo, "rev-parse", "--verify",
+                                        "%s^{commit}" % sha], capture_output=True,
+                                       timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git rev-parse: %s" % exc
+    for label, proc in (("base", resolves_base), ("sha", resolves_sha)):
+        if proc.returncode != 0:
+            return None, None, ((_git_out(proc.stderr, "replace").strip())
+                                or "git rev-parse --verify %s exited %d"
+                                   % (label, proc.returncode))
+    base_oid = _git_out(resolves_base.stdout, "surrogateescape").strip()
+    sha_oid = _git_out(resolves_sha.stdout, "surrogateescape").strip()
+    if not base_oid or not sha_oid:
+        return None, None, ("git rev-parse --verify answered with no commit id "
+                            "for base %r / sha %r" % (base, sha))
+    if base_oid == sha_oid:
+        raise LaneDiffRefusal(
+            "writer-guards: --base must be a strict ancestor of --sha (%s and %s "
+            "are both %s; an empty range fences nothing)"
+            % (base, sha, sha_oid[:12]))
+    try:
+        ancestor = subprocess.run(["git", "-C", repo, "merge-base", "--is-ancestor",
+                                   base_oid, sha_oid], capture_output=True,
+                                  timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, None, "git merge-base: %s" % exc
+    if ancestor.returncode not in (0, 1):
+        return None, None, ((_git_out(ancestor.stderr, "replace").strip())
+                            or "git merge-base --is-ancestor exited %d"
+                               % ancestor.returncode)
+    if ancestor.returncode == 1:
+        raise LaneDiffRefusal(
+            "writer-guards: --base must be a strict ancestor of --sha (%s is not "
+            "behind %s)" % (base, sha))
+    try:
         named = subprocess.run(["git", "-C", repo, "diff", "--name-only",
                                 "--no-renames", rng], capture_output=True,
-                               text=True, timeout=60, stdin=subprocess.DEVNULL)
-        body = subprocess.run(["git", "-C", repo, "diff", "-U0", rng],
-                              capture_output=True, text=True, timeout=60,
+                               timeout=60, stdin=subprocess.DEVNULL)
+        body = subprocess.run(["git", "-C", repo, "diff", "-U0", "--no-color", rng],
+                              capture_output=True, timeout=60,
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, None, "git diff: %s" % exc
     for label, proc in (("--name-only", named), ("-U0", body)):
         if proc.returncode != 0:
-            return None, None, ((proc.stderr or proc.stdout or "").strip()
+            return None, None, ((_git_out(proc.stderr, "replace").strip())
                                 or "git diff %s exited %d" % (label, proc.returncode))
-        if len(proc.stdout) > LANE_DIFF_MAX_BYTES:
-            return None, None, ("git diff %s printed %d characters, over the %d "
-                                "limit; read the lane's diff another way"
-                                % (label, len(proc.stdout), LANE_DIFF_MAX_BYTES))
-    paths = [line for line in named.stdout.split("\n") if line.strip()]
-    added = [line[1:] for line in body.stdout.split("\n")
-             if line.startswith("+") and not line.startswith("+++")]
-    return paths, "\n".join(added), None
+        size = len(proc.stdout or b"")
+        if size > LANE_DIFF_MAX_BYTES:
+            return None, None, ("diff too large to judge: git diff %s printed %d "
+                                "bytes, over the %d limit"
+                                % (label, size, LANE_DIFF_MAX_BYTES))
+    paths = [line for line in _git_out(named.stdout, "surrogateescape").split("\n")
+             if line.strip()]
+    if not paths:
+        raise LaneDiffRefusal(
+            "writer-guards: empty lane diff -- %s is a strict ancestor of %s and "
+            "nothing changed between them; a lane with no change is not ready"
+            % (base, sha))
+    return paths, _git_out(body.stdout, "replace"), None
 
 
 def read_guards_text(path):
@@ -5101,14 +5191,23 @@ def cmd_ready(args) -> int:
     WRITER-GUARDS (AO-WRITER-GUARDS P4b) sits between the pushed-sha gate and the
     CI gate and reads the lane's own diff (`lane_diff_paths`, injected from
     `--base`, default `origin/main`) rather than trusting the card: ops work is
-    decided by `requires_ops_guards` from the real path list and added lines, so a
-    `docs`/`code` label cannot skip it. When the diff says ops, `--brief` and
+    decided by `requires_ops_guards` from the real path list and the RAW diff text
+    (`git diff -U0 --no-color`, handed over unstripped — P4b-fixes D1: the risk
+    judge strips the leading '+' itself, and pre-stripping it let one source line
+    starting with '+', '--- ', '@@' or 'diff ' hide every other added line from the
+    check), so a `docs`/`code` label cannot skip it. `--base` must resolve to a
+    commit that is a STRICT ancestor of `--sha` (P4b-fixes D2): the same commit, a
+    base that does not sit behind the sha, or a range that changed nothing is
+    refused at exit 1 as `writer-guards: --base must be a strict ancestor of --sha`
+    / `writer-guards: empty lane diff` — an empty diff otherwise reads as "touched
+    nothing risky" and clears the gate. When the diff says ops, `--brief` and
     `--report` are required; whenever `--brief` is given the brief's canonical
     FILES line becomes the allow-list and `scope_fence` refuses any touched path
     outside it, naming every violation. An ops lane's REPORT must carry CHECK
     1-6 with a PASS verdict and evidence (`report_checks`). A GuardError from any
     helper refuses (exit 1, fail closed); a diff or brief/report file the gate
-    cannot read is exit 2. A lane that clears the guards appends ` guards=ok` to
+    cannot read — including a diff over the 2 MiB cap, which reads `diff too large
+    to judge` — is exit 2. A lane that clears the guards appends ` guards=ok` to
     the ready line (` ops=1` too for an ops lane); a lane that triggers nothing
     appends no new field, and `preflight` (the same module's tool check, exit 3 on
     input_required) tells the operator whether the guard tools exist at all."""
@@ -5142,20 +5241,29 @@ def cmd_ready(args) -> int:
     # a `docs` card that edited `playbooks/x.yml` is an ops lane. git failing to
     # answer the diff, or an unreadable --brief/--report file, is exit 2 like
     # every other unreadable gate: "the check never ran" is not "the lane failed
-    # it", and a writer that cannot be judged must not be allowed.
+    # it", and a writer that cannot be judged must not be allowed. A range the
+    # reader refuses (P4b-fixes D2: `--base` not a strict ancestor of `--sha`, or
+    # an empty diff) is the lane failing it -- exit 1, never exit 0.
     guards_fields = ""
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
     base = getattr(args, "base", None) or "origin/main"
     task_type = getattr(args, "task_type", None) or "code"
-    diff_paths, diff_added, diff_error = lane_diff_paths(args.repo or os.getcwd(),
-                                                         base, args.sha)
+    try:
+        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
+                                                           base, args.sha)
+    except LaneDiffRefusal as exc:
+        print("ready: not appended -- %s" % exc, file=sys.stderr)
+        return 1
     if diff_error:
         print("ready: cannot read diff: %s" % diff_error, file=sys.stderr)
         return 2
     try:
+        # P4b-fixes D1: the RAW diff body, not the added lines pre-stripped of
+        # their '+'. `requires_ops_guards` -> `required_r_level` -> `_added` reads
+        # diff text and does that strip itself.
         ops_required = ready_guards.requires_ops_guards(task_type, paths=diff_paths,
-                                                       diff_text=diff_added)
+                                                        diff_text=diff_raw)
     except (ready_guards.GuardError, ValueError) as exc:
         print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
         return 1
@@ -12390,7 +12498,10 @@ def _parser_ready(sub):
                               "(report-checks)")
     ready_p.add_argument("--base", default="origin/main",
                          help="the diff's other end for the writer-guards gate, compared at "
-                             "its merge base with --sha (default: %(default)s)")
+                             "its merge base with --sha (default: %(default)s). Must resolve "
+                             "to a commit that is a STRICT ancestor of --sha: the same commit, "
+                             "a base that is not behind --sha, or a range that changed "
+                             "nothing is refused")
     ready_p.add_argument("--task-type", dest="task_type", default="code",
                          choices=("ops", "code", "docs", "infra"),
                          help="what the card claimed (default: %(default)s). Only ever a "
