@@ -3034,11 +3034,11 @@ def _check_writers(registry) -> list:
     problems = []
     writers = _section(registry, "policy").get("writers")
     if writers is None:
-        return []
+        return ["writers: policy.writers is missing - writer_allowed fails closed without it"]
     if not isinstance(writers, dict):
         return ["writers: policy.writers must be an object"]
-    subs = writers.get("sub40_models", [])
-    if not isinstance(subs, list) or any(not isinstance(s, str) or not s for s in subs):
+    subs = writers.get("sub40_models")
+    if not isinstance(subs, list) or not subs or any(not isinstance(s, str) or not s for s in subs):
         problems.append("writers: policy.writers.sub40_models must list non-empty strings")
     for key in ("R2", "R3"):
         legs = writers.get(key, [])
