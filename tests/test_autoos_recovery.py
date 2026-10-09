@@ -1831,6 +1831,111 @@ class FooterOnlyTask(TempCase):
         self.assertIn("suspected", err.getvalue())
 
 
+class InvisiblePrefixFooter(TempCase):
+    """D-914 loop-stopper, the last narrow fix: `_usable_task` recognised a
+    lost-separator footer with `lstrip()`, which strips WHITESPACE only. ONE
+    invisible character in front of the heading — any member of the Zs/Zl/Zp/Cc/Cf
+    set `_has_visible_text` already refuses — hid a footer-only task from the check,
+    so the record classified 'died', answered 'rerun' (exit 3), and its continuation
+    brief stacked a SECOND 'CONTINUE FROM CURRENT DIFF' footer on the one it already
+    was. The heading is matched on a character class now (invisible and whitespace
+    characters removed, NFKC + casefold on both sides), so every one of those records
+    is unusable: 'unknown' + suspect, escalate, exit 4, no brief and zero footers."""
+
+    PREFIXES = (
+        "\u200b",                 # zero-width space — the exact reported repro
+        "\ufeff",                 # BOM
+        "\u200c",                 # zero-width non-joiner
+        "\xad",                   # soft hyphen (Cf)
+        "\x00", "\x01",           # C0 controls
+        "\u202e",                 # bidi override
+        "\u2028",                 # line separator (Zl) — splitslines() bait
+        "\xa0",                   # no-break space (Zs)
+        "\u200b\x00\ufeff ",      # several prefix characters at once
+        " \t\u200b\n",            # a tab/space mix around an invisible
+        "\n \t\xa0\t \n",         # whitespace only, no invisible
+    )
+
+    def repro(self, prefix):
+        """A footer that lost the marker's blank line, with `prefix` in front."""
+        return prefix + r.CONTINUE_HEADING + "1/2): AAAA"
+
+    def test_the_exact_repro_is_unusable_for_every_prefix(self):
+        for prefix in self.PREFIXES:
+            task = self.repro(prefix)
+            self.assertIsNone(r._usable_task({"task": task}, True), repr(task))
+
+    def test_every_prefix_escalates_with_no_footer_at_all(self):
+        for prefix in self.PREFIXES:
+            task = self.repro(prefix)
+            st = self.other_state()
+            make_record(st, task=task, exit_json={"rc": 1})
+            info = classify(os.path.join(st, "agents", RUN), probe=dead)
+            self.assertEqual((info["state"], info["record_suspect"]),
+                             ("unknown", True), repr(task))
+            self.assertEqual(r.next_action(0, info["state"],
+                                           record_suspect=info["record_suspect"]),
+                             "escalate", repr(task))
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual((p["action"], p["state"], p["record_suspect"]),
+                             ("escalate", "unknown", True), repr(task))
+            self.assertIsNone(p["continue_task"], repr(task))
+            # Zero stacked footers — in the plan, and in anything it says.
+            self.assertEqual(json.dumps(p, sort_keys=True, default=str)
+                             .count("CONTINUE FROM CURRENT DIFF"), 0, repr(task))
+            self.assertFalse(os.path.exists(r.path_of(LANE, st)), repr(task))
+
+    def test_the_exact_repro_exits_4_through_the_cli(self):
+        make_record(self.state, task=self.repro("\u200b"), exit_json={"rc": 1})
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = r.main(["plan", RUN, "--lane", LANE])
+        self.assertEqual(code, 4)
+        printed = out.getvalue() + err.getvalue()
+        self.assertNotIn("CONTINUE FROM CURRENT DIFF", printed)
+
+    def test_an_invisible_character_inside_the_heading_is_no_better(self):
+        """The class strip is not a prefix rule: an invisible woven into the heading
+        still leaves a footer-only record in front of no brief at all."""
+        for task in ("CONTINUE\u200b FROM CURRENT DIFF (recovery attempt 1/2): AAAA",
+                     "\ufeffCONTINUE FROM \x01CURRENT DIFF (recovery attempt 1/2): AAAA"):
+            self.assertIsNone(r._usable_task({"task": task}, True), repr(task))
+
+    def test_real_text_before_a_genuine_footer_still_gets_exactly_one(self):
+        """The cut stays literal for a brief: real task text plus the previous leg's
+        footer is usable, and the rebuilt brief carries ONE footer, not two."""
+        sb = self.sb()
+        task = "Fix the widget." + r.CONTINUE_MARKER + "1/2): older footer\n"
+        make_record(self.state, task=task, output=header_lines(sb),
+                    exit_json={"rc": 1})
+        out = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
+        self.assertEqual(out["action"], "rerun")
+        self.assertIsNotNone(out["continue_task"])
+        self.assertEqual(out["continue_task"].count("CONTINUE FROM CURRENT DIFF"), 1)
+        self.assertEqual(out["continue_task"], r.continuation_task(task, 1, sb))
+
+    def test_real_text_before_an_invisible_corrupted_footer_is_untouched(self):
+        """A brief with real text ahead of a footer whose blank line was lost is NOT
+        refused — the visible text before the match says it names work. It keeps the
+        literal-cut rule: the exact marker is the only thing `original_task` cuts at,
+        so the prose is passed through as it was written."""
+        task = "Fix the widget.\nCONTINUE FROM CURRENT DIFF (recovery attempt 1/2): x"
+        self.assertIsNotNone(r._usable_task({"task": task}, True))
+        self.assertEqual(r.original_task(task), task.rstrip())
+
+    def test_prose_mentioning_the_phrase_is_untouched(self):
+        """A real brief that merely spells the heading out mid-line is usable and
+        its text survives verbatim in the continuation, with exactly the new footer
+        added."""
+        task = ("Fix the widget.\nCONTINUE FROM CURRENT DIFF (recovery attempt 1/2) "
+                "is what the docs call the footer — do not print one yourself.\n")
+        self.assertIsNotNone(r._usable_task({"task": task}, True))
+        sb = self.sb()
+        cont = r.continuation_task(task, 1, sb)
+        self.assertTrue(cont.startswith(task.rstrip()))
+        self.assertEqual(cont.count("\n\n" + r.CONTINUE_HEADING), 1)
+
+
 class Attempts(TempCase):
     def test_no_file_is_zero_attempts(self):
         cur = r.read_attempts(LANE, self.state)

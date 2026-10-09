@@ -142,7 +142,10 @@ Residuals, stated rather than hidden:
   caller that wants a stable lane names one. The continuation footer is still cut
   before a brief is rebuilt (`original_task`, used by `continuation_task`), so a
   chain of legs never stacks footers, and a task that is nothing but a footer
-  still names no work: 'unknown' + suspect, which escalates.
+  still names no work: 'unknown' + suspect, which escalates. It is recognised on a
+  character CLASS, not on a literal prefix — one zero-width space before the heading
+  used to hide a footer-only task from `lstrip()` and buy a leg carrying two stacked
+  footers (D-914 loop-stopper).
 * the CLI's exit contract (P4c-fixes3): 0 none/wait and a recorded leg, 3 rerun,
   4 escalate — and 4 for lane state too: a corrupt, contested, non-regular or
   unwritable recovery state raises `RecoveryStateError`, which `main` answers
@@ -201,7 +204,10 @@ TASK_MAX_BYTES = 200 * 1024
 CONTINUE_MARKER = "\n\nCONTINUE FROM CURRENT DIFF (recovery attempt "
 # The same footer without the blank line that separates it from a brief — the shape
 # a record wears when the separator is lost. Only used to RECOGNISE a footer-only
-# task as naming no work (`_usable_task`), never to cut a brief (P4c-fixes8).
+# task as naming no work (`_usable_task`), never to cut a brief (P4c-fixes8). It is
+# recognised through `_heading_form`, the same invisible/whitespace character class
+# `_has_visible_text` refuses on, so a separator lost AND a heading preceded by a
+# zero-width character is still the same footer.
 CONTINUE_HEADING = CONTINUE_MARKER.lstrip("\n")
 LANE_KEY_MAX_CHARS = 120
 RUN_ID_MAX_CHARS = 128
@@ -1101,6 +1107,40 @@ def _has_visible_text(task):
     return False
 
 
+def _heading_form(text):
+    """`text` reduced to the shape the continuation heading is RECOGNISED in, plus
+    where each surviving character came from.
+
+    Recognition goes through a character class, never through a literal prefix:
+    every whitespace character and every member of `_INVISIBLE_CATS` (the same set
+    `_has_visible_text` refuses on) is removed, and what is left is NFKC-normalised
+    and casefolded one character at a time. `str.lstrip()` strips whitespace only,
+    so ONE invisible character in front of a footer whose blank line was lost
+    (U+200B, U+FEFF, U+200C, U+00AD, \\x00, \\x01, any Cf/Cc) used to hide the heading
+    from the check and let a record that names no work buy a continuation leg whose
+    brief stacked a second footer on it (D-914, the loop that never stopped).
+
+    Returns `(form, origins)` with `origins[i]` the index in `text` of the character
+    that produced `form[i]`, so a caller that found a match can ask what came BEFORE
+    it in the original.
+    """
+    parts = []
+    origins = []
+    for i, ch in enumerate(text):
+        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+            continue
+        folded = unicodedata.normalize("NFKC", ch).casefold()
+        parts.append(folded)
+        origins.extend([i] * len(folded))
+    return "".join(parts), origins
+
+
+# The heading in that form, computed once. `_usable_task` refuses a task whose form
+# CONTAINS this with nothing visible ahead of the match — `startswith` on the form
+# is the at-position-0 case of the same rule.
+CONTINUE_HEADING_FORM = _heading_form(CONTINUE_HEADING)[0]
+
+
 def _usable_task(job, job_ok):
     """The task a record can be continued from, or None when it cannot say what
     it ran.
@@ -1112,7 +1152,14 @@ def _usable_task(job, job_ok):
     reset and a bare footer are all truthy strings that name no work (P4c-fixes7).
     A footer that lost the blank line separating it from its brief is the same
     record with the marker's prefix instead of its separator, and names no work
-    either (P4c-fixes8).
+    either (P4c-fixes8) — including the variant where the heading is preceded by
+    invisible characters, which only a character-class comparison recognises.
+    Beyond the exact cut, a task is refused when its heading form CONTAINS the
+    footer's heading form anywhere AND nothing visible comes before that match:
+    same content-free record, whatever survived `original_task`'s literal cut. A
+    task with real text before the heading is never refused on a match — prose
+    that merely spells the footer out stays a brief and is cut by the exact
+    marker alone.
 
     A continuation brief needs a brief: without a usable task the only text that
     would reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer.
@@ -1123,10 +1170,12 @@ def _usable_task(job, job_ok):
     task = (job or {}).get("task")
     if type(task) is not str or not task:
         return None
-    head = original_task(task)
+    head = _normalise_output(original_task(task))
     if not _has_visible_text(head):
         return None
-    if _normalise_output(head).lstrip().startswith(CONTINUE_HEADING):
+    form, origins = _heading_form(head)
+    at = form.find(CONTINUE_HEADING_FORM)
+    if at >= 0 and not _has_visible_text(head[:origins[at]]):
         return None
     return task
 
