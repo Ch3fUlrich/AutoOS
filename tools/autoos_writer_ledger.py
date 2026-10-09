@@ -53,10 +53,7 @@ def _open_ledger_ro(resolved):
     if not os.path.lexists(resolved):
         return None
 
-    try:
-        flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
-    except AttributeError:
-        flags = os.O_RDONLY
+    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
 
     try:
         fd = os.open(resolved, flags)
@@ -275,16 +272,33 @@ def record(e, path=None):
     if d:
         os.makedirs(d, exist_ok=True)
 
-    fd = os.open(t, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND
+             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
 
     try:
+        fd = os.open(t, flags, 0o600)
+    except OSError as ex:
+        raise LedgerError("ledger %r: %s" % (t, ex)) from None
+
+    try:
+        try:
+            st = os.fstat(fd)
+        except OSError as ex:
+            raise LedgerError("ledger %r: %s" % (t, ex)) from None
+
+        if not stat.S_ISREG(st.st_mode):
+            raise LedgerError("ledger %r is not a regular file" % (t,))
+
         buf = b"\n" + json.dumps(o, sort_keys=True).encode("utf-8") + b"\n"
         n = os.write(fd, buf)
 
         if n != len(buf):
             raise OSError("short write on %r: %d of %d bytes" % (t, n, len(buf)))
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     return o
 

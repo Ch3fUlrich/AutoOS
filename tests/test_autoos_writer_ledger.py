@@ -224,6 +224,7 @@ class LedgerTests(unittest.TestCase):
         finally:
             del os.environ["AUTOOS_STATE_DIR"]
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: FIFO ledger path")
     def test_fifo_does_not_block(self):
         if not hasattr(os, "mkfifo"):
             self.skipTest("os.mkfifo unavailable")
@@ -257,6 +258,64 @@ class LedgerTests(unittest.TestCase):
         worker.join(timeout=5)
         self.assertFalse(worker.is_alive(), "demoted blocked on a FIFO")
         self.assertIsInstance(out.get("demoted"), ledger.LedgerError)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: FIFO ledger path")
+    def test_record_to_fifo_raises_quickly(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("os.mkfifo unavailable")
+
+        target = os.path.join(tempfile.mkdtemp(), "fifo")
+        os.mkfifo(target)
+        out = {}
+
+        def run_record():
+            try:
+                ledger.record(entry(), path=target)
+            except Exception as ex:  # noqa: BLE001 - recorded for the assert
+                out["ex"] = ex
+            else:
+                out["ex"] = None
+
+        worker = threading.Thread(target=run_record, daemon=True)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "record blocked on a FIFO")
+        self.assertIsInstance(out.get("ex"), ledger.LedgerError)
+
+    def test_record_to_directory_raises(self):
+        target = tempfile.mkdtemp()
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.record(entry(), path=target)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: symlink ledger path")
+    def test_record_to_symlink_raises(self):
+        d = tempfile.mkdtemp()
+        real = os.path.join(d, "real.jsonl")
+        link = os.path.join(d, "link.jsonl")
+        ledger.record(entry(), path=real)
+        os.symlink(real, link)
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.record(entry(run_id="r-symlink"), path=link)
+
+    def test_cli_reject_on_directory_exits_4(self):
+        state = tempfile.mkdtemp()
+        os.mkdir(os.path.join(state, "writer-ledger.jsonl"))
+        os.environ["AUTOOS_STATE_DIR"] = state
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                self.assertEqual(ledger.main(["reject", "cli-dir-1", "--class", "syntax",
+                                              "--reviewer", "t3", "--task-type", "code",
+                                              "--writer-client", "c",
+                                              "--writer-model", MODEL]), 4)
+
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            del os.environ["AUTOOS_STATE_DIR"]
 
     def test_demoted_threshold_window_spelling(self):
         target = path()
