@@ -310,6 +310,104 @@ class LedgerTests(unittest.TestCase):
             os.write = real_write
             del os.environ["AUTOOS_STATE_DIR"]
 
+    def test_record_close_error_on_success_raises(self):
+        target = path()
+        real_close = os.close
+        closes = []
+
+        def boom(fd):
+            closes.append(fd)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        os.close = boom
+
+        try:
+            with self.assertRaises(ledger.LedgerError):
+                ledger.record(entry(), path=target)
+        finally:
+            os.close = real_close
+
+        self.assertEqual(len(closes), 1, "close must be attempted once")
+
+    def test_record_close_error_on_success_cli_exits_4(self):
+        state = tempfile.mkdtemp()
+        os.environ["AUTOOS_STATE_DIR"] = state
+        real_close = os.close
+
+        def boom(fd):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        os.close = boom
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                rc = ledger.main(["reject", "cli-close-1", "--class", "syntax",
+                                  "--reviewer", "t3", "--task-type", "code",
+                                  "--writer-client", "c",
+                                  "--writer-model", MODEL])
+
+            self.assertEqual(rc, 4)
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            os.close = real_close
+            del os.environ["AUTOOS_STATE_DIR"]
+
+    def test_record_close_error_on_failure_keeps_original(self):
+        target = path()
+        real_write = os.write
+        real_close = os.close
+        closes = []
+
+        def write_boom(fd, buf):
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+        def close_boom(fd):
+            closes.append(fd)
+            raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+        os.write = write_boom
+        os.close = close_boom
+
+        try:
+            with self.assertRaises(ledger.LedgerError) as ctx:
+                ledger.record(entry(), path=target)
+        finally:
+            os.write = real_write
+            os.close = real_close
+
+        self.assertEqual(len(closes), 1, "close must be attempted once on error path")
+        self.assertIn(os.strerror(errno.ENOSPC), str(ctx.exception))
+        self.assertNotIn(os.strerror(errno.EIO), str(ctx.exception))
+
+    def test_record_makedirs_error_is_ledger_error_and_cli_exits_4(self):
+        d = tempfile.mkdtemp()
+        blocker = os.path.join(d, "blocker")
+        with open(blocker, "w", encoding="utf-8"):
+            pass
+        target = os.path.join(blocker, "sub", "writer-ledger.jsonl")
+
+        with self.assertRaises(ledger.LedgerError):
+            ledger.record(entry(), path=target)
+
+        state = os.path.join(blocker, "substate")
+        os.environ["AUTOOS_STATE_DIR"] = state
+
+        try:
+            buf = io.StringIO()
+
+            with contextlib.redirect_stderr(buf):
+                rc = ledger.main(["reject", "cli-mkdir-1", "--class", "syntax",
+                                  "--reviewer", "t3", "--task-type", "code",
+                                  "--writer-client", "c",
+                                  "--writer-model", MODEL])
+
+            self.assertEqual(rc, 4)
+            self.assertIn("ledger", buf.getvalue().lower())
+        finally:
+            del os.environ["AUTOOS_STATE_DIR"]
+
     @unittest.skipIf(os.name == "nt", "POSIX-only: symlink ledger path")
     def test_nofollow_fallback_write_rejects_symlink(self):
         old = ledger.NOFOLLOW

@@ -293,7 +293,10 @@ def record(e, path=None):
     d = os.path.dirname(os.path.abspath(t))
 
     if d:
-        os.makedirs(d, exist_ok=True)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as ex:
+            raise LedgerError("ledger %r: %s" % (t, ex)) from None
 
     flags = (os.O_WRONLY | os.O_CREAT | os.O_APPEND
              | getattr(os, "O_NONBLOCK", 0) | NOFOLLOW)
@@ -302,6 +305,7 @@ def record(e, path=None):
         raise LedgerError("ledger %r is a symlink" % (t,))
 
     fd = None
+    failed = False
 
     try:
         try:
@@ -335,12 +339,16 @@ def record(e, path=None):
 
         if n != len(buf):
             raise LedgerError("ledger %r: short write %d of %d bytes" % (t, n, len(buf)))
+    except BaseException:
+        failed = True
+        raise
     finally:
         if fd is not None:
             try:
                 os.close(fd)
-            except OSError:
-                pass
+            except OSError as ex:
+                if not failed:
+                    raise LedgerError("ledger %r: %s" % (t, ex)) from None
 
     return o
 
