@@ -22194,6 +22194,60 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             _wid, record = agent._worker_record_start(plan, self._args("HEAD"), tmp)
             self.assertEqual(record.get("sandbox_base"), stamp)
 
+    # P1-FIX3 (attacker-reproduced; every test below FAILS on edf5f640).
+
+    def _commit(self, msg):
+        subprocess.run(self.git + ["-C", self.root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", self.root, "commit", "-q", "-m", msg], check=True)
+        return self._out("-C", self.root, "rev-parse", "HEAD")
+
+    def test_deletions_and_symlinks_ride_the_patch_only_where_allowed(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        gone, leak = "gone.txt", "secrets-generated/leak.txt"
+        os.makedirs(os.path.join(self.root, "secrets-generated"))
+        io.open(os.path.join(self.root, gone), "w").write("GONE-AT-HEAD\n")
+        io.open(os.path.join(self.root, leak), "w").write("LEAK-GONE\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        base = self._commit("base")
+        if os.name != "nt":
+            os.symlink("keep.txt", os.path.join(self.root, self.cli.REVIEW_DIFF_FILE))
+        self._commit("tracked link")
+        os.remove(os.path.join(self.root, gone))
+        os.remove(os.path.join(self.root, leak))
+        head = self._commit("deleted")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = tmp + "/s"
+            self.cli.isolate_clone(self.root, dest, "agent/p1f3", (base, head))
+            patch = io.open(os.path.join(dest, self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("-GONE-AT-HEAD", patch, "D1: the seat never saw the deletion")
+            self.assertNotIn("LEAK-GONE", patch, "deletions obey the same predicates")
+            if os.name != "nt":   # D2: writing THROUGH a symlink is POSIX-testable
+                self.assertEqual(io.open(os.path.join(dest, "keep.txt")).read(), "one\n",
+                                 "D2: the patch bytes went THROUGH the symlink")
+                self.assertEqual(self._out("-C", dest, "ls-files", "-s", self.cli.REVIEW_DIFF_FILE)
+                                 .split()[0], "100644", "the patch is a file, never a 120000 link")
+
+    def test_a_secret_deleted_at_head_still_refuses_from_the_base_side(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, ".env"), "w").write("API_TOKEN=BASE-PLAIN\n")
+        base = self._commit("plain env")
+        os.remove(os.path.join(self.root, ".env"))
+        head = self._commit("env gone")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(self.cli.PrivacyRefused) as cm:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f3x", (base, head))
+        self.assertIn(".env", str(cm.exception), "D1: a deleted base secret must refuse")
+
+    def test_a_base_vanished_after_plan_refuses_instead_of_traceback(self):
+        root, _b, head = self._repo()
+        gone, allowed = "0" * 40, self.cli._isolate_allowed_files(root)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):  # D3: was traceback
+                self.cli.review_base_preflight_refuse(root, (gone, head), allowed)
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.write_review_diff(root, tmp, (gone, head), allowed)
+
 
 class P1PinnedWriterFamilyTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the

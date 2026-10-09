@@ -1060,13 +1060,8 @@ def review_base_preflight_refuse(root: str, pair, allowed) -> None:
     sandbox allows - the rest never enters the patch), and the same verdict it
     gives: REFUSE, not a silently narrowed patch. The message names PATHS only.
     """
-    rng = "%s..%s" % pair
-    names = subprocess.run(["git", "-C", root, "diff", "--name-only", "-z", rng],
-                           capture_output=True, check=True,
-                           stdin=subprocess.DEVNULL).stdout.split(b"\0")
-    decoded = {n.decode("utf-8", "surrogateescape") for n in names if n}
     bad = []
-    for rel in sorted(decoded & set(allowed)):
+    for rel in _review_diff_paths(root, pair, allowed):
         if not _isolate_secret_name(rel):
             continue
         # `rev:path` is a tree lookup, not a pathspec: a name like `*` resolves
@@ -1460,6 +1455,29 @@ def resolve_review_base(root: str, base):
     return tuple(proc.stdout.split()) if proc.returncode == 0 else None
 
 
+def _review_diff_paths(root: str, pair, allowed) -> list:
+    """The diff names that ride out: the allowed HEAD paths PLUS paths DELETED in
+    the range (D1: `allowed` is HEAD-only, so removals were dropped and the seat -
+    HEAD plus this patch - never saw them); deletions pass the same path-level
+    predicates as HEAD names, re-read here. `--no-renames`: a rename must not hide
+    a deletion end."""
+    def names(*extra):
+        try:
+            # subprocess-audit: git plumbing; only the two resolved shas are dynamic
+            out = subprocess.run(["git", "-C", root, "diff", "--no-renames", "--name-only", "-z"]
+                                 + list(extra) + ["%s..%s" % pair], capture_output=True,
+                                 check=True, stdin=subprocess.DEVNULL).stdout
+        except subprocess.CalledProcessError as exc:  # D3: vanished base = rc2 refusal
+            raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                    % (pair[0][:8], root, exc.returncode)) from None
+        return {n.decode("utf-8", "surrogateescape") for n in out.split(b"\0") if n}
+    deleted, ignore = names("--diff-filter=D"), _isolate_agentignore_patterns(root)
+    sparse = _isolate_sparse_allowed(root, sorted(deleted))
+    return sorted((names() & set(allowed)) | {p for p in deleted
+               if not _isolate_path_excluded(p, ignore)
+               and (sparse is None or p in sparse)})
+
+
 def write_review_diff(root: str, path: str, pair, allowed) -> None:
     """Ride base..head into the sandbox as REVIEW-DIFF.patch, keeping only the paths
     the seat materialises (S2: a patch with a plaintext secret in it is itself the
@@ -1468,12 +1486,14 @@ def write_review_diff(root: str, path: str, pair, allowed) -> None:
     its full base..head content out. `allowed` is the same set one-commit
     materialisation uses."""
     rng = "%s..%s" % pair
-    names = subprocess.run(["git", "-C", root, "diff", "--name-only", "-z", rng], capture_output=True,
-                           check=True, stdin=subprocess.DEVNULL).stdout.split(b"\0")
-    keep = set(allowed)
-    kept = [p for p in (n.decode("utf-8", "surrogateescape") for n in names)
-            if p and p in keep]
-    with io.open(os.path.join(path, REVIEW_DIFF_FILE), "wb") as fh:
+    kept = _review_diff_paths(root, pair, allowed)
+    # D2: the SOURCE may track this very name, and io.open("wb") writes THROUGH
+    # such a symlink: unlink, then create O_EXCL|O_NOFOLLOW - never write through.
+    target = os.path.join(path, REVIEW_DIFF_FILE)
+    if os.path.lexists(target):
+        os.remove(target)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with io.open(os.open(target, flags, 0o644), "wb") as fh:
         for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
             # P1-FIX2 (I1 again, cf. _isolate_batch_entries): a kept NAME may be
             # `*`, `secrets-*` or `:(glob)**`, and an INTERPRETED pathspec globs it
@@ -1481,7 +1501,7 @@ def write_review_diff(root: str, path: str, pair, allowed) -> None:
             # included, back into the patch. Names are literal, always.
             # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
             subprocess.run(["git", "-C", root, "--literal-pathspecs",
-                            "diff", rng, "--"] + kept[i:i + 200],
+                            "diff", "--no-renames", rng, "--"] + kept[i:i + 200],
                            stdout=fh, check=True, stdin=subprocess.DEVNULL)
 
 
