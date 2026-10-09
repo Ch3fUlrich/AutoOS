@@ -996,11 +996,19 @@ def _isolate_sparse_keeps_deleted(root: str, deleted) -> set | None:
     source dropped EVERY deletion from the patch; the pattern-level matcher —
     the same `_isolate_cone_allowed` over the pattern file
     `_isolate_sparse_allowed`'s fallback reads — decides instead. None when the
-    source is not sparse."""
+    source is not sparse. P1-FIX7: cone admits EVERY top-level path, so a
+    NON-cone source leaked its sparse-hidden top-level DELETION as a `-` hunk;
+    an unreproducible pattern matcher must not decide what leaks — on a sparse
+    source, non-cone or unknown drops ALL deletions (documented omission)."""
     cfg = subprocess.run(["git", "-C", root, "config", "--bool", "core.sparseCheckout"],
                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if cfg.stdout.strip() != "true":
         return None
+    cone = subprocess.run(["git", "-C", root, "config", "--bool",
+                           "core.sparseCheckoutCone"],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if cone.stdout.strip() != "true":
+        return set()
     gd = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
                         capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
     try:
@@ -1009,10 +1017,10 @@ def _isolate_sparse_keeps_deleted(root: str, deleted) -> set | None:
             patterns = [ln.strip() for ln in fh.read().splitlines()
                         if ln.strip() and not ln.strip().startswith("#")]
     except OSError:
-        return None
+        return set()
     return _isolate_cone_allowed([p for p in patterns if not p.startswith("!")],
                                  [p[1:] for p in patterns if p.startswith("!")],
-                                 deleted) if patterns else None
+                                 deleted) if patterns else set()
 
 
 def _isolate_path_excluded(rel: str, agentignore: list) -> bool:

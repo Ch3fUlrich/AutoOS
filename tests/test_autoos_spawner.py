@@ -23050,6 +23050,25 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             self.assertIn("-GONE-VISIBLE", patch, "a visible deletion must ride")
             self.assertNotIn("GONE-HIDDEN", patch, "sparse-hidden stays out (F1)")
 
+    def test_a_noncone_sparse_source_drops_every_deletion(self):
+        # P1-FIX7: cone semantics admit every top-level path, so a non-cone
+        # source carried its sparse-hidden top-level deletion out as a `-` hunk.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        io.open(os.path.join(self.root, "hidden.txt"), "w").write("HIDDEN-TOP-SECRET\n")
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "hidden.txt"))
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        head = self._commit("head")
+        subprocess.run(self.git + ["-C", self.root, "sparse-checkout", "set",
+                                   "--no-cone", "/keep.txt"], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f7a", (base, head))
+            patch = io.open(os.path.join(tmp, "s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("+two", patch, "the visible modification still rides")
+            self.assertNotIn("HIDDEN-TOP-SECRET", patch, "non-cone drops deletions")
+
     def test_a_directory_shaped_patch_name_refuses_instead_of_traceback2(self):
         # G3: HEAD tracks `REVIEW-DIFF.patch/x`; materialise builds that directory
         # and os.remove() on it was an uncaught IsADirectoryError past cmd_run.
