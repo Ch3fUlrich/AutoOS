@@ -79,11 +79,13 @@ def make_record(state, run_id=RUN, task=TASK, pid=4242, output="worker thinking\
     """One run record exactly as the fleet runner writes it, and its directory."""
     run_dir = os.path.join(state, "agents", run_id)
     os.makedirs(run_dir)
-    job = job_json if isinstance(job_json, str) else {
-        "run_id": run_id, "task": task, "cwd": "/repo", "started": mtime,
-        "pid": pid, "request": {}, "argv": [], "route": {}}
-    write_text(os.path.join(run_dir, "job.json"),
-               job if isinstance(job, str) else json.dumps(job, sort_keys=True), mtime)
+    if job_json is not SKIP:
+        job = job_json if isinstance(job_json, str) else {
+            "run_id": run_id, "task": task, "cwd": "/repo", "started": mtime,
+            "pid": pid, "request": {}, "argv": [], "route": {}}
+        write_text(os.path.join(run_dir, "job.json"),
+                   job if isinstance(job, str) else json.dumps(job, sort_keys=True),
+                   mtime)
     if output is not SKIP:
         write_text(os.path.join(run_dir, "output.log"),
                    "".join(output) if isinstance(output, list) else output, mtime)
@@ -1304,10 +1306,108 @@ class SuspectRecords(TempCase):
 
     def test_the_plan_carries_the_flag_and_escalates(self):
         make_record(self.state, task=123, exit_json={"rc": 0}, output=[report_body()])
-        p = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        p = r.plan(RUN, lane_key=LANE, state=self.state, now=NOW, pid_probe=dead)
         self.assertTrue(p["record_suspect"])
         self.assertEqual((p["action"], p["state"]), ("escalate", "unknown"))
         self.assertIsNone(p["continue_task"])
+
+    def test_a_record_with_no_usable_task_escalates(self):
+        """P4c-fixes6: exit.json alone, an empty job.json, or a job.json whose task
+        is absent / not a string / empty says nothing about WHAT the run was told to
+        do. It is not 'died' — 'died' is a rerun, and the rerun brief would carry
+        only the CONTINUE footer — it is 'unknown' + suspect, which escalates."""
+        for name, job in (("no job.json at all", SKIP),
+                          ("{} (no task)", "{}"),
+                          ("task missing", '{"pid": 4242}'),
+                          ("task empty", json.dumps({"task": ""})),
+                          ("task not text", json.dumps({"task": 123})),
+                          ("job.json unreadable", "{oops")):
+            st = self.other_state()
+            root = make_record(st, exit_json={"rc": 1}, job_json=job)
+            info = classify(root, probe=dead)
+            self.assertEqual((info["state"], info["rc"]), ("unknown", None), name)
+            self.assertTrue(info["record_suspect"], name)
+            self.assertEqual(r.next_action(0, info["state"],
+                                           record_suspect=info["record_suspect"]),
+                             "escalate", name)
+
+    def test_exit_json_only_is_not_a_died_rerun(self):
+        """The repro: a temp record holding nothing but `{"rc": 1}`."""
+        st = self.other_state()
+        root = os.path.join(st, "agents", RUN)
+        os.makedirs(root)
+        write_text(os.path.join(root, "exit.json"), json.dumps({"rc": 1}), NOW)
+        info = classify(root, probe=dead)
+        self.assertEqual((info["state"], info["record_suspect"]), ("unknown", True))
+
+    def test_a_task_that_exists_needs_no_exit_json_to_be_usable(self):
+        """The unchanged half: job.json with a real task and no exit.json still
+        classifies on pid and age and still reruns with the brief."""
+        st = self.other_state()
+        root = make_record(st, job_json=json.dumps({"task": "x"}), output="thinking\n")
+        info = classify(root, probe=dead)
+        self.assertEqual((info["state"], info["record_suspect"]), ("died", False))
+        p = r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+        self.assertEqual(p["lane_key"], r.lane_key_for_task("x"))
+        self.assertEqual(p["action"], "rerun")
+        self.assertTrue(p["continue_task"].startswith("x\n\n"))
+
+
+class NoUsableTaskPlan(TempCase):
+    """P4c-fixes6: the default lane key is a hash of the task, so an unusable task
+    would hand every such run sha256("") — one shared budget between unrelated
+    runs. `plan` refuses to invent that key; the caller names --lane or escalates."""
+
+    def broken(self, state=None, job=SKIP):
+        st = state or self.state
+        make_record(st, exit_json={"rc": 1}, job_json=job)
+        return st
+
+    def test_a_missing_job_json_never_hashes_to_the_empty_lane_key(self):
+        self.broken()
+        with self.assertRaises(r.RecoveryStateError) as caught:
+            r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertIn("--lane", str(caught.exception))
+        self.assertIn("empty task", str(caught.exception))
+        # A second unrelated run in a second state tree: the same refusal, so no
+        # lane of sha256("") is ever shared between them.
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, state=self.broken(self.other_state()), now=NOW,
+                   pid_probe=dead)
+
+    def test_an_explicit_lane_still_escalates_a_record_with_no_task(self):
+        for job in (SKIP, "{}", "{oops", json.dumps({"task": ""})):
+            st = self.other_state()
+            self.broken(state=st, job=job)
+            p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+            self.assertEqual((p["action"], p["state"], p["record_suspect"]),
+                             ("escalate", "unknown", True), job)
+            self.assertIsNone(p["continue_task"], job)
+            self.assertIsNone(p["spawn_hint"], job)
+            self.assertEqual(p["lane_key"], LANE, job)
+
+    def test_a_usable_task_still_gets_its_own_default_lane(self):
+        make_record(self.state, exit_json={"rc": 1})
+        p = r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertEqual(p["lane_key"], r.lane_key_for_task(TASK))
+        self.assertEqual(p["action"], "rerun")
+
+    def test_the_cli_exits_four_and_names_no_lane(self):
+        self.broken()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = r.main(["plan", RUN])
+        self.assertEqual(code, 4)
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("need --lane", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_no_spawner_lane_record_is_written_for_a_refused_plan(self):
+        self.broken()
+        before = sorted(os.listdir(self.state))
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, state=self.state, now=NOW, pid_probe=dead)
+        self.assertEqual(sorted(os.listdir(self.state)), before)
 
 
 class PidBounds(TempCase):
@@ -1958,7 +2058,7 @@ class Plan(TempCase):
     def test_an_unknown_run_escalates(self):
         st = self.other_state()
         make_record(st, job_json="{oops")
-        p = self.plan(state=st)
+        p = self.plan(state=st, lane_key=LANE)
         self.assertEqual((p["action"], p["state"]), ("escalate", "unknown"))
         self.assertIsNone(p["continue_task"])
 
@@ -2125,7 +2225,7 @@ class Cli(TempCase):
         """A job.json whose task is a number (P4c-fixes D2): the CLI answers
         escalate/4, never a crash and never a 0."""
         make_record(self.state, task=123, exit_json={"rc": 0}, output=[report_body()])
-        code, text, err = self.cli(["plan", RUN])
+        code, text, err = self.cli(["plan", RUN, "--lane", LANE])
         out = json.loads(text)
         self.assertEqual((code, out["action"], out["record_suspect"]), (4, "escalate", True))
         self.assertIn("wrong type", err)

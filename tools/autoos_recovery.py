@@ -46,7 +46,9 @@ check on the fd, so a FIFO planted at ``job.json`` / ``exit.json`` /
 forever. Fail closed everywhere: an unreadable record, a corrupt attempt file, a
 job.json field of the wrong type (`record_suspect` — the file is worker-writable,
 so every field is type-checked before use and a misshapen record never answers
-'completed') or
+'completed'), a record with no usable job.json task — absent, unreadable, not an
+object, or empty after the type guard (there is no brief to continue and no task to
+hash a default lane key from, so `plan` needs an explicit `--lane`), or
 a pid this host cannot probe is 'unknown', and 'unknown' is 'escalate'. It is
 never 'completed'.
 
@@ -1055,6 +1057,25 @@ def _output_age(run_dir, now):
     return None
 
 
+def _usable_task(job, job_ok):
+    """The task a record can be continued from, or None when it cannot say what
+    it ran: no readable ``job.json`` (absent, unreadable, not an object) or no task
+    of its own (absent, not a str, or the empty string) after the type guard.
+
+    A continuation brief needs a brief. Without a task the only text that would
+    reach the next writer is the ``CONTINUE FROM CURRENT DIFF`` footer, and every
+    such run would additionally hash to the same default lane key — sha256 of the
+    empty string — so unrelated runs would share one attempt budget. Both are
+    answered the same way: 'unknown' with `record_suspect`, which escalates (P4c-
+    fixes6)."""
+    if not job_ok:
+        return None
+    task = (job or {}).get("task")
+    if type(task) is not str or not task:
+        return None
+    return task
+
+
 def _job_record_suspect(job):
     """Whether a present job.json carries a field of the WRONG type.
 
@@ -1063,8 +1084,8 @@ def _job_record_suspect(job):
     before use — a non-str is never fed to the echo filter or the pid probe — and
     a record that misuses a field it is supposed to carry is 'suspect': too
     damaged to answer 'completed', so it classifies 'unknown' and escalates.
-    Absent fields are not suspect (a missing job.json is an unfinished record,
-    judged elsewhere); a present-but-wrong-typed one is. `started` is judged by
+    Absent fields are not suspect; a whole absent/unusable task is (`_usable_task`)
+    (P4c-fixes6). `started` is judged by
     `_is_time_number`, so a NaN or an infinity there is a damaged record and not a
     clock reading (P4c-fixes4 C).
     """
@@ -1098,7 +1119,10 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     `state` is one of STATES and 'unknown' is fail-closed: a record this cannot
     read is never 'completed'. A job.json field of the wrong type sets
     `record_suspect` and holds the state at 'unknown' — a record that misuses its
-    own fields cannot attest to anything, not even an exit 0 with a REPORT. With no
+    own fields cannot attest to anything, not even an exit 0 with a REPORT. So does
+    a record with no usable task (`_usable_task`: no readable job.json, or no task
+    in it) — there is nothing to continue, so 'died'/'rerun' would only spawn a
+    writer holding a footer instead of a brief (P4c-fixes6). With no
     ``exit.json`` the run is judged on its pid and its output age: a live pid quiet
     past `stall_secs` is 'stalled', a dead pid is 'died', a pid this host cannot
     probe is 'unknown'. `stall_secs` must be a FINITE number of seconds between 1
@@ -1142,16 +1166,17 @@ def classify_run(run_dir, now=None, stall_secs=STALL_SECS, pid_probe=None):
     # caller named decides it, not the caller's environment on top of that.
     root = os.path.dirname(os.path.dirname(path))
     sandbox, branch = _parse_sandbox(tail, root)
-    # A non-str task is '' for the echo filter (and a suspect record never
-    # reaches a verdict anyway); a non-int pid is not a number the probe can
-    # answer for — both are refused on type, never handed on unchecked.
-    task = (job or {}).get("task") if job_ok else None
-    if type(task) is not str:
-        task = ""
+    # A non-str task is '' for the echo filter; a task the record cannot supply at
+    # all — no readable job.json, or no task in it — makes the whole record
+    # unusable, which is 'unknown' + suspect below, never a verdict and never a
+    # brief built from the footer alone (P4c-fixes6).
+    task = _usable_task(job, job_ok)
+    echo_task = "" if task is None else task
     suspect = ((bool(job_ok) and _job_record_suspect(job))
-               or (bool(ex_ok) and _exit_record_suspect(ex)))
+               or (bool(ex_ok) and _exit_record_suspect(ex))
+               or task is None)
     out = {"state": "unknown", "rc": None,
-           "has_report": _has_report(tail, task, os.path.basename(path)),
+           "has_report": _has_report(tail, echo_task, os.path.basename(path)),
            "sandbox": sandbox, "branch": branch, "record_suspect": suspect,
            "last_output_age": _output_age(path, ref)}
     if not job_ok or not ex_ok or suspect:
@@ -1449,15 +1474,23 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
     has_report, last_output_age, lane_key, state_corrupt, record_suspect,
     run_id}. Without
     `lane_key` the lane is the run's own task, hashed; with one, every writer on
-    that lane shares the budget. `spawn_hint.cwd` is the kept worktree for the
-    L2/L1 to hand to `spawn` — this module never calls it.
+    that lane shares the budget. A run whose record cannot supply a task has no
+    derivable lane either — hashing an empty task would hand every such run the
+    same budget — so it is refused with a `RecoveryStateError` (the CLI's escalate
+    exit 4) unless the caller names `--lane`. `spawn_hint.cwd` is the kept worktree
+    for the L2/L1 to hand to `spawn` — this module never calls it.
     """
     path = run_dir_for(run_id, state)
     job, job_ok = _read_json_dict(os.path.join(path, "job.json"))
-    task = (job or {}).get("task")
-    if type(task) is not str or not job_ok:
-        task = ""
-    key = lane_key_for_task(task) if lane_key is None else _check_key(lane_key)
+    task = _usable_task(job, job_ok)
+    if lane_key is None:
+        if task is None:
+            raise RecoveryStateError(
+                "run %r has no usable job.json task: need --lane — the default "
+                "lane key is never derived from an empty task" % (run_id,))
+        key = lane_key_for_task(task)
+    else:
+        key = _check_key(lane_key)
     info = classify_run(path, now=now, stall_secs=stall_secs, pid_probe=pid_probe)
     cur = read_attempts(key, state)
     action = next_action(cur["attempts"], info["state"],
@@ -1508,8 +1541,9 @@ def main(argv=None):
             out = plan(a.run_id, lane_key=a.lane, stall_secs=a.stall_secs)
             print(json.dumps(out, indent=1, sort_keys=True))
             if out["record_suspect"]:
-                print("autoos_recovery: job.json carries a field of the wrong "
-                      "type; the record is suspected and the lane escalates",
+                print("autoos_recovery: job.json is unreadable or carries a field "
+                      "of the wrong type, so it names no task; the record is "
+                      "suspected and the lane escalates",
                       file=sys.stderr)
             return _EXIT_FOR_ACTION[out["action"]]
         out = record_attempt(a.lane, a.run_id)
