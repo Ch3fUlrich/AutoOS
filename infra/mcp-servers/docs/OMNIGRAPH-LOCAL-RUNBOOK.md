@@ -194,9 +194,13 @@ Automated by [`../scripts/populate-embeddings.py`](../scripts/populate-embedding
 
 ```bash
 cd infra/mcp-servers
+# Fleet rule D-825: the overwrite-load changes the live store, so it runs only on an
+# explicit judge GO naming this checkout's HEAD. Add --no-load to write the embedded
+# NDJSON locally without touching the store — that path needs no GO.
 python scripts/populate-embeddings.py \
   --seeds cluster/seed/sibling-analysis-repo.jsonl cluster/seed/finance-repo.jsonl \
-  --ollama http://localhost:11434 --graph memory
+  --ollama http://localhost:11434 --graph memory \
+  --go D-825 --go-sha "$(git rev-parse HEAD)"
 ```
 
 It: (1) embeds every `Decision.rationale` via the local Ollama

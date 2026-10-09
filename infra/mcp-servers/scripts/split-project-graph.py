@@ -7,7 +7,9 @@ subgraph out and merge-loads it into the project's graph. Additive and idempoten
 it never deletes from `memory` (use --prune-source separately, after verifying).
 
     python scripts/split-project-graph.py sibling-analysis-repo            # dry run
-    python scripts/split-project-graph.py sibling-analysis-repo --apply
+    # --apply writes the live store, so it needs a judge GO naming this checkout's HEAD
+    # (fleet rule D-825):
+    python scripts/split-project-graph.py sibling-analysis-repo --apply --go <ref> --go-sha "$(git rev-parse HEAD)"
 
 A project's subgraph = its Project node + every node joined to it by a hub edge
 (DecidedIn/ConstrainsProject/AppliesTo/PartOf/Tracks) + every relational edge whose
@@ -24,6 +26,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _go_gate import add_go_args, enforce  # noqa: E402
 from _omni_env import LOCAL_NET, detect_network  # noqa: E402
 
 HUB_EDGES = {"DecidedIn", "ConstrainsProject", "AppliesTo", "PartOf", "Tracks"}
@@ -196,7 +199,16 @@ def main() -> None:
         "whenever live has moved ahead of the seed, or the self-healing seed loader "
         "will merge stale values back over newer ones on the next boot.",
     )
+    add_go_args(ap)
     args = ap.parse_args()
+
+    # Fleet rule D-825: --apply merge-loads the subgraph into the live target graph and
+    # --prune-source deletes nodes from the live source graph, so either run proceeds only
+    # on a judge GO naming this checkout's HEAD. A dry run (neither flag) needs none.
+    # The gate runs before any token/docker access, so a refused run touches nothing.
+    _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    enforce("split-project-graph.py", "write to the live omnigraph graph",
+            bool(args.apply or args.prune_source), args.go, args.go_sha, _root)
 
     env = load_env()
     token = env.get("OMNIGRAPH_TOKEN") or os.environ.get("OMNIGRAPH_TOKEN", "")

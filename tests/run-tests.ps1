@@ -11200,6 +11200,65 @@ Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unc
     Assert-True ($r.Out -notmatch 'GO: D') "a dry run without -Go printed a GO: $($r.Out)"
 }
 
+# ─── infra/mcp-servers/scripts/compact-graphs.ps1 D-825 GO gate ───────────────
+# Compaction stops and restarts the live omnigraph-server and rewrites each graph's
+# manifest against the running store, so it is a live converging step (fleet rule D-825)
+# like apply-cluster.sh. The gate runs before any docker call, so a refused run touches
+# nothing and this needs no stack; -DryRun is unchanged (it clears the gate and only then
+# fails on the absent docker, which is exactly the read-only behaviour).
+Describe-Group 'compact-graphs D-825 GO gate'
+$gateCompact = Join-Path $Root 'infra/mcp-servers/scripts/compact-graphs.ps1'
+
+function Invoke-ChildCompact {
+    param([string[]]$ScriptArgs)
+    $prevEap = $ErrorActionPreference
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop; the
+        # refusal is written to stderr, so run the child call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $out = & $gateHost -NoProfile -NonInteractive -File $gateCompact @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a live compaction with no -Go is refused before any docker call' {
+    $r = Invoke-ChildCompact @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to compact the live omnigraph store without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildCompact @('-DryRun')
+    Assert-True ($r.Out -notmatch 'refusing to compact the live omnigraph store') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildCompact @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "a valid GO was refused: $($r.Out)"
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

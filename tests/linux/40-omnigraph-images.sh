@@ -200,3 +200,85 @@ if it "apply-cluster: --go=OS-0 with a non-HEAD --go-sha= still refuses"; then
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "the =-form args were not gated: rc=$rc out=$out"
 fi
+
+# ─── The same D-825 gate on the Python live-store tools (dedup / populate / split) ──
+# They mutate the running omnigraph store (a reset + overwrite-load, an overwrite-load,
+# or a merge-load / node delete), so like apply-cluster.sh a mutating run refuses without
+# --go/--go-sha. The gate sits before any docker or token access, so each case below runs
+# the real script against no stack at all: a refusal never reaches docker, and a read-only
+# run (--dry-run / --no-load / no --apply) passes the gate and only then fails on the
+# absent stack — which is exactly the unchanged read-only behaviour.
+OG_PY="$ROOT/infra/mcp-servers/scripts"
+_head() { git -C "$ROOT" rev-parse HEAD; }
+
+if it "D-825: dedup-graph refuses a live dedup with no --go and touches nothing"; then
+    out="$(python3 "$OG_PY/dedup-graph.py" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a --go-less dedup exited 0" >&2; }
+    [[ "$out" == *"refusing to dedup the live omnigraph store without --go"* ]] \
+        || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    if (( ok )); then pass; else fail "dedup-graph deduped with no --go"; fi
+fi
+
+if it "D-825: dedup-graph refuses a malformed --go reference" ; then
+    out="$(python3 "$OG_PY/dedup-graph.py" --go not-a-ref --go-sha "$(_head)" 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not a judge run id"* ]] && pass \
+        || fail "a malformed --go reference was accepted: rc=$rc out=$out"
+fi
+
+if it "D-825: dedup-graph refuses when --go-sha is not this checkout's HEAD"; then
+    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
+        || fail "a wrong --go-sha was accepted: rc=$rc out=$out"
+fi
+
+if it "D-825: dedup-graph --dry-run needs no --go and is unchanged"; then
+    out="$(python3 "$OG_PY/dedup-graph.py" --dry-run 2>&1)"; rc=$?
+    [[ "$out" != *"refusing to dedup the live omnigraph store"* ]] && pass \
+        || fail "the dry run hit the D-825 gate: $out"
+fi
+
+if it "D-825: dedup-graph a valid --go + --go-sha echoes GO first and proceeds"; then
+    out="$(python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO: D-825 sha=$(_head)" ]] && pass \
+        || fail "the GO line was not first or the gate refused: [$first_line]"
+fi
+
+if it "D-825: populate-embeddings refuses an overwrite-load with no --go"; then
+    out="$(python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"refusing to overwrite-load the live omnigraph graph without --go"* ]] \
+        && pass || fail "a --go-less overwrite-load was not refused: rc=$rc out=$out"
+fi
+
+if it "D-825: populate-embeddings --no-load needs no --go and is unchanged"; then
+    out="$(python3 "$OG_PY/populate-embeddings.py" --seeds x.jsonl --no-load 2>&1)"; rc=$?
+    [[ "$out" != *"refusing to overwrite-load the live omnigraph graph"* ]] && pass \
+        || fail "--no-load hit the D-825 gate: $out"
+fi
+
+if it "D-825: split-project-graph refuses --apply with no --go"; then
+    out="$(python3 "$OG_PY/split-project-graph.py" some-project --apply 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"refusing to write to the live omnigraph graph without --go"* ]] \
+        && pass || fail "--apply was not refused: rc=$rc out=$out"
+fi
+
+if it "D-825: split-project-graph a dry run (no --apply) needs no --go and is unchanged"; then
+    out="$(python3 "$OG_PY/split-project-graph.py" some-project 2>&1)"; rc=$?
+    [[ "$out" != *"refusing to write to the live omnigraph graph"* ]] && pass \
+        || fail "a dry run hit the D-825 gate: $out"
+fi
+
+if it "D-825: compact-graphs.ps1 gate is present (refuses without -Go)"; then
+    # The pwsh suite owns the full battery; the bash shard only proves the gate exists and
+    # fires, so a Windows host that never runs pwsh still guards against the gate vanishing.
+    command -v pwsh >/dev/null || { skip "no pwsh on this host"; }
+    out="$(pwsh -NoProfile -NonInteractive -File "$OG_PY/compact-graphs.ps1" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a no-Go compact-graphs run exited 0" >&2; }
+    [[ "$out" == *"refusing to compact the live omnigraph store without -Go"* ]] \
+        || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    if (( ok )); then pass; else fail "compact-graphs.ps1 ran live without a -Go: rc=$rc out=$out"; fi
+fi
+

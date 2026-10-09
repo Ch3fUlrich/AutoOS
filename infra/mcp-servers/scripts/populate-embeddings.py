@@ -31,6 +31,9 @@ import sys
 import tempfile
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _go_gate import add_go_args, enforce  # noqa: E402
+
 
 def embed(ollama, model, text, key="ollama"):
     body = json.dumps({"model": model, "input": text}).encode()
@@ -70,7 +73,15 @@ def main():
     ap.add_argument("--env-shared", default=".env.shared")
     ap.add_argument("--out", default=None, help="embedded NDJSON output path (default: temp)")
     ap.add_argument("--no-load", action="store_true", help="write embedded NDJSON only; skip load")
+    add_go_args(ap)
     a = ap.parse_args()
+
+    # Fleet rule D-825: without --no-load this run overwrite-loads the live graph, so it
+    # proceeds only on a judge GO naming this checkout's HEAD. --no-load writes a local
+    # file only and needs none. The gate runs before any docker/token access.
+    _root = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+    enforce("populate-embeddings.py", "overwrite-load the live omnigraph graph",
+            not a.no_load, a.go, a.go_sha, _root)
 
     records, n = [], 0
     for fn in a.seeds:
