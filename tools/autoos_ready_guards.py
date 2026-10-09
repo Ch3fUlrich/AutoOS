@@ -19,13 +19,21 @@ _CANON_PREFIX = "FILES (only these;"
 _FILES_LOOK = re.compile(r"^[ \t]*FILES\b")
 _FILES_RE = re.compile(r"^FILES \(only these; <= 3 files, <= 200 lines changed\):"
                        r"[ \t]*(?P<paths>.*?)\.[ \t]Do not touch other lines/files\.[ \t]*$")
-_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+# Markdown's own fence rule, shared by BOTH readers (see _Fences): at most 3
+# leading blanks, then 3+ of the same ` or ~; `tail` is what follows on the line.
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})(?P<tail>.*)$")
 _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
 # A verdict needs a non-empty tail after it: a bare 'PASS' proves nothing.
 _VERDICT_RE = re.compile(r"^(PASS|FAIL|INPUT_REQUIRED)[ \t]+\S.*$")
 REQUIRED_TOOLS = ("yamllint", "ansible-playbook", "ansible-lint", "gitleaks", "pre-commit")
+# Size limits (P4a fix 4): a text input bigger than this is not a brief or a
+# report, it is a payload; a path bigger than these is not a repo-relative path.
+MAX_TEXT_CHARS = 1 << 20          # 1 MiB of characters
+MAX_PATH_CHARS = 200
+MAX_COMPONENT_CHARS = 100
+MAX_PATH_COMPONENTS = 20
 # Documented install step, quoted for the operator; nothing runs it here.
 INSTALL_HELP = ("pipx install yamllint ansible-core ansible-lint pre-commit\n"
                 "gitleaks: the vendor release binary on PATH "
@@ -34,6 +42,29 @@ INSTALL_HELP = ("pipx install yamllint ansible-core ansible-lint pre-commit\n"
 
 class GuardError(ValueError):
     """The brief, the report shape, or a caller argument is not usable."""
+
+
+def _guard_text(name, text):
+    """A brief/report body must be a usable str (P4a fix 2: a wrong type raises,
+    it never reaches a line loop and dies with AttributeError/TypeError) and must
+    fit the size limit (fix 4)."""
+    if type(text) is not str:
+        raise GuardError("%s must be a str, got %s" % (name, type(text).__name__))
+    if len(text) > MAX_TEXT_CHARS:
+        raise GuardError("%s is %d characters, over the %d limit"
+                         % (name, len(text), MAX_TEXT_CHARS))
+
+
+def _guard_seq(name, paths):
+    """A sequence of path arguments, fail closed (P4a fix 2): a non-iterable has
+    no entries to check, and a bare str/bytes IS iterable — walking it yields
+    single characters, which would silently compare the wrong thing, so a string
+    handed to a path-list argument is refused rather than split."""
+    if (isinstance(paths, (str, bytes, bytearray)) or paths is None
+            or not hasattr(paths, "__iter__")):
+        raise GuardError("%s must be a sequence of str paths, got %s"
+                         % (name, type(paths).__name__))
+    return list(paths)
 
 
 def norm_path(path):
@@ -52,15 +83,23 @@ def exact_path(path):
     './' — nothing else is collapsed. Case, NFKC form and look-alikes are KEPT,
     because on Linux 'Tools/A.PY' and 'tools/a.py' are different files, so they
     compare unequal and become violations. Returns None when the input is not a
-    plain relative path (fail closed)."""
+    plain relative path (fail closed). Spaces INSIDE a name are legal —
+    'ops/host names.yml' is a path, 'not a path' is compared and usually
+    violates; only the shape and the size limits below refuse a name."""
     if (type(path) is not str or not path or not path.isascii() or path != path.strip()
             or any(ord(c) < 0x20 or ord(c) == 0x7f for c in path)):
         return None
     if path.startswith("./"):
         path = path[2:]
+    if len(path) > MAX_PATH_CHARS:
+        return None
     if any(c in path for c in "*?[]:\\") or path.endswith(("/", ".")):
         return None
     parts = path.split("/")
+    if len(parts) > MAX_PATH_COMPONENTS:
+        return None
+    if any(len(c) > MAX_COMPONENT_CHARS for c in parts):
+        return None
     if any(p in ("", ".", "..") for p in parts):
         return None
     if any(c != c.strip() or c.endswith(".") or c.split(".")[0].upper() in _RESERVED
@@ -83,31 +122,56 @@ def _files_looks(line):
     return bool(_FILES_LOOK.match(line) or _FILES_LOOK.match(_unquote(line)))
 
 
+class _Fences:
+    """ONE markdown-fence tracker, shared by `brief_files` and `report_checks` so
+    the two readers can never disagree about what is fenced (P4a fix 1 — the
+    report side used to toggle on any fence line, and '```' then '~~~' then
+    forged `CHECK n: PASS` lines read as unfenced).
+
+    `feed(line)` returns True for a line that is fence markup or fenced content,
+    False for a line that counts. A fence opens on 3+ of the same ` or ~ after at
+    most 3 leading blanks (its info string may follow); it closes ONLY on a line
+    of the same character, at least as long, with nothing after it. A shorter
+    marker, the other character, or a marker with trailing text is content, not a
+    closer — so a fence that is never closed swallows the rest of the text."""
+
+    def __init__(self):
+        self.open = None
+
+    def feed(self, line):
+        marker = _FENCE_RE.match(line)
+        fence = marker.group(1) if marker else None
+        if self.open is not None:
+            char, length = self.open
+            if (fence and fence[0] == char and len(fence) >= length
+                    and marker.group("tail") == ""):
+                self.open = None
+            return True
+        if fence:
+            self.open = (fence[0], len(fence))
+            return True
+        return False
+
+
 def brief_files(brief_text):
     """Normalised paths the brief allows, from its ONE canonical FILES line.
 
     The line must start at column 0 with `_CANON_PREFIX` in the canonical
     wording. A FILES-looking line that is indented, CR-terminated, quoted, or
     sitting inside a ``` / ~~~ fence is never used silently — it raises, as does
-    a second canonical line anywhere (fences are tracked by their own character:
-    a ``` block closes only on ```, a ~~~ block only on ~~~). Duplicate
-    DETECTION stays case-insensitive (same file), but the returned paths keep
-    their case for the fence."""
-    if type(brief_text) is not str:
-        raise GuardError("brief_text must be a str, got %s" % type(brief_text).__name__)
-    fence = None
+    a second canonical line anywhere. Fences follow ONE rule for both readers
+    (see _Fences): a ``` block closes only on a ``` or longer marker with nothing
+    after it, a ~~~ block only on ~~~, and a fence that never closes swallows the
+    rest of the text. Duplicate DETECTION stays case-insensitive (same file), but
+    the returned paths keep their case for the fence."""
+    _guard_text("brief_text", brief_text)
+    fences = _Fences()
     canonical = []
     for line in brief_text.split("\n"):
-        marker = _FENCE_RE.match(line)
-        if fence is not None:
-            if marker and marker.group(1)[0] == fence[0] and len(marker.group(1)) >= fence[1]:
-                fence = None
-            elif _files_looks(line):
+        if fences.feed(line):
+            if _files_looks(line):
                 raise GuardError("FILES line inside a code fence is never used: %r"
                                  % line[:120])
-            continue
-        if marker:
-            fence = (marker.group(1)[0], len(marker.group(1)))
             continue
         if not _files_looks(line):
             continue
@@ -132,18 +196,20 @@ def scope_fence(diff_paths, allowed):
     leading './' is normalised away; case and Unicode form are part of the name).
     Renames, deletes and mode changes all arrive as paths and the caller passes
     both rename halves; an empty allowed fails closed; membership only, never a
-    prefix test — a path under an allowed directory is a violation. A non-str in
-    `allowed` is a GuardError (the caller passed a broken allow-list); a non-str
-    diff path is a violation named by its repr, never a crash."""
+    prefix test — a path under an allowed directory is a violation. `diff_paths`
+    and `allowed` must each be a sequence: a str, bytes, None or a non-iterable is
+    a GuardError, never a crash and never a silent character-by-character walk. A
+    non-str ENTRY in `allowed` is a GuardError (the caller passed a broken
+    allow-list); a non-str diff path is a violation named by its repr."""
     ok = set()
-    for a in allowed:
+    for a in _guard_seq("allowed", allowed):
         if type(a) is not str:
             raise GuardError("allowed entry must be a str, got %r" % (a,))
         folded = exact_path(a)
         if folded is not None:
             ok.add(folded)
     violations = []
-    for p in diff_paths:
+    for p in _guard_seq("diff_paths", diff_paths):
         if type(p) is not str:
             violations.append(repr(p))
             continue
@@ -153,21 +219,42 @@ def scope_fence(diff_paths, allowed):
     return violations
 
 
+def _guard_required(required):
+    """The CHECK ids a report must carry (P4a fix 3): a non-empty tuple/list of
+    ints in 1..99 with no duplicates. Anything else is a broken caller argument,
+    not an empty requirement set — an empty one would make every report `ok`."""
+    if not isinstance(required, (tuple, list)):
+        raise GuardError("required must be a non-empty tuple/list of ints, got %s"
+                         % type(required).__name__)
+    req = list(required)
+    if not req:
+        raise GuardError("required must not be empty")
+    for n in req:
+        if type(n) is not int or not 1 <= n <= 99:
+            raise GuardError("required entry must be an int in 1..99, got %r" % (n,))
+    if len(req) != len(set(req)):
+        raise GuardError("required has duplicates: %r" % (req,))
+    return req
+
+
 def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     """{ok, missing, failed, input_required} over the report's CHECK lines.
     A CHECK line counts only at column 0: indented, '>'-quoted or list-marked
     lines are quoted output and never count, and neither does a zero-padded or
-    non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Fenced (``` or ~~~)
-    output never counts. No line for n is missing; a FAIL, a verdict with no
-    evidence tail, an unparsable verdict, or conflicting duplicates (the last
-    line does not silently win) is failed."""
-    req = list(required)
-    seen, fenced = {}, False
+    non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Fenced output never
+    counts, under the same markdown rule `brief_files` uses (_Fences: closed only
+    by the same character, at least as long, with nothing after it; never closed
+    means the rest of the text is swallowed). No line for n is missing; a FAIL, a
+    verdict with no evidence tail, an unparsable verdict, or conflicting
+    duplicates (the last line does not silently win) is failed. A body that is not
+    a str, one over MAX_TEXT_CHARS, or a `required` argument that is not a
+    non-empty tuple/list of ints in 1..99 all raise."""
+    _guard_text("report_text", report_text)
+    req = _guard_required(required)
+    seen = {}
+    fences = _Fences()
     for line in report_text.splitlines():
-        if _FENCE_RE.match(line):
-            fenced = not fenced
-            continue
-        if fenced:
+        if fences.feed(line):
             continue
         m = _CHECK_RE.match(line)
         if not m or int(m.group("n")) not in req:
