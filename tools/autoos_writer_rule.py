@@ -151,7 +151,7 @@ def _chain_match(model_id, legs):
     return False
 
 
-def writer_allowed(model_id, r_level, task_type, registry):
+def writer_allowed(model_id, r_level, task_type, registry, ledger_path=None):
     """Sub-40 ids (containment on the normalized id) only at R0/R1, never on
     ops; R2 only for an available R2 chain leg, R3 only for an available R3
     leg (no R3 key falls back to the R2 chain; an explicit empty R3 list
@@ -159,8 +159,29 @@ def writer_allowed(model_id, r_level, task_type, registry):
 
     Fail closed: with policy.writers or sub40_models absent/empty every R2/R3
     request and every ops request is denied.
+
+    With ledger_path given, a model demoted() flags for this task_type is
+    denied at every r_level. The path itself fails closed: a symlink
+    (broken or not), a directory (or any non-file), or an unreadable file
+    denies; only a path that does not exist at all reads as an empty
+    (not-demoted) ledger.
     """
     _checked(task_type, r_level)
+    if ledger_path is not None:
+        import os as _os
+        try:
+            if not _os.path.lexists(ledger_path):
+                pass  # absent path: empty ledger, not demoted
+            elif _os.path.islink(ledger_path) or not _os.path.isfile(ledger_path):
+                return False  # symlink (broken or not), directory, ...: deny
+            else:
+                with open(ledger_path, "rb"):
+                    pass  # readability probe: unreadable denies
+                import autoos_writer_ledger as _ledger
+                if _ledger.demoted(model_id, task_type, path=ledger_path):
+                    return False
+        except Exception:
+            return False
     writers = _writers(registry)
     subs = writers.get("sub40_models")
     if not writers or not isinstance(subs, list) or not subs:

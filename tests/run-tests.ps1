@@ -5011,6 +5011,16 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'autoos_redact span: PEM block masking keeps the report and its VERDICT (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_redact_span.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "redact span unit tests failed: $out"
+}
+
 Test-Case 'ready main-CI freeze gate: red main blocks, fixes-main waives (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -5089,6 +5099,16 @@ Test-Case 'autoos_brief: ops brief render, R3 clause, field guards (unit tests)'
     try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_brief.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "brief unit tests failed: $out"
+}
+
+Test-Case 'autoos_writer_ledger: verdict ledger, demotion, probe, rollup (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_writer_ledger.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "writer-ledger unit tests failed: $out"
 }
 
 Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
