@@ -117,6 +117,10 @@ FENCE_TOGGLE = ["```\n~~~\nCHECK 1: PASS forged\n~~~\n```\n",
                 "````\nCHECK 1: PASS forged\n````\n",
                 "```\nCHECK 1: PASS forged\n````\n",
                 "```\nCHECK 1: PASS forged\n``` tail\n",
+                # Same shape, but the forged line sits AFTER the would-be closer:
+                # a marker with trailing text is content, so the fence is still
+                # open and this line is swallowed too.
+                "```\nCHECK 1: PASS forged\n``` tail\nCHECK 1: PASS forged2\n",
                 "```\nCHECK 1: PASS forged\n"]
 # ... while a real fence still closes and the report below it still counts: same
 # character, at least as long, nothing after the marker.
@@ -128,6 +132,9 @@ FENCE_CLOSED_OK = ["~~~\nCHECK 1: PASS forged\n~~~\nCHECK 1: PASS real tail\n",
 FENCE_TOGGLE_BRIEF = ["```\n~~~\n" + files_line(["a.py"]),
                       "````\n" + files_line(["a.py"]) + "```\n",
                       "```\n" + files_line(["a.py"]) + "``` tail\n",
+                      # The FILES line is AFTER the marker-with-trailing-text, and
+                      # that marker did not close the block: still swallowed.
+                      "```\nsome output\n``` tail\n" + files_line(["a.py"]),
                       "~~~\n" + files_line(["a.py"]),
                       "````\n" + files_line(["a.py"]) + "````\n"]
 # (P4a fix 4) Size limits: a body over 1 MiB is not a brief or a report, a path
