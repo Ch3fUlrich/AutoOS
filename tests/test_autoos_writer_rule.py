@@ -5,13 +5,16 @@ Fixtures are inline dicts plus the committed registry. Nothing is spawned.
 Run from the repo root: python3 tests/test_autoos_writer_rule.py [ClassName]
 """
 import json
+import os
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import autoos_routing as routing  # noqa: E402
+import autoos_writer_ledger as ledger  # noqa: E402
 import autoos_writer_rule as rule  # noqa: E402
 import registry as registry_mod  # noqa: E402
 NEMOTRON = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
@@ -233,6 +236,38 @@ class WritersPolicyTests(unittest.TestCase):
             self.assertIsNotNone(
                 re.search(r"\n\n\ndef %s\b" % re.escape(name), "\n\n" + text),
                 "expected two blank lines before def %s" % name)
+
+
+class DemotionHookTests(unittest.TestCase):
+    def _ledger(self, verdicts):
+        path = os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
+        for i, verdict in enumerate(verdicts):
+            item = {"run_id": "r%d" % i, "verdict": verdict, "writer_client": "vertex",
+                    "writer_model_served": VERTEX, "task_type": "code", "reviewer": "t3"}
+            if verdict != "accepted":
+                item["failure_class"] = "syntax"
+            ledger.record(item, path=path)
+        return path
+
+    def test_demoted_denied_every_level(self):
+        path = self._ledger(["rejected", "rejected"])
+        for level in ("R0", "R1", "R2", "R3"):
+            with self.subTest(level=level):
+                self.assertFalse(rule.writer_allowed(VERTEX, level, "code", reg(), path))
+        self.assertTrue(rule.writer_allowed(VERTEX, "R2", "ops", reg(), path))
+
+    def test_clean_missing_and_probe(self):
+        path = self._ledger(["accepted"])
+        self.assertTrue(rule.writer_allowed(VERTEX, "R2", "ops", reg(), path))
+        self.assertTrue(rule.writer_allowed(
+            VERTEX, "R2", "ops", reg(), os.path.join(tempfile.mkdtemp(), "no.jsonl")))
+        bad = self._ledger(["rejected", "rejected"])
+        self.assertFalse(rule.writer_allowed(VERTEX, "R2", "code", reg(), bad))
+        ledger.probe_pass(VERTEX, "code", path=bad)
+        self.assertTrue(rule.writer_allowed(VERTEX, "R2", "code", reg(), bad))
+
+    def test_unreadable_ledger_fails_closed(self):
+        self.assertFalse(rule.writer_allowed(VERTEX, "R2", "ops", reg(), tempfile.mkdtemp()))
 
 
 if __name__ == "__main__":
