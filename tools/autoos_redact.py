@@ -93,6 +93,22 @@ _ASSIGNMENT_KEYWORDS = ("key", "token", "secret", "password", "passwd", "credent
 
 _PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 _PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+# What the lines AFTER an open BEGIN may be: a base64 body line, or one of the
+# PEM encryption headers. Anything else is not key material, so PEM mode ends
+# and that line is processed like every other line (AO-REDACT-SPAN: the old
+# blanket swallow ate a report that merely MENTIONED a BEGIN marker, VERDICT
+# line included).
+_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]{16,}")
+_PEM_HEADER_RE = re.compile(r"(?:Proc-Type|DEK-Info):")
+# A worker's verdict is how the caller learns the outcome; it is never swallowed
+# and it always closes an open PEM block. Leading indent is tolerated (a verdict
+# inside a fenced block or a markdown list is still a verdict).
+_VERDICT_LINE_RE = re.compile(r"[ \t]*VERDICT:")
+
+# Backstop for an open BEGIN whose END never arrives: at most this many body
+# lines are swallowed before PEM mode is given up on. A real RSA-2048/4096 key
+# body is 6-30 lines, so the cap is far above any genuine block.
+PEM_BODY_CAP = 120
 
 
 def sanitize_text(s: str) -> str:
@@ -194,16 +210,23 @@ class Redactor:
     """Line-oriented redactor for a stream the caller reads as it arrives.
 
     ``text()`` may be fed a whole report or one line at a time; a PEM block
-    that spans lines is masked as it passes (the BEGIN line becomes the marker,
-    the body is swallowed until the END line). ``count`` is how many secrets
-    have been masked so far, so the spawner can tell the caller it did
-    something instead of silently altering the worker's output.
+    that spans lines is masked as it passes: the BEGIN..END *span* becomes the
+    marker (the prose around it on that line survives), and the lines under an
+    open BEGIN are swallowed only while they look like key body — until the END
+    line, the first line that does not, ``PEM_BODY_CAP`` lines, or a VERDICT
+    line. A report that merely mentions a BEGIN marker therefore still reaches
+    the caller, verdict included (AO-REDACT-SPAN).
+
+    ``count`` is how many secrets have been masked so far, so the spawner can
+    tell the caller it did something instead of silently altering the worker's
+    output. One key counts once: the END line closes the block without adding.
     """
 
     def __init__(self, values: Iterable[str] = ()):
         self.values: list[str] = []
         self.count = 0
         self._in_pem = False
+        self._pem_bodies = 0
         self.add_values(values)
 
     def add_values(self, values: Iterable[str]) -> None:
@@ -226,25 +249,55 @@ class Redactor:
             out.append(self._one_line(body) + line[len(body):])
         return "".join(out)
 
-    def _one_line(self, line: str) -> str:
-        if self._in_pem:
-            if _PEM_END_RE.search(line):
-                self._in_pem = False
-            return ""
-        begin = _PEM_BEGIN_RE.search(line)
-        if begin:
-            # A whole key on one line (a log record of it) is masked in place;
-            # an open BEGIN starts the swallow until the matching END line.
-            self.count += 1
-            self._in_pem = not _PEM_END_RE.search(line, begin.end())
-            return TEXT_MASK
-        # The injected literals go first: they are the values we KNOW are
-        # secret, and masking them whole before the patterns run means a
-        # pattern can never mask the middle of one and leave its ends visible.
+    def _exit_pem(self) -> None:
+        self._in_pem = False
+        self._pem_bodies = 0
+
+    def _masked(self, line: str) -> str:
+        """The per-line masking of a line that is not key body: the injected
+        literals go first (they are the values we KNOW are secret, and masking
+        them whole before the patterns run means a pattern can never mask the
+        middle of one and leave its ends visible), then the value shapes."""
         masked, hits = redact_values(line, self.values, TEXT_MASK)
         masked, n = _apply_line_patterns(masked)
         self.count += hits + n
         return masked
+
+    def _mask_span(self, line: str, start: int, end: int) -> str:
+        """Replace ``line[start:end]`` with the marker, keep both sides, and
+        mask the survivors like any other line."""
+        return self._masked(line[:start] + TEXT_MASK + line[end:])
+
+    def _one_line(self, line: str) -> str:
+        if _VERDICT_LINE_RE.match(line):
+            # Never swallowed, and it ends a block: the caller's one mandatory
+            # line must survive an unterminated PEM marker.
+            self._exit_pem()
+            return self._masked(line)
+        if self._in_pem:
+            end = _PEM_END_RE.search(line)
+            if end:
+                self._exit_pem()
+                return self._mask_span(line, end.start(), end.end())
+            if (self._pem_bodies < PEM_BODY_CAP
+                    and (_PEM_BODY_RE.fullmatch(line) or _PEM_HEADER_RE.match(line))):
+                self._pem_bodies += 1
+                return ""
+            self._exit_pem()              # not key body: this line is a normal line
+        begin = _PEM_BEGIN_RE.search(line)
+        if begin:
+            # A whole key on one line (a log record of it) is masked in place;
+            # an open BEGIN masks from the marker to the end of the line — the
+            # rest of that line may already be base64 body — and starts the
+            # body-only swallow.
+            self.count += 1
+            end = _PEM_END_RE.search(line, begin.end())
+            if end:
+                return self._mask_span(line, begin.start(), end.end())
+            self._in_pem = True
+            self._pem_bodies = 0
+            return self._masked(line[:begin.start()] + TEXT_MASK)
+        return self._masked(line)
 
 
 # ─── argv (hostexec's stored form) ─────────────────────────────────────────
