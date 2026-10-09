@@ -3,7 +3,8 @@
 
 Tools: list_clients, spawn, status, result, cancel, respond, route,
 list_agents, context, heartbeat, ps, oc_status/oc_start/oc_restart (L1 lane
-lifecycle, c2), l2_start/l2_status/l2_stop/l2_inbox (L2 phase lanes, D-665)
+lifecycle, c2), l2_start/l2_status/l2_stop/l2_inbox/l2_resume (L2 phase lanes,
+D-665 + AO-L2-RESUME)
 (spec 6.2; heartbeat: R-heartbeat-02/03, R-pause-01, R-handoff-07; respond: the
 spec 9 ask-back). Which of those a client can even LIST is a profile
 (MCP_TOOL_PROFILES): a server whose environment marks it as running inside an L2
@@ -179,7 +180,8 @@ ENV_L1_INBOX = "AUTOOS_L1_INBOX"
 # The tools this fence covers. It is a list, not a comment, so the suite can pin
 # that the set of tools it refuses is exactly the set it tests: a lane-control
 # tool added later makes that test say which one is unfenced.
-LANE_CONTROL_TOOLS = ("l2_start", "l2_stop", "l2_inbox", "oc_start", "oc_restart")
+LANE_CONTROL_TOOLS = ("l2_start", "l2_stop", "l2_inbox", "l2_resume",
+                      "oc_start", "oc_restart")
 
 
 def lane_control_fence(tool: str) -> dict | None:
@@ -221,7 +223,7 @@ SPAWNER_TOOLS = ("spawn", "status", "result", "ps", "list_clients", "route",
 MCP_TOOL_NAMES = ("list_clients", "spawn", "status", "result", "cancel",
                   "respond", "route", "list_agents", "ps", "context",
                   "oc_status", "oc_start", "oc_restart", "l2_start",
-                  "l2_status", "l2_stop", "l2_inbox", "heartbeat")
+                  "l2_status", "l2_stop", "l2_inbox", "l2_resume", "heartbeat")
 FULL_PROFILE = "full"
 NARROWEST_PROFILE = "l2"
 # L2SPAWN-TIER fix 1: the layer BELOW the L2. A spawn made from profile l2 stamps
@@ -376,9 +378,10 @@ def oc_restart(lane: str) -> dict:
             "detail": "the lane's watcher starts it within ~2 minutes; verify with oc_status"}
 
 
-# --- L2 phase lanes (D-665 AO-L2-LAUNCH): l2_start / l2_status / l2_stop /
-# l2_inbox through tools/oc_l2.py, which resolves a phase into a lane and hands
-# the render-serve-canary-prompt pipeline to tools/oc_l1.py. The shape mirrors
+# --- L2 phase lanes (D-665 AO-L2-LAUNCH, AO-L2-RESUME): l2_start / l2_status /
+# l2_stop / l2_inbox / l2_resume through tools/oc_l2.py, which resolves a phase
+# into a lane and hands the render-serve-canary-prompt pipeline to
+# tools/oc_l1.py. The shape mirrors
 # the oc_* helpers above: an allowlisted environment, the server password
 # present by NAME only and never read here, and the CLI's own JSON as the
 # answer - this server renders no lane and kills no pid itself.
@@ -387,12 +390,19 @@ _OC_L2_SCRIPT = os.path.join(TOOLS_DIR, "oc_l2.py")
 # What oc_l2.py reads. AUTOOS_OCL1_PW is already in the L1 allowlist; the rest
 # are the binary path, where the L2 reports to, the run dir whose inbox the
 # L2's own lines land in, and where the lane state lives.
+# AUTOOS_STATE_DIR is deliberately NOT on this list: the CLI child of an MCP tool
+# gets an allowlist, not this server's whole environment. So the lane records the
+# agents root it will spawn into at start (oc_l2 `l2.agents_root`) and reads its
+# children from there, instead of re-deriving it from an environment that no
+# longer has the variable.
 _OC_L2_ENV_KEYS = _OC_L1_ENV_KEYS + ("AUTOOS_OPENCODE_BIN", "AUTOOS_L1_INBOX",
                                      "AUTOOS_RUN_DIR", "AUTOOS_OCL2_STATE_DIR",
                                      "AUTOOS_OCL2_GUARD_DIR")
-# start pays for a canary model call; the others are one HTTP round trip plus a
-# kill wait.
-_L2_TIMEOUT_S = {"start": 420, "status": 90, "stop": 90, "inbox": 90}
+# What oc_l2.py pays for. `start` and `resume` are the two that can run a full
+# render-serve-canary-prompt cycle (a resume restarts the lane when its session
+# is gone), the others are one HTTP round trip plus a kill wait.
+_L2_TIMEOUT_S = {"start": 420, "status": 90, "stop": 90, "inbox": 90,
+                 "resume": 420}
 
 
 def _oc_l2_env() -> dict:
@@ -432,8 +442,8 @@ def l2_start(repo: str, phase: str, brief_path: str,
 
 
 def l2_status(lane: str) -> dict:
-    """live | silent | dead | absent for a phase lane, with its session id,
-    port and last canary result."""
+    """live | silent | stalled | dead | absent for a phase lane, with its
+    session id, port and last canary result."""
     return _oc_l2("status", ["--lane", str(lane)])
 
 
@@ -457,6 +467,20 @@ def l2_inbox(lane: str, text: str) -> dict:
     if fence is not None:
         return fence
     return _oc_l2("inbox", ["--lane", str(lane), "--text", str(text)])
+
+
+def l2_resume(lane: str) -> dict:
+    """Wake a stalled phase lane: exactly one wake prompt per stall, naming the
+    child that exited or the error that ended its last turn. A lane with no live
+    session is stopped and started again from its stored config (restarted=true);
+    a healthy lane that merely refused the prompt (HTTP 409 busy) is left alone
+    (wake_rejected=true) — a working lane is never restarted for being busy. An
+    already-woken stall is a no-op until the lane moves or the wake cooldown
+    passes."""
+    fence = lane_control_fence("l2_resume")
+    if fence is not None:
+        return fence
+    return _oc_l2("resume", ["--lane", str(lane)])
 
 
 def _l2_report_scrub(text) -> str:
@@ -1122,6 +1146,13 @@ def spawn(req: dict) -> dict:
     job = {"id": run_id, "run_id": run_id,
            "request": {k: v for k, v in req.items() if k != "task"},
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
+           # F1 (AO-L2-RESUME): whose child this is. The L2 lane names itself in
+           # its own environment (the render sets AUTOOS_L2_LANE), so the lane
+           # that started a run is recorded by identity at the top of the run
+           # record — the `cwd` alone says only where it ran, and any same-cwd
+           # run anyone else starts would otherwise be read as the lane's own
+           # child and wake it for someone else's process.
+           "parent_lane": os.environ.get(ENV_L2_LANE) or None,
            "started": time.time()}
     _write_json(os.path.join(path, "job.json"), job)
     # SB-A4: the run's decided-at-spawn record, written before the child exists so
@@ -2007,8 +2038,11 @@ def build_server(profile: str | None = None):
 
     @_register("l2_status")
     def _l2_status(lane: str) -> dict:
-        """D-665: a phase lane's verdict - live / silent / dead / absent - plus
-        its session id, port, phase and last canary result.
+        """D-665: a phase lane's verdict - live / silent / stalled / dead /
+        absent - plus its session id, port, phase and last canary result.
+        `stalled` (exit 1) is a live but stuck session: its last turn errored,
+        or it sits idle while a child it spawned already exited - wake it with
+        l2_resume.
         Reading a lane stays allowed inside an
         L2 - the fence is on control."""
         return l2_status(lane)
@@ -2034,6 +2068,19 @@ def build_server(profile: str | None = None):
         (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
         the L1 inbox instead."""
         return l2_inbox(lane, text)
+
+    @_register("l2_resume")
+    def _l2_resume(lane: str) -> dict:
+        """AO-L2-RESUME: wake a stalled phase lane with exactly one prompt per
+        stall - the child that exited or the error that ended its last turn. A
+        lane whose session is gone is stopped and started again from its stored
+        config (restarted=true); a healthy lane that only refused the prompt
+        (HTTP 409 busy) is left alone (wake_rejected=true); a stall already
+        woken for is a no-op (already_woken=true).
+        Refused from inside an L2 lane
+        (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
+        the L1 inbox instead."""
+        return l2_resume(lane)
 
     @_register(L2_REPORT_TOOL)
     def _l2_report(text: str, kind: str = "REPORT") -> dict:

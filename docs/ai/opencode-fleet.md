@@ -143,16 +143,17 @@ pilot's first prompt (the handoff head plus a hint line about MCP tools): a pilo
   from the LANE and never inherited. A lane that genuinely needs one more variable names it in `child_env`; a credential-shaped
   name there is a validation error, and a value never belongs in a lane config. What was left behind is printed by NAME at spawn,
   so a missing variable is diagnosable instead of silent.
-- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same four lane tools are on it, so
+- **The layer fence.** One `autoos-agent` MCP server answers both an L1 and an L2, and the same lane tools are on it, so
   without a fence an L2 could start, stop or nudge lanes — relaunch its own supervisor, or switch off a phase it does not own. The
   L2 lane marks its own level (`agent_layer: "L2"` → `AUTOOS_AGENT_LAYER=L2` in the child env AND in the MCP server's own rendered
   env), and that one marker does two things. It picks the server's TOOL PROFILE: an L2 registers the spawner and its read-only
   companions — `spawn`, `status`, `result`, `ps`, `list_clients`, `route`, `context`, `heartbeat` — and lists no lane tool, no
   `cancel`, no `respond` at all (an unknown profile falls back to this narrowest list, never to the full one). And it fences what
-  remains: `l2_start`, `l2_stop`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they read `L2` back,
-  because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from an L2 is a tier-2
-  or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller passed), while tier 1 and
-  any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was a dead end: tier 3 is the
+  remains: `l2_start`, `l2_stop`, `l2_resume`, `l2_inbox`, `oc_start` and `oc_restart` still answer `refused: true` when they
+  read `L2` back, because the same functions are reachable from the CLI and a hidden tool is not a permitted call; a `spawn` from
+  an L2 is a tier-2 or tier-3 worker — a writer or a reviewer — forced into its own clone (`--isolate`, whatever the caller
+  passed), while tier 1 and any `role: orchestrate` card are refused before a run dir exists. It used to be tier-3-only, which was
+  a dead end: tier 3 is the
   review-only seat and refuses an implement card, so an L2 could never start a writer (found live by AO-L2-PRODTEST). A spawn that
   passes that fence is stamped `AUTOOS_AGENT_LAYER=L3` — the child's layer is decided by the spawner, from the spawner's own
   environment, never inherited and never a plan entry or a caller's `extra`, because a child that chooses its own mark chooses its
@@ -197,12 +198,26 @@ python3 tools/oc_l2.py resume --lane l2-<repo>-<checkout-tag>-<phase>
 
 Each subcommand prints exactly one JSON object, and the exit codes are `oc_l1`'s, forwarded: 0 ok, 2 config/validation/refusal,
 4 health timeout, 5 `UNATTENDED-REFUSED`. `status` adds one verdict of its own: `stalled` (exit 1) — the session is alive but its
-last turn ended in error, or it sits idle while a child run it spawned already exited. `resume` wakes a stalled lane once with
-the next action (`child <run-id> exited rc=N; read its result with autoos-agent result and continue with <next action>`), or stops
-and restarts it when the session is unrecoverable. Children are discovered, not recorded: a lane's children are the run dirs under
-`<lane cwd>/logs/agents/` whose `job.json` names the lane's cwd and started at or after the lane, and child state is the run's own
-`exit.json` — never `pgrep -f`, which matches the caller's own argv. The same four are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`,
-`l2_stop`, `l2_inbox`), so an L1 coordinates phases without leaving its own session.
+last turn ended in error, or it sits idle while a child run it spawned already exited. Children are discovered, not recorded, and
+attributed by IDENTITY (AO-L2-RESUME F1): the lane's own environment carries `AUTOOS_L2_LANE=<lane>`, the spawner records that as
+`parent_lane` at the top of every run's `job.json`, and only a run whose `parent_lane` is the lane is its child — the same-cwd and
+start-time filters narrow a match, they never make one. A run anyone else starts in the lane's directory therefore cannot stall the
+lane or wake it for someone else's process. They are read from the spawner's own root (`AUTOOS_STATE_DIR`/agents, recorded in the
+lane config as `l2.agents_root` at start, because a lane tool's CLI child gets an allowlist that does not carry that variable), and
+child state is the run's own `exit.json` — never `pgrep -f`, which matches the caller's own argv.
+
+`resume` wakes a stalled lane with one short prompt naming the child or the error (`child <run-id> exited rc=N; read its result
+with autoos-agent result and continue with <next action>`), and the three outcomes are distinguishable in that one JSON object.
+ONE wake per stall (F2): the prompt is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
+while it stands — no turn activity newer than the wake and the 10-minute wake window unexpired — `stalled` reads `already-woken` and
+a second `resume` is a no-op instead of a prompt per poll. A RESTART is for a lane that cannot take a prompt at all (F3): the
+session is gone (`live_session` answers nothing, or ended `failed`/`interrupted`) or the connection itself failed, and then `resume`
+stops and starts the lane from its stored config and reports `restarted`. An HTTP status that is merely a refusal (409 busy is the
+server answering a working lane) reports `wake_rejected` with `http_status` and leaves the lane, its state file and its process
+alone — a healthy lane is never restarted for being busy. What the record and the transcript held is forced through one printable
+capped line before it is interpolated (F6), so an error string with a newline cannot end the wake sentence and start an instruction
+of its own. The five are MCP tools on the `autoos-agent` server (`l2_start`, `l2_status`, `l2_stop`, `l2_resume`, `l2_inbox`), so an
+L1 coordinates phases without leaving its own session.
 
 The lane it renders — and an L2 has nothing else, which is the point (R-coord-14: the L2 never edits code):
 

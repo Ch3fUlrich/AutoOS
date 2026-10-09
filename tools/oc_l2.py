@@ -21,7 +21,11 @@ second spawner.
 
 Reporting (L2 -> L1): the lane's child env carries `AUTOOS_L1_INBOX` = the L1
 inbox the resolved lane key `inbox_file` names, and the first prompt tells the
-L2 to write its `REPORT` / `DONE` lines there. Work going the other way
+L2 to write its `REPORT` / `DONE` lines there. The same env carries
+`AUTOOS_L2_LANE` = this lane's name (the render sets it, and the spawner records
+it as `parent_lane` in every run it starts), which is how `status`/`resume` know
+whose children they are looking at — by identity, not by a shared cwd. Work
+going the other way
 (L1 -> L2) is `inbox`: one timestamped record appended to the lane's own inbox
 (<$AUTOOS_RUN_DIR>/inbox/<lane>.md when set, else <state dir>/<lane>/inbox.md,
 the path the append reports) and the live session nudged with the same POST
@@ -57,6 +61,8 @@ Subcommands (each prints one JSON object on stdout):
   stop   --lane l2-<repo>-<checkout-tag>-<phase>
   inbox  --lane l2-<repo>-<checkout-tag>-<phase> --text LINE
   resume --lane l2-<repo>-<checkout-tag>-<phase>
+     one wake prompt per stall; restarts the lane when its session is gone and
+     leaves a lane that merely refused the prompt (HTTP 409 busy) alone.
 
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
 already running, a missing binary or password env) - 4 server not healthy -
@@ -83,6 +89,10 @@ import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
 import oc_l1_render  # noqa: E402
 from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
+
+# The spawner resolves the run-state root with this helper; a lane's children are
+# looked for under the SAME root, never under a path this module invented (F4).
+import autoos_clients  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = REPO_ROOT / "catalog" / "ai-registry.json"
@@ -134,6 +144,14 @@ CHILD_WAIT_LINE = (
     "under logs/agents/<run>/, exit.json when done) - never `pgrep -f`.")
 _SILENT_WINDOW_S = 10 * 60.0
 _ERROR_STATUSES = ("error", "failed")
+# AO-L2-RESUME rework F2: one wake per stall. A wake is recorded and the same
+# stall is not woken again until the lane shows activity after it or this window
+# passes - otherwise every `resume` poll posts another prompt to a session that
+# was already told, and an L1 that retries wakes the lane dozens of times.
+_WAKE_COOLDOWN_S = 10 * 60.0
+# F6: what a wake prompt interpolates from a run record (a run id, an error
+# string) is model-visible text from another process - one line, capped.
+_SAFE_TEXT_MAX = 200
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
 ROLE_LINES = (
@@ -173,6 +191,15 @@ class L2Error(Exception):
 
 def _now_ts():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _safe_text(value, cap=_SAFE_TEXT_MAX):
+    """Text from another process, fit to interpolate into a prompt: one
+    printable line, capped (F6). A run id or an error string that carried a
+    newline would otherwise end the wake prompt and start a new instruction."""
+    kept = [ch for ch in str(value)
+            if ch == " " or (0x20 <= ord(ch) and ord(ch) != 0x7F)]
+    return "".join(kept).strip()[:cap]
 
 
 # --- naming ------------------------------------------------------------------
@@ -311,6 +338,15 @@ def lane_inbox(lane_dir_):
     return lane_dir_ / "inbox.md"
 
 
+def agents_root():
+    """Where the spawner's run dirs live, resolved the way the spawner resolves
+    it: `autoos_clients.state_dir()/agents` - honoured by AUTOOS_STATE_DIR, the
+    checkout's own `logs/agents` otherwise (F4). NOT `<lane cwd>/logs`: the
+    spawner that writes those records is this checkout's MCP server, whatever
+    project the lane coordinates."""
+    return Path(autoos_clients.state_dir()) / "agents"
+
+
 # --- the first prompt --------------------------------------------------------
 
 
@@ -379,9 +415,13 @@ def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
         # L2-only metadata (oc_l1 ignores keys it does not know): stop, status
         # and inbox read the phase back out of the generated config instead of
         # re-deriving it from arguments nobody passed.
+        # `agents_root` is recorded at start (F4): the `resume` CLI an MCP tool
+        # launches has AUTOOS_STATE_DIR stripped from its environment, so the
+        # lane carries the root its own children will be written under rather
+        # than re-deriving it from an environment that is no longer the starter's.
         "l2": {"repo": str(repo), "phase": phase, "combo": combo,
                "brief": str(brief), "l1_inbox": str(l1_inbox),
-               "lane_inbox": str(inbox)},
+               "lane_inbox": str(inbox), "agents_root": str(agents_root())},
     }
     if port:
         lane["serve_port"] = port
@@ -453,10 +493,14 @@ def live_session(lane):
 # The canary writes heartbeat.json with turn 0 and nothing moved it, so a live
 # lane read as turn 0. Every status poll merges the session's turn count and
 # newest message ts forward; a lane whose last turn errored, or that sits idle
-# while its newest spawned child already exited, is `stalled` (wake it with
-# `resume`, which restarts the lane when the session is gone). Children are
-# discovered from the spawner's own run records under logs/agents/<run>/
-# (job.json to match, exit.json when done) - never `pgrep -f`, whose pattern
+# while a child it spawned already exited, is `stalled` — one wake per stall
+# (`last_wake_ts` in the heartbeat), `resume` restarts the lane when the session
+# is gone and leaves a healthy lane alone when it only refused the prompt.
+# Children are discovered from the spawner's own run records, under the state
+# dir the spawner writes (`autoos_clients.state_dir()/agents`, recorded in the
+# lane config at start), and a run belongs to the lane only when its job.json
+# carries `parent_lane` == this lane's name — never merely because it shares a
+# cwd. Child state is the run's own exit.json — never `pgrep -f`, whose pattern
 # sits in the caller's own argv and matches itself, so it never ends.
 
 def _session_messages(port, sid, password, limit=20):
@@ -488,6 +532,28 @@ def _turn_activity(items):
     return count, newest
 
 
+def _heartbeat_path(lane):
+    return Path(lane.get("heartbeat_file")
+                or str(Path(lane["scratch_dir"]) / "heartbeat.json"))
+
+
+def _read_heartbeat(lane):
+    """The lane's heartbeat dict; {} when it has none or it will not parse."""
+    try:
+        data = json.loads(_heartbeat_path(lane).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_heartbeat(lane, data):
+    path = _heartbeat_path(lane)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def note_activity(lane):
     """Merge the session's turn count / newest message ts into heartbeat.json.
 
@@ -505,23 +571,12 @@ def note_activity(lane):
         if items is None:
             return None
         count, newest = _turn_activity(items)
-        path = Path(lane.get("heartbeat_file") or
-                    str(Path(lane["scratch_dir"]) / "heartbeat.json"))
-        data = {}
-        if path.is_file():
-            try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    data = loaded
-            except (OSError, ValueError):
-                data = {}
+        data = _read_heartbeat(lane)
         data["turn"] = max(int(data.get("turn") or 0), count)
         if newest is not None:
             data["last_message_ts"] = newest
             data["last_activity_ts"] = _now_ts()
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
+        _write_heartbeat(lane, data)
         return data["turn"], data.get("last_message_ts")
     except (OSError, ValueError):
         return None
@@ -562,35 +617,69 @@ def child_exited(run_dir):
 
 def _lane_children(lane):
     """The lane's spawned workers, newest last, DISCOVERED not recorded: run
-    dirs under the spawner's agents root whose job.json names this lane's cwd
-    and started at or after the lane. Nothing writes a list of children."""
+    dirs under the spawner's agents root whose job.json was written by THIS lane.
+
+    F1 (attacker review): attribution is by identity, never by cwd. The spawner
+    stamps every run it starts with the lane that owns it — the lane name the
+    renderer put in the lane's own environment (`AUTOOS_L2_LANE`), recorded as
+    `parent_lane` at the top of job.json — and only that match makes a run a
+    lane's child. The old filter was "same cwd, started at or after the lane",
+    which any run anyone starts in the lane's directory after it began matches:
+    one unrelated worker exiting then read the lane as stalled and woke it for
+    someone else's process. Same-cwd and the start time stay as the secondary
+    filter — they narrow what is already this lane's — but they are never
+    sufficient on their own."""
+    name = lane.get("name") or ""
     state = _read_state(lane.get("state_file") or "") or {}
     start = 0.0
     with contextlib.suppress(ValueError, TypeError):
         start = datetime.fromisoformat(
             str(state.get("started_utc") or "").replace("Z", "+00:00")).timestamp()
-    base = os.environ.get("AUTOOS_STATE_DIR")
-    root = (Path(base) if base else Path(lane.get("cwd") or ".") / "logs") / "agents"
+    l2 = lane.get("l2") or {}
+    root = Path(l2.get("agents_root") or agents_root())
     want = os.path.realpath(lane.get("cwd") or "")
     try:
         names = sorted(os.listdir(root))
     except OSError:
         return []
     found = []
-    for name in names:
+    for name_ in names:
         try:
-            job = json.loads((root / name / "job.json").read_text(encoding="utf-8"))
+            job = json.loads((root / name_ / "job.json").read_text(encoding="utf-8"))
+            if job.get("parent_lane") != name:
+                continue
             req = job.get("request") or {}
             got = req.get("cwd") if isinstance(req, dict) else None
             got = os.path.realpath(got or job.get("cwd") or "")
             begun = job.get("started")
             if got == want and isinstance(begun, (int, float)) and begun >= start:
-                found.append({"run_id": job.get("run_id") or job.get("id") or name,
-                              "run_dir": str(root / name), "started": float(begun)})
+                found.append({"run_id": job.get("run_id") or job.get("id") or name_,
+                              "run_dir": str(root / name_), "started": float(begun)})
         except (OSError, ValueError, AttributeError):
             continue
     found.sort(key=lambda e: e["started"])
     return found
+
+
+def _wake_key(info):
+    """What one wake covered: the reason plus the child it was about, so a new
+    stall of a different shape is still worth a prompt."""
+    return "%s:%s" % (info.get("reason") or "", info.get("run_id") or "")
+
+
+def _already_woken(heartbeat, info, newest):
+    """F2: was this exact stall already woken for? Covered until the lane shows
+    activity after the wake, or the wake cooldown passes. `newest` is the newest
+    turn timestamp of the session (None when it has none)."""
+    ts = heartbeat.get("last_wake_ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return False
+    if heartbeat.get("last_wake_key") != _wake_key(info):
+        return False
+    if isinstance(newest, (int, float)) and not isinstance(newest, bool) \
+            and newest > ts:
+        return False
+    return (time.time() - ts) < _WAKE_COOLDOWN_S
 
 
 def _last_turn_error(items):
@@ -625,7 +714,10 @@ def _last_turn_error(items):
 def stalled(name):
     """Is the lane stuck? `last-turn-error`, `child-exited`, or not stalled.
 
-    A dead server is `dead`, not stuck - status already says so."""
+    A dead server is `dead`, not stuck - status already says so. A stall that
+    was already woken for is not stalled either (F2): it reads `already-woken`
+    until the lane moves or the wake cooldown passes, so one wake covers one
+    stall however often status or resume is polled in between."""
     name = check_lane(name)
     lane = read_config(name)
     if lane is None:
@@ -633,80 +725,67 @@ def stalled(name):
     state = live_session(lane)
     if state is None:
         return {"lane": name, "stalled": False, "reason": "not-live"}
+    base = {"lane": name, "session_id": state.get("session_id"),
+            "port": state.get("port")}
     items = _session_messages(state["port"], state["session_id"],
                               os.environ.get(lane.get("password_env") or ENV_PW))
     if items is None:
         items = []
+    _, newest = _turn_activity(items)
+    verdict = None
     is_err, detail = _last_turn_error(items)
     if is_err:
-        return {"lane": name, "stalled": True, "reason": "last-turn-error",
-                "detail": detail, "session_id": state.get("session_id"),
-                "port": state.get("port")}
-    _, newest = _turn_activity(items)
-    kids = _lane_children(lane)
-    kid = kids[-1] if kids else None
-    ex = child_exited(kid["run_dir"]) if kid else {"exited": False}
-    if kid and ex["exited"] and (newest is None or ex["ended"] is None
-                                 or newest <= ex["ended"]):
-        return {"lane": name, "stalled": True, "reason": "child-exited",
-                "run_id": kid["run_id"], "run_dir": kid["run_dir"],
-                "rc": ex["rc"], "cancelled": ex["cancelled"],
-                "session_id": state.get("session_id"), "port": state.get("port")}
-    return {"lane": name, "stalled": False, "reason": "ok",
-            "session_id": state.get("session_id"), "port": state.get("port")}
+        verdict = {"reason": "last-turn-error", "detail": detail}
+    else:
+        kids = _lane_children(lane)
+        kid = kids[-1] if kids else None
+        ex = child_exited(kid["run_dir"]) if kid else {"exited": False}
+        if kid and ex["exited"] and (newest is None or ex["ended"] is None
+                                     or newest <= ex["ended"]):
+            verdict = {"reason": "child-exited", "run_id": kid["run_id"],
+                       "run_dir": kid["run_dir"], "rc": ex["rc"],
+                       "cancelled": ex["cancelled"]}
+    if verdict is None:
+        return dict(base, stalled=False, reason="ok")
+    if _already_woken(_read_heartbeat(lane), verdict, newest):
+        return dict(base, stalled=False, reason="already-woken")
+    return dict(base, stalled=True, **verdict)
 
 
 def _wake_text(info):
-    """The one short wake prompt: it names the next action, not the brief."""
-    nxt = info.get("next_action") or "the next phase step"
+    """The one short wake prompt: it names the next action, not the brief.
+
+    Everything interpolated here comes out of another process's record, so it
+    goes through `_safe_text` (F6): a run id or error string carrying a newline
+    would otherwise end the wake line and start an instruction of its own."""
+    nxt = _safe_text(info.get("next_action") or "the next phase step")
     if info.get("reason") == "child-exited":
         return ("Wake: child %s exited rc=%s; read its result with autoos-agent "
                 "result and continue with %s. Reply with "
                 "one short line of what you do next."
-                % (info.get("run_id"), info.get("rc"), nxt))
+                % (_safe_text(info.get("run_id")), _safe_text(info.get("rc")), nxt))
     return ("Wake: your last turn ended in error (%s); read the error and continue "
             "with %s. Reply with one short line of what you do next."
-            % (info.get("detail") or "unknown error", nxt))
+            % (_safe_text(info.get("detail") or "unknown error"), nxt))
 
 
-def cmd_resume(name):
-    """Wake a stalled lane once with its next action, or restart it.
+def _record_wake(lane, info):
+    """F2: mark the wake in the heartbeat - when it went out, which stall it
+    covers, and the child or error it woke for."""
+    hb = _read_heartbeat(lane)
+    hb["last_wake_ts"] = time.time()
+    hb["last_wake_key"] = _wake_key(info)
+    for key in ("run_id", "detail"):
+        if info.get(key) is not None:
+            hb["last_wake_" + key] = _safe_text(info[key])
+    with contextlib.suppress(OSError):
+        _write_heartbeat(lane, hb)
 
-    Not stalled is a no-op. Exactly ONE prompt is ever posted; when the
-    session cannot take it the lane is stopped and started again from its
-    stored config, and the answer says restarted."""
-    name = check_lane(name)
-    lane = read_config(name)
-    if lane is None:
-        raise L2Error("no lane config at %s for '%s'" % (config_path(name), name))
-    info = stalled(name)
-    if not info.get("stalled"):
-        return {"lane": name, "resumed": False, "restarted": False, "noop": True,
-                "reason": info.get("reason"),
-                "detail": "not stalled (%s) - nothing to wake" % info.get("reason")}
-    state = live_session(lane)
-    wake_failed = None
-    if state is not None:
-        try:
-            status, _ = _request(
-                state["port"], "POST", "/api/session/%s/prompt" % state["session_id"],
-                body={"text": _wake_text(info)},
-                password=os.environ.get(lane.get("password_env") or ENV_PW))
-            if status == 200:
-                out = {"lane": name, "resumed": True, "restarted": False,
-                       "reason": info.get("reason"),
-                       "detail": "woke session %s (%s)"
-                                 % (state["session_id"], info["reason"])}
-                for key in ("run_id", "rc", "next_action"):
-                    if info.get(key) is not None:
-                        out[key] = info[key]
-                return out
-            wake_failed = "the wake prompt returned HTTP %s" % status
-        except ServerDown as e:
-            wake_failed = "the wake prompt did not reach the server (%s)" % e
-    else:
-        wake_failed = ("the session is unrecoverable (the server no longer "
-                       "answers for it)")
+
+def _restart_lane(name, lane, why):
+    """Stop the lane and start it again from its stored config, reporting the
+    pair as one answer. `why` is what made a wake impossible - the restart is
+    the caller's only remaining move, so it is named in the detail."""
     stopped = cmd_stop(name)
     l2 = lane.get("l2") or {}
     try:
@@ -721,10 +800,71 @@ def cmd_resume(name):
             child_env=lane.get("child_env"))
     except (L2Error, oc_l1.LaneError) as e:
         return {"lane": name, "resumed": False, "restarted": False,
-                "stop": stopped, "detail": "%s; restart failed: %s" % (wake_failed, e)}
+                "stop": stopped, "detail": "%s; restart failed: %s" % (why, e)}
     return {"lane": name, "resumed": False, "restarted": rc == 0,
             "stop": stopped, "start": result,
-            "detail": "%s; restarted (exit %s)" % (wake_failed, rc)}
+            "detail": "%s; restarted (exit %s)" % (why, rc)}
+
+
+def cmd_resume(name):
+    """Wake a stalled lane once with its next action, or restart it.
+
+    One prompt per stall (F2), and the answer separates the three things that
+    can happen: a wake landed, the lane was refused (a healthy lane that is busy
+    is left alone, F3), or the session was gone and the lane restarted from its
+    stored config."""
+    name = check_lane(name)
+    lane = read_config(name)
+    if lane is None:
+        raise L2Error("no lane config at %s for '%s'" % (config_path(name), name))
+    info = stalled(name)
+    state = live_session(lane)
+    if state is None:
+        # F3: a session that is gone - whether the serve still answers for
+        # nothing or is dead entirely - cannot take a wake. Restarting from the
+        # stored config is the only way the phase continues.
+        return _restart_lane(
+            name, lane, "the lane has no live session (status %s)"
+                        % info.get("reason"))
+    if not info.get("stalled"):
+        reason = info.get("reason")
+        woken = reason == "already-woken"
+        return {"lane": name, "resumed": False, "restarted": False, "noop": True,
+                "already_woken": woken, "reason": reason,
+                "detail": (
+                    "already woken for this stall - nothing new until the lane "
+                    "moves or the %d-minute wake cooldown passes"
+                    % int(_WAKE_COOLDOWN_S / 60) if woken else
+                    "not stalled (%s) - nothing to wake" % reason)}
+    try:
+        status, _ = _request(
+            state["port"], "POST", "/api/session/%s/prompt" % state["session_id"],
+            body={"text": _wake_text(info)},
+            password=os.environ.get(lane.get("password_env") or ENV_PW))
+    except ServerDown as e:
+        return _restart_lane(name, lane,
+                             "the wake prompt did not reach the server (%s)" % e)
+    if status != 200:
+        # F3: the server answered, so the lane is healthy - it merely refused
+        # this prompt (409 busy is the ordinary shape). Restarting a lane that
+        # is working would throw the turn it is mid-way through away.
+        out = {"lane": name, "resumed": False, "restarted": False,
+               "wake_rejected": True, "reason": info.get("reason"),
+               "http_status": status,
+               "detail": "the wake prompt returned HTTP %s - a healthy lane is "
+                         "left alone, not restarted" % status}
+        for key in ("run_id", "rc", "next_action"):
+            if info.get(key) is not None:
+                out[key] = info[key]
+        return out
+    _record_wake(lane, info)
+    out = {"lane": name, "resumed": True, "restarted": False,
+           "reason": info.get("reason"),
+           "detail": "woke session %s (%s)" % (state["session_id"], info["reason"])}
+    for key in ("run_id", "rc", "next_action"):
+        if info.get(key) is not None:
+            out[key] = info[key]
+    return out
 
 
 # --- stop / inbox ------------------------------------------------------------
