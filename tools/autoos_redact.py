@@ -98,17 +98,45 @@ _PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
 # and that line is processed like every other line (AO-REDACT-SPAN: the old
 # blanket swallow ate a report that merely MENTIONED a BEGIN marker, VERDICT
 # line included).
-_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]{16,}")
-_PEM_HEADER_RE = re.compile(r"(?:Proc-Type|DEK-Info):")
+#
+# A body line is `[ \t]*[A-Za-z0-9+/=]*[ \t]*` — so the empty line, a
+# whitespace-only line, an indented line and the ragged LAST line of a real key
+# ("YQ==", "abc=", "===") all count as body. The old `{16,}` fullmatch called
+# every one of those "not key material", ended PEM mode early and printed the
+# rest of a real private key — the END marker and everything after it — in
+# plaintext (AO-REDACT-SPAN rework, attacker review).
+#
+# Written as strip-then-core-fullmatch rather than that one expression: the two
+# `[ \t]*` flanks make the engine re-scan the whitespace run on every backtrack
+# (quadratic on a 200 KB line, which is exactly the cost the pump thread may not
+# pay), while `strip` + a single character class are two linear C-speed walks.
+_PEM_BODY_RE = re.compile(r"[A-Za-z0-9+/=]*")
+_PEM_HEADER_RE = re.compile(r"[ \t]*(?:Proc-Type|DEK-Info):")
+
+
+def _is_pem_body_line(line: str) -> bool:
+    """True for a line that is base64 body, blank, or whitespace-only — see
+    ``_PEM_BODY_RE`` for the shape and the reason it is not one regex."""
+    return _PEM_BODY_RE.fullmatch(line.strip(" \t")) is not None
+
+
 # A worker's verdict is how the caller learns the outcome; it is never swallowed
 # and it always closes an open PEM block. Leading indent is tolerated (a verdict
 # inside a fenced block or a markdown list is still a verdict).
 _VERDICT_LINE_RE = re.compile(r"[ \t]*VERDICT:")
 
-# Backstop for an open BEGIN whose END never arrives: at most this many body
-# lines are swallowed before PEM mode is given up on. A real RSA-2048/4096 key
-# body is 6-30 lines, so the cap is far above any genuine block.
-PEM_BODY_CAP = 120
+# Backstop for an open BEGIN whose END never arrives: at most this many lines
+# (body AND blanks/headers) are swallowed before PEM mode is given up on. A real
+# RSA-2048/4096 key body is 6-30 lines, so the cap is far above any genuine
+# block; every swallowed line counts, blanks included, because a blank line is
+# body and a key copy-pasted out of a terminal is full of them.
+#
+# COST OF THE PERMISSIVE BODY SHAPE (accepted, attacker review): a report that
+# MENTIONS an unclosed BEGIN and is followed by one or two lines that are
+# alnum-only — a bare word, a hash, `MERGE_OK`-without-underscore — looks like
+# key body, so those lines are swallowed. Only those lines: the first line that
+# is not body-shaped ends PEM mode, and a VERDICT line ends it and survives.
+PEM_BODY_CAP = 200
 
 
 def sanitize_text(s: str) -> str:
@@ -212,10 +240,13 @@ class Redactor:
     ``text()`` may be fed a whole report or one line at a time; a PEM block
     that spans lines is masked as it passes: the BEGIN..END *span* becomes the
     marker (the prose around it on that line survives), and the lines under an
-    open BEGIN are swallowed only while they look like key body — until the END
-    line, the first line that does not, ``PEM_BODY_CAP`` lines, or a VERDICT
-    line. A report that merely mentions a BEGIN marker therefore still reaches
-    the caller, verdict included (AO-REDACT-SPAN).
+    open BEGIN are swallowed while they look like key body — base64, blank,
+    indented, or a PEM encryption header — until the END line, the first line
+    that is not, ``PEM_BODY_CAP`` lines, or a VERDICT line. A report that merely
+    mentions a BEGIN marker therefore still reaches the caller, verdict included
+    (AO-REDACT-SPAN; the body shape itself is the rework — a short last line, a
+    blank or an indent inside a real key used to end the block early and print
+    its tail in plaintext).
 
     ``count`` is how many secrets have been masked so far, so the spawner can
     tell the caller it did something instead of silently altering the worker's
@@ -280,7 +311,7 @@ class Redactor:
                 self._exit_pem()
                 return self._mask_span(line, end.start(), end.end())
             if (self._pem_bodies < PEM_BODY_CAP
-                    and (_PEM_BODY_RE.fullmatch(line) or _PEM_HEADER_RE.match(line))):
+                    and (_is_pem_body_line(line) or _PEM_HEADER_RE.match(line))):
                 self._pem_bodies += 1
                 return ""
             self._exit_pem()              # not key body: this line is a normal line
