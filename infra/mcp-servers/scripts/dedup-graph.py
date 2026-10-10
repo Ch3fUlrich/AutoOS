@@ -213,7 +213,10 @@ def node_count(a, token, graph="memory", retries=6):
              "-e", f"OMNIGRAPH_BEARER_TOKEN={token}", "-e", f"OG={a.server}", "-e", "HOME=/tmp", "-w", "/tmp",
              "--entrypoint", "sh", a.image, "-c",
              'mkdir -p /tmp/.omnigraph; printf "servers:\\n  local:\\n    url: %s\\n" "$OG">/tmp/.omnigraph/config.yaml; '
-             f'omnigraph snapshot --server local --graph {shlex.quote(graph)} --json 2>/dev/null'],
+             # 0.8.x prints JSON by default; a 0.13 CLI prints text unless --json, but this
+             # script refuses >= 0.13 images (refuse_unsupported_image), so the default output
+             # is the contract here — passing --json would make the 0.8 CLI reject the call.
+             f'omnigraph snapshot --server local --graph {shlex.quote(graph)} 2>/dev/null'],
             capture_output=True, text=True)
         try:
             d = json.loads(r.stdout[r.stdout.index("{"):])

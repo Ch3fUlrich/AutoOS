@@ -4,8 +4,10 @@ Offline, stdlib + pytest. `dedup-graph.py` has a hyphenated name, so it is loade
 with importlib exactly like test_split_project_graph.py loads its script.
 """
 import importlib.util
+import json
 import os
 import sys
+import types
 
 import pytest
 
@@ -55,6 +57,26 @@ def test_snapshot_node_count_is_minus_one_on_any_shape_it_cannot_read():
 def test_snapshot_node_count_of_an_empty_graph_is_zero_not_minus_one():
     assert dedup_graph.snapshot_node_count({"datasets": []}) == 0
     assert dedup_graph.snapshot_node_count({"tables": []}) == 0
+
+
+def test_node_count_probes_snapshot_without_a_json_flag(monkeypatch):
+    # 0.8.x prints JSON by DEFAULT; --json is a 0.13 flag. Pass it anyway and the 0.8
+    # CLI rejects it, stdout comes back empty, node_count returns -1 and the rebuild
+    # aborts at its "graph is not verifiably empty" guard — the only supported path.
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(stdout=json.dumps(SNAPSHOT_081), returncode=0)
+
+    monkeypatch.setattr(dedup_graph.subprocess, "run", fake_run)
+    a = types.SimpleNamespace(network="mcp-server_mcp-net", image="modernrelay/omnigraph-server:v0.8.1",
+                              server="http://omnigraph-server:8080")
+    assert dedup_graph.node_count(a, "tok", "memory") == 16
+
+    script = calls[0][calls[0].index("-c") + 1]
+    assert "omnigraph snapshot --server local --graph memory" in script
+    assert "--json" not in script
 
 
 def test_refuse_unsupported_image_passes_a_0_8_tag():
