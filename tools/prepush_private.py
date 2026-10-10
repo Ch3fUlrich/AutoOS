@@ -85,9 +85,13 @@ def load_entries(path):
     Raises ``OSError``: the caller distinguishes "not there" (skipped) from
     "there and unreadable" (refused) before it ever gets here, so a failure to
     read a file that exists is the second case and must not look like the first.
+
+    ``utf-8-sig`` because a hand-edited names file often opens with a BOM, and
+    ``str.strip()`` keeps U+FEFF: read as plain utf-8 the BOM glued itself to
+    entry #1 and that entry matched nothing, on the leg a push is certified by.
     """
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        raw = handle.read().splitlines()
+    with open(path, encoding="utf-8-sig", errors="replace") as handle:
+        raw = handle.read().split("\n")
     stripped = [line.strip() for line in raw]
     return [line for line in stripped if line and not line.startswith("#")]
 
@@ -106,10 +110,14 @@ def _path_of(target):
     """The ``b/``-prefixed path a diff header names, unquoted if git quoted it."""
     if target == "/dev/null":
         return None
+    if len(target) >= 2 and target.startswith('"') and target.endswith('"'):
+        # Git keeps the b/ prefix inside the quotes ("b/qa\"b.txt"), so the
+        # prefix comes off after them or the refusal names a path not in the
+        # tree. The diff runs with core.quotepath=false, so no octal escapes
+        # reach here — only the quote and backslash git needs for " and \.
+        target = target[1:-1].replace('\\"', '"').replace("\\\\", "\\")
     if target.startswith("b/"):
         target = target[2:]
-    if len(target) >= 2 and target.startswith('"') and target.endswith('"'):
-        return target[1:-1].replace('\\"', '"').replace("\\\\", "\\")
     return target
 
 
@@ -125,6 +133,14 @@ def added_lines(repo, base):
     with ``++ `` arrives as ``+++ b/...`` — byte-identical to the next file's
     header. Reading it as one would silently re-home every later added line of the
     real file, and a scan that misses lines is a secret gate failing open.
+
+    The diff is split on ``"\n"`` alone, the rule ``autoos_ready_guards._lines()``
+    applies (a private helper of a module this script may run without, so it is
+    replicated here rather than imported): ``str.splitlines()`` also breaks on
+    ``\x0b \x0c \x1c \x1d \x1e \x85 U+2028 U+2029``, which git treats as ordinary
+    content, and a line cut that way loses its ``'+'`` — the tail reads as context,
+    the entry on it goes unseen, and the counter drifts. A CRLF patch keeps its
+    trailing ``'\r'`` in the text, which none of the header tests mind.
     """
     text = _diff_text(repo, base)
     if text is None:
@@ -133,7 +149,7 @@ def added_lines(repo, base):
     path = None
     line = 0
     in_hunk = False
-    for row in text.splitlines():
+    for row in text.split("\n"):
         if row.startswith("diff --git "):
             in_hunk = False
             path = None

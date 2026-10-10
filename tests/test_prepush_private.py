@@ -101,9 +101,9 @@ class PrivateGateTests(unittest.TestCase):
         run_git("commit", "-q", "-m", msg, cwd=self.repo)
         return path
 
-    def names_file(self, text, name="names.txt"):
+    def names_file(self, text, name="names.txt", encoding="utf-8"):
         path = self.tmp / name
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding=encoding)
         return path
 
     def gate(self, env=None):
@@ -233,6 +233,47 @@ class PrivateGateTests(unittest.TestCase):
         status, _results, out = self.patterns(ALPHA + "\n")
         self.assertEqual(status, private.REFUSED)
         self.assertIn("tracked.txt:4: private-pattern #1", out)
+
+    def test_a_bom_on_the_names_file_does_not_blind_entry_one(self):
+        # The names file is edited by hand on Windows hosts and opens with
+        # utf-8-sig: read as utf-8, the U+FEFF stayed glued to entry #1 —
+        # str.strip() keeps it — so that entry matched nothing and a push
+        # carrying it was certified green.
+        self.commit("tracked.txt", "third %s third\n" % ALPHA, append=True)
+        status, _results, out = self.gate({
+            "AUTOOS_PRIVATE_PATTERNS":
+                str(self.names_file(ALPHA + "\n", encoding="utf-8-sig"))})
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("tracked.txt:3: private-pattern #1", out)
+        self.assertNotIn(ALPHA, out, "the matched text was printed")
+
+    def test_a_line_break_inside_an_added_line_cuts_neither_the_scan_nor_the_count(self):
+        # An added line holding U+2028 or a form feed reaches the patch as one
+        # line; a parser that splits the diff on every Unicode break character
+        # hands the tail — which lost its '+' — to the counter as context, so the
+        # entry on it goes unseen and every later line of the file drifts.
+        self.commit("tracked.txt", "noise \x0c zz\npre\u2028%s tail\nlater %s\n"
+                    % (ALPHA, BETA), append=True)
+        rows = private.added_lines(self.repo, self.base)
+        self.assertEqual([(r[0], r[1]) for r in rows],
+                         [("tracked.txt", 3), ("tracked.txt", 4),
+                          ("tracked.txt", 5)], rows)
+        status, _results, out = self.patterns(ALPHA + "\n" + BETA + "\n")
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("tracked.txt:4: private-pattern #1", out)
+        self.assertIn("tracked.txt:5: private-pattern #2", out)
+        self.assertNotIn(ALPHA, out, "the matched text was printed")
+        self.assertNotIn(BETA, out, "the matched text was printed")
+
+    def test_a_quoted_path_is_printed_without_the_diffs_b_prefix(self):
+        # Git quotes a name containing a double quote as "b/qa\"b.txt"; stripping
+        # the prefix before the quotes left the refusal pointing at a path that
+        # is not in the tree.
+        self.commit('qa"b.txt', "first %s\n" % ALPHA)
+        status, _results, out = self.patterns(ALPHA + "\n")
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn('qa"b.txt:1: private-pattern #1', out)
+        self.assertNotIn('b/qa', out, "the b/ prefix leaked into the refusal")
 
     # --- the gitleaks leg -----------------------------------------------------
 
