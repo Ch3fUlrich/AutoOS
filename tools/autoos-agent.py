@@ -104,6 +104,8 @@ Usage:
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
+    python3 tools/autoos-agent.py ready status/<lane>.<name>.md --branch <B> --sha <SHA> \
+        --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>   # both, always
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
@@ -270,6 +272,9 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import errno
+import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -279,6 +284,7 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import site
 import socket
 import stat
 import subprocess
@@ -309,6 +315,8 @@ import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b:
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
+import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
+import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1490,6 +1498,10 @@ class ReviewBaseRefused(ValueError):
     """--review-base named no commit the seat can diff from."""
 
 
+# S5-FIX1: a rev RANGE makes rev-parse print 3-4 lines; the stamp needs two full shas.
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
 def resolve_review_base(root: str, base):
     """`(base_sha, head_sha)` full shas, or None when `base` names no commit in the
     parent - the seat's snapshot IS the parent's HEAD, so the parent names it."""
@@ -1498,7 +1510,13 @@ def resolve_review_base(root: str, base):
     proc = subprocess.run(["git", "-C", root, "rev-parse", "%s^{commit}" % base,
                            "HEAD^{commit}"], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL)
-    return tuple(proc.stdout.split()) if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        return None
+    tokens = proc.stdout.split()
+    # exactly two 40-hex tokens name the pair; a 3-4-line range is refused, not stamped
+    if len(tokens) != 2 or not all(_FULL_SHA_RE.fullmatch(t) for t in tokens):
+        return None
+    return tuple(tokens)
 
 
 def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
@@ -1914,6 +1932,21 @@ WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
                             "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
                             "GITHUB_", "GITLAB_", "SLACK_",
                             "LD_", "DYLD_", "GIT_", "SSH_", "KUBE", "DOCKER_")
+# TOOLHOME (AO-L2-SEAT-INTEGRITY P3a): the cache roots the measured seat writes
+# used (a qwen seat ran `ansible-galaxy collection install ansible.posix` and
+# filled ~/.ansible, outside its sandbox — HOME and every tool cache are
+# inherited). An --isolate worker gets each one repointed into a sandbox-private
+# toolhome; the names MUST stay in sync with WORKER_PLAN_ENV_PASSLIST below
+# (tests: the passlist and the redirect set cannot drift).
+TOOL_HOME_REDIRECTS = ("ANSIBLE_HOME", "ANSIBLE_LOCAL_TEMP", "ANSIBLE_REMOTE_TEMP",
+                       "ANSIBLE_COLLECTIONS_PATH", "PIP_CACHE_DIR", "npm_config_cache",
+                       "CARGO_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME",
+                       "PYTHONUSERBASE")
+# The TWO sandbox-private siblings of a seat clone, named once and read by
+# `toolhome_dir`, the plan, the `discard:` line and the leak filter (P3a-FIX).
+TOOLHOME_SUFFIX = ".toolhome"
+OPENCODE_DATA_SUFFIX = ".opencode-data"
+SANDBOX_PRIVATE_SUFFIXES = (TOOLHOME_SUFFIX, OPENCODE_DATA_SUFFIX)
 # And what the *plan* is allowed to add, on top of clearing the deny check. The
 # allowlist above only ever covered the caller's own exports: plan["env"] was
 # copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
@@ -1926,7 +1959,7 @@ WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
                             clients.GEMINI_CUSTOM_HEADERS_ENV,
                             # D8: the pin that keeps a gemini-cli internal call on
                             # the leg this run routed instead of its `auto` default.
-                            clients.GEMINI_MODEL_ENV)
+                            clients.GEMINI_MODEL_ENV) + TOOL_HOME_REDIRECTS
 WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
@@ -2089,6 +2122,21 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     pin = worker_shell()
     if pin:
         env["SHELL"] = pin
+    # TOOLHOME (P3a), and the HOME split it lives with: own-account clients
+    # (claude, qoder, qwen, agy, codex, gemini) authenticate from $HOME, so
+    # they inherit the operator's HOME and only the caches named in
+    # TOOL_HOME_REDIRECTS move; a gateway client (opencode) needs nothing from
+    # HOME, so its builder asks for the toolhome as home with plan["forced_home"].
+    # It is honoured only when it is exactly the sandbox's own `.toolhome`
+    # sibling — the passlist gate on HOME itself stays the way it was.
+    forced_home = plan.get("forced_home")
+    if forced_home is not None and forced_home == toolhome_dir(str(plan.get("cwd", ""))):
+        env["HOME"] = forced_home
+    # SEAT-PYTEST (P4): honoured only when the plan's key is exactly what this
+    # spawner recomputes now — a plan cannot write down a path of its own.
+    user_site = plan.get("user_site_path")
+    if user_site is not None and user_site == seat_user_site_path(src):
+        env["PYTHONPATH"] = user_site
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
     _drop_extra_git_config(env)
@@ -2338,9 +2386,11 @@ def provision_worker_dirs(env: dict) -> bool:
     because an absent or hostile one is the same exposure the refusal was for.
 
     An env that names no dir (the scrub pops both when the plan has no state
-    tree) is not a refusal: there is nothing to provision.
+    tree) is not a refusal: there is nothing to provision. The TOOLHOME cache
+    roots an --isolate plan redirects are provisioned under the same rule: the
+    sandbox-private toolhome appears as their parent, mode 0700.
     """
-    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME") + TOOL_HOME_REDIRECTS:
         path = env.get(name)
         if not path:
             continue
@@ -2352,6 +2402,172 @@ def provision_worker_dirs(env: dict) -> bool:
                   file=sys.stderr)
             return False
     return True
+
+
+def toolhome_dir(sandbox_path: str) -> str:
+    """The sandbox-private tool-cache home: a sibling of the clone, removed
+    with it (the `discard:` line names both), created 0700 by the provisioner."""
+    return sandbox_path + TOOLHOME_SUFFIX
+
+
+def redirect_tool_caches(env: dict, toolhome: str) -> None:
+    """Repoint every measured tool-cache root into the sandbox-private toolhome
+    (P3a: HOME and the caches are inherited, and an `ansible-galaxy` install
+    from a seat wrote into ~/.ansible with nothing watching — the parent leak
+    check reads the parent checkout, and ~/.ansible is in neither tree).
+
+    HOME itself is NOT touched here: own-account clients (claude, qoder, qwen,
+    agy, codex, gemini) authenticate from $HOME, so redirecting it breaks the
+    login; a gateway client (opencode) needs nothing from it, and that split is
+    decided by `forced_home` in the plan and applied in `worker_env`."""
+    for name in TOOL_HOME_REDIRECTS:
+        env[name] = os.path.join(toolhome, name.lower())
+
+
+# SEAT-PYTEST (AO-L2-SEAT-INTEGRITY P4, measured): the redirect above moves
+# PYTHONUSERBASE into the toolhome and `site.getusersitepackages()` with it — in an
+# --isolate seat `python3 -m pytest` printed "No module named pytest" (it lives in
+# ~/.local/lib/python3.X/site-packages), so no seat could RUN the tests it was told to
+# run. Writes stay redirected; the read side reopens for exactly ONE spawner-computed
+# directory. PYTHONPATH itself stays denied on both sides (FF1b): never a plan value,
+# never a caller value, only this revalidated one.
+def user_site_packages() -> str:
+    """The user site-packages dir `site` computes for THIS interpreter."""
+    return site.getusersitepackages()
+
+
+# SEAT-PYTHON (P4-FIX2, measured): the interpreter version is part of the path, so
+# asking the spawner (3.13 here) handed a 3.12 seat a directory it does not have. Ask
+# the `python3` the seat will run; its answer goes through the same qualification.
+SEAT_PY_USER_SITE_TIMEOUT = 5.0
+_SEAT_PY_USER_SITE_CACHE: dict = {}
+
+
+def seat_python_user_site(py: str, src: dict) -> str | None:
+    """What `py -I` prints for its own user site, or None: an error, a timeout or a
+    non-absolute / multi-line answer is a None and the caller falls back. Cached per
+    (interpreter, HOME), because a fallthrough re-plan builds the plan again. The PYTHON*
+    scrub is load-bearing: `-I` does not ignore PYTHONUSERBASE — site.py reads it
+    itself — so the toolhome redirect would come back as the seat's real site."""
+    key = (py, src.get("HOME") or "")
+    if key not in _SEAT_PY_USER_SITE_CACHE:
+        answer = None
+        try:
+            # subprocess-audit: one read-only path query against the seat's own
+            # interpreter — chosen env, no shell, a timeout, output validated below.
+            got = subprocess.run([py, "-I", "-c",
+                                  "import site,sys;"
+                                  "sys.stdout.write(site.getusersitepackages())"],
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                 env={n: v for n, v in src.items()
+                                      if not n.startswith("PYTHON")},
+                                 timeout=SEAT_PY_USER_SITE_TIMEOUT)
+            out = got.stdout.strip() if not got.returncode else ""
+            if out and "\n" not in out and os.path.isabs(out):
+                answer = out
+        except Exception:
+            answer = None
+        _SEAT_PY_USER_SITE_CACHE[key] = answer
+    return _SEAT_PY_USER_SITE_CACHE[key]
+
+
+def qualified_user_site(user_site: str, home: str) -> str | None:
+    """`user_site` when it is safe to hand a seat read access to it, else None: a
+    real directory, no symlink anywhere up to HOME, a strict descendant of HOME, and
+    writable by nobody but the operator — a directory someone else can write is a
+    module the child would import, the exact exposure the denial is for."""
+    if not user_site or not home:
+        return None
+    user_site, home = os.path.abspath(user_site), os.path.abspath(home)
+    if user_site == home or not user_site.startswith(home + os.sep):
+        return None
+    # realpath resolves every component, so a HOME-level parent that is a symlink —
+    # escaping HOME or not — already failed the equality below.
+    if not os.path.isdir(user_site) or os.path.islink(user_site) or \
+            os.path.realpath(user_site) != user_site:
+        return None
+    if os.name == "nt":
+        return user_site
+    st = os.stat(user_site)
+    if st.st_mode & stat.S_IWOTH:
+        return None
+    if st.st_mode & stat.S_IWGRP:
+        # `pip install --user` under the common umask 002 leaves the real site 0775,
+        # so a flat "no group-write" would refuse the one directory this is for. It
+        # is safe exactly when the group is our own and empty of anyone else — that,
+        # not the mode bit, is the claim.
+        import grp
+        if (st.st_uid != os.getuid() or st.st_gid != os.getgid() or
+                grp.getgrgid(st.st_gid).gr_mem):
+            return None
+    return user_site
+
+
+def seat_user_site_path(base: dict | None = None) -> str | None:
+    """The one PYTHONPATH value a seat may get, or None — the user site of the
+    interpreter the seat will run, resolved on the PATH and checked against the HOME of
+    the environment it is built from; anything unusable falls back to the spawner's own
+    interpreter and then to no PYTHONPATH. Every failure is a None, never a raised
+    error: a seat brief that says its tests may not run beats a spawner that crashes."""
+    src = os.environ if base is None else base
+    home = src.get("HOME") or os.path.expanduser("~")
+    try:
+        py = shutil.which("python3", path=src.get("PATH"))
+        seat_site = qualified_user_site(seat_python_user_site(py, src) if py else None,
+                                        home)
+        return seat_site or qualified_user_site(user_site_packages(), home)
+    except Exception:
+        return None
+
+
+# TOOLWATCH (P3a): the well-known tool dirs under the REAL home, as the
+# measured escapes wrote to them. Before and after an --isolate run each one
+# is *statted* — never opened, never followed through a symlink, and a read
+# that raises is skipped in silence: a hygiene warning is not allowed to break
+# the run it is watching.
+TOOL_WATCH_DIRS = (".ansible", os.path.join(".cache", "pip"), ".npm",
+                   os.path.join(".cargo", "registry"), os.path.join(".cache", "uv"),
+                   os.path.join(".local", "lib"))
+
+
+def tool_watch_paths(home: str) -> list:
+    return [os.path.join(home, *d.split(os.sep)) for d in TOOL_WATCH_DIRS]
+
+
+def tool_watch_snapshot(paths: list) -> dict:
+    """{path: "absent" | (mtime_ns, entry_count) | None} — None means "no claim":
+    the read raised, and no verdict is ever built on it."""
+    out = {}
+    for p in paths:
+        try:
+            if not os.path.lexists(p):
+                out[p] = "absent"
+                continue
+            st = os.lstat(p)              # lstat: never follow a symlink
+        except (OSError, ValueError):
+            out[p] = None
+            continue
+        count = None
+        if stat.S_ISDIR(st.st_mode):      # only a real directory is counted
+            try:                          # scandir never opens an entry
+                count = sum(1 for _ in os.scandir(p))
+            except (OSError, ValueError):
+                count = None
+        out[p] = (st.st_mtime_ns, count)
+    return out
+
+
+def tool_watch_changes(before: dict, after: dict, home: str) -> list:
+    """The watched dirs that changed during the run, home-relative (`~/.ansible`):
+    a name for a WARNING line and a run record, never an absolute path with the
+    operator's username in it (AGENTS.md 7)."""
+    out = []
+    for p, b in before.items():
+        a = after.get(p)
+        if b is None or a is None or b == a:
+            continue
+        out.append("~/%s" % os.path.relpath(p, home).replace(os.sep, "/"))
+    return out
 
 
 def fence_sandbox_push(sandbox: str) -> None:
@@ -2397,7 +2613,8 @@ def fence_sandbox_push(sandbox: str) -> None:
     os.chmod(path, 0o755)
 
 
-def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, base_line: str = "") -> str:
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False,
+                        base_line: str = "", stamp_base: bool = True) -> str:
     """The lines prepended to the task text of an --isolate run.
 
     SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
@@ -2407,6 +2624,8 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, b
     Item 4 adds the third line a research run needs: an edit is not the
     deliverable, and a worker that is never told so will helpfully make one.
     P1: a review seat is pointed at that file - its own history cannot resolve shas.
+    P2/G1b: `stamp_base=False` says the base line is quoted by the seat template
+    instead, so one prompt never carries the same proof line twice.
     """
     lines = ("Your working directory %s is your only writable checkout; "
              "never cd, git -C or write into %s or any other path outside it.\n"
@@ -2418,10 +2637,11 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, b
                   "changing nothing is success - do not edit, commit or "
                   "reorganise anything; read and report.")
     if base_line:
-        lines += ("\n%s\nThe change under review is written to %s - read that file; "
+        stated = base_line.strip() + "\n" if stamp_base else ""
+        lines += ("\n%sThe change under review is written to %s - read that file; "
                   "`git diff`/`git show` on those shas name nothing here: this seat "
                   "is a one-commit snapshot."
-                  % (base_line, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
+                  % (stated, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
     return lines
 
 
@@ -4403,6 +4623,32 @@ def read_only_run(args, card) -> bool:
         (card or {}).get("kind") == "research" or (card or {}).get("role") == "research")
 
 
+def seat_deps_note(modules=("mcp",)):
+    """One line naming the project-test modules this interpreter lacks ('' when none).
+
+    AO-L2-SEAT-INTEGRITY P3b item 2 (measured): a seat sandbox had no `mcp`, so the
+    project tests it was briefed to run could not start, and the seat reported an
+    untested verdict as if it had tested. Read with `importlib.util.find_spec` in the
+    interpreter the seat will use — `sys.executable` of this spawner, which is what the
+    sandbox's `python3` resolves to — and only ever SAID: nothing here installs.
+
+    The fix for a missing dep would be an optional per-sandbox `uv venv` from the repo
+    lockfile — a network install inside a run that may be --read-only, into a tree the
+    leak check has to reason about. Future work, for the operator; this stays a report.
+    """
+    missing = []
+    for name in modules:
+        try:
+            found = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            found = None  # a missing parent package is a missing module, not a crash
+        if found is None:
+            missing.append(name)
+    if not missing:
+        return ""
+    return "project tests unrunnable: missing python modules: %s" % ", ".join(missing)
+
+
 def review_run_refusal(review: dict | None):
     """Why an authored review run must not start yet, or None when it may.
 
@@ -4437,12 +4683,13 @@ def review_run_refusal(review: dict | None):
 # REVGATE2F (operator 2026-09-30): one line is one SEAT, and a ready lane needs
 # two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
-REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence",
+                       "run", "task", "failure", "risk")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
                             # vocabulary's OPEN finding and stays refused.
-                            "ship"))
+                            "ship", seat_verdict.READY_TOKEN))  # AO-SEAT-VERDICT-GRAMMAR
 # The final check is the operator's unchanged decision (Q-003 2026-09-27): a
 # cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
 # registry route -- it is the orchestrator's own interactive model -- so this one
@@ -4455,7 +4702,9 @@ FINAL_REVIEWER = "sonnet"
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
-                     "verdict=<ready|pass|ship|lgtm|...>")
+                     "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
+                     "[run=<writer-run-id> task=<ops|code|docs|infra> "
+                     "failure=<class> risk=<R0..R3>]")
 
 
 def _family_of_one_spelling(name, registry):
@@ -4868,15 +5117,182 @@ def is_final_reviewer(spelling):
     return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
 
 
-def _review_entry_verdict(entry):
-    """``(ok, reason)`` for one entry's verdict field."""
-    verdict = (entry.get("verdict") or "").strip()
-    if verdict.lower() in READY_VERDICTS:
-        return True, None
-    return False, "verdict %s" % (verdict or "missing")
+# P2/G1a: `evidence=<path>` points at the seat's own answer, so a READY claim in the
+# record is checked against the file the reviewer wrote. No field, no change of behaviour.
+EVIDENCE_DIR = os.path.join("logs", "briefs", "evidence")
+EVIDENCE_MAX_BYTES = 1 << 20  # P2-FIX2: the gate reads a seat's answer, not a disk
 
 
-def _cross_family_seat(entry, registry):
+def _resolve_evidence_path(root, raw):
+    """`(path, None)` for an evidence file the repo owns, `(None, reason)` otherwise.
+
+    A `..` in any component and any realpath that leaves the repo — or the evidence dir
+    under it — is refused: a gate that reads whatever file a record names is a file
+    reader, not a gate.
+    """
+    parts = [p for p in re.split(r"[\\/]+", raw) if p]
+    if not parts or ".." in parts:
+        return None, "evidence path outside the repo: %s" % raw
+    candidate = raw if os.path.isabs(raw) else os.path.join(root, *parts)
+    real = os.path.normcase(os.path.realpath(candidate))
+    for allowed in (os.path.realpath(root),
+                    os.path.realpath(os.path.join(root, EVIDENCE_DIR))):
+        allowed = os.path.normcase(allowed)
+        if real == allowed or real.startswith(allowed.rstrip(os.sep) + os.sep):
+            return candidate, None
+    return None, "evidence path outside the repo: %s" % raw
+
+
+# AO-LEDGER-WRITE (P6): the measurement clock only ticks when a verdict is written
+# down, so a countable, evidence-backed seat lands exactly one row on the ledger --
+# through the ledger's own API, never hand-built JSON.
+LEDGER_VERDICTS = {"ACCEPT": "accepted", "REJECT": "rejected"}
+
+
+def _ledger_append(row):
+    """One check-then-append under an advisory lock, so two parallel gate calls
+    cannot both pass the duplicate check and double-append. POSIX flock on a
+    sibling `.lock`; the lock call sits in a branch Windows never takes."""
+    target = writer_ledger.default_path()
+    folder = os.path.dirname(os.path.abspath(target))
+    fd = os.open(os.path.join(folder, "." + os.path.basename(target) + ".lock"),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name != "nt":
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        for seen in writer_ledger.load()[0]:
+            if (seen["run_id"], seen.get("reviewer"), seen["verdict"], seen.get("ref")) \
+                    == (row["run_id"], row["reviewer"], row["verdict"], row["ref"]):
+                return False
+        writer_ledger.record(row)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _ledger_record_seat(entry, parsed, ref, write):
+    """Append this seat's verdict to the writer ledger (AO-LEDGER-WRITE P6), and
+    return the reason the seat must not pass the gate, or None. `ref` is the sha256
+    of the evidence text, so re-running the gate over the same answer is a no-op and
+    a changed answer is a new row. Notes ride on the entry for review_status. P6-FIX F1:
+    called only for a PAIR that agrees, never for a mismatch the gate refused."""
+    verdict = LEDGER_VERDICTS.get(parsed["verdict"]) if parsed["countable"] else None
+    if verdict is None or not write:
+        return None
+    run = (entry.get("run") or "").strip()
+    writer = writer_ledger.writer_for_run(run) if run else None
+    if not writer or not writer[0] or not writer[1]:
+        # Never invent a writer: a row naming a model nobody served would poison
+        # the rollup the demotion decision is read off.
+        entry.setdefault("_ledger", []).append(
+            "ledger: no writer record for run %s, not recorded" % (run or "<no run=>"))
+        return None
+    row = {"run_id": run, "verdict": verdict, "writer_client": writer[0],
+           "writer_model_served": writer[1], "task_type": entry.get("task") or "code",
+           "reviewer": entry.get("reviewer"), "ref": ref}
+    if verdict == "rejected":
+        row["failure_class"] = entry.get("failure") or "other"  # F3 refused an unknown one
+    if entry.get("risk") in writer_ledger.RISKS:
+        row["risk"] = entry["risk"]
+    try:
+        _ledger_append(row)
+    except (writer_ledger.LedgerError, OSError, ValueError) as exc:
+        # Fail closed, as P3 defined it: a verdict that cannot be recorded does not
+        # clear the gate, and it says so rather than raising a traceback.
+        reason = "ledger write failed: %s" % type(exc).__name__
+        entry.setdefault("_ledger", []).append("ledger: %s" % reason)
+        return reason
+    return None
+
+
+def _ledger_field_refusal(entry):
+    """F3 (AO-LEDGER-WRITE P6-FIX, FAIL-CLOSED): why a PRESENT but unknown ledger field
+    refuses this seat, or None. An absent field keeps its default; a typo is never
+    guessed at (`task=opz` would be ledgered under the wrong type and slip the writer
+    rule's R-tiering), so the seat is refused naming field, value and valid values."""
+    for name, allowed in (("task", writer_ledger.TASKS), ("failure", writer_ledger.FAILURES),
+                          ("risk", writer_ledger.RISKS)):
+        value = (entry.get(name) or "").strip()
+        if value and value not in allowed:
+            return "ledger: %s=%s is not one of %s" % (name, value, ", ".join(allowed))
+    return None
+
+
+def _evidence_reason(entry, root, write_ledger=True):
+    """Why this entry's evidence file does not back its verdict, or None when it does:
+    it must sit inside the repo, be readable, be a valid `parse_verdict` answer, say
+    the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose —
+    and have its verdict recorded in the writer ledger (P6). P6-FIX F1: the PAIR decides
+    the row — the ledger step runs only where the seat's answer AGREEs with the entry."""
+    raw = (entry.get("evidence") or "").strip()
+    if not raw:
+        return None
+    # P2-FIX2: attacker text from a lane record, and the syscalls below raise on it.
+    try:
+        path, refused = _resolve_evidence_path(root or os.getcwd(), raw)
+    except (ValueError, OSError) as exc:
+        return "evidence path invalid: %s" % type(exc).__name__
+    if refused:
+        return refused
+    # P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): fd-only read — a fifo opened blocking hangs
+    # the gate forever and a raced symlink misdirects it; O_NONBLOCK|O_NOFOLLOW fall
+    # back to 0 where absent (Windows import), the cap is st_size AND bytes read.
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "evidence not a regular file"
+        if st.st_size > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        chunks, total = [], 0
+        while total <= EVIDENCE_MAX_BYTES:
+            data = os.read(fd, min(EVIDENCE_MAX_BYTES + 1 - total, 1 << 16))
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+        if total > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        text = b"".join(chunks).decode("utf-8")
+    except (ValueError, OSError) as exc:
+        why = errno.errorcode.get(getattr(exc, "errno", None)) or type(exc).__name__
+        # ELOOP (O_NOFOLLOW) and ENXIO (socket file) raise at open, before fstat.
+        return ("evidence file missing: %s" % raw if why == "ENOENT" else
+                "evidence not a regular file" if why in ("ELOOP", "ENXIO")
+                else "evidence unreadable: %s" % why)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    parsed = seat_verdict.parse_verdict(text)
+    if not parsed["valid"]:
+        return "evidence invalid: %s" % parsed["reason"]
+    word = (seat_verdict.verdict_word(entry.get("verdict")) or "").upper()
+    if parsed["verdict"] != ("ACCEPT" if word.lower() in READY_VERDICTS else word):
+        return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
+    return _ledger_record_seat(entry, parsed,
+                               hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                               write_ledger)
+
+
+def _review_entry_verdict(entry, root=None, write_ledger=True):
+    """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
+    (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
+    HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
+    names an `evidence=` file, that file has to say the same thing (P2/G1a), and its
+    verdict has to reach the writer ledger (P6). P6-FIX F1: the evidence is read on BOTH
+    paths — a finding is not ready, and its matching rejection is still data."""
+    raw = (entry.get("verdict") or "").strip()
+    refused = _ledger_field_refusal(entry) or _evidence_reason(entry, root, write_ledger)
+    if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
+        return False, "verdict %s" % (raw or "missing")
+    if refused:
+        return False, refused
+    return True, None
+
+
+def _cross_family_seat(entry, registry, root=None, write_ledger=True):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
@@ -4905,14 +5321,14 @@ def _cross_family_seat(entry, registry):
         # seat is refused and the mismatch names both sides.
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
-    ok, reason = _review_entry_verdict(entry)
+    ok, reason = _review_entry_verdict(entry, root, write_ledger)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
             "verdict": (entry.get("verdict") or "").strip()}, None
 
 
-def _cross_family_review(entries, registry):
+def _cross_family_review(entries, registry, root=None, write_ledger=True):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -4930,7 +5346,7 @@ def _cross_family_review(entries, registry):
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
     reasons, seats = [], []
     for entry in wanted:
-        seat, reason = _cross_family_seat(entry, registry)
+        seat, reason = _cross_family_seat(entry, registry, root, write_ledger)
         if reason is not None:
             reasons.append(reason)
             continue
@@ -4954,7 +5370,7 @@ def _cross_family_review(entries, registry):
             "seats": seats, "detail": detail}
 
 
-def _final_review(entries):
+def _final_review(entries, root=None, write_ledger=True):
     """The record's sign-off: a kind=final entry naming the final checker."""
     wanted = [e for e in entries if e.get("kind") == "final"]
     if not wanted:
@@ -4967,7 +5383,7 @@ def _final_review(entries):
                           % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
     reasons = []
     for entry in named:
-        ok, reason = _review_entry_verdict(entry)
+        ok, reason = _review_entry_verdict(entry, root, write_ledger)
         if ok:
             return {"ok": True,
                     "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
@@ -4975,7 +5391,7 @@ def _final_review(entries):
     return {"ok": False, "detail": "; ".join(reasons)}
 
 
-def review_status(text, registry):
+def review_status(text, registry, root=None, write_ledger=True):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -4985,6 +5401,11 @@ def review_status(text, registry):
     send someone to book a review that already happened and did not pass. The
     floor is two seats from distinct families (REVGATE2F): one entry is no
     longer a review, and two spellings of one family are one seat.
+
+    Each countable evidence-backed seat is written to the writer verdict ledger as
+    it is read (AO-LEDGER-WRITE P6); `write_ledger=False` is the `--no-ledger` dry
+    inspection, and a seat whose row cannot be written is refused with the reason --
+    an unrecorded verdict ticks none of the clocks the ledger feeds.
     """
     entries, malformed = [], []
     for line in (text or "").splitlines():
@@ -5000,10 +5421,11 @@ def review_status(text, registry):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
-    cross = _cross_family_review(entries, registry)
-    final = _final_review(entries)
+    cross = _cross_family_review(entries, registry, root, write_ledger)
+    final = _final_review(entries, root, write_ledger)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
+            "ledger_notes": [n for e in entries for n in e.get("_ledger") or []],
             "ready": cross["ok"] and final["ok"],
             "hint": REVIEW_ENTRY_HINT}
 
@@ -5040,6 +5462,10 @@ def print_review_report(label, report):
                   % (number, seat["reviewer"], seat["family"], seat["verdict"]))
     for line in report["malformed"]:
         print("  note: entry without a kind= or reviewer= ignored: %s" % line)
+    # AO-LEDGER-WRITE P6: a verdict the ledger could not name a writer for, or could
+    # not write at all, is said here rather than left out of the measurement silently.
+    for line in report.get("ledger_notes") or []:
+        print("  %s" % line)
     if not report["entries"]:
         print("  note: write one line per review, e.g.: %s" % report["hint"])
     print("ready: %s" % ("yes" if report["ready"] else "no"))
@@ -5092,7 +5518,8 @@ def cmd_review_status(args) -> int:
 
     Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
     read -- a typo'd path is not a lane that needs reviewing, and a caller that
-    waits on 1 would wait forever on that mistake.
+    waits on 1 would wait forever on that mistake. `--no-ledger` reads the record
+    without writing the verdict ledger; `ready` always writes (AO-LEDGER-WRITE P6).
     """
     try:
         text, label = read_lane_record(args.record)
@@ -5100,7 +5527,8 @@ def cmd_review_status(args) -> int:
         print("review-status: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry)
+    report = review_status(text, registry, root=os.getcwd(),
+                           write_ledger=not getattr(args, "no_ledger", False))
     print_review_report(label, report)
     return 0 if report["ready"] else 1
 
@@ -5484,7 +5912,9 @@ def cmd_ready(args) -> int:
     refused at exit 1 as `writer-guards: --base must be a strict ancestor of --sha`
     / `writer-guards: empty lane diff` — an empty diff otherwise reads as "touched
     nothing risky" and clears the gate. When the diff says ops, `--brief` and
-    `--report` are required; whenever `--brief` is given the brief's canonical
+    `--report` are required — AO-READY-CALLERS is that every CALLER passes both on
+    every run, the requirement being decided from the diff, which is the one thing a
+    caller has not read; whenever `--brief` is given the brief's canonical
     FILES line becomes the allow-list and `scope_fence` refuses any touched path
     outside it, naming every violation. An ops lane's REPORT must carry CHECK
     1-6 with a PASS verdict and evidence (`report_checks`). A GuardError from any
@@ -5500,7 +5930,7 @@ def cmd_ready(args) -> int:
         print("ready: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry)
+    report = review_status(text, registry, root=args.repo or os.getcwd())
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")
@@ -5550,11 +5980,20 @@ def cmd_ready(args) -> int:
     except (ready_guards.GuardError, ValueError) as exc:
         print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
         return 1
+
+    def guards_command():
+        """The exact call that clears this lane's guard gate, its own arguments filled
+        in (AO-READY-CALLERS): a refusal naming only a missing flag is one the caller
+        has to guess its way out of."""
+        return ("python3 tools/autoos-agent.py ready %s --branch %s --sha %s "
+                "--inbox %s --brief <BRIEF path> --report <REPORT path>"
+                % (args.record, args.branch, args.sha, args.inbox))
+
     if brief_arg or ops_required:
         if not brief_arg:
-            print("ready: not appended -- writer-guards: ops lane without --brief; "
+            print("ready: not appended -- writer-guards: ops lane without --brief/--report; "
                   "the diff reaches R2, so the rendered brief is what names the "
-                  "files this lane was allowed to touch")
+                  "files this lane was allowed to touch. Run: %s" % guards_command())
             return 1
         brief_text, brief_error = read_guards_text(brief_arg)
         if brief_error:
@@ -6257,6 +6696,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # containment prompt + leak check are the controls; writes outside
             # the parent checkout (e.g. $HOME) are not detected.
             args.isolate = True
+        # AO-L2-SEAT-INTEGRITY P3b: an isolated reviewer is a SEAT, and a seat has to
+        # write its findings inside its own clone. Read AFTER the qoder leg, so the level
+        # the checks above acted on is the one they were read from.
+        level = clients.seat_level(client, level, isolate=bool(args.isolate),
+                                   read_only=bool(route.get("read_only")))
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
@@ -6303,6 +6747,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # update is unconditional on purpose: a GEMINI_MODEL the caller's shell happens
     # to hold is not a leg this lane routed, so the routed model wins. (G3, RWP3)
     env.update(clients.gemini_side_model_env(client.name, model))
+    forced_home = None
+    user_site = None
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
@@ -6339,9 +6785,22 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
             # main checkout's recorded root.
-            env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
+            env["XDG_DATA_HOME"] = sandbox["path"] + OPENCODE_DATA_SUFFIX
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
                                                    os.environ.get("AUTOOS_TASK_DIR"))
+        # TOOLHOME (P3a): an --isolate worker writes its tool caches under the
+        # inherited HOME (measured: a qwen seat's `ansible-galaxy install` filled
+        # ~/.ansible outside its sandbox). Every cache root named in
+        # TOOL_HOME_REDIRECTS moves into the sandbox-private `<sandbox>.toolhome`;
+        # the HOME split (own-account clients keep $HOME for their login, the
+        # gateway client gets the toolhome as home) is documented at `forced_home`
+        # in worker_env.
+        _toolhome = toolhome_dir(sandbox["path"])
+        redirect_tool_caches(env, _toolhome)
+        # SEAT-PYTEST (P4): the seat reads the user site back, read-only.
+        user_site = seat_user_site_path()
+        if client.gateway:
+            forced_home = _toolhome
     if sandbox is None and getattr(args, "review_base", None):
         raise ReviewBaseRefused("--review-base needs --isolate: the diff lands in the "
                                 "sandbox, not in a shared checkout")
@@ -6361,9 +6820,25 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                                         "in %s" % (args.review_base, sandbox["source"]))
             sandbox["review_base"] = pair
             sandbox["base_line"] = "sandbox base: %s HEAD %s" % pair
-        cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
-                                      read_only=bool(route.get("read_only")),
-                                      base_line=sandbox.get("base_line", "")) + "\n" + cmd[-1]
+        _base_line = sandbox.get("base_line", "")
+        # P2/G1b: `--card role=review --review-base` is briefed through the ONE seat
+        # template, so the answer grammar and the proof line are standard. The template
+        # quotes the base line itself, so the prefix must not stamp it a second time.
+        _card = route.get("card") or _parsed_card_fields(getattr(args, "card", None)) or {}
+        _seat = bool(_base_line) and _card_asks_review(_card)
+        _brief = (seat_verdict.seat_prompt(str(_card.get("angle") or
+                                              "cross-family review of the change"),
+                                           cmd[-1], _base_line) if _seat else cmd[-1])
+        if _seat:
+            # P3b item 2: a seat that cannot start the project tests says so in its
+            # brief, so an untested verdict is never mistaken for a tested one.
+            _deps = seat_deps_note()
+            if _deps:
+                _brief += _deps + "\n"
+        cmd[-1] = (isolate_task_prefix(sandbox["path"], sandbox["source"],
+                                       read_only=bool(route.get("read_only")),
+                                       base_line=_base_line, stamp_base=not _seat) + "\n"
+                   + _brief)
     if client.name == "opencode":
         # WSLSHELL (SB-B): opencode's own config schema carries a top-level
         # `shell` ("Default shell to use for terminal"), which its resolver
@@ -6454,6 +6929,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "run_id": run_id, "sandbox": sandbox,
             "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            # TOOLHOME (P3a): the gateway client's HOME, applied by worker_env
+            # only when it names this sandbox's own .toolhome sibling.
+            "forced_home": forced_home,
+            # SEAT-PYTEST (P4): worker_env applies it only if it recomputes to this.
+            "user_site_path": user_site,
             "session_tag": tag}
 
 
@@ -8681,16 +9161,48 @@ def _porcelain_path_is_logs(p: str) -> bool:
     return p == "logs" or p.startswith("logs/")
 
 
-def _filtered_parent_status(root: str) -> dict:
+def _porcelain_path_is_sandbox(p: str, rel: str) -> bool:
+    """True when a porcelain path (quoted or not) is the seat tree, anything under
+    it, or one of the TWO siblings named in SANDBOX_PRIVATE_SUFFIXES — exact, never
+    by dot: `<seat>.anything` and `<seat>.toolhome-evil` are parent writes (P3a-FIX)."""
+    p = p.strip().strip('"').rstrip("/")
+    if p == rel or p.startswith(rel + "/"):
+        return True
+    return any(p == rel + s or p.startswith(rel + s + "/")
+               for s in SANDBOX_PRIVATE_SUFFIXES)
+
+
+def _sandbox_rel(root: str, sandbox: str | None) -> str | None:
+    """The sandbox path relative to the parent checkout, git-style (forward
+    slashes), or None when the sandbox is not a subtree of the root (a foreign
+    repo's clone under ~/fleet, the same tree, another drive on Windows) — then
+    there is nothing to subtract and the caller judges every path."""
+    if not sandbox:
+        return None
+    try:
+        rel = os.path.relpath(sandbox, root)
+    except ValueError:
+        return None
+    if rel in (os.curdir, "") or rel.split(os.sep)[0] == os.pardir:
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def _filtered_parent_status(root: str, sandbox: str | None = None) -> dict:
     """{path-part: XY} of `git status --porcelain --untracked-files=all`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
     so logs/ paths are the spawner's own, never a worker's leak. Only entries
     where EVERY path is under logs/ drop; a rename with one side outside
     (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
+
+    With a `sandbox`, paths inside the seat tree (and its `.toolhome` /
+    `.opencode-data` siblings) drop the same way — the state dir is not always
+    git-ignored under logs/, and a sandbox-private write is not a parent leak.
     """
     # Untracked files count too: a worker with write rights (qoder
     # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
+    rel = _sandbox_rel(root, sandbox)
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
                         "--untracked-files=all"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     out = {}
@@ -8701,7 +9213,9 @@ def _filtered_parent_status(root: str) -> dict:
             continue
         rest = line[3:] if len(line) > 3 else ""
         paths = [p.strip() for p in rest.split(" -> ")]
-        if all(_porcelain_path_is_logs(p) for p in paths):
+        if all(_porcelain_path_is_logs(p)
+               or (rel is not None and _porcelain_path_is_sandbox(p, rel))
+               for p in paths):
             continue
         out[rest] = line[:2]
     return out
@@ -8851,10 +9365,11 @@ def parent_leak(snapshot, root=None, sandbox=None):
       onto another lane is reported and only the frozen-parent rule (skill
       R-coord-01) tells the operator it was their own move - the exit-7
       message says so;
-    - any tracked path outside logs/ whose porcelain state is DIRTY after
-      and differs from before (new dirt is the worker-shaped signal; a path
-      that became clean - the orchestrator committing its own WIP - is not a
-      leak).
+    - any tracked path outside logs/ and outside the seat tree (the sandbox and
+      its `.toolhome` / `.opencode-data` siblings) whose porcelain state is
+      DIRTY after and differs from before (new dirt is the worker-shaped
+      signal; a path that became clean - the orchestrator committing its own
+      WIP - is not a leak).
 
     KNOWN HOLES, both inherited from 75f2866~1 and accepted with the strict
     rule: a worker that commits on a branch CREATED during the run and then
@@ -8908,7 +9423,7 @@ def parent_leak(snapshot, root=None, sandbox=None):
             side.append("%s %s" % (name, sha))
     if side:
         leaks.append("worker commits on moved parent branches: %s" % ", ".join(side))
-    after_status = _filtered_parent_status(root)
+    after_status = _filtered_parent_status(root, sandbox)
     changed = sorted(p for p, xy in after_status.items()
                      if before_status.get(p) != xy)
     if changed:
@@ -9658,7 +10173,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
         merged.setdefault("run_id", run_id)
         merged.setdefault("created_at", _iso_zulu(datetime.datetime.now(
             datetime.timezone.utc)))
-        for key in ("pgid", "start", "writer", "attempt"):
+        for key in ("pgid", "start", "writer", "attempt", "outside_writes"):
             if record.get(key) is not None:
                 merged[key] = record[key]
         for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
@@ -11952,6 +12467,7 @@ def cmd_run(args, cfg: dict) -> int:
     if admission is not None:
         return refuse(admission, EXIT_HOST_ADMISSION)
     parent_snap = None
+    watch_home = watch_paths = watch_before = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
         # Snapshot the parent checkout before the run: a worker that writes
@@ -11960,6 +12476,13 @@ def cmd_run(args, cfg: dict) -> int:
         # not the checkout this script happens to live in (KEYDENY3g item 7).
         source = sb.get("source") or isolate_source()
         parent_snap = parent_snapshot(source)
+        # OUTSIDEWATCH (P3a): the tool caches the redirect above cannot cover
+        # (a tool that ignores its env, or a write made with a hardcoded path)
+        # are caught by watching the well-known dirs under the REAL home before
+        # and after the run - a warning line, never a changed exit code.
+        watch_home = os.path.expanduser("~")
+        watch_paths = tool_watch_paths(watch_home)
+        watch_before = tool_watch_snapshot(watch_paths)
         # I12: the plaintext-secret refusal runs BEFORE anything is created,
         # so a denied card leaves no ~/fleet directory in the operator's home.
         try:
@@ -12478,7 +13001,11 @@ def cmd_run(args, cfg: dict) -> int:
                 else:
                     print("take it: git -C %s branch <name> %s   (detached HEAD)"
                           % (q, rest.split()[0]))
-        extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
+        # TOOLHOME (P3a): the sandbox-private toolhome is removed with the
+        # sandbox, like the opencode data dir beside it.
+        extra = " " + shlex.quote(toolhome_dir(sb["path"]))
+        if client.name == "opencode":
+            extra += " " + shlex.quote(sb["path"] + OPENCODE_DATA_SUFFIX)
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
         # SPAWNFIX3c (S2): only a read-only run is judged on an untouched
@@ -12495,8 +13022,21 @@ def cmd_run(args, cfg: dict) -> int:
             reflog=", ".join(reset_away),
             brief=plan.get("brief") or "",
             extra="; ".join(off_ref))
-        leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
+        # LEAKTREE (P3a): `root` must be the tree the snapshot above was taken
+        # of — both fall back to isolate_source(), not one to ROOT (a different
+        # checkout), which compared snapshot and verdict across two trees.
+        leak = parent_leak(parent_snap, root=sb.get("source") or isolate_source(),
                            sandbox=sb["path"])
+        # OUTSIDEWATCH (P3a): sandbox-private writes never reach this list (the
+        # redirect moved them), a real write to the operator's tool dirs does —
+        # warning and record only, the exit code stays whatever the run earned.
+        if watch_before is not None:
+            outside = tool_watch_changes(watch_before,
+                                         tool_watch_snapshot(watch_paths), watch_home)
+            if outside:
+                print("WARNING: --isolate run wrote outside its sandbox: %s"
+                      % ", ".join(outside), file=sys.stderr)
+                write_kill_record(plan.get("run_id"), {"outside_writes": outside})
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
@@ -12870,6 +13410,10 @@ def _parser_review_status(sub):
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+    review_status_p.add_argument("--no-ledger", action="store_true",
+                                 help="read the record without appending its seat "
+                                      "verdicts to the writer ledger (dry inspection; "
+                                      "`ready` always writes)")
 
 
 def _parser_ready(sub):
@@ -12877,7 +13421,9 @@ def _parser_ready(sub):
         "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
                       "hand: gate on review-status and on --sha being the tip of "
                       "origin/--branch, then append one line to the controller's "
-                      "inbox (REVGATE)")
+                      "inbox (REVGATE). Pass --brief and --report on every call: "
+                      "the gate requires them as soon as the DIFF reaches R2, "
+                      "whatever the card says (AO-WRITER-GUARDS, AO-READY-CALLERS)")
     ready_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
     ready_p.add_argument("--branch", required=True,
                          help="the lane branch, checked as refs/heads/<branch> on origin")

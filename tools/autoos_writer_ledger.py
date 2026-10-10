@@ -33,8 +33,12 @@ FAILURES = ("syntax", "semantics", "secret", "scope", "tests-missing", "alert-po
 TASKS = ("ops", "code", "docs", "infra")
 RISKS = ("R0", "R1", "R2", "R3")
 KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_model_served",
-        "task_type", "risk", "reviewer", "fixer_model", "probe")
+        "task_type", "risk", "reviewer", "fixer_model", "probe", "ref")
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
+# P6: `ref` names the evidence a seat row came from (the lane sha, or the sha256 of
+# the seat's answer), so a re-run over the same answer dedupes and a changed
+# answer is a new row. Optional, so every row written before P6 still loads.
+_REF = re.compile(r"[0-9a-f]{7,64}$")
 _FUTURE_SKEW = datetime.timedelta(minutes=5)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 # A valid row is a handful of <=200-char fields; anything past this is garbage
@@ -158,7 +162,11 @@ def _model_match(a, b):
 
 
 def default_path():
-    return os.path.join(clients.state_dir(), "writer-ledger.jsonl")
+    """The ledger's home: `AUTOOS_LEDGER_PATH` wins outright (P6: tests point it
+    at a temp file and never touch the real logs/writer-ledger.jsonl), else the
+    runner-private state dir."""
+    return os.environ.get("AUTOOS_LEDGER_PATH") or os.path.join(clients.state_dir(),
+                                                                "writer-ledger.jsonl")
 
 
 def _dt(v=None):
@@ -283,6 +291,14 @@ def validate(e, fill_ts=True):
             raise ValueError("probe: bool, got %r" % (e["probe"],))
 
         o["probe"] = e["probe"]
+
+    if e.get("ref") is not None:
+        r = e["ref"]
+
+        if type(r) is not str or not _REF.fullmatch(r):
+            raise ValueError("ref: 7..64 lowercase hex, got %r" % (r,))
+
+        o["ref"] = r
 
     t = e.get("ts")
 

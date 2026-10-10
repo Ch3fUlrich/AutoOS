@@ -69,7 +69,7 @@ checkout could certify its own push. That log stays — one line per push, the
 it. A gate that runs inside a worker's sandbox — ``AUTOOS_AGENT_RUN_ID`` set, the
 mark the spawner puts in every worker it starts — runs the checks and prints its
 verdict but writes no green record: the worker cannot certify its own push, so
-only an orchestrator's run records green and ``autoos-agent.py ready`` asks for
+only an orchestrator's run records green and ``autoos-agent.py ready`` asks for <!-- ready-no-guards -->
 that record as its fifth gate. Under the same mark the reader is guarded too: a
 state root that was never given defaults to ``<checkout>/logs``, and a store that
 resolves inside the sandbox it certifies is refused rather than believed. An

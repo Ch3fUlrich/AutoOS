@@ -20,6 +20,7 @@ import subprocess
 import sys
 import shutil
 import signal
+import socket
 import tempfile
 import threading
 import time
@@ -40,6 +41,7 @@ import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
+import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
@@ -49,6 +51,14 @@ def load_agent():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def seat_sandboxes(names):
+    """The seat names from a `logs/sandboxes` listing: `<seat>.toolhome` and
+    `<seat>.opencode-data` are the run's private dirs beside the clone, not
+    clones themselves (P3a), so a test that expects its one sandbox strips them."""
+    return [n for n in names
+            if not (n.endswith(".toolhome") or n.endswith(".opencode-data"))]
 
 
 def allow_in_place(case, agent):
@@ -5864,7 +5874,7 @@ class IsolateContainmentTests(unittest.TestCase):
 
     def lone_sandbox(self, statedir):
         base = os.path.join(statedir, "sandboxes")
-        names = os.listdir(base)
+        names = seat_sandboxes(os.listdir(base))
         self.assertEqual(len(names), 1, names)
         return os.path.join(base, names[0])
 
@@ -6861,7 +6871,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
          agent.LEGACY_OVERLAY_PATH, agent.PROVIDER_STATE_PATH) = (
             old_root, old_track, old_overlay, old_legacy, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
-    names = os.listdir(base) if os.path.isdir(base) else []
+    names = (seat_sandboxes(os.listdir(base)) if os.path.isdir(base) else [])
     return rc, out.getvalue(), err.getvalue(), calls, names
 
 
@@ -10046,6 +10056,412 @@ class ReviewStatusTests(unittest.TestCase):
                 self.assertIn("same family", report["cross_family"]["detail"])
 
 
+class EvidenceGateTests(unittest.TestCase):
+    """P2/G1a: the record's `verdict=` is a CLAIM, `evidence=<path>` is the PROOF.
+
+    The gate reads that file through `parse_verdict` and refuses the seat unless it is a
+    valid verdict saying the word the entry claims. No `evidence=` changes nothing (every
+    record written before the field exists); a path that leaves the repo is refused."""
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: the hint could be shorter.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
+    REL = "logs/briefs/evidence/seat.md"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def status(self, rel=REL, text=ACCEPT, write=True, verdict="verdict=ACCEPT",
+               final=FINAL_LINE):
+        """One seat line carrying `evidence=rel`, over a lane that is otherwise ready."""
+        if write:
+            path = os.path.join(self.root, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        entry = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                 "reviewer=omniroute/muse %s evidence=%s" % (verdict, rel))
+        return self.agent.review_status("\n".join((entry, CROSS_FAMILY_LINE_2, final)) + "\n",
+                                        self.registry, root=self.root)
+
+    def test_evidence_that_says_the_same_word_counts_as_a_seat(self):
+        self.assertTrue(self.status()["ready"], self.status()["cross_family"]["detail"])
+
+    def test_evidence_that_says_reject_under_a_line_that_says_ready_is_no_seat(self):
+        report = self.status(text=self.REJECT)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence verdict REJECT != entry ACCEPT",
+                      report["cross_family"]["detail"])
+        # The same proof under the Sonnet final: the claim never gets the last word.
+        report = self.status(text=self.REJECT, verdict="verdict=READY",
+                             final="AutoOS-Review: kind=final reviewer=sonnet "
+                                   "verdict=READY evidence=%s" % self.REL)
+        self.assertIn("evidence verdict REJECT != entry READY", report["final"]["detail"])
+
+    def test_an_evidence_file_the_grammar_or_the_disk_refuses_is_no_seat(self):
+        for kwargs, why in (({"text": "I looked at it.\nVERDICT: ACCEPT\n"},
+                             "evidence invalid:"),
+                            ({"rel": "evidence/gone.md", "write": False},
+                             "evidence file missing")):
+            report = self.status(**kwargs)
+            self.assertIn(why, report["cross_family"]["detail"], kwargs)
+            self.assertFalse(report["ready"], report)
+
+    def test_an_evidence_path_that_escapes_the_repo_is_refused(self):
+        outside = os.path.join(os.path.dirname(self.root), "outside.md")
+        with io.open(outside, "w", encoding="utf-8") as fh:
+            fh.write(self.ACCEPT)
+        self.addCleanup(os.unlink, outside)
+        for value in ("../outside.md", "logs/../../outside.md", outside):
+            report = self.status(value, write=False)
+            self.assertIn("outside the repo", report["cross_family"]["detail"], value)
+            self.assertFalse(report["cross_family"]["ok"], value)
+
+    def test_a_hostile_evidence_path_refuses_the_seat_and_both_commands(self):
+        # P2-FIX2: an unreadable `evidence=` value is a printed refusal that exits 1 on the
+        # existing non-ready path for BOTH commands -- not a traceback that also exits 1.
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        Path(ev, "big.md").write_bytes((self.ACCEPT + "q" * 2 ** 21).encode())
+        Path(ev, "bin.md").write_bytes(b"\xff\xfe VERDICT: ACCEPT\n")
+        os.symlink("nowhere.md", Path(ev, "dangling.md"))
+        rec = os.path.join(self.root, "rec.md")
+        ready = ["ready", rec, "--branch", "b", "--sha", "0" * 40, "--repo", self.root,
+                 "--inbox", os.path.join(self.root, "inbox"), "--registry", self.registry_path]
+        for rel, why in ((ev + "/a\x00b.md", "evidence path invalid"), (ev, "not a regular file"),
+                         (ev + "/" + "s" * 5000, "ENAMETOOLONG"), (ev + "/big.md", "too large"),
+                         (ev + "/bin.md", "UnicodeDecode"), (ev + "/dangling.md", "not a regular file")):
+            with self.subTest(rel=rel[-24:]), io.open(rec, "w", encoding="utf-8") as fh:
+                fh.write(CROSS_FAMILY_LINE + " evidence=%s\n" % rel)
+            with contextlib.redirect_stdout(out := io.StringIO()):
+                rc = [self.agent.main(ready), self.agent.main(["review-status", rec])]
+            self.assertEqual((rc, why in out.getvalue()), ([1, 1], True), out.getvalue())
+
+    def test_no_evidence_field_behaves_exactly_as_before(self):
+        report = self.agent.review_status("\n".join((CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
+                                                      FINAL_LINE)) + "\n",
+                                          self.registry, root=self.root)
+        self.assertTrue(report["ready"], report)
+        # The hint is the documentation a person reads when the gate refuses.
+        self.assertIn("[evidence=<path>]", report["hint"])
+
+    def test_decoration_on_the_entry_field_agrees_with_the_evidence_file(self):
+        # G3 at the gate: `verdict=**ACCEPT.**` and an answer of `VERDICT: ACCEPT` are one
+        # word through the shared normaliser, so the proof matches the claim.
+        self.assertTrue(self.status(verdict="verdict=**ACCEPT.**")["ready"])
+
+    # --- P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): the non-regular-file class; the 337b5f27
+    # repro was a fifo HANGING the gate, so every case runs in a thread joined at 10 s.
+    def ev_path(self, name):
+        os.makedirs(p := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        return os.path.join(p, name)
+
+    def guarded(self, name, write=False):
+        box = []
+        t = threading.Thread(target=lambda: box.append(self.status(
+            rel="logs/briefs/evidence/" + name, write=write)), daemon=True)
+        t.start(); t.join(10)
+        self.assertFalse(t.is_alive(), "the gate hung on %s" % name)
+        return box[0]["cross_family"]["detail"]
+
+    @unittest.skipIf(os.name == "nt", "os.mkfifo/AF_UNIX special files are POSIX-only")
+    def test_special_files_and_the_cap_refuse_fast_instead_of_hanging(self):
+        NOT, BIG = "not a regular file", "evidence too large"
+        cases = []
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.ev_path("fifo.md")); cases.append(("fifo.md", NOT))
+        if getattr(socket, "AF_UNIX", None):
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sk.bind(self.ev_path("sock.md")); cases.append(("sock.md", NOT))
+            except OSError:
+                pass
+        if hasattr(os, "symlink"):  # realpath may refuse it first; either is fast
+            os.symlink("/dev/zero", self.ev_path("zero.md")); cases.append(("zero.md", "outside the repo"))
+        os.makedirs(self.ev_path("dir")); cases.append(("dir", NOT))
+        for name, why in cases:
+            with self.subTest(name=name):
+                self.assertIn(why, self.guarded(name))
+        with open(self.ev_path("big.md"), "wb") as fh:  # sparse: st_size honest
+            fh.truncate(self.agent.EVIDENCE_MAX_BYTES + 1)
+        self.assertIn(BIG, self.guarded("big.md"))
+        # fstat swears 4 bytes while the patched os.read pours past the cap —
+        # the bounded loop must refuse anyway, never trusting st_size.
+        lie = os.stat_result((0o100644, 1, 1, 1, 0, 0, 4, 0, 0, 0))
+        with mock.patch.object(os, "fstat", return_value=lie), \
+             mock.patch.object(os, "read", side_effect=lambda fd, n: b"q" * n):
+            self.assertIn(BIG, self.guarded("seat.md", write=True))
+
+
+class LedgerWriteTests(unittest.TestCase):
+    """AO-LEDGER-WRITE (P6): a countable, evidence-backed seat is one data point on
+    the writer's measurement clock, so the gate writes it to the verdict ledger
+    through the ledger's OWN API. Hermetic: `AUTOOS_LEDGER_PATH` points at a temp
+    file and `writer_for_run` is stubbed -- nothing here touches the real
+    logs/writer-ledger.jsonl or the runner-private store.
+    """
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
+    HOLD = "VERDICT: HOLD\n\nBlocked on an operator decision.\n"
+    WRITER = ("opencode", "vertex/gemini-3.8-flash")
+    RUNS = "writer-run-1"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self._old_env = os.environ.get("AUTOOS_LEDGER_PATH")
+        self.set_ledger(os.path.join(self.folder, "writer-ledger.jsonl"))
+        self._stub = mock.patch.object(writer_ledger, "writer_for_run",
+                                       lambda run: self.WRITER)
+        self._stub.start()
+        self.addCleanup(self._stub.stop)
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("AUTOOS_LEDGER_PATH", None)
+        else:
+            os.environ["AUTOOS_LEDGER_PATH"] = self._old_env
+
+    def set_ledger(self, target):
+        os.environ["AUTOOS_LEDGER_PATH"] = self.target = target
+
+    def rows(self):
+        return writer_ledger.load(self.target)[0]
+
+    def seat_line(self, text=ACCEPT, extra=" run=" + RUNS, name="seat.md", verdict=None):
+        if verdict is None:  # F1: the default is a PAIR — the line says the seat's own word
+            verdict = text.split(":", 1)[1].split("\n", 1)[0].strip()
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"),
+                    exist_ok=True)
+        with io.open(os.path.join(ev, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                "reviewer=omniroute/muse verdict=%s evidence=%s%s"
+                % (verdict, "logs/briefs/evidence/" + name, extra))
+
+    def record_text(self, text=ACCEPT, extra=" run=" + RUNS, final=None, verdict=None):
+        return "\n".join([self.seat_line(text, extra, verdict=verdict), CROSS_FAMILY_LINE_2,
+                          final or FINAL_LINE]) + "\n"
+
+    def status(self, text=ACCEPT, extra=" run=" + RUNS, final=None, verdict=None, **kw):
+        return self.agent.review_status(self.record_text(text, extra, final, verdict),
+                                        self.registry, root=self.root, **kw)
+
+    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False):
+        """The same record through the real `review-status` command line."""
+        fd, rec = tempfile.mkstemp(suffix=".md")
+        os.close(fd)
+        self.addCleanup(os.unlink, rec)
+        with io.open(rec, "w", encoding="utf-8") as fh:
+            fh.write(self.record_text(text, extra))
+        argv = ["review-status", rec, "--registry", self.registry_path]
+        if no_ledger:
+            argv.append("--no-ledger")
+        out = io.StringIO()
+        with mock.patch.object(os, "getcwd", return_value=self.root), \
+                contextlib.redirect_stdout(out):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue()
+
+    def test_an_accept_seat_appends_one_accepted_row(self):
+        self.assertTrue(self.status()["ready"], self.status()["cross_family"]["detail"])
+        rows = self.rows()
+        self.assertEqual([(r["verdict"], r["run_id"], r["reviewer"]) for r in rows],
+                         [("accepted", self.RUNS, "omniroute/muse")])
+        self.assertEqual(rows[0]["writer_client"], self.WRITER[0])
+        self.assertEqual(rows[0]["writer_model_served"], self.WRITER[1])
+        self.assertEqual(rows[0]["task_type"], "code")
+        self.assertEqual(len(rows[0]["ref"]), 64)
+        self.assertNotIn("failure_class", rows[0])
+
+    def test_the_fields_come_from_the_record_entry(self):
+        self.status(extra=" run=%s task=docs risk=R2" % self.RUNS)
+        self.assertEqual([(r["task_type"], r["risk"]) for r in self.rows()],
+                         [("docs", "R2")])
+
+    def test_re_running_the_gate_over_the_same_record_writes_no_second_row(self):
+        self.status()
+        self.status()
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_command_appends_the_row_and_a_rerun_does_not(self):
+        rc, out = self.cmd()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.rows()), 1)
+        rc, out = self.cmd()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.rows()), 1)
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: the ledger lock is fcntl.flock")
+    def test_two_parallel_calls_write_one_row(self):
+        text = self.record_text()  # the evidence file is written once, then read twice
+        box = []
+
+        def gate():
+            box.append(self.agent.review_status(text, self.registry, root=self.root))
+
+        # A slow read only lands one row if the lock keeps the other call out of the
+        # check-then-append window: both would read the empty ledger first.
+        real_load = writer_ledger.load
+
+        def slow_load(*a, **kw):
+            out = real_load(*a, **kw)
+            time.sleep(0.05)
+            return out
+
+        threads = [threading.Thread(target=gate) for _ in range(2)]
+        with mock.patch.object(writer_ledger, "load", slow_load):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(len(box), 2, box)
+        self.assertTrue(all(r["ready"] for r in box), box)
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: fcntl.flock is what is being raced")
+    def test_two_processes_race_the_gate_and_write_one_row(self):
+        # F2: the thread test above patches `load` in ONE interpreter, so it never races
+        # two processes taking the lock — which is what two lanes actually are.
+        src = ("import importlib.util, os, sys, time\n"
+               "sys.path.insert(0, os.path.dirname(os.environ['GATE_AGENT']))\n"
+               "import autoos_writer_ledger as wl; wl.writer_for_run = lambda run: @W@\n"
+               "real, delay = wl.load, float(os.environ['GATE_DELAY']); "
+               "wl.load = lambda *a, **k: (time.sleep(delay), real(*a, **k))[1]\n"
+               "spec = importlib.util.spec_from_file_location('a', os.environ['GATE_AGENT'])\n"
+               "agent = importlib.util.module_from_spec(spec); spec.loader.exec_module(agent)\n"
+               "open(sys.argv[1], 'w').close(); f, end = os.path.dirname(sys.argv[1]), "
+               "time.time() + 60\n"
+               "while time.time() < end and not all(os.path.exists(os.path.join(f,"
+               " 'b%d' % i)) for i in (0, 1)):\n"
+               "    time.sleep(0.02)\n"
+               "sys.exit(agent.main(sys.argv[2:]))\n").replace("@W@", repr(self.WRITER))
+        Path(child := os.path.join(self.folder, "gate-child.py")).write_text(src)
+        Path(rec := os.path.join(self.root, "rec.md")).write_text(self.record_text())
+        kids = [subprocess.Popen([sys.executable, child, os.path.join(self.folder, "b%d" % i),
+                                  "review-status", rec, "--registry", self.registry_path],
+                                 env=dict(os.environ, GATE_AGENT=str(AGENT), GATE_DELAY="0.3"),
+                                 cwd=self.root, stdout=subprocess.DEVNULL) for i in (0, 1)]
+        self.assertEqual([k.wait(90) for k in kids], [0, 0])
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
+    def test_a_reject_proofs_a_rejected_row_with_a_failure_class(self):
+        # F1: REJECT + REJECT is a MATCHING rejection — the data the clock must tick on.
+        report = self.status(self.REJECT, extra=" run=run-a failure=tests-missing")
+        self.assertFalse(report["ready"], report)
+        self.assertEqual([(r["verdict"], r["failure_class"]) for r in self.rows()],
+                         [("rejected", "tests-missing")])
+        self.status(self.REJECT, extra=" run=run-b")
+        self.assertEqual([r["failure_class"] for r in self.rows()],
+                         ["tests-missing", "other"])
+
+    def test_a_mismatch_writes_no_row_in_either_direction(self):
+        # F1: the row comes from the PAIR; a disagreement records nothing either way, and
+        # the refusal text is the one this gate already said.
+        for entry, text, why in (("ACCEPT", self.REJECT, "evidence verdict REJECT != entry ACCEPT"),
+                                 ("REJECT", self.ACCEPT, "verdict REJECT")):
+            with self.subTest(entry=entry, evidence=text.splitlines()[0]):
+                report = self.status(text, verdict=entry)
+                self.assertFalse(report["ready"], report)
+                self.assertEqual(self.rows(), [])
+                self.assertIn(why, report["cross_family"]["detail"])
+
+    def test_two_rejects_from_one_writer_demote_it(self):
+        self.status(self.REJECT, extra=" run=run-a")
+        self.status(self.REJECT, extra=" run=run-b")
+        self.assertTrue(writer_ledger.demoted(self.WRITER[1], "code", threshold=2,
+                                              path=self.target))
+
+    def test_changed_evidence_content_is_a_new_row(self):
+        self.status(self.ACCEPT)
+        self.status(self.ACCEPT + "Re-read after the second commit.\n")
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_a_hold_an_invalid_and_a_blind_answer_write_no_row(self):
+        for text in (self.HOLD, "I looked at it.\nVERDICT: ACCEPT\n",
+                     self.ACCEPT + "I could not see the diff.\n"):
+            with self.subTest(text=text[-32:]):
+                self.status(text)
+                self.assertEqual(self.rows(), [])
+
+    def test_a_seat_without_run_appends_no_row_says_so_and_still_counts(self):
+        report = self.status(extra="")
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertIn("ledger: no writer record for run", " ".join(report["ledger_notes"]))
+
+    def test_an_unknown_writer_run_appends_no_row_says_so_and_still_counts(self):
+        with mock.patch.object(writer_ledger, "writer_for_run", lambda run: None):
+            report = self.status()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertIn("not recorded", " ".join(report["ledger_notes"]))
+
+    def test_no_ledger_skips_the_write_and_creates_no_file(self):
+        report = self.status(write_ledger=False)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(os.listdir(self.folder), [])
+        rc, out = self.cmd(no_ledger=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(os.listdir(self.folder), [])
+
+    def test_a_present_but_unknown_ledger_field_refuses_the_seat(self):
+        # F3 (FAIL-CLOSED, no defaulting): a typo'd task would be ledgered under the wrong
+        # type and slip the writer rule's R-tiering. Refuse, name it, write nothing.
+        for field, bad, why in (("task", "opz", "ledger: task=opz is not one of ops, code, docs, infra"),
+                                ("failure", "typo", "ledger: failure=typo is not one of"),
+                                ("risk", "R9", "ledger: risk=R9 is not one of")):
+            with self.subTest(field=field):
+                extra = " run=%s %s=%s" % (self.RUNS, field, bad)
+                report = self.status(extra=extra)
+                self.assertFalse(report["ready"], report)
+                self.assertIn(why, report["cross_family"]["detail"])
+                self.assertEqual(self.rows(), [])
+                rc, out = self.cmd(extra=extra)
+                self.assertEqual((rc, why in out), (1, True), out)
+
+    def test_an_absent_ledger_field_keeps_its_default(self):
+        self.assertTrue(self.status()["ready"])
+        self.assertEqual(self.rows()[0]["task_type"], "code")
+        self.assertNotIn("risk", self.rows()[0])
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod / symlink / directory ledger paths")
+    def test_an_unwritable_ledger_refuses_the_seat_and_exits_non_zero(self):
+        ro = os.path.join(self.folder, "ro")
+        os.makedirs(ro)
+        os.chmod(ro, 0o500)
+        self.addCleanup(os.chmod, ro, 0o700)
+        targets = [] if os.access(ro, os.W_OK) else [os.path.join(ro, "ledger.jsonl")]
+        os.makedirs(d := os.path.join(self.folder, "is-a-dir"))
+        targets.append(d)
+        os.symlink("nowhere.jsonl", s := os.path.join(self.folder, "link.jsonl"))
+        targets.append(s)
+        for target in targets:
+            with self.subTest(target=os.path.basename(target)):
+                self.set_ledger(target)
+                report = self.status()
+                self.assertFalse(report["ready"], report)
+                self.assertIn("ledger write failed", report["cross_family"]["detail"])
+                rc, out = self.cmd()
+                self.assertEqual(rc, 1, out)
+                self.assertIn("ledger write failed", out)
+
+
 class ReadyCommandTests(unittest.TestCase):
     """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
 
@@ -10204,6 +10620,25 @@ class ReadyCommandTests(unittest.TestCase):
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
     NOT_PUSHED_SHA = "0" * 40
+
+    def test_ready_fails_closed_when_the_evidence_says_reject_and_the_line_says_ready(self):
+        # P2/G1a through the REAL CLI: `ready` is the same gate as `review-status`, so a
+        # seat whose answer file says REJECT under a line saying PASS is no seat, and the
+        # inbox keeps nothing. The claim in the record no longer gets the last word.
+        repo, sha = self.make_repo()
+        rel = "logs/briefs/evidence/seat-muse.md"
+        path = os.path.join(repo, *(rel.split("/")))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n")
+        inbox = self.make_inbox("")
+        rc, out, _err = self.ready(
+            self.write_record(CROSS_FAMILY_LINE + " evidence=" + rel,
+                              CROSS_FAMILY_LINE_2, FINAL_LINE), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("evidence verdict REJECT != entry PASS", out)
+        self.assertIn("ready: no", out)
+        self.assertEqual(self.read_inbox(inbox), "")
 
     def test_main_ci_gate_is_reached_through_a_fake_gh_runner(self):
         """T0-FREEZE-2 F3: the sixth gate runs for real — no main_ci_status stub.
@@ -10786,6 +11221,17 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         self.assertIn("writer-guards: ops lane without --brief", out + err)
         self.assertEqual(inbox, "")
         self.assertEqual(len(calls), 1, calls)
+
+    def test_the_ops_refusal_names_the_exact_command_to_rerun(self):
+        # AO-READY-CALLERS: the `Run:` line is what the caller copies back, so it
+        # must be the whole corrected call — record, branch, sha, inbox and BOTH
+        # guard files — never a command that omits the flags it is asking for.
+        rc, out, err, _inbox, _calls = self.ready(diff_paths=["playbooks/x.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("Run: python3 tools/autoos-agent.py ready %s --branch %s "
+                      "--sha %s --inbox %s --brief <BRIEF path> "
+                      "--report <REPORT path>"
+                      % (self.record, self.BRANCH, self.SHA, self.inbox), out + err)
 
     def test_a_mislabelled_docs_card_on_a_playbook_diff_still_needs_brief_and_report(self):
         # The label is only a FLOOR: the diff decides, so `--task-type docs` buys
@@ -15793,7 +16239,7 @@ class CommittedWorkNotANoOpTests(unittest.TestCase):
 
     def lone(self, state):
         base = os.path.join(state, "sandboxes")
-        names = os.listdir(base)
+        names = seat_sandboxes(os.listdir(base))
         self.assertEqual(len(names), 1, names)
         return os.path.join(base, names[0])
 
@@ -17517,6 +17963,78 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
         st = self.wait_done(out["id"])
         self.assertEqual(st["state"], "completed",
                          mcp_server.result(out["id"]).get("text"))
+
+
+class McpReviewBasePlumbingTests(unittest.TestCase):
+    """AO-MCP-REVIEW-BASE: the MCP `spawn` tool carries the CLI's `--review-base
+    SHA` to its argv, validates it as the CLI's arg half does (before any run dir),
+    records it in job.json, and leaves the unknown-rev / no-isolate rc 2 to the CLI."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+    def _spawn(self, **over):
+        return mcp_server.spawn(dict({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                      "card": {"role": "review"}}, **over))
+
+    def test_review_base_reaches_the_cli_argv_when_asked_and_never_otherwise(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "card": {"role": "review"},
+                                         "review_base": "deadbeef"})
+        self.assertEqual(argv[argv.index("--review-base") + 1], "deadbeef")
+        self.assertNotIn("--review-base", mcp_server.build_argv({"task": "t", "tier": 2})[0])
+
+    def test_a_blank_or_option_shaped_base_is_refused_before_a_run_dir_exists(self):
+        # A blank value or a leading '-' is what `resolve_review_base` answers None
+        # for, and an option-shaped one would reach the argv as a flag.
+        for bad in ("", "   ", "-x", "--isolate", "two words", "!!", "a" * 65):
+            with self.subTest(bad=bad):
+                self.assertIn("review_base", self._spawn(review_base=bad)["error"])
+        self.assertEqual(os.listdir(mcp_server.state_root()) if os.path.isdir(
+            mcp_server.state_root()) else [], [])
+
+    def test_a_revision_range_is_refused_early_as_text_not_a_traceback(self):
+        # S5-FIX1: `..`/`...` passes the old rev regex (it allowed `.`) but is a
+        # RANGE, not one rev token - so refuse it here, before a run dir, in text.
+        for bad in ("HEAD~1..HEAD", "HEAD...HEAD", "a..b"):
+            with self.subTest(bad=bad):
+                self.assertIn("review_base", mcp_server.review_base_refusal(bad))
+                self.assertIn("review_base", self._spawn(review_base=bad)["error"])
+        self.assertEqual(os.listdir(mcp_server.state_root()) if os.path.isdir(
+            mcp_server.state_root()) else [], [])
+
+    def test_a_spawn_records_the_base_in_job_json(self):
+        # Not only in the runner-private record: job.json's `request` carries it.
+        out = self._spawn(review_base="HEAD")
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["review_base"], "HEAD")
+        self.assertIn("--review-base", job["argv"])
+
+    def test_an_unknown_base_surfaces_the_cli_rc_2_and_no_isolate_also_does(self):
+        # A review role gets isolation, so an unknown rev is the CLI's own rc 2.
+        self.assertIn("not a reachable commit",
+                      self._spawn(review_base="f00d" * 8)["error"])
+        self.assertIn("--review-base needs --isolate",
+                      self._spawn(card={"role": "orchestrate"},
+                                  review_base="HEAD")["error"])
+
+    def test_the_spawn_tool_schema_and_docstring_advertise_the_param(self):
+        # R-orch-11: a param absent from the advertised schema names nothing.
+        import asyncio
+        if not importlib.util.find_spec("mcp"):
+            self.skipTest("the mcp package is not installed")
+        tool = [t for t in asyncio.run(mcp_server.build_server().list_tools())
+                if t.name == "spawn"][0]
+        self.assertIn("review_base", tool.inputSchema["properties"])
+        self.assertIn("review_base", tool.description)
 
 
 class FamilyFenceRecordTests(unittest.TestCase):
@@ -23258,6 +23776,35 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
         subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"], check=True)
         return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
 
+    def test_resolve_review_base_refuses_a_multiline_range_output(self):
+        # S5-FIX1: a revision range is ONE token to the caller but rev-parse answers
+        # it with 3-4 (some `^`-prefixed) lines; only an exact pair of full shas
+        # names the two commits. A stub returning 3 or 4 valid shas is not a pair.
+        sha = lambda i: "%040x" % i
+        for stdout in ("%s\n%s\n%s\n" % (sha(1), sha(2), sha(3)),
+                       "%s\n%s\n%s\n%s\n" % (sha(1), sha(2), sha(3), sha(4))):
+            fake = mock.Mock(returncode=0, stdout=stdout)
+            with mock.patch.object(self.cli.subprocess, "run", return_value=fake):
+                self.assertIsNone(self.cli.resolve_review_base("r", "HEAD~1..HEAD"))
+
+    def test_a_revision_range_base_refuses_cleanly_at_the_cli(self):
+        # The crash was CLI-level too: a range reached resolve_review_base, produced
+        # a malformed pair, and the stamp `"… %s HEAD %s" % pair` raised TypeError ->
+        # traceback, rc 1. Now it is the existing clean rc 2 refusal, no traceback.
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        for base in ("HEAD~1..HEAD", "HEAD...HEAD"):
+            with self.subTest(base=base):
+                p = subprocess.run([sys.executable, str(AGENT), "run", "--dry-run",
+                                    "--client", "qwen", "--isolate",
+                                    "--review-base", base, "x"],
+                                   cwd=root, env=clean_env(AUTOOS_STATE_DIR=root),
+                                   capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn("not a reachable commit", p.stderr)
+                self.assertNotIn("Traceback", p.stdout + p.stderr)
+
     def test_the_seat_holds_the_diff_as_a_file_in_its_one_commit(self):
         cli, root, base, head = self.cli, *self._repo()
         self.assertEqual(cli.resolve_review_base(root, base[:8]), (base, head))
@@ -23362,12 +23909,36 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(os.path.join(tmp, "sandbox")),
                              "refused before anything was built")
 
-    def _args(self, review_base):
-        return argparse.Namespace(client="opencode", tier=2, card=None, auto=True,
+    def _args(self, review_base, card=None):
+        return argparse.Namespace(client="opencode", tier=2, card=card, auto=True,
                                   task="review the diff", free=False, isolate=True,
                                   joinable=False, model=None, clean=False, title=None,
                                   allow_training=False, max_depth=None, lean=False,
                                   review_base=review_base, free_model=self.cli.DEFAULT_FREE_MODEL)
+
+    # P2/G1b (FAILS before the wiring): `seat_prompt` shipped in P1 uncalled, so the seat
+    # answered in whatever grammar it felt like. A `--card role=review` run with
+    # `--review-base` now passes its task through the ONE template, base line quoted once.
+    def test_a_review_card_answers_on_the_seat_template_with_one_base_stamp(self):
+        agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                                "providers": {"omniroute": {"models": {"x": {}}}}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = agent.build_plan(self._args("HEAD", card="role=review"), cfg)
+            prompt = plan["cmd"][-1]
+            self.assertEqual(1, prompt.count("sandbox base:"), prompt)
+            for needle in ("You are an independent review seat", "Review criteria, verbatim:",
+                           "VERDICT: ACCEPT|REJECT|HOLD", "review the diff",
+                           os.path.join(plan["sandbox"]["path"], agent.REVIEW_DIFF_FILE)):
+                self.assertIn(needle, prompt)
+            # An implement seat with the same --review-base keeps P1's prefix: the seat
+            # grammar is for review cards, not a new mandatory block for every run.
+            plain_plan = agent.build_plan(self._args("HEAD"), cfg)
+            plain = plain_plan["cmd"][-1]
+            self.assertEqual(1, plain.count("sandbox base:"), plain)
+            self.assertNotIn("independent review seat", plain)
+            self.assertIn(os.path.join(plain_plan["sandbox"]["path"],
+                                       agent.REVIEW_DIFF_FILE), plain)
 
     def test_build_plan_stamps_prompt_and_record_and_refuses_an_unknown_base(self):
         agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
@@ -23642,6 +24213,673 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
                                          model_source=agent.WRITER_SOURCE_PIN)
         self.assertEqual(writer["provider"], "opencode")
         self.assertEqual(writer["model"], "gemini-3.8-flash")
+
+
+def seat_run_args(**kw):
+    """A hand-built `run` namespace for a seat plan: the flags build_plan reads."""
+    d = dict(client="claude", tier=3, card="role=review", auto=True,
+             task="review the diff", free=False, isolate=False, joinable=False,
+             model=None, clean=False, title=None, allow_training=False, max_depth=None,
+             lean=False, review_base=None, read_only=False, free_model=None)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+class ClaudeSeatModeTests(unittest.TestCase):
+    """P3b item 1 (measured, run 20261009-165450-mem-tools-sonnet-68764c): a claude
+    review SEAT ran in `plan` and could not write its own REVIEW-FINDINGS.txt. An
+    --isolate read run IS a seat, confined to its private clone by the sandbox and the
+    leak check, so it gets a mode that writes in there. `plan` stays for a run in the
+    caller's checkout and for --read-only, whose success is an unchanged sandbox."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"},
+                               "t3-reviewer": {"model": "omniroute/y"}},
+                    "providers": {"omniroute": {"models": {"x": {}, "y": {}}}}}
+
+    def _cmd(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"]
+
+    def test_an_isolated_review_seat_gets_the_writing_mode(self):
+        cmd = self._cmd(isolate=True)
+        self.assertEqual(["claude", "-p", "--permission-mode", "acceptEdits"], cmd[:4])
+        self.assertNotIn("plan", cmd)
+        # the seat's spawn deny list is unchanged by the mode it writes with
+        self.assertEqual(["--disallowed-tools", "Task", "Agent", "--"], cmd[-5:-1])
+
+    def test_a_review_in_the_callers_checkout_still_plans(self):
+        self.assertEqual(["claude", "-p", "--permission-mode", "plan"], self._cmd()[:4])
+
+    def test_a_read_only_seat_stays_plan_even_isolated(self):
+        # both spellings of a read-only review route: the flag, and a bare --tier 3
+        # seat with no card at all
+        for kw in ({"isolate": True, "read_only": True},
+                   {"isolate": True, "read_only": True, "card": None}):
+            with self.subTest(**kw):
+                self.assertEqual(["claude", "-p", "--permission-mode", "plan"],
+                                 self._cmd(**kw)[:4])
+
+    def test_no_other_client_gets_a_seat_mode(self):
+        # The mode is declared by the client row, so a client without one cannot gain
+        # it: every other CLI's read-run argv is byte-for-byte what it was.
+        task = "review the diff"
+        expect = {
+            "qoder": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                      "--model", clients.QODER_DEFAULT_MODEL, task],
+            "qwen": ["omniroute", "run", "qwen", "--model", "l3-driver",
+                     "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                     "--approval-mode", "plan", "-p", task],
+            "gemini": ["omniroute", "run", "gemini", "--model", "l3-driver",
+                       "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                       "--skip-trust", "--approval-mode", "plan", "-p", task],
+            "codex": ["omniroute", "run", "codex", "--model", "l3-driver",
+                      "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                      "exec", "--sandbox", "read-only", "--skip-git-repo-check", task],
+        }
+        for name, argv in sorted(expect.items()):
+            client = clients.CLIENTS[name]
+            got = clients.seat_level(client, "read", isolate=True, read_only=False)
+            self.assertEqual("read", got, name)
+            self.assertEqual(argv, clients.build_command(client, task, "l3-driver", got),
+                             name)
+
+
+class SeatDepsNoteTests(unittest.TestCase):
+    """P3b item 2 (measured): a seat sandbox had no `mcp`, so the project tests it was
+    told to run could not run and the seat said nothing. The brief says it — a report,
+    never an install."""
+
+    LINE = "project tests unrunnable: missing python modules: mcp"
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                    "providers": {"omniroute": {"models": {"x": {}}}}}
+
+    def _absent(self, name):
+        return None if name == "mcp" else object()
+
+    def _prompt(self, **kw):
+        kw.update(client="opencode", tier=2, isolate=True, review_base="HEAD")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"][-1]
+
+    def test_the_note_names_exactly_the_missing_modules(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: None):
+            self.assertEqual(self.LINE, self.cli.seat_deps_note())
+            self.assertEqual("project tests unrunnable: missing python modules: mcp, yaml",
+                             self.cli.seat_deps_note(modules=("mcp", "yaml")))
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            self.assertEqual("", self.cli.seat_deps_note())
+
+    def test_a_find_spec_that_raises_reads_as_missing_not_as_a_crash(self):
+        # importlib raises for a missing PARENT package of a dotted name; a seat brief
+        # is never worth a traceback in the spawner.
+        def raiser(name):
+            raise ImportError(name)
+        with mock.patch.object(self.cli.importlib.util, "find_spec", raiser):
+            self.assertIn("mcp", self.cli.seat_deps_note())
+
+    def test_a_seat_brief_says_its_tests_cannot_run_once(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            prompt = self._prompt()
+        self.assertEqual(1, prompt.count(self.LINE), prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_a_seat_brief_stays_clean_when_the_modules_are_present(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            prompt = self._prompt()
+        self.assertNotIn("project tests unrunnable", prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_the_note_is_a_seat_brief_line_and_not_an_implement_prefix(self):
+        # Only the --review-base review seat is briefed with it; a writer with the same
+        # --review-base keeps P1's plain prefix.
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            self.assertNotIn("project tests unrunnable", self._prompt(card=None))
+
+
+class SeatTreeLeakTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (b): the measured LEAK-FP. The porcelain leg of
+    the leak check compared the WHOLE parent checkout against the snapshot —
+    including the run's own seat. The sandbox tree collapses into one porcelain
+    entry (a nested repository is listed as a directory even under
+    `--untracked-files=all`), but its sandbox-private siblings
+    (`<sandbox>.toolhome`, `<sandbox>.opencode-data`) expand file-by-file, so
+    sandbox-private writes read as "changed tracked paths in the parent
+    checkout" the moment the state tree sat inside the parent checkout without
+    being git-ignored. The verdict must subtract the seat's own tree(s):
+    sandbox-private writes never count as a parent leak, real parent writes
+    still do."""
+
+    WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+    WORKER_ID = ["-c", "user.name=autoos-worker", "-c", "user.email=" + WORKER_EMAIL]
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def git(self, *args, **kw):
+        return subprocess.run(
+            ["git", "-C", kw.get("cwd") or self.root, *args],
+            capture_output=True, text=True, check=True).stdout.strip()
+
+    def make_seat(self, rel):
+        """The layout `isolate_clone` makes AFTER the parent snapshot: a fresh
+        repository with one base commit, inside the parent checkout at `rel`."""
+        sb = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(sb)
+        self.git("init", "-q", ".", cwd=sb)
+        with open(os.path.join(sb, "base.txt"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        self.git("add", ".", cwd=sb)
+        self.git(*self.WORKER_ID, "commit", "-qm", "sandbox base", cwd=sb)
+        return sb
+
+    def test_writes_inside_the_seat_tree_are_not_parent_leaks(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        # The worker's own work: a commit inside its seat...
+        with open(os.path.join(sb, "work.txt"), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        self.git("add", "work.txt", cwd=sb)
+        self.git(*self.WORKER_ID, "commit", "-qm", "worker change", cwd=sb)
+        # ... and the sandbox-private siblings — not repositories, so the
+        # parent's porcelain expands every one of their files.
+        for name in (".toolhome", ".opencode-data"):
+            d = sb + name
+            os.makedirs(os.path.join(d, "caches"))
+            with open(os.path.join(d, "caches", "blob.bin"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("cache\n")
+        self.assertEqual([], self.agent.parent_leak(snap, self.root, sb))
+
+    def test_a_real_parent_write_beside_the_seat_tree_is_still_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        with open(os.path.join(self.root, "stray.txt"), "w", encoding="utf-8") as fh:
+            fh.write("leak\n")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("stray.txt" in ln for ln in leak), leak)
+        # A path that merely SHARES the seat's prefix is not the seat: the
+        # subtraction must be exact (the seat, inside it, its private dots).
+        with open(os.path.join(self.root, "state", "sandboxes",
+                               "run-9-notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("run-9-notes.txt" in ln for ln in leak), leak)
+
+    def test_only_the_two_named_private_siblings_subtract_from_the_leak(self):
+        """P3a-FIX: the sibling rule is the two NAMES, not the dot — subtracting
+        every `<seat>.*` hides `<seat>.toolhome-evil`, a parent write in a costume."""
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        leaks = ["run-9.anything", "run-9.toolhome-evil", "run-9.toolhomeX",
+                 "run-9.opencode-data2", "run-9-notes.txt", "run-90/leak.txt"]
+        private = ["run-9.toolhome/caches/blob.bin", "run-9.opencode-data/caches/blob.bin"]
+        for rel in leaks + private:
+            path = os.path.join(self.root, "state", "sandboxes", *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            io.open(path, "w", encoding="utf-8").write("x\n")
+        joined = "\n".join(self.agent.parent_leak(snap, self.root, sb))
+        for rel in leaks:
+            self.assertIn(rel, joined, "a write beside the seat must leak: %s" % rel)
+        for rel in private:
+            self.assertNotIn(rel, joined, "sandbox-private state is not a leak: %s" % rel)
+
+
+class ToolHomeRedirectTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (a): measured — a qwen seat ran
+    `ansible-galaxy collection install ansible.posix` and wrote to ~/.ansible,
+    outside its --isolate sandbox: HOME and the tool caches are inherited.
+    Every cache a worker can write goes into a sandbox-private
+    `<sandbox>.toolhome`; HOME itself only for a gateway client, whose login
+    does not live there."""
+
+    EXPECTED = ("ANSIBLE_HOME", "ANSIBLE_LOCAL_TEMP", "ANSIBLE_REMOTE_TEMP",
+                "ANSIBLE_COLLECTIONS_PATH", "PIP_CACHE_DIR", "npm_config_cache",
+                "CARGO_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME", "PYTHONUSERBASE")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_the_redirect_set_and_the_plan_passlist_cannot_drift(self):
+        self.assertEqual(set(self.EXPECTED), set(self.agent.TOOL_HOME_REDIRECTS))
+        for name in self.agent.TOOL_HOME_REDIRECTS:
+            self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST,
+                          "%s is redirected, but the plan guard would refuse it" % name)
+        # The other direction (P3a-FIX): every sibling the tuple names is subtracted
+        # by the filter, and a plan env name bound into the seat is a redirect.
+        for suffix in self.agent.SANDBOX_PRIVATE_SUFFIXES:
+            for leaf in (suffix, suffix + "/blob.bin"):
+                self.assertTrue(self.agent._porcelain_path_is_sandbox("run-9" + leaf, "run-9"),
+                                "the filter does not subtract its own sibling: %s" % leaf)
+        src = io.open(AGENT, encoding="utf-8").read()
+        seat_bound = re.findall('env\\[("[A-Z_]+")\\] = [^\\n]*(?:toolhome|opencode)', src, re.I)
+        for expr in seat_bound or self.fail("the plan binds no seat-private env name"):
+            name = expr.strip('"')
+            self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST, name)
+            self.assertTrue(name in self.agent.TOOL_HOME_REDIRECTS or name == "XDG_DATA_HOME",
+                            "%s is bound into the seat but is not a redirect" % name)
+
+    def test_redirect_tool_caches_names_every_cache_under_the_toolhome(self):
+        env = {}
+        self.agent.redirect_tool_caches(env, "/sb.toolhome")
+        for name in self.EXPECTED:
+            self.assertEqual(os.path.join("/sb.toolhome", name.lower()), env[name])
+
+    def scrub(self, plan_env, forced_home=None):
+        out = io.StringIO()
+        plan = {"cwd": "/sb", "env": plan_env}
+        if forced_home is not None:
+            plan["forced_home"] = forced_home
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "t",
+                "XDG_CACHE_HOME": "/home/tester/.cache"}
+        with contextlib.redirect_stderr(out):
+            env = self.agent.worker_env(plan, None, base=base)
+        return env, out.getvalue()
+
+    def test_the_redirected_caches_reach_the_child_and_refuse_nothing(self):
+        plan_env = {n: os.path.join("/sb.toolhome", n.lower())
+                    for n in self.agent.TOOL_HOME_REDIRECTS}
+        env, err = self.scrub(plan_env)
+        self.assertEqual("", err, "a passlisted redirect must not be announced")
+        for name in self.EXPECTED:
+            self.assertEqual(plan_env[name], env[name], name)
+        # the operator's own XDG_CACHE_HOME must not beat the redirect
+        self.assertEqual("/sb.toolhome/xdg_cache_home", env["XDG_CACHE_HOME"])
+
+    def test_home_stays_the_operators_for_an_own_account_worker(self):
+        env, err = self.scrub({})
+        self.assertEqual("/home/tester", env["HOME"])
+        self.assertEqual("", err)
+
+    def test_a_gateway_plan_homes_its_worker_in_the_toolhome(self):
+        env, err = self.scrub({}, forced_home="/sb.toolhome")
+        self.assertEqual("/sb.toolhome", env["HOME"])
+        self.assertEqual("", err)
+
+    def test_a_forced_home_that_is_not_the_sandbox_sibling_is_ignored(self):
+        for evil in ("/home/tester", "/evil.toolhome", "/sb.toolhome.evil"):
+            env, _ = self.scrub({}, forced_home=evil)
+            self.assertEqual("/home/tester", env["HOME"], evil)
+
+    @unittest.skipIf(os.name == "nt", "mode bits; POSIX only")
+    def test_provision_worker_dirs_makes_the_toolhome_and_caches_0700(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        toolhome = os.path.join(tmp, "sb.toolhome")
+        env = {"XDG_RUNTIME_DIR": os.path.join(tmp, "rt"),
+               "XDG_CONFIG_HOME": os.path.join(tmp, "cf"),
+               "ANSIBLE_HOME": os.path.join(toolhome, "ansible_home"),
+               "PIP_CACHE_DIR": os.path.join(toolhome, "pip_cache_dir")}
+        self.assertTrue(self.agent.provision_worker_dirs(env))
+        for path in (toolhome, env["ANSIBLE_HOME"], env["PIP_CACHE_DIR"]):
+            self.assertTrue(os.path.isdir(path), path)
+            self.assertEqual(0o700, os.lstat(path).st_mode & 0o777, path)
+
+
+class OutsideWriteWatchTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (2): a tool write that lands under the real
+    HOME is invisible to the parent leak check — it is outside both trees. The
+    well-known tool directories are stat'd before and after an --isolate run;
+    a changed one is named on one WARNING line and in the run record, and it
+    never changes the exit code. Reads are stat-only: never opened, never a
+    symlink followed, never a traceback."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def watch(self):
+        return self.agent.tool_watch_paths(self.home)
+
+    def test_the_watch_set_names_the_measured_tool_dirs(self):
+        rel = sorted(p[len(self.home) + 1:].replace(os.sep, "/")
+                     for p in self.watch())
+        self.assertEqual([".ansible", ".cache/pip", ".cache/uv",
+                          ".cargo/registry", ".local/lib", ".npm"], rel)
+
+    def test_a_write_under_a_watched_dir_is_named(self):
+        os.makedirs(os.path.join(self.home, ".ansible"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        with open(os.path.join(self.home, ".ansible", "installed.yml"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\n")
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual(["~/.ansible"],
+                         self.agent.tool_watch_changes(before, after, self.home))
+
+    def test_a_tool_dir_created_by_the_run_is_named(self):
+        before = self.agent.tool_watch_snapshot(self.watch())
+        os.makedirs(os.path.join(self.home, ".npm"))
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual(["~/.npm"],
+                         self.agent.tool_watch_changes(before, after, self.home))
+
+    def test_untouched_dirs_are_quiet_and_names_never_carry_the_home(self):
+        os.makedirs(os.path.join(self.home, ".npm"))
+        snap = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(snap, snap, self.home))
+        os.makedirs(os.path.join(self.home, ".cargo", "registry"))
+        after = self.agent.tool_watch_snapshot(self.watch())
+        changes = self.agent.tool_watch_changes(snap, after, self.home)
+        self.assertEqual(["~/.cargo/registry"], changes)
+        for name in changes:
+            self.assertNotIn(self.home, name, "the warning line may not leak "
+                                              "the operator's absolute home")
+
+    @unittest.skipIf(os.name == "nt", "symlink semantics; POSIX only")
+    def test_a_symlinked_tool_dir_is_statted_never_followed(self):
+        real = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, real, True)
+        os.symlink(real, os.path.join(self.home, ".ansible"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        with open(os.path.join(real, "through-the-link.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\n")
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+    @unittest.skipIf(os.name == "nt", "mkfifo; POSIX only")
+    def test_a_fifo_at_a_watched_path_is_statted_never_opened(self):
+        os.mkfifo(os.path.join(self.home, ".npm"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        after = self.agent.tool_watch_snapshot(self.watch())
+        # an open() would block on a FIFO with no writer forever: completing at
+        # all is the proof the read is stat-only.
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "mode 000; POSIX, not root")
+    def test_an_unreadable_tool_dir_raises_nothing(self):
+        d = os.path.join(self.home, ".local", "lib")
+        os.makedirs(d)
+        os.chmod(d, 0o000)
+        self.addCleanup(os.chmod, d, 0o755)
+        before = self.agent.tool_watch_snapshot(self.watch())
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+
+@unittest.skipIf(os.name == "nt", "write_kill_record is a no-op on nt")
+class OutsideWriteRecordTests(unittest.TestCase):
+    """The warning is for the terminal, the run record for the reviewer:
+    `outside_writes` merges into the runner's private record like `writer`
+    does — it is decided AFTER the run, so a later write must be able to set
+    it while the decided-at-spawn fields stay immutable."""
+
+    RUN_ID = "20261010-000000-seatint-f00001"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_outside_writes_merge_into_the_run_record(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            self.assertTrue(self.agent.write_kill_record(
+                self.RUN_ID, {"mode": "write"}))
+            self.assertTrue(self.agent.write_kill_record(
+                self.RUN_ID, {"outside_writes": ["~/.ansible"]}))
+            rec = self.agent.read_kill_record(self.RUN_ID)
+        self.assertEqual("write", rec["mode"])
+        self.assertEqual(["~/.ansible"], rec["outside_writes"])
+
+
+class SeatUserSitePasslistTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P4 (measured): the P3a PYTHONUSERBASE redirect hides the
+    user site-packages, so in an --isolate seat `python3 -m pytest` printed "No module
+    named pytest" and no seat could RUN the tests it was told to run. Writes stay in
+    the toolhome; one spawner-computed, validated directory reopens read-only, and the
+    name itself stays denied on both sides (FF1b)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.site = os.path.join(self.home, ".local", "lib", "python3.12", "site-packages")
+        os.makedirs(self.site, 0o755)
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"},
+                               "t3-reviewer": {"model": "omniroute/y"}},
+                    "providers": {"omniroute": {"models": {"x": {}, "y": {}}}}}
+
+    def seat(self, plan=None, site=None, plan_site=None, plan_env=None, base=None,
+             gr_mem=""):
+        """(worker_env, stderr) for a seat plan: `site` is what the spawner computes
+        for its own interpreter and `plan_site` what the plan writes down (False = no
+        key); both default to the qualifying fake."""
+        site = site or self.site
+        if plan is None:
+            plan_site = site if plan_site is None else plan_site
+            plan = {"cwd": os.path.join(self.tmp, "sb"), "env": dict(plan_env or {})}
+            if plan_site is not False:
+                plan["user_site_path"] = plan_site
+        out = io.StringIO()
+        src = {"PATH": "/usr/bin", "HOME": self.home, "USER": "t"}
+        src.update(base or {})
+        fake_grp = types.SimpleNamespace(getgrgid=gr_mem if callable(gr_mem) else (
+            lambda gid: types.SimpleNamespace(gr_name="g", gr_gid=gid,
+                                              gr_mem=[m for m in gr_mem.split(",") if m])))
+        with mock.patch.object(self.agent, "user_site_packages", lambda: site), \
+                mock.patch.dict(sys.modules, {"grp": fake_grp}), \
+                contextlib.redirect_stderr(out):
+            return self.agent.worker_env(plan, None, base=src), out.getvalue()
+
+    def isolate_plan(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp, "HOME": self.home}), \
+                mock.patch.object(self.agent, "user_site_packages", lambda: self.site):
+            return self.agent.build_plan(seat_run_args(isolate=True, **kw), self.cfg)
+
+    def test_an_isolate_plan_names_the_qualifying_site_for_every_client(self):
+        for client in ("claude", "opencode"):
+            with self.subTest(client=client):
+                plan = self.isolate_plan(client=client, tier=2)
+                self.assertEqual(self.site, plan["user_site_path"], client)
+                env, err = self.seat(plan=plan)
+                self.assertEqual(self.site, env.get("PYTHONPATH"), client)
+                self.assertEqual(plan["cwd"] + self.agent.TOOLHOME_SUFFIX +
+                                 os.sep + "pythonuserbase", env["PYTHONUSERBASE"], client)
+                self.assertEqual("", err, client)
+
+    def test_pythonpath_from_the_plan_or_the_caller_is_still_refused(self):
+        env, err = self.seat(plan_env={"PYTHONPATH": "/evil/site"}, plan_site=False)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertIn("PYTHONPATH", err, "a refused plan entry must be announced")
+        env, _ = self.seat(base={"PYTHONPATH": "/evil/site"}, plan_site=False)
+        self.assertNotIn("PYTHONPATH", env)
+        # a plan key that is not what the spawner recomputes is ignored, and so is a
+        # plan that carries no key at all: the seat simply gets no PYTHONPATH
+        for bad in (False, "/home/tester/.local/lib/python3.12/site-packages"):
+            env, err = self.seat(plan_site=bad)
+            self.assertNotIn("PYTHONPATH", env, bad)
+            self.assertEqual("", err)
+
+    def test_the_name_stays_denied_and_off_the_passlist(self):
+        self.assertIn("PYTHONPATH", self.agent.WORKER_ENV_DENY)
+        self.assertNotIn("PYTHONPATH", self.agent.WORKER_PLAN_ENV_PASSLIST)
+        self.assertNotIn("PYTHONPATH", self.agent.TOOL_HOME_REDIRECTS)
+        self.assertIn("PYTHONUSERBASE", self.agent.TOOL_HOME_REDIRECTS)
+
+    def test_a_site_that_is_not_a_real_dir_under_HOME_is_never_set(self):
+        link = os.path.join(self.home, "link")
+        os.symlink(self.site, link)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        outside = os.path.join(elsewhere, "site-packages")
+        os.makedirs(outside)
+        # a HOME-level parent that is a symlink, escaping HOME or not: the leaf
+        # exists through it, and only the realpath check may catch that
+        home2 = os.path.join(self.tmp, "home2")
+        os.mkdir(home2)
+        os.symlink(elsewhere, os.path.join(home2, ".local"))
+        escaping = os.path.join(home2, ".local", "lib", "python3", "sp")
+        os.makedirs(os.path.join(elsewhere, "lib", "python3", "sp"))
+        for bad in (link, outside, os.path.join(self.home, "gone", "site-packages"),
+                    self.home, escaping):
+            env, _ = self.seat(site=bad)
+            self.assertNotIn("PYTHONPATH", env, bad)
+
+    @unittest.skipIf(os.name == "nt", "mode bits and group membership; POSIX only")
+    def test_a_site_writable_by_other_hands_is_never_set(self):
+        # world-write is refused outright; group-write only when the group is not our
+        # own empty one — 0775 with an empty group is the accepted case below.
+        for mode, members in ((0o777, ""), (0o775, "intruder"), (0o770, "intruder")):
+            shared = os.path.join(self.home, "shared%d" % mode)
+            os.makedirs(shared, 0o755)
+            os.chmod(shared, mode)
+            env, _ = self.seat(site=shared, gr_mem=members)
+            self.assertNotIn("PYTHONPATH", env, "%s %s" % (oct(mode), members))
+
+        # a group database this host cannot read is a refusal, never a crash
+        def raiser(gid):
+            raise KeyError(gid)
+        self.assertNotIn("PYTHONPATH", self.seat(site=os.path.join(
+            self.home, "shared770"), gr_mem=raiser)[0])
+
+    def test_a_real_subprocess_reads_the_site_and_writes_only_the_toolhome(self):
+        with io.open(os.path.join(self.site, "fakepytestmod.py"), "w",
+                     encoding="utf-8") as fh:
+            fh.write("version = '1'\n")
+        toolhome = os.path.join(self.tmp, "sb.toolhome", "pythonuserbase")
+        env, _ = self.seat()
+        env = dict(env, PYTHONUSERBASE=toolhome)
+        probe = ("import fakepytestmod, os, site, sys;"
+                 "os.makedirs(os.path.join(site.USER_BASE, 'lib'), exist_ok=True);"
+                 "sys.stdout.write('MOD=' + fakepytestmod.__file__ +"
+                 " '\\nBASE=' + site.USER_BASE + '\\n')")
+        got = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(0, got.returncode, got.stderr)
+        self.assertEqual("MOD=%s\nBASE=%s\n" % (os.path.join(self.site, "fakepytestmod.py"),
+                                                toolhome), got.stdout,
+                         "the module must come from the read-only site and a "
+                         "pip --user write from the toolhome")
+        self.assertTrue(os.path.isdir(os.path.join(toolhome, "lib")))
+        self.assertEqual(set(), set(os.listdir(self.site)) -
+                         {"fakepytestmod.py", "__pycache__"},
+                         "a --user write landed in the read-only site, not the toolhome")
+
+    @unittest.skipIf(os.name == "nt", "mode bits and group membership; POSIX only")
+    def test_the_mode_pip_user_leaves_is_taken_when_the_group_holds_nobody_else(self):
+        # `pip install --user` under umask 002 leaves 0775, and the operator's own
+        # group is empty: that is the measured real site, and refusing it is the
+        # bug this task is about.
+        os.chmod(self.site, 0o775)
+        env, _ = self.seat()
+        self.assertEqual(self.site, env.get("PYTHONPATH"))
+
+
+@unittest.skipIf(os.name == "nt", "an executable probe script; POSIX only")
+class SeatPythonProbeTests(unittest.TestCase):
+    """P4-FIX2: the interpreter version is part of the user-site path, so P4's
+    spawner-side answer (3.13 here) named a directory a 3.12 seat does not have and
+    `import pytest` still failed. The `python3` the SEAT runs decides; anything
+    unusable falls back to the spawner's answer, and never raises."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.spawner_site = os.path.join(self.home, ".local/lib/python3.13/site-packages")
+        self.seat_site = os.path.join(self.home, ".local/lib/python3.12/site-packages")
+        for d in (self.spawner_site, self.seat_site):
+            os.makedirs(d, 0o755)
+
+    def fake_py(self, body, path_extra=""):
+        """A fake `python3` running `body`, in a fresh bin dir per call so the cache
+        never answers for another test's fake. Returns the seat env that finds it."""
+        bin_ = os.path.join(self.tmp, "bin%d" % len(os.listdir(self.tmp)))
+        os.mkdir(bin_)
+        with io.open(os.path.join(bin_, "python3"), "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\n" + body)
+        os.chmod(os.path.join(bin_, "python3"), 0o755)
+        return {"PATH": bin_ + path_extra, "HOME": self.home}
+
+    def site_of(self, src):
+        """The seat site for `src`, with the spawner's own answer pinned to a
+        DIFFERENT directory, so a fallback is visible rather than accidental."""
+        with mock.patch.object(self.agent, "user_site_packages", lambda: self.spawner_site):
+            return self.agent.seat_user_site_path(src)
+
+    def test_the_seat_python3_answers_and_the_seat_env_carries_its_site(self):
+        src = self.fake_py('echo "%s"\n' % self.seat_site)
+        found = self.site_of(src)
+        self.assertEqual(self.seat_site, found)
+        env = self.agent.worker_env({"cwd": self.tmp, "env": {}, "user_site_path": found},
+                                    None, base=src)
+        self.assertEqual(self.seat_site, env["PYTHONPATH"])
+
+    def test_an_unusable_answer_falls_back_and_never_sets_an_unsafe_site(self):
+        world = os.path.join(self.home, "world")
+        os.makedirs(world)
+        os.chmod(world, 0o777)          # makedirs' mode is umask-masked; only chmod is exact
+        for label, body in (("garbage", 'echo "not a path"\n'),
+                            ("relative", 'echo ".local/lib/python3.12/site-packages"\n'),
+                            ("multi-line", 'echo "%s"; echo more\n' % self.seat_site),
+                            ("world-writable", 'echo "%s"\n' % world),
+                            ("outside-HOME", 'echo "%s"\n' % os.path.join(self.tmp, "out")),
+                            ("empty", "true\n"), ("nonzero-exit", "exit 3\n")):
+            self.assertEqual(self.spawner_site, self.site_of(self.fake_py(body)), label)
+        self.assertEqual(self.spawner_site, self.site_of({"PATH": self.tmp,
+                                                          "HOME": self.home}),
+                         "no python3 on the seat PATH is a fallback, not a crash")
+
+    def test_one_probe_per_interpreter_and_a_hang_costs_only_its_timeout(self):
+        src = self.fake_py('echo "%s"\n' % self.seat_site)
+        calls, real = [], self.agent.subprocess.run
+
+        def spy(*a, **k):
+            calls.append(a[0][1:3])
+            return real(*a, **k)
+        with mock.patch.object(self.agent.subprocess, "run", spy):
+            twice = [self.site_of(src) for _ in range(2)]
+        self.assertEqual([self.seat_site, self.seat_site], twice)
+        self.assertEqual([["-I", "-c"]], calls, "plan building re-asks python each seat")
+        with mock.patch.object(self.agent, "SEAT_PY_USER_SITE_TIMEOUT", 1):
+            started = time.time()
+            self.assertEqual(self.spawner_site, self.site_of(
+                self.fake_py("sleep 30\n", os.pathsep + "/bin" + os.pathsep + "/usr/bin")))
+        self.assertTrue(1 <= time.time() - started < 10, "the probe outlived its timeout")
+
+    def test_a_real_seat_imports_pytest_only_through_the_recomputed_path(self):
+        """The measured gap, run on this host: with PYTHONUSERBASE redirected into the
+        toolhome, the seat imports pytest only through its own python3's user site."""
+        toolhome = os.path.join(self.tmp, "sb.toolhome")
+        for py in [p for p in (shutil.which("python3"), "/usr/bin/python3")
+                   if p and os.path.exists(p)]:
+            base = {"PATH": os.pathsep.join((os.path.dirname(py), os.environ["PATH"])),
+                    "HOME": os.path.expanduser("~")}
+            found = self.agent.seat_user_site_path(base)
+            if not found:
+                continue
+            env = self.agent.worker_env({"cwd": toolhome, "user_site_path": found,
+                                         "env": {"PYTHONUSERBASE": toolhome}},
+                                        None, base=base)
+            self.assertEqual(found, env["PYTHONPATH"], py)
+            run = lambda e: subprocess.run([py, "-c", "import pytest"], capture_output=True,
+                                           text=True, stdin=subprocess.DEVNULL, env=e,
+                                           timeout=60)  # subprocess-audit: the seat env
+            if run({n: v for n, v in env.items() if n != "PYTHONPATH"}).returncode == 0:
+                continue  # reachable anyway: this interpreter proves nothing
+            self.assertEqual(0, run(env).returncode,
+                             "%s lost its own pytest (site=%s)" % (py, found))
+            return
+        self.skipTest("no python3 here imports pytest only through its user site")
 
 
 if __name__ == "__main__":

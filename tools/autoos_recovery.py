@@ -173,6 +173,7 @@ import tempfile
 import time
 import unicodedata
 
+import autoos_blank as blank
 import autoos_clients as clients
 import autoos_ready_guards as ready_guards
 import autoos_report as report_parser
@@ -295,11 +296,18 @@ _BLANK_STRIP = " \t"
 # silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
 # a real line legitimately carries; every other member makes a report suspect.
 _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
-# What a task must hold besides it: the same invisible classes, widened with Cf
-# (zero-width joiners, bidi overrides — characters that render nothing a writer can
-# be told to work on), and judged AFTER the output normaliser has run, so ANSI
-# colour cannot pass as content either (P4c-fixes7, `_has_visible_text`).
-_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
+# The invisible classes a task may not be made of: Zs/Zl/Zp/Cc widened with Cf
+# (zero-width joiners, bidi overrides), plus the blank-LOOKING code points no
+# category covers. ONE set and ONE predicate, in tools/autoos_blank.py, imported by
+# BOTH ready readers — a copy here and a copy there is how a blank passed the gate's
+# CHECK evidence while hiding a footer from this reader (AO-RECOVER-BLANK-CHARS).
+# Judged AFTER the output normaliser has run, so ANSI colour cannot pass as content
+# either (P4c-fixes7, `_has_visible_text`).
+_INVISIBLE_CATS = blank.INVISIBLE_CATS
+_BLANK_LOOKING = blank.BLANK_LOOKING
+_is_invisible_char = blank.is_invisible_char
+
+
 # --- output.log normalisation (P4c-fixes5 (1)) --------------------------------
 #
 # ``output.log`` is the CLIENT's raw captured stdout. A CLI that believes it owns a
@@ -1144,9 +1152,9 @@ def _has_visible_text(task):
     no work — a footer-only brief would otherwise buy a continuation leg (P4c-
     fixes7). The judgement runs on `_normalise_output`'s text, so colour and a
     redraw do not count as content either, and then on what is left once every
-    whitespace character and every Zs/Zl/Zp/Cc/Cf character is gone."""
+    character `_is_invisible_char` refuses is gone."""
     for ch in _normalise_output(task):
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             continue
         return True
     return False
@@ -1172,7 +1180,7 @@ def _heading_form(text):
     parts = []
     origins = []
     for i, ch in enumerate(text):
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             continue
         folded = unicodedata.normalize("NFKC", ch).casefold()
         parts.append(folded)
@@ -1209,7 +1217,7 @@ def _footer_prefix_invisible(prefix):
             if i < n and "\x40" <= prefix[i] <= "\x7e":
                 i += 1
             continue
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             i += 1
             continue
         return False
