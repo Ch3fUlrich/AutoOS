@@ -1588,6 +1588,55 @@ if it "omnigraph-client: the api-keys template carries a commented omnigraph_tok
     (( ok )) && pass || fail "api-keys.example.yml is wrong"
 fi
 
+# ─── D-1038 A3: the 0.13 HTTP contract header in the device sync scripts ────
+#
+# Measured: Omnigraph 0.13.0 answers 400 {"code":"api_contract_mismatch"} to
+# every HTTP request (except /healthz) that lacks `omnigraph-http-api: 0.13`, so
+# the direct HTTP calls in both device-sync scripts must send it. The docker
+# `omnigraph` CLI/load calls are untouched — the 0.13 CLI sends the header
+# itself — and so are the two exempt reads: /healthz, and the viewer's
+# /api/sync-ping, which is not an Omnigraph request at all. Hermetic: static
+# reads of the two scripts and one `bash -n`; no network, no server.
+if it "omnigraph-client: the device sync scripts send the 0.13 contract header"; then
+    sync_sh='infra/mcp-servers/omnigraph-setup/omnigraph-sync.sh'
+    sync_ps='infra/mcp-servers/omnigraph-setup/sync-windows.ps1'
+    IMAGE_PIN='modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1'
+    ok=1
+    [[ -f "$sync_sh" && -f "$sync_ps" ]] || { ok=0; echo "a sync script is missing" >&2; }
+    # (a) Every curl that addresses an Omnigraph graph carries the header. Two
+    # greps on purpose: a curl line without /graphs is the viewer's sync-ping,
+    # which must NOT gain the header, so the demand is exactly "curl AND /graphs".
+    graph_curls="$(grep 'curl' "$sync_sh" | grep '/graphs' || true)"
+    n_curls="$(printf '%s\n' "$graph_curls" | grep -c . || true)"
+    bare_curls="$(printf '%s\n' "$graph_curls" | grep -v 'CONTRACT_HEADER' || true)"
+    n_defines="$(grep -c "^CONTRACT_HEADER='omnigraph-http-api: 0.13'$" "$sync_sh" || true)"
+    ping_header="$(grep 'sync-ping' "$sync_sh" | grep -c 'CONTRACT_HEADER' || true)"
+    # (b) The PowerShell twin: the header constant exists and reaches the one
+    # Omnigraph request, GET /graphs in Get-GraphList.
+    ps_header="$(grep -c "omnigraph-http-api" "$sync_ps" || true)"
+    ps_list="$(sed -n '/^function Get-GraphList/,/^}/p' "$sync_ps")"
+    ps_merged="$(printf '%s\n' "$ps_list" | grep -c 'CONTRACT_HEADERS' || true)"
+    ps_exempt="$( (grep 'healthz' "$sync_ps"; grep 'sync-ping' "$sync_ps") | grep -c 'CONTRACT_HEADERS' || true)"
+    # (c) The script still parses after the edits.
+    bash -n "$sync_sh" 2>/dev/null || { ok=0; echo "bash -n failed on $sync_sh" >&2; }
+    # (d) The default image moved to the 0.13.0 digest pin, and the old pin is
+    # gone from both scripts entirely (comments included).
+    sh_pin="$(grep -cF "OMNIGRAPH_IMAGE:-$IMAGE_PIN" "$sync_sh" || true)"
+    ps_pin="$(grep -cF "else { '$IMAGE_PIN' }" "$sync_ps" || true)"
+    old_pin="$(grep -h 'v0\.8\.1' "$sync_sh" "$sync_ps" | wc -l | tr -d '[:space:]')"
+    [[ "$n_curls" -ge 2 ]] || { ok=0; echo "only $n_curls curl line(s) address /graphs - the check would be vacuous" >&2; }
+    [[ -z "$bare_curls" ]] || { ok=0; echo "curl line(s) to /graphs without the header: $bare_curls" >&2; }
+    [[ "$n_defines" == 1 ]] || { ok=0; echo "the header constant is defined $n_defines time(s), expected exactly one" >&2; }
+    [[ "$ping_header" == 0 ]] || { ok=0; echo "the viewer's sync-ping was given the Omnigraph header" >&2; }
+    [[ "$ps_header" -ge 1 ]] || { ok=0; echo "sync-windows.ps1 never names the omnigraph-http-api header" >&2; }
+    [[ "$ps_merged" == 1 ]] || { ok=0; echo "Get-GraphList sends the header $ps_merged time(s), expected 1" >&2; }
+    [[ "$ps_exempt" == 0 ]] || { ok=0; echo "/healthz or the viewer ping was given the header" >&2; }
+    [[ "$sh_pin" == 1 ]] || { ok=0; echo "the sh default image is not the 0.13.0 pin ($sh_pin)" >&2; }
+    [[ "$ps_pin" == 1 ]] || { ok=0; echo "the ps1 default image is not the 0.13.0 pin ($ps_pin)" >&2; }
+    [[ "$old_pin" == 0 ]] || { ok=0; echo "the old v0.8.1 pin still appears $old_pin time(s) in the two scripts" >&2; }
+    (( ok )) && pass || fail "the contract header / 0.13 image pin is not in place"
+fi
+
 if it "omnigraph-client: docs name the component and the token rotation procedure"; then
     ok=1
     grep -q 'omnigraph-client' docs/omnigraph.md || { ok=0; echo "docs/omnigraph.md has no omnigraph-client section" >&2; }

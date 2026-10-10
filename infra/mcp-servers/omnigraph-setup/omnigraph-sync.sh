@@ -58,10 +58,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 : "${LOCAL_URL:=http://127.0.0.1:8080}"; : "${LOCAL_TOKEN:?set LOCAL_TOKEN}"
 LOCAL_URL_CONTAINER="${LOCAL_URL_CONTAINER:-$LOCAL_URL}"
 DEVICE="${DEVICE:-$(hostname)}"
-IMAGE="${OMNIGRAPH_IMAGE:-modernrelay/omnigraph-server:v0.8.1}"
+IMAGE="${OMNIGRAPH_IMAGE:-modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1}"
 DOCKER_NET="${DOCKER_NET:-host}"
 BACKUP_DIR="${BACKUP_DIR:-$here/backups}"
 BRANCH="device/${DEVICE}"
+CONTRACT_HEADER='omnigraph-http-api: 0.13'
 JQ="$here/omnigraph_jsonl.py"; PULL="$here/pull_graph.py"; PY="${PYTHON:-python3}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$BACKUP_DIR"
@@ -81,7 +82,7 @@ og_load() {  # og_load <token> <url> <graph> <mode> <file>
     < "$5"
 }
 api() {  # api <token> <url> <graph> <verb: export|…>  -> stdout
-  curl -fsS -m 300 -X POST "${2%/}/graphs/$3/$4" \
+  curl -fsS -m 300 -X POST "${2%/}/graphs/$3/$4" -H "$CONTRACT_HEADER" \
     -H "Authorization: Bearer $1" -H 'content-type: application/json' -d '{}'
 }
 
@@ -92,7 +93,7 @@ if [ -n "${GRAPHS:-}" ]; then
 elif [ -n "${GRAPH:-}" ] && [ "${GRAPH}" != "memory" ]; then
   GRAPH_LIST=("$GRAPH")                       # legacy single-graph
 else
-  read -r -a GRAPH_LIST <<< "$(curl -fsS -m 60 "${CENTRAL_URL%/}/graphs" \
+  read -r -a GRAPH_LIST <<< "$(curl -fsS -m 60 "${CENTRAL_URL%/}/graphs" -H "$CONTRACT_HEADER" \
     -H "Authorization: Bearer $CENTRAL_TOKEN" \
     | grep -o '"graph_id":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')"
 fi
