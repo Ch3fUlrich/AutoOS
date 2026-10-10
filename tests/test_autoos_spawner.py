@@ -41,6 +41,7 @@ import autoos_agent_mcp as mcp_server  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402  (tools/autoos_resolver.py; serving_legs)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate record)
+import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
@@ -10195,6 +10196,207 @@ class EvidenceGateTests(unittest.TestCase):
         with mock.patch.object(os, "fstat", return_value=lie), \
              mock.patch.object(os, "read", side_effect=lambda fd, n: b"q" * n):
             self.assertIn(BIG, self.guarded("seat.md", write=True))
+
+
+class LedgerWriteTests(unittest.TestCase):
+    """AO-LEDGER-WRITE (P6): a countable, evidence-backed seat is one data point on
+    the writer's measurement clock, so the gate writes it to the verdict ledger
+    through the ledger's OWN API. Hermetic: `AUTOOS_LEDGER_PATH` points at a temp
+    file and `writer_for_run` is stubbed -- nothing here touches the real
+    logs/writer-ledger.jsonl or the runner-private store.
+    """
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
+    HOLD = "VERDICT: HOLD\n\nBlocked on an operator decision.\n"
+    WRITER = ("opencode", "vertex/gemini-3.8-flash")
+    RUNS = "writer-run-1"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self._old_env = os.environ.get("AUTOOS_LEDGER_PATH")
+        self.set_ledger(os.path.join(self.folder, "writer-ledger.jsonl"))
+        self._stub = mock.patch.object(writer_ledger, "writer_for_run",
+                                       lambda run: self.WRITER)
+        self._stub.start()
+        self.addCleanup(self._stub.stop)
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("AUTOOS_LEDGER_PATH", None)
+        else:
+            os.environ["AUTOOS_LEDGER_PATH"] = self._old_env
+
+    def set_ledger(self, target):
+        os.environ["AUTOOS_LEDGER_PATH"] = self.target = target
+
+    def rows(self):
+        return writer_ledger.load(self.target)[0]
+
+    def seat_line(self, text=ACCEPT, extra=" run=" + RUNS, name="seat.md"):
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"),
+                    exist_ok=True)
+        with io.open(os.path.join(ev, name), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                "reviewer=omniroute/muse verdict=ACCEPT evidence=%s%s"
+                % ("logs/briefs/evidence/" + name, extra))
+
+    def record_text(self, text=ACCEPT, extra=" run=" + RUNS, final=None):
+        return "\n".join([self.seat_line(text, extra), CROSS_FAMILY_LINE_2,
+                          final or FINAL_LINE]) + "\n"
+
+    def status(self, text=ACCEPT, extra=" run=" + RUNS, final=None, **kw):
+        return self.agent.review_status(self.record_text(text, extra, final),
+                                        self.registry, root=self.root, **kw)
+
+    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False):
+        """The same record through the real `review-status` command line."""
+        fd, rec = tempfile.mkstemp(suffix=".md")
+        os.close(fd)
+        self.addCleanup(os.unlink, rec)
+        with io.open(rec, "w", encoding="utf-8") as fh:
+            fh.write(self.record_text(text, extra))
+        argv = ["review-status", rec, "--registry", self.registry_path]
+        if no_ledger:
+            argv.append("--no-ledger")
+        out = io.StringIO()
+        with mock.patch.object(os, "getcwd", return_value=self.root), \
+                contextlib.redirect_stdout(out):
+            rc = self.agent.main(argv)
+        return rc, out.getvalue()
+
+    def test_an_accept_seat_appends_one_accepted_row(self):
+        self.assertTrue(self.status()["ready"], self.status()["cross_family"]["detail"])
+        rows = self.rows()
+        self.assertEqual([(r["verdict"], r["run_id"], r["reviewer"]) for r in rows],
+                         [("accepted", self.RUNS, "omniroute/muse")])
+        self.assertEqual(rows[0]["writer_client"], self.WRITER[0])
+        self.assertEqual(rows[0]["writer_model_served"], self.WRITER[1])
+        self.assertEqual(rows[0]["task_type"], "code")
+        self.assertEqual(len(rows[0]["ref"]), 64)
+        self.assertNotIn("failure_class", rows[0])
+
+    def test_the_fields_come_from_the_record_entry(self):
+        self.status(extra=" run=%s task=docs risk=R2" % self.RUNS)
+        self.assertEqual([(r["task_type"], r["risk"]) for r in self.rows()],
+                         [("docs", "R2")])
+
+    def test_re_running_the_gate_over_the_same_record_writes_no_second_row(self):
+        self.status()
+        self.status()
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_the_command_appends_the_row_and_a_rerun_does_not(self):
+        rc, out = self.cmd()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.rows()), 1)
+        rc, out = self.cmd()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_two_parallel_calls_write_one_row(self):
+        text = self.record_text()  # the evidence file is written once, then read twice
+        box = []
+
+        def gate():
+            box.append(self.agent.review_status(text, self.registry, root=self.root))
+
+        # A slow read only lands one row if the lock keeps the other call out of the
+        # check-then-append window: both would read the empty ledger first.
+        real_load = writer_ledger.load
+
+        def slow_load(*a, **kw):
+            out = real_load(*a, **kw)
+            time.sleep(0.05)
+            return out
+
+        threads = [threading.Thread(target=gate) for _ in range(2)]
+        with mock.patch.object(writer_ledger, "load", slow_load):
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(30)
+        self.assertEqual(len(box), 2, box)
+        self.assertTrue(all(r["ready"] for r in box), box)
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
+    def test_a_reject_proofs_a_rejected_row_with_a_failure_class(self):
+        self.status(self.REJECT, extra=" run=run-a failure=tests-missing")
+        self.assertEqual(self.rows()[0]["failure_class"], "tests-missing")
+        self.status(self.REJECT, extra=" run=run-b")
+        self.assertEqual([r["failure_class"] for r in self.rows()],
+                         ["tests-missing", "other"])
+
+    def test_two_rejects_from_one_writer_demote_it(self):
+        self.status(self.REJECT, extra=" run=run-a")
+        self.status(self.REJECT, extra=" run=run-b")
+        self.assertTrue(writer_ledger.demoted(self.WRITER[1], "code", threshold=2,
+                                              path=self.target))
+
+    def test_changed_evidence_content_is_a_new_row(self):
+        self.status(self.ACCEPT)
+        self.status(self.ACCEPT + "Re-read after the second commit.\n")
+        self.assertEqual(len(self.rows()), 2)
+
+    def test_a_hold_an_invalid_and_a_blind_answer_write_no_row(self):
+        for text in (self.HOLD, "I looked at it.\nVERDICT: ACCEPT\n",
+                     self.ACCEPT + "I could not see the diff.\n"):
+            with self.subTest(text=text[-32:]):
+                self.status(text)
+                self.assertEqual(self.rows(), [])
+
+    def test_a_seat_without_run_appends_no_row_says_so_and_still_counts(self):
+        report = self.status(extra="")
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertIn("ledger: no writer record for run", " ".join(report["ledger_notes"]))
+
+    def test_an_unknown_writer_run_appends_no_row_says_so_and_still_counts(self):
+        with mock.patch.object(writer_ledger, "writer_for_run", lambda run: None):
+            report = self.status()
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertIn("not recorded", " ".join(report["ledger_notes"]))
+
+    def test_no_ledger_skips_the_write_and_creates_no_file(self):
+        report = self.status(write_ledger=False)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(os.listdir(self.folder), [])
+        rc, out = self.cmd(no_ledger=True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(os.listdir(self.folder), [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod / symlink / directory ledger paths")
+    def test_an_unwritable_ledger_refuses_the_seat_and_exits_non_zero(self):
+        ro = os.path.join(self.folder, "ro")
+        os.makedirs(ro)
+        os.chmod(ro, 0o500)
+        self.addCleanup(os.chmod, ro, 0o700)
+        targets = [] if os.access(ro, os.W_OK) else [os.path.join(ro, "ledger.jsonl")]
+        os.makedirs(d := os.path.join(self.folder, "is-a-dir"))
+        targets.append(d)
+        os.symlink("nowhere.jsonl", s := os.path.join(self.folder, "link.jsonl"))
+        targets.append(s)
+        for target in targets:
+            with self.subTest(target=os.path.basename(target)):
+                self.set_ledger(target)
+                report = self.status()
+                self.assertFalse(report["ready"], report)
+                self.assertIn("ledger write failed", report["cross_family"]["detail"])
+                rc, out = self.cmd()
+                self.assertEqual(rc, 1, out)
+                self.assertIn("ledger write failed", out)
 
 
 class ReadyCommandTests(unittest.TestCase):

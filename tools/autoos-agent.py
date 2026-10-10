@@ -273,6 +273,7 @@ import argparse
 import copy
 import datetime
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -315,6 +316,7 @@ import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
+import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -4671,7 +4673,8 @@ def review_run_refusal(review: dict | None):
 # REVGATE2F (operator 2026-09-30): one line is one SEAT, and a ready lane needs
 # two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
-REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence",
+                       "run", "task", "failure", "risk")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
@@ -4689,7 +4692,9 @@ FINAL_REVIEWER = "sonnet"
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
-                     "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>]")
+                     "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
+                     "[run=<writer-run-id> task=<ops|code|docs|infra> "
+                     "failure=<class> risk=<R0..R3>]")
 
 
 def _family_of_one_spelling(name, registry):
@@ -5128,10 +5133,73 @@ def _resolve_evidence_path(root, raw):
     return None, "evidence path outside the repo: %s" % raw
 
 
-def _evidence_reason(entry, root):
+# AO-LEDGER-WRITE (P6): the measurement clock only ticks when a verdict is written
+# down, so a countable, evidence-backed seat lands exactly one row on the ledger --
+# through the ledger's own API, never hand-built JSON.
+LEDGER_VERDICTS = {"ACCEPT": "accepted", "REJECT": "rejected"}
+
+
+def _ledger_append(row):
+    """One check-then-append under an advisory lock, so two parallel gate calls
+    cannot both pass the duplicate check and double-append. POSIX flock on a
+    sibling `.lock`; the lock call sits in a branch Windows never takes."""
+    target = writer_ledger.default_path()
+    folder = os.path.dirname(os.path.abspath(target))
+    fd = os.open(os.path.join(folder, "." + os.path.basename(target) + ".lock"),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name != "nt":
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        for seen in writer_ledger.load()[0]:
+            if (seen["run_id"], seen.get("reviewer"), seen["verdict"], seen.get("ref")) \
+                    == (row["run_id"], row["reviewer"], row["verdict"], row["ref"]):
+                return False
+        writer_ledger.record(row)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _ledger_record_seat(entry, parsed, ref, write):
+    """Append this seat's verdict to the writer ledger (AO-LEDGER-WRITE P6), and
+    return the reason the seat must not pass the gate, or None. `ref` is the sha256
+    of the evidence text, so re-running the gate over the same answer is a no-op and
+    a changed answer is a new row. Notes ride on the entry for review_status."""
+    verdict = LEDGER_VERDICTS.get(parsed["verdict"]) if parsed["countable"] else None
+    if verdict is None or not write:
+        return None
+    run = (entry.get("run") or "").strip()
+    writer = writer_ledger.writer_for_run(run) if run else None
+    if not writer or not writer[0] or not writer[1]:
+        # Never invent a writer: a row naming a model nobody served would poison
+        # the rollup the demotion decision is read off.
+        entry.setdefault("_ledger", []).append(
+            "ledger: no writer record for run %s, not recorded" % (run or "<no run=>"))
+        return None
+    row = {"run_id": run, "verdict": verdict, "writer_client": writer[0],
+           "writer_model_served": writer[1], "task_type": entry.get("task") or "code",
+           "reviewer": entry.get("reviewer"), "ref": ref}
+    if verdict == "rejected":
+        row["failure_class"] = (entry.get("failure")
+                                if entry.get("failure") in writer_ledger.FAILURES else "other")
+    if entry.get("risk") in writer_ledger.RISKS:
+        row["risk"] = entry["risk"]
+    try:
+        _ledger_append(row)
+    except (writer_ledger.LedgerError, OSError, ValueError) as exc:
+        # Fail closed, as P3 defined it: a verdict that cannot be recorded does not
+        # clear the gate, and it says so rather than raising a traceback.
+        reason = "ledger write failed: %s" % type(exc).__name__
+        entry.setdefault("_ledger", []).append("ledger: %s" % reason)
+        return reason
+    return None
+
+
+def _evidence_reason(entry, root, write_ledger=True):
     """Why this entry's evidence file does not back its verdict, or None when it does:
-    it must sit inside the repo, be readable, be a valid `parse_verdict` answer, and say
-    the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose."""
+    it must sit inside the repo, be readable, be a valid `parse_verdict` answer, say
+    the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose —
+    and have its verdict recorded in the writer ledger (P6)."""
     raw = (entry.get("evidence") or "").strip()
     if not raw:
         return None
@@ -5176,27 +5244,31 @@ def _evidence_reason(entry, root):
     parsed = seat_verdict.parse_verdict(text)
     if not parsed["valid"]:
         return "evidence invalid: %s" % parsed["reason"]
+    unrecorded = _ledger_record_seat(entry, parsed,
+                                     hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                                     write_ledger)
     word = (seat_verdict.verdict_word(entry.get("verdict")) or "").upper()
     if parsed["verdict"] != ("ACCEPT" if word.lower() in READY_VERDICTS else word):
         return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
-    return None
+    return unrecorded
 
 
-def _review_entry_verdict(entry, root=None):
+def _review_entry_verdict(entry, root=None, write_ledger=True):
     """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
     (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
     HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
-    names an `evidence=` file, that file has to say the same thing (P2/G1a)."""
+    names an `evidence=` file, that file has to say the same thing (P2/G1a), and its
+    verdict has to reach the writer ledger (P6)."""
     raw = (entry.get("verdict") or "").strip()
     if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
         return False, "verdict %s" % (raw or "missing")
-    refused = _evidence_reason(entry, root)
+    refused = _evidence_reason(entry, root, write_ledger)
     if refused:
         return False, refused
     return True, None
 
 
-def _cross_family_seat(entry, registry, root=None):
+def _cross_family_seat(entry, registry, root=None, write_ledger=True):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
@@ -5225,14 +5297,14 @@ def _cross_family_seat(entry, registry, root=None):
         # seat is refused and the mismatch names both sides.
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
-    ok, reason = _review_entry_verdict(entry, root)
+    ok, reason = _review_entry_verdict(entry, root, write_ledger)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
             "verdict": (entry.get("verdict") or "").strip()}, None
 
 
-def _cross_family_review(entries, registry, root=None):
+def _cross_family_review(entries, registry, root=None, write_ledger=True):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -5250,7 +5322,7 @@ def _cross_family_review(entries, registry, root=None):
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
     reasons, seats = [], []
     for entry in wanted:
-        seat, reason = _cross_family_seat(entry, registry, root)
+        seat, reason = _cross_family_seat(entry, registry, root, write_ledger)
         if reason is not None:
             reasons.append(reason)
             continue
@@ -5274,7 +5346,7 @@ def _cross_family_review(entries, registry, root=None):
             "seats": seats, "detail": detail}
 
 
-def _final_review(entries, root=None):
+def _final_review(entries, root=None, write_ledger=True):
     """The record's sign-off: a kind=final entry naming the final checker."""
     wanted = [e for e in entries if e.get("kind") == "final"]
     if not wanted:
@@ -5287,7 +5359,7 @@ def _final_review(entries, root=None):
                           % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
     reasons = []
     for entry in named:
-        ok, reason = _review_entry_verdict(entry, root)
+        ok, reason = _review_entry_verdict(entry, root, write_ledger)
         if ok:
             return {"ok": True,
                     "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
@@ -5295,7 +5367,7 @@ def _final_review(entries, root=None):
     return {"ok": False, "detail": "; ".join(reasons)}
 
 
-def review_status(text, registry, root=None):
+def review_status(text, registry, root=None, write_ledger=True):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -5305,6 +5377,11 @@ def review_status(text, registry, root=None):
     send someone to book a review that already happened and did not pass. The
     floor is two seats from distinct families (REVGATE2F): one entry is no
     longer a review, and two spellings of one family are one seat.
+
+    Each countable evidence-backed seat is written to the writer verdict ledger as
+    it is read (AO-LEDGER-WRITE P6); `write_ledger=False` is the `--no-ledger` dry
+    inspection, and a seat whose row cannot be written is refused with the reason --
+    an unrecorded verdict ticks none of the clocks the ledger feeds.
     """
     entries, malformed = [], []
     for line in (text or "").splitlines():
@@ -5320,10 +5397,11 @@ def review_status(text, registry, root=None):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
-    cross = _cross_family_review(entries, registry, root)
-    final = _final_review(entries, root)
+    cross = _cross_family_review(entries, registry, root, write_ledger)
+    final = _final_review(entries, root, write_ledger)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
+            "ledger_notes": [n for e in entries for n in e.get("_ledger") or []],
             "ready": cross["ok"] and final["ok"],
             "hint": REVIEW_ENTRY_HINT}
 
@@ -5360,6 +5438,10 @@ def print_review_report(label, report):
                   % (number, seat["reviewer"], seat["family"], seat["verdict"]))
     for line in report["malformed"]:
         print("  note: entry without a kind= or reviewer= ignored: %s" % line)
+    # AO-LEDGER-WRITE P6: a verdict the ledger could not name a writer for, or could
+    # not write at all, is said here rather than left out of the measurement silently.
+    for line in report.get("ledger_notes") or []:
+        print("  %s" % line)
     if not report["entries"]:
         print("  note: write one line per review, e.g.: %s" % report["hint"])
     print("ready: %s" % ("yes" if report["ready"] else "no"))
@@ -5412,7 +5494,8 @@ def cmd_review_status(args) -> int:
 
     Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
     read -- a typo'd path is not a lane that needs reviewing, and a caller that
-    waits on 1 would wait forever on that mistake.
+    waits on 1 would wait forever on that mistake. `--no-ledger` reads the record
+    without writing the verdict ledger; `ready` always writes (AO-LEDGER-WRITE P6).
     """
     try:
         text, label = read_lane_record(args.record)
@@ -5420,7 +5503,8 @@ def cmd_review_status(args) -> int:
         print("review-status: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry, root=os.getcwd())
+    report = review_status(text, registry, root=os.getcwd(),
+                           write_ledger=not getattr(args, "no_ledger", False))
     print_review_report(label, report)
     return 0 if report["ready"] else 1
 
@@ -13302,6 +13386,10 @@ def _parser_review_status(sub):
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+    review_status_p.add_argument("--no-ledger", action="store_true",
+                                 help="read the record without appending its seat "
+                                      "verdicts to the writer ledger (dry inspection; "
+                                      "`ready` always writes)")
 
 
 def _parser_ready(sub):
