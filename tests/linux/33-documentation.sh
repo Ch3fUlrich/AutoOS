@@ -717,8 +717,8 @@ if it "autoos_writer_ledger: verdict ledger, demotion, probe, rollup (unit tests
 fi
 
 # AO-WRITER-GUARDS P4a: the pure ready guards (tools/autoos_ready_guards.py).
-if it "autoos_ready_guards: brief FILES scope, diff fence, report checks, preflight (unit tests)"; then
-    out="$(python3 tests/test_autoos_ready_guards.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+if it "autoos_ready_guards + autoos_verdict: FILES scope, diff fence, verdict grammar (unit tests)"; then
+    out="$(python3 tests/test_autoos_ready_guards.py 2>&1)" && out="$(python3 tests/test_autoos_verdict.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # AO-WRITER-GUARDS P4c: run-death recovery (tools/autoos_recovery.py).

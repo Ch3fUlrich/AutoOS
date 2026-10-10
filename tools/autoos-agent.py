@@ -305,6 +305,7 @@ import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b:
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
+import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -4438,7 +4439,7 @@ READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "l
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
                             # vocabulary's OPEN finding and stays refused.
-                            "ship"))
+                            "ship", seat_verdict.READY_TOKEN))  # AO-SEAT-VERDICT-GRAMMAR
 # The final check is the operator's unchanged decision (Q-003 2026-09-27): a
 # cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
 # registry route -- it is the orchestrator's own interactive model -- so this one
@@ -4451,7 +4452,7 @@ FINAL_REVIEWER = "sonnet"
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
-                     "verdict=<ready|pass|ship|lgtm|...>")
+                     "verdict=<ready|pass|ship|lgtm|accept|...>")
 
 
 def _family_of_one_spelling(name, registry):
@@ -4827,11 +4828,13 @@ def is_final_reviewer(spelling):
 
 
 def _review_entry_verdict(entry):
-    """``(ok, reason)`` for one entry's verdict field."""
-    verdict = (entry.get("verdict") or "").strip()
-    if verdict.lower() in READY_VERDICTS:
+    """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
+    (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
+    HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works."""
+    raw = (entry.get("verdict") or "").strip()
+    if (seat_verdict.verdict_word(raw) or "").lower() in READY_VERDICTS:
         return True, None
-    return False, "verdict %s" % (verdict or "missing")
+    return False, "verdict %s" % (raw or "missing")
 
 
 def _cross_family_seat(entry, registry):
