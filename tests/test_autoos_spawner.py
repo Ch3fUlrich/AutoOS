@@ -23838,6 +23838,134 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
         self.assertEqual(writer["model"], "gemini-3.8-flash")
 
 
+def seat_run_args(**kw):
+    """A hand-built `run` namespace for a seat plan: the flags build_plan reads."""
+    d = dict(client="claude", tier=3, card="role=review", auto=True,
+             task="review the diff", free=False, isolate=False, joinable=False,
+             model=None, clean=False, title=None, allow_training=False, max_depth=None,
+             lean=False, review_base=None, read_only=False, free_model=None)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+class ClaudeSeatModeTests(unittest.TestCase):
+    """P3b item 1 (measured, run 20261009-165450-mem-tools-sonnet-68764c): a claude
+    review SEAT ran in `plan` and could not write its own REVIEW-FINDINGS.txt. An
+    --isolate read run IS a seat, confined to its private clone by the sandbox and the
+    leak check, so it gets a mode that writes in there. `plan` stays for a run in the
+    caller's checkout and for --read-only, whose success is an unchanged sandbox."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"},
+                               "t3-reviewer": {"model": "omniroute/y"}},
+                    "providers": {"omniroute": {"models": {"x": {}, "y": {}}}}}
+
+    def _cmd(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"]
+
+    def test_an_isolated_review_seat_gets_the_writing_mode(self):
+        cmd = self._cmd(isolate=True)
+        self.assertEqual(["claude", "-p", "--permission-mode", "acceptEdits"], cmd[:4])
+        self.assertNotIn("plan", cmd)
+        # the seat's spawn deny list is unchanged by the mode it writes with
+        self.assertEqual(["--disallowed-tools", "Task", "Agent", "--"], cmd[-5:-1])
+
+    def test_a_review_in_the_callers_checkout_still_plans(self):
+        self.assertEqual(["claude", "-p", "--permission-mode", "plan"], self._cmd()[:4])
+
+    def test_a_read_only_seat_stays_plan_even_isolated(self):
+        # both spellings of a read-only review route: the flag, and a bare --tier 3
+        # seat with no card at all
+        for kw in ({"isolate": True, "read_only": True},
+                   {"isolate": True, "read_only": True, "card": None}):
+            with self.subTest(**kw):
+                self.assertEqual(["claude", "-p", "--permission-mode", "plan"],
+                                 self._cmd(**kw)[:4])
+
+    def test_no_other_client_gets_a_seat_mode(self):
+        # The mode is declared by the client row, so a client without one cannot gain
+        # it: every other CLI's read-run argv is byte-for-byte what it was.
+        task = "review the diff"
+        expect = {
+            "qoder": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                      "--model", clients.QODER_DEFAULT_MODEL, task],
+            "qwen": ["omniroute", "run", "qwen", "--model", "l3-driver",
+                     "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                     "--approval-mode", "plan", "-p", task],
+            "gemini": ["omniroute", "run", "gemini", "--model", "l3-driver",
+                       "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                       "--skip-trust", "--approval-mode", "plan", "-p", task],
+            "codex": ["omniroute", "run", "codex", "--model", "l3-driver",
+                      "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                      "exec", "--sandbox", "read-only", "--skip-git-repo-check", task],
+        }
+        for name, argv in sorted(expect.items()):
+            client = clients.CLIENTS[name]
+            got = clients.seat_level(client, "read", isolate=True, read_only=False)
+            self.assertEqual("read", got, name)
+            self.assertEqual(argv, clients.build_command(client, task, "l3-driver", got),
+                             name)
+
+
+class SeatDepsNoteTests(unittest.TestCase):
+    """P3b item 2 (measured): a seat sandbox had no `mcp`, so the project tests it was
+    told to run could not run and the seat said nothing. The brief says it — a report,
+    never an install."""
+
+    LINE = "project tests unrunnable: missing python modules: mcp"
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                    "providers": {"omniroute": {"models": {"x": {}}}}}
+
+    def _absent(self, name):
+        return None if name == "mcp" else object()
+
+    def _prompt(self, **kw):
+        kw.update(client="opencode", tier=2, isolate=True, review_base="HEAD")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"][-1]
+
+    def test_the_note_names_exactly_the_missing_modules(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: None):
+            self.assertEqual(self.LINE, self.cli.seat_deps_note())
+            self.assertEqual("project tests unrunnable: missing python modules: mcp, yaml",
+                             self.cli.seat_deps_note(modules=("mcp", "yaml")))
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            self.assertEqual("", self.cli.seat_deps_note())
+
+    def test_a_find_spec_that_raises_reads_as_missing_not_as_a_crash(self):
+        # importlib raises for a missing PARENT package of a dotted name; a seat brief
+        # is never worth a traceback in the spawner.
+        def raiser(name):
+            raise ImportError(name)
+        with mock.patch.object(self.cli.importlib.util, "find_spec", raiser):
+            self.assertIn("mcp", self.cli.seat_deps_note())
+
+    def test_a_seat_brief_says_its_tests_cannot_run_once(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            prompt = self._prompt()
+        self.assertEqual(1, prompt.count(self.LINE), prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_a_seat_brief_stays_clean_when_the_modules_are_present(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            prompt = self._prompt()
+        self.assertNotIn("project tests unrunnable", prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_the_note_is_a_seat_brief_line_and_not_an_implement_prefix(self):
+        # Only the --review-base review seat is briefed with it; a writer with the same
+        # --review-base keeps P1's plain prefix.
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            self.assertNotIn("project tests unrunnable", self._prompt(card=None))
+
+
 class SeatTreeLeakTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P3a (b): the measured LEAK-FP. The porcelain leg of
     the leak check compared the WHOLE parent checkout against the snapshot —

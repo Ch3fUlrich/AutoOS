@@ -271,6 +271,7 @@ import argparse
 import copy
 import datetime
 import errno
+import importlib.util
 import io
 import json
 import os
@@ -4506,6 +4507,32 @@ def read_only_run(args, card) -> bool:
         (card or {}).get("kind") == "research" or (card or {}).get("role") == "research")
 
 
+def seat_deps_note(modules=("mcp",)):
+    """One line naming the project-test modules this interpreter lacks ('' when none).
+
+    AO-L2-SEAT-INTEGRITY P3b item 2 (measured): a seat sandbox had no `mcp`, so the
+    project tests it was briefed to run could not start, and the seat reported an
+    untested verdict as if it had tested. Read with `importlib.util.find_spec` in the
+    interpreter the seat will use — `sys.executable` of this spawner, which is what the
+    sandbox's `python3` resolves to — and only ever SAID: nothing here installs.
+
+    The fix for a missing dep would be an optional per-sandbox `uv venv` from the repo
+    lockfile — a network install inside a run that may be --read-only, into a tree the
+    leak check has to reason about. Future work, for the operator; this stays a report.
+    """
+    missing = []
+    for name in modules:
+        try:
+            found = importlib.util.find_spec(name)
+        except (ImportError, ValueError):
+            found = None  # a missing parent package is a missing module, not a crash
+        if found is None:
+            missing.append(name)
+    if not missing:
+        return ""
+    return "project tests unrunnable: missing python modules: %s" % ", ".join(missing)
+
+
 def review_run_refusal(review: dict | None):
     """Why an authored review run must not start yet, or None when it may.
 
@@ -6446,6 +6473,11 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # containment prompt + leak check are the controls; writes outside
             # the parent checkout (e.g. $HOME) are not detected.
             args.isolate = True
+        # AO-L2-SEAT-INTEGRITY P3b: an isolated reviewer is a SEAT, and a seat has to
+        # write its findings inside its own clone. Read AFTER the qoder leg, so the level
+        # the checks above acted on is the one they were read from.
+        level = clients.seat_level(client, level, isolate=bool(args.isolate),
+                                   read_only=bool(route.get("read_only")))
         model = args.model if not client.gateway else None
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
@@ -6568,12 +6600,19 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # quotes the base line itself, so the prefix must not stamp it a second time.
         _card = route.get("card") or _parsed_card_fields(getattr(args, "card", None)) or {}
         _seat = bool(_base_line) and _card_asks_review(_card)
+        _brief = (seat_verdict.seat_prompt(str(_card.get("angle") or
+                                              "cross-family review of the change"),
+                                           cmd[-1], _base_line) if _seat else cmd[-1])
+        if _seat:
+            # P3b item 2: a seat that cannot start the project tests says so in its
+            # brief, so an untested verdict is never mistaken for a tested one.
+            _deps = seat_deps_note()
+            if _deps:
+                _brief += _deps + "\n"
         cmd[-1] = (isolate_task_prefix(sandbox["path"], sandbox["source"],
                                        read_only=bool(route.get("read_only")),
                                        base_line=_base_line, stamp_base=not _seat) + "\n"
-                   + (seat_verdict.seat_prompt(str(_card.get("angle") or
-                                                 "cross-family review of the change"),
-                                               cmd[-1], _base_line) if _seat else cmd[-1]))
+                   + _brief)
     if client.name == "opencode":
         # WSLSHELL (SB-B): opencode's own config schema carries a top-level
         # `shell` ("Default shell to use for terminal"), which its resolver
