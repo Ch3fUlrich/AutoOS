@@ -5131,6 +5131,15 @@ Test-Case 'autoos_recovery: run classify, stall clock, attempt budget, continue 
     Assert-Equal $rc 0 "recovery unit tests failed: $out"
 }
 
+Test-Case 'ready callers: tracked invocations name --brief and --report (lint)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_callers.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "ready-caller lint failed: $out"
+}
+
 Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

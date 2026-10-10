@@ -22,7 +22,7 @@ files and what each lists, and defines the baseline measurement exactly (lane R9
 v3.5 (RSTAMEND4, 2026-09-28, Sonnet FIX-FIRST on 2ecc900): §7 closes the hole §0's non-order list
 opened — a `ready <branch> <sha>` record is a non-order, so rule (a) archived it unanswered while §3's
 open-readies scan (`--since-card`, which never reads the archive) lost the lane it was waiting on; §7
-now owns the one closing rule for a ready and §3 points at it. §0 names `autoos-agent.py ready` as a
+now owns the one closing rule for a ready and §3 points at it. §0 names `autoos-agent.py ready` as a <!-- ready-no-guards -->
 writer already covered by the lock inside `append_inbox_line`, and says plainly that R8's bare-`>>`
 grep only reaches shell recipes. §5 takes the L2 cap from the operator's D-088 (orchestration 500k,
 workers min(40 %, 400k), lane CAPD088), which supersedes D-085's interim 250k, and §8 keeps only the
@@ -227,7 +227,7 @@ code from state the session keeps small at every wave. Then the context cap drop
   `flock -s -w 10 <RUN>/inbox/<name>.lock -c 'printf … >> <file>'`.
   **The lock lives inside `append_inbox_line`, and that is the whole coverage story for Python**: any
   caller of it is locked the moment R1 puts the `flock` there, one implementation for all of them.
-  `autoos-agent.py ready` (`cmd_ready`) is already such a writer — it appends the
+  `autoos-agent.py ready` (`cmd_ready`) is already such a writer — it appends the <!-- ready-no-guards -->
   `ready <branch> <sha>` line through `append_inbox_line` — so it needs no lane of its own, and R8's
   `inbox append` verb joins it rather than adding a second path. It also means a *new* Python writer
   must call `append_inbox_line` instead of opening the file itself.
@@ -655,7 +655,7 @@ another lane owns (SKILL.md is R6's), R8 fixes that one line and nothing else in
 | v3.4 Sonnet finding (on 2ecc900) | v3.5 resolution |
 |---|---|
 | HIGH: §0 classes a `ready` line as a non-order, so §7's rule (a) archives it **unanswered** — and §3's open-readies scan reads `--since-card`, which never opens the archive, so the successor loses the only reminder that a lane is unmerged | §7 adds the `ready` exception as the rule's one home: a ready is archivable only once a later record in the same inbox closes it, either a `→ done:` naming it exactly as rule (b) names an order or a line pairing `main=` with the first 7 hex of its `<sha>`; until then it is an open order, stays live whatever its position, and rotate counts it in `kept N records: no covering done`. §3 and §0's marker bullet point at §7 instead of defining a closer, §R's "open readies" row follows the move, and the R8 lane scope names the exception so it is built, not discovered |
-| MEDIUM: §0 named only the two future appenders, so a reader could not see that the `ready` line already in every real inbox is written by a locked path — nor that the grep would never catch an unlocked Python writer | §0 states where the lock lives (`append_inbox_line`) and names `autoos-agent.py ready` (`cmd_ready`) as a covered caller that needs no lane of its own; it says plainly that R8's bare-`>>` grep reaches **shell recipes only**, and that a new Python writer's obligation is to call `append_inbox_line`, not to survive a text search |
+| MEDIUM: §0 named only the two future appenders, so a reader could not see that the `ready` line already in every real inbox is written by a locked path — nor that the grep would never catch an unlocked Python writer | §0 states where the lock lives (`append_inbox_line`) and names `autoos-agent.py ready` (`cmd_ready`) as a covered caller that needs no lane of its own; it says plainly that R8's bare-`>>` grep reaches **shell recipes only**, and that a new Python writer's obligation is to call `append_inbox_line`, not to survive a text search | <!-- ready-no-guards -->
 | §5 still presented D-085's interim 250k as the L2 cap | §5 leads with operator D-088 (orchestration 500k, workers min(40 % of window, 400k), lane CAPD088) and keeps only what is still true from D-085 — the ~15 min handoff and 55.5k measurements, which are §8's anchor. CAPL2 is retired unbuilt, the ordering trap moves to CAPD088 (v3.5 named the keying there as (family, role) with a `cap_for` role argument; that was wrong and v3.6 restates it as family rows used as the role proxy), §8's lead and the v3.3 table row stop naming 150k/250k as current, and only §8's baseline work is left open |
 
 | v3.5 Muse finding (on 42297a6) | v3.6 resolution |

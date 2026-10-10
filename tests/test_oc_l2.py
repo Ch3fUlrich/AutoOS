@@ -2120,5 +2120,53 @@ class McpToolTest(unittest.TestCase):
                 self.assertIn("L3", out["detail"], fn.__name__)
 
 
+class ForeignRepoFooterTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P4: the fixed footer may not hard-require a skill
+    that only exists in THIS repo's `.agents/skills`. Measured: an L2 launched in
+    a scratch/foreign repo errored `Unable to load skill
+    unattended-orchestration` and the lane never worked. The load is
+    best-effort now and the rules an L2 needs travel with the footer, as ONE
+    inline line."""
+
+    INBOX = "/srv/run/inbox/L1.md"
+
+    def setUp(self):
+        self.text = oc_l2.first_prompt_text(BRIEF, "l2-proj-x-p1", self.INBOX)
+
+    def test_the_skill_load_is_conditional_and_never_fatal(self):
+        self.assertIn("if it is available", self.text)
+        self.assertIn("do NOT stop or error", self.text)
+        self.assertIn("`%s`" % oc_l2.SKILL, self.text)
+        self.assertNotIn("Load the `%s` skill first." % oc_l2.SKILL, self.text)
+
+    def test_the_inline_rules_line_is_one_line_and_travels_once(self):
+        line = oc_l2.INLINE_RULES_LINE
+        self.assertNotIn("\n", line, "the inline rules must stay one line")
+        self.assertLessEqual(len(line), 600, "the footer grew past its budget")
+        self.assertEqual(self.text.count(line), 1, self.text)
+
+    def test_the_inline_line_carries_the_rules_an_l2_needs(self):
+        table = (("R-coord-14", "never fix or research"),
+                 ("R-coord-09", "autoos-agent"),
+                 ("R-orch-01", "one line per fact"),
+                 ("R-orch-22", "GOAL / DONE / NEXT / BLOCKED"),
+                 ("R-coord-08", "heartbeat"))
+        for rule, claim in table:
+            self.assertIn(rule, oc_l2.INLINE_RULES_LINE, rule)
+            self.assertIn(claim, oc_l2.INLINE_RULES_LINE, claim)
+
+    def test_the_rest_of_the_footer_survives_in_order(self):
+        self.assertTrue(self.text.startswith(BRIEF.rstrip()), self.text[:80])
+        parts = ["You are the L2 orchestrator of this phase (l2-proj-x-p1)",
+                 oc_l2.INLINE_RULES_LINE,
+                 oc_l2.ROLE_LINES[1],
+                 "Report upward with the `l2_report` tool",
+                 oc_l2.CHILD_WAIT_LINE,
+                 oc_l1_serve.HINT_LINE]
+        where = [self.text.index(p) for p in parts]
+        self.assertEqual(where, sorted(where), self.text)
+        self.assertIn(self.INBOX, self.text)
+
+
 if __name__ == "__main__":
     unittest.main()
