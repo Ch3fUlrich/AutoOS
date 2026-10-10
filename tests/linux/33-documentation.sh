@@ -879,6 +879,10 @@ if it "omnigraph gateway policy: static refusal and least-privilege checks (unit
     out="$(python3 tests/test_gateway_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "omnigraph bridge deny audit: every write-capable tool is denied in each opencode block (unit tests)"; then
+    out="$(python3 tests/test_omnigraph_deny_audit.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "cost guard: run and daily budget evaluations (unit tests)"; then
     out="$(python3 tests/test_run_budget.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
