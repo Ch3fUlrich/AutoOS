@@ -56,3 +56,49 @@ def test_partition_wrong_node_type():
     with pytest.raises(SystemExit) as exc_info:
         split_project_graph.partition(records, "dec-only")
     assert "is a Decision, not a Project" in str(exc_info.value)
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self) -> bytes:
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _install_fake_urlopen(monkeypatch, body: bytes):
+    captured: dict = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["req"] = req
+        return _FakeResponse(body)
+
+    monkeypatch.setattr(split_project_graph.urllib.request, "urlopen", fake_urlopen)
+    return captured
+
+
+def test_export_graph_sends_contract_header(monkeypatch):
+    captured = _install_fake_urlopen(monkeypatch, b"")
+    split_project_graph.export_graph("http://x", "tok", "g")
+    req = captured["req"]
+    assert req.full_url == "http://x/graphs/g/export"
+    # urllib capitalises header keys on the Request.
+    assert req.get_header("Omnigraph-http-api") == "0.13"
+    assert req.get_header("Authorization") == "Bearer tok"
+    assert req.get_header("Content-type") == "application/json"
+
+
+def test_mutate_sends_contract_header(monkeypatch):
+    captured = _install_fake_urlopen(monkeypatch, b"{}")
+    split_project_graph.mutate("http://x", "tok", "g", "query q() {}")
+    req = captured["req"]
+    assert req.full_url == "http://x/graphs/g/mutate"
+    assert req.get_header("Omnigraph-http-api") == "0.13"
+    assert req.get_header("Authorization") == "Bearer tok"
+    assert req.get_header("Content-type") == "application/json"

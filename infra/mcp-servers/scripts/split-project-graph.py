@@ -32,6 +32,9 @@ from _omni_env import LOCAL_NET, detect_network  # noqa: E402
 HUB_EDGES = {"DecidedIn", "ConstrainsProject", "AppliesTo", "PartOf", "Tracks"}
 HERE = Path(__file__).resolve().parent.parent  # infra/mcp-servers
 IMAGE = "modernrelay/omnigraph-server:v0.8.1"
+# Omnigraph 0.13.0 answers 400 api_contract_mismatch to any request (except /healthz)
+# that does not carry this header.
+CONTRACT_HEADERS = {"omnigraph-http-api": "0.13"}
 
 
 def load_env() -> dict[str, str]:
@@ -53,7 +56,8 @@ def export_graph(base_url: str, token: str, graph: str) -> list[dict]:
     req = urllib.request.Request(
         f"{base_url}/graphs/{graph}/export",
         data=b"{}",
-        headers={"Authorization": f"Bearer {token}", "content-type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "content-type": "application/json",
+                 **CONTRACT_HEADERS},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=120) as resp:
@@ -104,7 +108,8 @@ def mutate(base_url: str, token: str, graph: str, query: str) -> dict:
     req = urllib.request.Request(
         f"{base_url}/graphs/{graph}/mutate",
         data=json.dumps({"query": query}).encode(),
-        headers={"Authorization": f"Bearer {token}", "content-type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "content-type": "application/json",
+                 **CONTRACT_HEADERS},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=180) as resp:
