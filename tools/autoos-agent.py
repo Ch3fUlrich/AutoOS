@@ -12030,7 +12030,12 @@ def cmd_run(args, cfg: dict) -> int:
         # attempt left is announced. A --free run never reaches the track
         # record (track_entry returns None for it), so a queue timeout costs
         # the route nothing.
-        if args.free and fallthroughs:
+        # AO-SPAWN-COOLDOWN-RETRY seat note: a cooldown retry is a fresh start
+        # too, and it spends no fallthrough — so the gate cannot key on
+        # `fallthroughs` alone. This run's worker record is closed while it naps,
+        # and another --free run claims the freed slot in that window; retrying
+        # without a re-claim would run as cap+1 over policy.free_concurrency.
+        if args.free and (fallthroughs or cooldown_retries):
             queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
             if queue_msg is not None:
                 print("autoos-agent: %s" % queue_msg, file=sys.stderr)

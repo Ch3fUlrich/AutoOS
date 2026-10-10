@@ -7207,6 +7207,92 @@ class CooldownRetryTests(unittest.TestCase):
         self.assertEqual(self.sleeps, [])
         self.assertEqual(rc, 8, out + err)
 
+    def test_a_zero_second_reset_waits_a_beat_and_re_runs_the_same_route(self):
+        # A window the gateway rounds to nothing is still a cooldown: the run
+        # waits the stated 0 s plus the one beat it always adds, and retries.
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1, window="0s")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [1], "0 s stated, 1 s slept")
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free"], out + err)
+
+    def test_a_reset_with_no_unit_or_a_huge_one_falls_through_without_waiting(self):
+        for window in ("7", "100000s"):
+            with self.subTest(window=window):
+                rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                                   window=window)
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(self.sleeps, [])
+                self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"],
+                                 out + err)
+
+
+class FreeCooldownReclaimTests(unittest.TestCase):
+    """AO-SPAWN-COOLDOWN-RETRY, the seat note the L1 confirmed as a real defect:
+    the same-leg retry `continue`s to the top of cmd_run's loop, and the free-slot
+    gate there reads `if args.free and fallthroughs:` — a retry spends no
+    fallthrough, so a --free retry started WITHOUT re-claiming a slot. This run's
+    own worker record is closed during the nap, so another --free run can take the
+    freed slot and the retry then runs as cap+1, over policy.free_concurrency. The
+    gate must run for a cooldown retry exactly as it does for a fallthrough."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.sleeps = []
+
+    def _run(self, route_ids, stops, refuse_claim_at=None, free=True):
+        """The --free cooldown run, with the slot claim and the launch both
+        observed: `claims` records how many launches had happened each time the
+        gate ran, so an ordering claim is a data claim, not a reading of a log."""
+        claims, launches = [], []
+        real_record = self.agent._worker_record_start
+
+        def recording_record(plan, args, directory, attempt=None):
+            launches.append(attempt)
+            return real_record(plan, args, directory, attempt=attempt)
+
+        def fake_wait(provider, cap, directory, **k):
+            if len(claims) + 1 == refuse_claim_at:
+                return 1, True
+            claims.append(len(launches))
+            if k.get("on_free") is not None:
+                k["on_free"]()
+            return 0, False
+
+        over = {"free": free, "free_model": FREE_MODELS[1], "isolate": True}
+        with mock.patch.object(self.agent, "cooldown_sleep", self.sleeps.append):
+            with mock.patch.object(self.agent, "_worker_record_start",
+                                   recording_record):
+                with mock.patch.object(self.agent, "wait_for_free_slot", fake_wait):
+                    rc, out, err, calls, _ = _fallthrough_run(
+                        self, route_ids, stops, args_over=over,
+                        stop_tail=CooldownRetryTests.REAL_TAIL % " (reset after 3s)",
+                        stop_rc=1,
+                        policy={"free_client_models": {"opencode": FREE_MODELS}})
+        return rc, out, err, calls, claims, launches
+
+    def test_the_free_retry_re_claims_its_slot_before_it_launches(self):
+        rc, out, err, calls, claims, launches = self._run(["r-free"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [4], out + err)
+        self.assertEqual(claims, [0, 1],
+                         "a second claim, after launch 1 and before launch 2")
+        self.assertEqual(launches, [1, 2], out + err)
+
+    def test_a_free_retry_that_cannot_re_claim_a_slot_exits_9_without_launching(self):
+        rc, out, err, calls, claims, launches = self._run(
+            ["r-free"], stops=1, refuse_claim_at=2)
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(launches, [1], "the retry never started")
+        self.assertEqual(claims, [0])
+
+    def test_a_non_free_retry_never_touches_the_free_slot_gate(self):
+        rc, out, err, calls, claims, launches = self._run(
+            ["r-free"], stops=1, free=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(claims, [], "no claim, before or after the retry")
+        self.assertEqual(launches, [1, 2], out + err)
+
 
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
                "opencode/muse-spark-1.3-contributor-free",
