@@ -71,6 +71,8 @@ output/cao/
 # Memory-graph sync ledger (tools/sync_memory_graph.py --mark): machine state,
 # must never be committed or a re-run would skip records the graph never got.
 .state/graph-loaded.txt
+.state/graph-load-pending
+.state/graph-load-pending.tmp
 .claude/settings.local.json
 .claude/lane-mcp.local.json
 # Installer-created junctions into .agents/skills (one per skill, guarded by

@@ -38,7 +38,9 @@ runs. A Decision that cites a routing-d-NNN in its own text emits no
 Decision->Decision ``Implements`` edge - no such schema edge exists.
 
 Usage: tools/sync_memory_graph.py > out.ndjson   (then load with omnigraph `load` mode=merge)
-       tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs)
+       tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs;
+                                                   with an attempt marker, mark only the records its
+                                                   "keys" list named)
        tools/sync_memory_graph.py --load          (POST new records to $OMNIGRAPH_BASE_URL/graphs/autoos/load, then --mark)
        tools/sync_memory_graph.py --clear-pending (after an ambiguous --load that did NOT land: drop the attempt marker)
        tools/sync_memory_graph.py --known-slugs FILE --load
@@ -601,16 +603,24 @@ def main(argv=None, root=None, env=None):
         try:
             res = post_load(base_url, token, lines)
         except urllib.error.HTTPError as exc:
-            print(f"ERROR: the omnigraph server rejected the load "
-                  f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
-                  "retry.", file=sys.stderr)
-            # A 4xx rejected the whole load, so nothing landed and a retry is safe.
             if 400 <= exc.code < 500:
+                # A 4xx rejected the whole load, so nothing landed and a retry is safe.
+                print(f"ERROR: the omnigraph server rejected the load "
+                      f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
+                      "retry.", file=sys.stderr)
                 clear_pending(root)
+            else:
+                print(f"ERROR: the omnigraph server rejected the load "
+                      f"(HTTP {exc.code} {exc.reason}); ledger NOT marked. The load "
+                      "may have landed - the attempt marker was kept, so the next "
+                      "--load refuses until you run --mark (it landed) or "
+                      "--clear-pending (it did not).", file=sys.stderr)
             return 1
         except urllib.error.URLError as exc:
             print(f"ERROR: could not reach the omnigraph server "
-                  f"({exc.reason}); ledger NOT marked - fix and retry.",
+                  f"({exc.reason}); ledger NOT marked. The load may have landed - "
+                  "the attempt marker was kept, so the next --load refuses until "
+                  "you run --mark (it landed) or --clear-pending (it did not).",
                   file=sys.stderr)
             return 1
         print("loaded:", load_summary(res), file=sys.stderr)
@@ -621,10 +631,30 @@ def main(argv=None, root=None, env=None):
                   file=sys.stderr)
             return 1
         argv = list(argv) + ["--mark"]
-    if "--mark" in argv:
-        mark(root, ledger_path(root), new)
+        # Clear before the internal --mark: it must mark the WHOLE batch it
+        # just confirmed, not intersect with the marker this same run wrote.
         clear_pending(root)
-        print(f"marked {len(new)} records as loaded", file=sys.stderr)
+    if "--mark" in argv:
+        pending = read_pending(root)
+        if pending is None:
+            mark(root, ledger_path(root), new)
+            print(f"marked {len(new)} records as loaded", file=sys.stderr)
+            return 0
+        keys = pending.get("keys")
+        if not isinstance(keys, list):
+            # {} from read_pending (unreadable) or a dict without "keys": the
+            # marker cannot say which records it covered, so nothing may be
+            # hidden as loaded on its behalf.
+            print("ERROR: attempt marker unreadable; cannot tell which records "
+                  "it covered. Check the graph, then run --clear-pending and "
+                  "re-run --mark.", file=sys.stderr)
+            return 1
+        wanted = set(keys)
+        batch = [rec for rec in new if rec[0] in wanted]
+        mark(root, ledger_path(root), batch)
+        clear_pending(root)
+        print(f"marked {len(batch)} records as loaded (from the attempt marker)",
+              file=sys.stderr)
         return 0
     for _, node, _ in new:
         if node is not None:
