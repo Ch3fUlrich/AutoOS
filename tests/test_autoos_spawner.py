@@ -17965,6 +17965,78 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
                          mcp_server.result(out["id"]).get("text"))
 
 
+class McpReviewBasePlumbingTests(unittest.TestCase):
+    """AO-MCP-REVIEW-BASE: the MCP `spawn` tool carries the CLI's `--review-base
+    SHA` to its argv, validates it as the CLI's arg half does (before any run dir),
+    records it in job.json, and leaves the unknown-rev / no-isolate rc 2 to the CLI."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+    def _spawn(self, **over):
+        return mcp_server.spawn(dict({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                      "card": {"role": "review"}}, **over))
+
+    def test_review_base_reaches_the_cli_argv_when_asked_and_never_otherwise(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "card": {"role": "review"},
+                                         "review_base": "deadbeef"})
+        self.assertEqual(argv[argv.index("--review-base") + 1], "deadbeef")
+        self.assertNotIn("--review-base", mcp_server.build_argv({"task": "t", "tier": 2})[0])
+
+    def test_a_blank_or_option_shaped_base_is_refused_before_a_run_dir_exists(self):
+        # A blank value or a leading '-' is what `resolve_review_base` answers None
+        # for, and an option-shaped one would reach the argv as a flag.
+        for bad in ("", "   ", "-x", "--isolate", "two words", "!!", "a" * 65):
+            with self.subTest(bad=bad):
+                self.assertIn("review_base", self._spawn(review_base=bad)["error"])
+        self.assertEqual(os.listdir(mcp_server.state_root()) if os.path.isdir(
+            mcp_server.state_root()) else [], [])
+
+    def test_a_revision_range_is_refused_early_as_text_not_a_traceback(self):
+        # S5-FIX1: `..`/`...` passes the old rev regex (it allowed `.`) but is a
+        # RANGE, not one rev token - so refuse it here, before a run dir, in text.
+        for bad in ("HEAD~1..HEAD", "HEAD...HEAD", "a..b"):
+            with self.subTest(bad=bad):
+                self.assertIn("review_base", mcp_server.review_base_refusal(bad))
+                self.assertIn("review_base", self._spawn(review_base=bad)["error"])
+        self.assertEqual(os.listdir(mcp_server.state_root()) if os.path.isdir(
+            mcp_server.state_root()) else [], [])
+
+    def test_a_spawn_records_the_base_in_job_json(self):
+        # Not only in the runner-private record: job.json's `request` carries it.
+        out = self._spawn(review_base="HEAD")
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["review_base"], "HEAD")
+        self.assertIn("--review-base", job["argv"])
+
+    def test_an_unknown_base_surfaces_the_cli_rc_2_and_no_isolate_also_does(self):
+        # A review role gets isolation, so an unknown rev is the CLI's own rc 2.
+        self.assertIn("not a reachable commit",
+                      self._spawn(review_base="f00d" * 8)["error"])
+        self.assertIn("--review-base needs --isolate",
+                      self._spawn(card={"role": "orchestrate"},
+                                  review_base="HEAD")["error"])
+
+    def test_the_spawn_tool_schema_and_docstring_advertise_the_param(self):
+        # R-orch-11: a param absent from the advertised schema names nothing.
+        import asyncio
+        if not importlib.util.find_spec("mcp"):
+            self.skipTest("the mcp package is not installed")
+        tool = [t for t in asyncio.run(mcp_server.build_server().list_tools())
+                if t.name == "spawn"][0]
+        self.assertIn("review_base", tool.inputSchema["properties"])
+        self.assertIn("review_base", tool.description)
+
+
 class FamilyFenceRecordTests(unittest.TestCase):
     """FAMILYFENCE, the two places a new exit code has to land the same moment it
     is added: the docstring table every caller reads (R-orch-11) and the track
@@ -23703,6 +23775,35 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
         subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
         subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"], check=True)
         return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
+
+    def test_resolve_review_base_refuses_a_multiline_range_output(self):
+        # S5-FIX1: a revision range is ONE token to the caller but rev-parse answers
+        # it with 3-4 (some `^`-prefixed) lines; only an exact pair of full shas
+        # names the two commits. A stub returning 3 or 4 valid shas is not a pair.
+        sha = lambda i: "%040x" % i
+        for stdout in ("%s\n%s\n%s\n" % (sha(1), sha(2), sha(3)),
+                       "%s\n%s\n%s\n%s\n" % (sha(1), sha(2), sha(3), sha(4))):
+            fake = mock.Mock(returncode=0, stdout=stdout)
+            with mock.patch.object(self.cli.subprocess, "run", return_value=fake):
+                self.assertIsNone(self.cli.resolve_review_base("r", "HEAD~1..HEAD"))
+
+    def test_a_revision_range_base_refuses_cleanly_at_the_cli(self):
+        # The crash was CLI-level too: a range reached resolve_review_base, produced
+        # a malformed pair, and the stamp `"… %s HEAD %s" % pair` raised TypeError ->
+        # traceback, rc 1. Now it is the existing clean rc 2 refusal, no traceback.
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        for base in ("HEAD~1..HEAD", "HEAD...HEAD"):
+            with self.subTest(base=base):
+                p = subprocess.run([sys.executable, str(AGENT), "run", "--dry-run",
+                                    "--client", "qwen", "--isolate",
+                                    "--review-base", base, "x"],
+                                   cwd=root, env=clean_env(AUTOOS_STATE_DIR=root),
+                                   capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL)
+                self.assertEqual(p.returncode, 2, p.stderr)
+                self.assertIn("not a reachable commit", p.stderr)
+                self.assertNotIn("Traceback", p.stdout + p.stderr)
 
     def test_the_seat_holds_the_diff_as_a_file_in_its_one_commit(self):
         cli, root, base, head = self.cli, *self._repo()
