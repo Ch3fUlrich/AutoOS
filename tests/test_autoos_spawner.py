@@ -9887,6 +9887,25 @@ class EvidenceGateTests(unittest.TestCase):
             self.assertIn("outside the repo", report["cross_family"]["detail"], value)
             self.assertFalse(report["cross_family"]["ok"], value)
 
+    def test_a_hostile_evidence_path_refuses_the_seat_and_both_commands(self):
+        # P2-FIX2: an unreadable `evidence=` value is a printed refusal that exits 1 on the
+        # existing non-ready path for BOTH commands -- not a traceback that also exits 1.
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        Path(ev, "big.md").write_bytes((self.ACCEPT + "q" * 2 ** 21).encode())
+        Path(ev, "bin.md").write_bytes(b"\xff\xfe VERDICT: ACCEPT\n")
+        os.symlink("nowhere.md", Path(ev, "dangling.md"))
+        rec = os.path.join(self.root, "rec.md")
+        ready = ["ready", rec, "--branch", "b", "--sha", "0" * 40, "--repo", self.root,
+                 "--inbox", os.path.join(self.root, "inbox"), "--registry", self.registry_path]
+        for rel, why in ((ev + "/a\x00b.md", "evidence path invalid"), (ev, "EISDIR"),
+                         (ev + "/" + "s" * 5000, "ENAMETOOLONG"), (ev + "/big.md", "EFBIG"),
+                         (ev + "/bin.md", "UnicodeDecode"), (ev + "/dangling.md", "missing")):
+            with self.subTest(rel=rel[-24:]), io.open(rec, "w", encoding="utf-8") as fh:
+                fh.write(CROSS_FAMILY_LINE + " evidence=%s\n" % rel)
+            with contextlib.redirect_stdout(out := io.StringIO()):
+                rc = [self.agent.main(ready), self.agent.main(["review-status", rec])]
+            self.assertEqual((rc, why in out.getvalue()), ([1, 1], True), out.getvalue())
+
     def test_no_evidence_field_behaves_exactly_as_before(self):
         report = self.agent.review_status("\n".join((CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
                                                       FINAL_LINE)) + "\n",

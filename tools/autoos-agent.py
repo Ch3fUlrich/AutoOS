@@ -266,6 +266,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import errno
 import io
 import json
 import os
@@ -4834,6 +4835,7 @@ def is_final_reviewer(spelling):
 # P2/G1a: `evidence=<path>` points at the seat's own answer, so a READY claim in the
 # record is checked against the file the reviewer wrote. No field, no change of behaviour.
 EVIDENCE_DIR = os.path.join("logs", "briefs", "evidence")
+EVIDENCE_MAX_BYTES = 1 << 20  # P2-FIX2: the gate reads a seat's answer, not a disk
 
 
 def _resolve_evidence_path(root, raw):
@@ -4863,14 +4865,23 @@ def _evidence_reason(entry, root):
     raw = (entry.get("evidence") or "").strip()
     if not raw:
         return None
-    path, refused = _resolve_evidence_path(root or os.getcwd(), raw)
+    # P2-FIX2: attacker text from a lane record, and the syscalls below raise on it.
+    try:
+        path, refused = _resolve_evidence_path(root or os.getcwd(), raw)
+    except (ValueError, OSError) as exc:
+        return "evidence path invalid: %s" % type(exc).__name__
     if refused:
         return refused
     try:
-        with io.open(path, encoding="utf-8", errors="replace") as fh:
-            parsed = seat_verdict.parse_verdict(fh.read())
-    except OSError:
-        return "evidence file missing: %s" % raw
+        with io.open(path, encoding="utf-8") as fh:
+            text = fh.read(EVIDENCE_MAX_BYTES + 1)
+        if len(text) > EVIDENCE_MAX_BYTES:
+            raise OSError(errno.EFBIG, "evidence over the cap")
+    except (ValueError, OSError) as exc:
+        why = errno.errorcode.get(getattr(exc, "errno", None)) or type(exc).__name__
+        return ("evidence file missing: %s" % raw if why == "ENOENT"
+                else "evidence unreadable: %s" % why)
+    parsed = seat_verdict.parse_verdict(text)
     if not parsed["valid"]:
         return "evidence invalid: %s" % parsed["reason"]
     word = (seat_verdict.verdict_word(entry.get("verdict")) or "").upper()
