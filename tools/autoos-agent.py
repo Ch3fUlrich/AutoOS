@@ -272,6 +272,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime
+import errno
 import io
 import json
 import os
@@ -311,6 +312,7 @@ import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b:
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
+import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2399,7 +2401,8 @@ def fence_sandbox_push(sandbox: str) -> None:
     os.chmod(path, 0o755)
 
 
-def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, base_line: str = "") -> str:
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False,
+                        base_line: str = "", stamp_base: bool = True) -> str:
     """The lines prepended to the task text of an --isolate run.
 
     SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
@@ -2409,6 +2412,8 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, b
     Item 4 adds the third line a research run needs: an edit is not the
     deliverable, and a worker that is never told so will helpfully make one.
     P1: a review seat is pointed at that file - its own history cannot resolve shas.
+    P2/G1b: `stamp_base=False` says the base line is quoted by the seat template
+    instead, so one prompt never carries the same proof line twice.
     """
     lines = ("Your working directory %s is your only writable checkout; "
              "never cd, git -C or write into %s or any other path outside it.\n"
@@ -2420,10 +2425,11 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, b
                   "changing nothing is success - do not edit, commit or "
                   "reorganise anything; read and report.")
     if base_line:
-        lines += ("\n%s\nThe change under review is written to %s - read that file; "
+        stated = base_line.strip() + "\n" if stamp_base else ""
+        lines += ("\n%sThe change under review is written to %s - read that file; "
                   "`git diff`/`git show` on those shas name nothing here: this seat "
                   "is a one-commit snapshot."
-                  % (base_line, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
+                  % (stated, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
     return lines
 
 
@@ -4439,12 +4445,12 @@ def review_run_refusal(review: dict | None):
 # REVGATE2F (operator 2026-09-30): one line is one SEAT, and a ready lane needs
 # two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
-REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict")
+REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
                             # vocabulary's OPEN finding and stays refused.
-                            "ship"))
+                            "ship", seat_verdict.READY_TOKEN))  # AO-SEAT-VERDICT-GRAMMAR
 # The final check is the operator's unchanged decision (Q-003 2026-09-27): a
 # cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
 # registry route -- it is the orchestrator's own interactive model -- so this one
@@ -4457,7 +4463,7 @@ FINAL_REVIEWER = "sonnet"
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
-                     "verdict=<ready|pass|ship|lgtm|...>")
+                     "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>]")
 
 
 def _family_of_one_spelling(name, registry):
@@ -4870,15 +4876,101 @@ def is_final_reviewer(spelling):
     return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
 
 
-def _review_entry_verdict(entry):
-    """``(ok, reason)`` for one entry's verdict field."""
-    verdict = (entry.get("verdict") or "").strip()
-    if verdict.lower() in READY_VERDICTS:
-        return True, None
-    return False, "verdict %s" % (verdict or "missing")
+# P2/G1a: `evidence=<path>` points at the seat's own answer, so a READY claim in the
+# record is checked against the file the reviewer wrote. No field, no change of behaviour.
+EVIDENCE_DIR = os.path.join("logs", "briefs", "evidence")
+EVIDENCE_MAX_BYTES = 1 << 20  # P2-FIX2: the gate reads a seat's answer, not a disk
 
 
-def _cross_family_seat(entry, registry):
+def _resolve_evidence_path(root, raw):
+    """`(path, None)` for an evidence file the repo owns, `(None, reason)` otherwise.
+
+    A `..` in any component and any realpath that leaves the repo — or the evidence dir
+    under it — is refused: a gate that reads whatever file a record names is a file
+    reader, not a gate.
+    """
+    parts = [p for p in re.split(r"[\\/]+", raw) if p]
+    if not parts or ".." in parts:
+        return None, "evidence path outside the repo: %s" % raw
+    candidate = raw if os.path.isabs(raw) else os.path.join(root, *parts)
+    real = os.path.normcase(os.path.realpath(candidate))
+    for allowed in (os.path.realpath(root),
+                    os.path.realpath(os.path.join(root, EVIDENCE_DIR))):
+        allowed = os.path.normcase(allowed)
+        if real == allowed or real.startswith(allowed.rstrip(os.sep) + os.sep):
+            return candidate, None
+    return None, "evidence path outside the repo: %s" % raw
+
+
+def _evidence_reason(entry, root):
+    """Why this entry's evidence file does not back its verdict, or None when it does:
+    it must sit inside the repo, be readable, be a valid `parse_verdict` answer, and say
+    the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose."""
+    raw = (entry.get("evidence") or "").strip()
+    if not raw:
+        return None
+    # P2-FIX2: attacker text from a lane record, and the syscalls below raise on it.
+    try:
+        path, refused = _resolve_evidence_path(root or os.getcwd(), raw)
+    except (ValueError, OSError) as exc:
+        return "evidence path invalid: %s" % type(exc).__name__
+    if refused:
+        return refused
+    # P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): fd-only read — a fifo opened blocking hangs
+    # the gate forever and a raced symlink misdirects it; O_NONBLOCK|O_NOFOLLOW fall
+    # back to 0 where absent (Windows import), the cap is st_size AND bytes read.
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "evidence not a regular file"
+        if st.st_size > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        chunks, total = [], 0
+        while total <= EVIDENCE_MAX_BYTES:
+            data = os.read(fd, min(EVIDENCE_MAX_BYTES + 1 - total, 1 << 16))
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+        if total > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        text = b"".join(chunks).decode("utf-8")
+    except (ValueError, OSError) as exc:
+        why = errno.errorcode.get(getattr(exc, "errno", None)) or type(exc).__name__
+        # ELOOP (O_NOFOLLOW) and ENXIO (socket file) raise at open, before fstat.
+        return ("evidence file missing: %s" % raw if why == "ENOENT" else
+                "evidence not a regular file" if why in ("ELOOP", "ENXIO")
+                else "evidence unreadable: %s" % why)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    parsed = seat_verdict.parse_verdict(text)
+    if not parsed["valid"]:
+        return "evidence invalid: %s" % parsed["reason"]
+    word = (seat_verdict.verdict_word(entry.get("verdict")) or "").upper()
+    if parsed["verdict"] != ("ACCEPT" if word.lower() in READY_VERDICTS else word):
+        return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
+    return None
+
+
+def _review_entry_verdict(entry, root=None):
+    """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
+    (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
+    HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
+    names an `evidence=` file, that file has to say the same thing (P2/G1a)."""
+    raw = (entry.get("verdict") or "").strip()
+    if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
+        return False, "verdict %s" % (raw or "missing")
+    refused = _evidence_reason(entry, root)
+    if refused:
+        return False, refused
+    return True, None
+
+
+def _cross_family_seat(entry, registry, root=None):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
@@ -4907,14 +4999,14 @@ def _cross_family_seat(entry, registry):
         # seat is refused and the mismatch names both sides.
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
-    ok, reason = _review_entry_verdict(entry)
+    ok, reason = _review_entry_verdict(entry, root)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
             "verdict": (entry.get("verdict") or "").strip()}, None
 
 
-def _cross_family_review(entries, registry):
+def _cross_family_review(entries, registry, root=None):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -4932,7 +5024,7 @@ def _cross_family_review(entries, registry):
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
     reasons, seats = [], []
     for entry in wanted:
-        seat, reason = _cross_family_seat(entry, registry)
+        seat, reason = _cross_family_seat(entry, registry, root)
         if reason is not None:
             reasons.append(reason)
             continue
@@ -4956,7 +5048,7 @@ def _cross_family_review(entries, registry):
             "seats": seats, "detail": detail}
 
 
-def _final_review(entries):
+def _final_review(entries, root=None):
     """The record's sign-off: a kind=final entry naming the final checker."""
     wanted = [e for e in entries if e.get("kind") == "final"]
     if not wanted:
@@ -4969,7 +5061,7 @@ def _final_review(entries):
                           % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
     reasons = []
     for entry in named:
-        ok, reason = _review_entry_verdict(entry)
+        ok, reason = _review_entry_verdict(entry, root)
         if ok:
             return {"ok": True,
                     "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
@@ -4977,7 +5069,7 @@ def _final_review(entries):
     return {"ok": False, "detail": "; ".join(reasons)}
 
 
-def review_status(text, registry):
+def review_status(text, registry, root=None):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -5002,8 +5094,8 @@ def review_status(text, registry):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
-    cross = _cross_family_review(entries, registry)
-    final = _final_review(entries)
+    cross = _cross_family_review(entries, registry, root)
+    final = _final_review(entries, root)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
             "ready": cross["ok"] and final["ok"],
@@ -5102,7 +5194,7 @@ def cmd_review_status(args) -> int:
         print("review-status: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry)
+    report = review_status(text, registry, root=os.getcwd())
     print_review_report(label, report)
     return 0 if report["ready"] else 1
 
@@ -5504,7 +5596,7 @@ def cmd_ready(args) -> int:
         print("ready: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry)
+    report = review_status(text, registry, root=args.repo or os.getcwd())
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")
@@ -6374,9 +6466,18 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                                         "in %s" % (args.review_base, sandbox["source"]))
             sandbox["review_base"] = pair
             sandbox["base_line"] = "sandbox base: %s HEAD %s" % pair
-        cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
-                                      read_only=bool(route.get("read_only")),
-                                      base_line=sandbox.get("base_line", "")) + "\n" + cmd[-1]
+        _base_line = sandbox.get("base_line", "")
+        # P2/G1b: `--card role=review --review-base` is briefed through the ONE seat
+        # template, so the answer grammar and the proof line are standard. The template
+        # quotes the base line itself, so the prefix must not stamp it a second time.
+        _card = route.get("card") or _parsed_card_fields(getattr(args, "card", None)) or {}
+        _seat = bool(_base_line) and _card_asks_review(_card)
+        cmd[-1] = (isolate_task_prefix(sandbox["path"], sandbox["source"],
+                                       read_only=bool(route.get("read_only")),
+                                       base_line=_base_line, stamp_base=not _seat) + "\n"
+                   + (seat_verdict.seat_prompt(str(_card.get("angle") or
+                                                 "cross-family review of the change"),
+                                               cmd[-1], _base_line) if _seat else cmd[-1]))
     if client.name == "opencode":
         # WSLSHELL (SB-B): opencode's own config schema carries a top-level
         # `shell` ("Default shell to use for terminal"), which its resolver

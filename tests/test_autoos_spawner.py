@@ -20,6 +20,7 @@ import subprocess
 import sys
 import shutil
 import signal
+import socket
 import tempfile
 import threading
 import time
@@ -10046,6 +10047,148 @@ class ReviewStatusTests(unittest.TestCase):
                 self.assertIn("same family", report["cross_family"]["detail"])
 
 
+class EvidenceGateTests(unittest.TestCase):
+    """P2/G1a: the record's `verdict=` is a CLAIM, `evidence=<path>` is the PROOF.
+
+    The gate reads that file through `parse_verdict` and refuses the seat unless it is a
+    valid verdict saying the word the entry claims. No `evidence=` changes nothing (every
+    record written before the field exists); a path that leaves the repo is refused."""
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: the hint could be shorter.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
+    REL = "logs/briefs/evidence/seat.md"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def status(self, rel=REL, text=ACCEPT, write=True, verdict="verdict=ACCEPT",
+               final=FINAL_LINE):
+        """One seat line carrying `evidence=rel`, over a lane that is otherwise ready."""
+        if write:
+            path = os.path.join(self.root, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with io.open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        entry = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
+                 "reviewer=omniroute/muse %s evidence=%s" % (verdict, rel))
+        return self.agent.review_status("\n".join((entry, CROSS_FAMILY_LINE_2, final)) + "\n",
+                                        self.registry, root=self.root)
+
+    def test_evidence_that_says_the_same_word_counts_as_a_seat(self):
+        self.assertTrue(self.status()["ready"], self.status()["cross_family"]["detail"])
+
+    def test_evidence_that_says_reject_under_a_line_that_says_ready_is_no_seat(self):
+        report = self.status(text=self.REJECT)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence verdict REJECT != entry ACCEPT",
+                      report["cross_family"]["detail"])
+        # The same proof under the Sonnet final: the claim never gets the last word.
+        report = self.status(text=self.REJECT, verdict="verdict=READY",
+                             final="AutoOS-Review: kind=final reviewer=sonnet "
+                                   "verdict=READY evidence=%s" % self.REL)
+        self.assertIn("evidence verdict REJECT != entry READY", report["final"]["detail"])
+
+    def test_an_evidence_file_the_grammar_or_the_disk_refuses_is_no_seat(self):
+        for kwargs, why in (({"text": "I looked at it.\nVERDICT: ACCEPT\n"},
+                             "evidence invalid:"),
+                            ({"rel": "evidence/gone.md", "write": False},
+                             "evidence file missing")):
+            report = self.status(**kwargs)
+            self.assertIn(why, report["cross_family"]["detail"], kwargs)
+            self.assertFalse(report["ready"], report)
+
+    def test_an_evidence_path_that_escapes_the_repo_is_refused(self):
+        outside = os.path.join(os.path.dirname(self.root), "outside.md")
+        with io.open(outside, "w", encoding="utf-8") as fh:
+            fh.write(self.ACCEPT)
+        self.addCleanup(os.unlink, outside)
+        for value in ("../outside.md", "logs/../../outside.md", outside):
+            report = self.status(value, write=False)
+            self.assertIn("outside the repo", report["cross_family"]["detail"], value)
+            self.assertFalse(report["cross_family"]["ok"], value)
+
+    def test_a_hostile_evidence_path_refuses_the_seat_and_both_commands(self):
+        # P2-FIX2: an unreadable `evidence=` value is a printed refusal that exits 1 on the
+        # existing non-ready path for BOTH commands -- not a traceback that also exits 1.
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        Path(ev, "big.md").write_bytes((self.ACCEPT + "q" * 2 ** 21).encode())
+        Path(ev, "bin.md").write_bytes(b"\xff\xfe VERDICT: ACCEPT\n")
+        os.symlink("nowhere.md", Path(ev, "dangling.md"))
+        rec = os.path.join(self.root, "rec.md")
+        ready = ["ready", rec, "--branch", "b", "--sha", "0" * 40, "--repo", self.root,
+                 "--inbox", os.path.join(self.root, "inbox"), "--registry", self.registry_path]
+        for rel, why in ((ev + "/a\x00b.md", "evidence path invalid"), (ev, "not a regular file"),
+                         (ev + "/" + "s" * 5000, "ENAMETOOLONG"), (ev + "/big.md", "too large"),
+                         (ev + "/bin.md", "UnicodeDecode"), (ev + "/dangling.md", "not a regular file")):
+            with self.subTest(rel=rel[-24:]), io.open(rec, "w", encoding="utf-8") as fh:
+                fh.write(CROSS_FAMILY_LINE + " evidence=%s\n" % rel)
+            with contextlib.redirect_stdout(out := io.StringIO()):
+                rc = [self.agent.main(ready), self.agent.main(["review-status", rec])]
+            self.assertEqual((rc, why in out.getvalue()), ([1, 1], True), out.getvalue())
+
+    def test_no_evidence_field_behaves_exactly_as_before(self):
+        report = self.agent.review_status("\n".join((CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
+                                                      FINAL_LINE)) + "\n",
+                                          self.registry, root=self.root)
+        self.assertTrue(report["ready"], report)
+        # The hint is the documentation a person reads when the gate refuses.
+        self.assertIn("[evidence=<path>]", report["hint"])
+
+    def test_decoration_on_the_entry_field_agrees_with_the_evidence_file(self):
+        # G3 at the gate: `verdict=**ACCEPT.**` and an answer of `VERDICT: ACCEPT` are one
+        # word through the shared normaliser, so the proof matches the claim.
+        self.assertTrue(self.status(verdict="verdict=**ACCEPT.**")["ready"])
+
+    # --- P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): the non-regular-file class; the 337b5f27
+    # repro was a fifo HANGING the gate, so every case runs in a thread joined at 10 s.
+    def ev_path(self, name):
+        os.makedirs(p := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        return os.path.join(p, name)
+
+    def guarded(self, name, write=False):
+        box = []
+        t = threading.Thread(target=lambda: box.append(self.status(
+            rel="logs/briefs/evidence/" + name, write=write)), daemon=True)
+        t.start(); t.join(10)
+        self.assertFalse(t.is_alive(), "the gate hung on %s" % name)
+        return box[0]["cross_family"]["detail"]
+
+    @unittest.skipIf(os.name == "nt", "os.mkfifo/AF_UNIX special files are POSIX-only")
+    def test_special_files_and_the_cap_refuse_fast_instead_of_hanging(self):
+        NOT, BIG = "not a regular file", "evidence too large"
+        cases = []
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.ev_path("fifo.md")); cases.append(("fifo.md", NOT))
+        if getattr(socket, "AF_UNIX", None):
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sk.bind(self.ev_path("sock.md")); cases.append(("sock.md", NOT))
+            except OSError:
+                pass
+        if hasattr(os, "symlink"):  # realpath may refuse it first; either is fast
+            os.symlink("/dev/zero", self.ev_path("zero.md")); cases.append(("zero.md", "outside the repo"))
+        os.makedirs(self.ev_path("dir")); cases.append(("dir", NOT))
+        for name, why in cases:
+            with self.subTest(name=name):
+                self.assertIn(why, self.guarded(name))
+        with open(self.ev_path("big.md"), "wb") as fh:  # sparse: st_size honest
+            fh.truncate(self.agent.EVIDENCE_MAX_BYTES + 1)
+        self.assertIn(BIG, self.guarded("big.md"))
+        # fstat swears 4 bytes while the patched os.read pours past the cap —
+        # the bounded loop must refuse anyway, never trusting st_size.
+        lie = os.stat_result((0o100644, 1, 1, 1, 0, 0, 4, 0, 0, 0))
+        with mock.patch.object(os, "fstat", return_value=lie), \
+             mock.patch.object(os, "read", side_effect=lambda fd, n: b"q" * n):
+            self.assertIn(BIG, self.guarded("seat.md", write=True))
+
+
 class ReadyCommandTests(unittest.TestCase):
     """REVGATE (S2, rule -> code): the `ready` step is code, not memory.
 
@@ -10204,6 +10347,25 @@ class ReadyCommandTests(unittest.TestCase):
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
     NOT_PUSHED_SHA = "0" * 40
+
+    def test_ready_fails_closed_when_the_evidence_says_reject_and_the_line_says_ready(self):
+        # P2/G1a through the REAL CLI: `ready` is the same gate as `review-status`, so a
+        # seat whose answer file says REJECT under a line saying PASS is no seat, and the
+        # inbox keeps nothing. The claim in the record no longer gets the last word.
+        repo, sha = self.make_repo()
+        rel = "logs/briefs/evidence/seat-muse.md"
+        path = os.path.join(repo, *(rel.split("/")))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n")
+        inbox = self.make_inbox("")
+        rc, out, _err = self.ready(
+            self.write_record(CROSS_FAMILY_LINE + " evidence=" + rel,
+                              CROSS_FAMILY_LINE_2, FINAL_LINE), repo, sha, inbox)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("evidence verdict REJECT != entry PASS", out)
+        self.assertIn("ready: no", out)
+        self.assertEqual(self.read_inbox(inbox), "")
 
     def test_main_ci_gate_is_reached_through_a_fake_gh_runner(self):
         """T0-FREEZE-2 F3: the sixth gate runs for real — no main_ci_status stub.
@@ -23362,12 +23524,36 @@ class P1ReviewBaseSeatTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(os.path.join(tmp, "sandbox")),
                              "refused before anything was built")
 
-    def _args(self, review_base):
-        return argparse.Namespace(client="opencode", tier=2, card=None, auto=True,
+    def _args(self, review_base, card=None):
+        return argparse.Namespace(client="opencode", tier=2, card=card, auto=True,
                                   task="review the diff", free=False, isolate=True,
                                   joinable=False, model=None, clean=False, title=None,
                                   allow_training=False, max_depth=None, lean=False,
                                   review_base=review_base, free_model=self.cli.DEFAULT_FREE_MODEL)
+
+    # P2/G1b (FAILS before the wiring): `seat_prompt` shipped in P1 uncalled, so the seat
+    # answered in whatever grammar it felt like. A `--card role=review` run with
+    # `--review-base` now passes its task through the ONE template, base line quoted once.
+    def test_a_review_card_answers_on_the_seat_template_with_one_base_stamp(self):
+        agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                                "providers": {"omniroute": {"models": {"x": {}}}}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            plan = agent.build_plan(self._args("HEAD", card="role=review"), cfg)
+            prompt = plan["cmd"][-1]
+            self.assertEqual(1, prompt.count("sandbox base:"), prompt)
+            for needle in ("You are an independent review seat", "Review criteria, verbatim:",
+                           "VERDICT: ACCEPT|REJECT|HOLD", "review the diff",
+                           os.path.join(plan["sandbox"]["path"], agent.REVIEW_DIFF_FILE)):
+                self.assertIn(needle, prompt)
+            # An implement seat with the same --review-base keeps P1's prefix: the seat
+            # grammar is for review cards, not a new mandatory block for every run.
+            plain_plan = agent.build_plan(self._args("HEAD"), cfg)
+            plain = plain_plan["cmd"][-1]
+            self.assertEqual(1, plain.count("sandbox base:"), plain)
+            self.assertNotIn("independent review seat", plain)
+            self.assertIn(os.path.join(plain_plan["sandbox"]["path"],
+                                       agent.REVIEW_DIFF_FILE), plain)
 
     def test_build_plan_stamps_prompt_and_record_and_refuses_an_unknown_base(self):
         agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
