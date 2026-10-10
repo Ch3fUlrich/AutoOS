@@ -20,6 +20,7 @@ import subprocess
 import sys
 import shutil
 import signal
+import socket
 import tempfile
 import threading
 import time
@@ -9897,9 +9898,9 @@ class EvidenceGateTests(unittest.TestCase):
         rec = os.path.join(self.root, "rec.md")
         ready = ["ready", rec, "--branch", "b", "--sha", "0" * 40, "--repo", self.root,
                  "--inbox", os.path.join(self.root, "inbox"), "--registry", self.registry_path]
-        for rel, why in ((ev + "/a\x00b.md", "evidence path invalid"), (ev, "EISDIR"),
-                         (ev + "/" + "s" * 5000, "ENAMETOOLONG"), (ev + "/big.md", "EFBIG"),
-                         (ev + "/bin.md", "UnicodeDecode"), (ev + "/dangling.md", "missing")):
+        for rel, why in ((ev + "/a\x00b.md", "evidence path invalid"), (ev, "not a regular file"),
+                         (ev + "/" + "s" * 5000, "ENAMETOOLONG"), (ev + "/big.md", "too large"),
+                         (ev + "/bin.md", "UnicodeDecode"), (ev + "/dangling.md", "not a regular file")):
             with self.subTest(rel=rel[-24:]), io.open(rec, "w", encoding="utf-8") as fh:
                 fh.write(CROSS_FAMILY_LINE + " evidence=%s\n" % rel)
             with contextlib.redirect_stdout(out := io.StringIO()):
@@ -9918,6 +9919,47 @@ class EvidenceGateTests(unittest.TestCase):
         # G3 at the gate: `verdict=**ACCEPT.**` and an answer of `VERDICT: ACCEPT` are one
         # word through the shared normaliser, so the proof matches the claim.
         self.assertTrue(self.status(verdict="verdict=**ACCEPT.**")["ready"])
+
+    # --- P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): the non-regular-file class; the 337b5f27
+    # repro was a fifo HANGING the gate, so every case runs in a thread joined at 10 s.
+    def ev_path(self, name):
+        os.makedirs(p := os.path.join(self.root, "logs", "briefs", "evidence"), exist_ok=True)
+        return os.path.join(p, name)
+
+    def guarded(self, name, write=False):
+        box = []
+        t = threading.Thread(target=lambda: box.append(self.status(
+            rel="logs/briefs/evidence/" + name, write=write)), daemon=True)
+        t.start(); t.join(10)
+        self.assertFalse(t.is_alive(), "the gate hung on %s" % name)
+        return box[0]["cross_family"]["detail"]
+
+    def test_special_files_and_the_cap_refuse_fast_instead_of_hanging(self):
+        NOT, BIG = "not a regular file", "evidence too large"
+        cases = []
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.ev_path("fifo.md")); cases.append(("fifo.md", NOT))
+        if getattr(socket, "AF_UNIX", None):
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                sk.bind(self.ev_path("sock.md")); cases.append(("sock.md", NOT))
+            except OSError:
+                pass
+        if hasattr(os, "symlink"):  # realpath may refuse it first; either is fast
+            os.symlink("/dev/zero", self.ev_path("zero.md")); cases.append(("zero.md", "outside the repo"))
+        os.makedirs(self.ev_path("dir")); cases.append(("dir", NOT))
+        for name, why in cases:
+            with self.subTest(name=name):
+                self.assertIn(why, self.guarded(name))
+        with open(self.ev_path("big.md"), "wb") as fh:  # sparse: st_size honest
+            fh.truncate(self.agent.EVIDENCE_MAX_BYTES + 1)
+        self.assertIn(BIG, self.guarded("big.md"))
+        # fstat swears 4 bytes while the patched os.read pours past the cap —
+        # the bounded loop must refuse anyway, never trusting st_size.
+        lie = os.stat_result((0o100644, 1, 1, 1, 0, 0, 4, 0, 0, 0))
+        with mock.patch.object(os, "fstat", return_value=lie), \
+             mock.patch.object(os, "read", side_effect=lambda fd, n: b"q" * n):
+            self.assertIn(BIG, self.guarded("seat.md", write=True))
 
 
 class ReadyCommandTests(unittest.TestCase):

@@ -4872,15 +4872,37 @@ def _evidence_reason(entry, root):
         return "evidence path invalid: %s" % type(exc).__name__
     if refused:
         return refused
+    # P2-FIX3 (AO-SEAT-VERDICT-GRAMMAR): fd-only read — a fifo opened blocking hangs
+    # the gate forever and a raced symlink misdirects it; O_NONBLOCK|O_NOFOLLOW fall
+    # back to 0 where absent (Windows import), the cap is st_size AND bytes read.
+    fd = None
     try:
-        with io.open(path, encoding="utf-8") as fh:
-            text = fh.read(EVIDENCE_MAX_BYTES + 1)
-        if len(text) > EVIDENCE_MAX_BYTES:
-            raise OSError(errno.EFBIG, "evidence over the cap")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_NONBLOCK", 0))
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "evidence not a regular file"
+        if st.st_size > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        chunks, total = [], 0
+        while total <= EVIDENCE_MAX_BYTES:
+            data = os.read(fd, min(EVIDENCE_MAX_BYTES + 1 - total, 1 << 16))
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+        if total > EVIDENCE_MAX_BYTES:
+            return "evidence too large"
+        text = b"".join(chunks).decode("utf-8")
     except (ValueError, OSError) as exc:
         why = errno.errorcode.get(getattr(exc, "errno", None)) or type(exc).__name__
-        return ("evidence file missing: %s" % raw if why == "ENOENT"
+        # ELOOP (O_NOFOLLOW) and ENXIO (socket file) raise at open, before fstat.
+        return ("evidence file missing: %s" % raw if why == "ENOENT" else
+                "evidence not a regular file" if why in ("ELOOP", "ENXIO")
                 else "evidence unreadable: %s" % why)
+    finally:
+        if fd is not None:
+            os.close(fd)
     parsed = seat_verdict.parse_verdict(text)
     if not parsed["valid"]:
         return "evidence invalid: %s" % parsed["reason"]
