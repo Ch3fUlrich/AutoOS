@@ -1409,14 +1409,29 @@ class LaneFromThePrivateRecord(TempCase):
     record the SPAWNER wrote — the one store a worker cannot rewrite (R-orch-17).
     A `lane` in job.json is a label the worker could paint, and names nothing."""
 
-    def kill(self, lane=LANE):
-        root = os.path.join(self.state, "kill")
+    def kill(self, lane=LANE, state=None):
+        root = os.path.join(state or self.state, "kill")
         os.makedirs(root, exist_ok=True)
         write_text(os.path.join(root, RUN + ".json"), json.dumps({"lane": lane}))
 
-    def died(self, **job_over):
+    def died(self, state=None, **job_over):
         job = {"run_id": RUN, "task": TASK, "cwd": "/repo", "started": NOW}
-        make_record(self.state, exit_json={"rc": 1}, job_json=dict(job, **job_over))
+        make_record(state or self.state, exit_json={"rc": 1}, job_json=dict(job, **job_over))
+
+    def test_plan_reads_the_record_lane_from_the_state_root_it_was_given(self):
+        """`record_lane` honours `plan(state=X)` — the lane lookup and the run-record
+        read are one store, so a plan pointed at another tree is neither graded on
+        nor refused for want of the ambient state dir's record."""
+        st = self.other_state()
+        self.died(state=st)
+        self.kill(state=st)
+        p = r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+        self.assertEqual((p["lane_key"], p["state"], p["action"]),
+                         (LANE, "died", "rerun"), p)
+        # The ambient store names nothing here, so only X's record can name a lane.
+        self.assertIsNone(r.record_lane(RUN))
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, now=NOW, pid_probe=dead)
 
     def test_plan_without_a_lane_reads_the_record_lane(self):
         self.died()

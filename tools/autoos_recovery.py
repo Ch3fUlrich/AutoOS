@@ -522,11 +522,12 @@ _UNSET = object()
 _kill_reader = _UNSET
 
 
-def record_lane(run_id):
+def record_lane(run_id, state=None):
     """The lane the SPAWNER recorded for one run, read from the runner-private
     kill record ONLY. None is 'it names none', which covers no record, an
     unreadable one, a `lane` of the wrong shape, a run id that is not one and a
-    launcher that will not load: fail closed, never a traceback out of a plan."""
+    launcher that will not load: fail closed, never a traceback out of a plan.
+    `state` is the root the caller plans against — one plan never reads two stores."""
     global _kill_reader
     if _kill_reader is _UNSET:
         try:
@@ -539,7 +540,7 @@ def record_lane(run_id):
         except BaseException:                 # noqa: BLE001 - fail closed: no lane
             _kill_reader = None
     try:
-        record = _kill_reader(_check_run_id(run_id))
+        record = _kill_reader(_check_run_id(run_id), state)
         lane = record.get("lane") if isinstance(record, dict) else None
         return _check_key(lane) if lane is not None else None
     except (TypeError, ValueError, OSError):  # includes RecoveryError
@@ -1716,7 +1717,7 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
     continuing a footer. `spawn_hint.cwd` is the kept worktree for the L2/L1 to
     hand to `spawn` — this module never calls it.
     """
-    recorded = record_lane(run_id)
+    recorded = record_lane(run_id, state)
     if lane_key is None:
         if recorded is None:
             raise RecoveryError(

@@ -9589,7 +9589,7 @@ def proc_start_time(pid) -> int | None:
         return None
 
 
-def kill_store_dir() -> str:
+def kill_store_dir(state: str | None = None) -> str:
     """The runner-private home of each run's decided-at-spawn record (SB-A3,
     D-103 item C; the run MODE joined it in SB-A4).
 
@@ -9612,16 +9612,19 @@ def kill_store_dir() -> str:
     the same record from inside `run_client`, and a second copy of a store is a
     second place a killer's answer can come from. The server reads and writes it
     through this one implementation.
+
+    `state` overrides the state root for a reader handed one (a recovery plan
+    pointed at another tree): the store is always <root>/kill, never a second layout.
     """
-    return os.path.join(clients.state_dir(), "kill")
+    return os.path.join(state or clients.state_dir(), "kill")
 
 
-def kill_store_path(run_id: str) -> str:
+def kill_store_path(run_id: str, state: str | None = None) -> str:
     """The one record file for `run_id`, named so no run id escapes the store."""
     name = os.path.basename(os.path.normpath(str(run_id or "")))
     if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         raise ValueError("bad run id %r" % (run_id,))
-    return os.path.join(kill_store_dir(), name + ".json")
+    return os.path.join(kill_store_dir(state), name + ".json")
 
 
 def write_kill_record(run_id: str, record: dict) -> bool:
@@ -9673,12 +9676,13 @@ def write_kill_record(run_id: str, record: dict) -> bool:
     return True
 
 
-def read_kill_record(run_id: str):
+def read_kill_record(run_id: str, state: str | None = None):
     """The private record, or None. A run with no record is a run whose group and
     mode were never decided by a server — the direct CLI path — and a killer must
-    say so rather than kill what it cannot identify."""
+    say so rather than kill what it cannot identify. `state` reads the store of
+    that state root instead of the ambient one."""
     try:
-        path = kill_store_path(run_id)
+        path = kill_store_path(run_id, state)
         with io.open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError):

@@ -1150,14 +1150,22 @@ class McpToolTests(unittest.TestCase):
                     mcp_server.read_kill_record(out["id"]) or {})
 
     # --- AO-JOB-LANE-ID: the lane id rides the spawn, validated, in both stores
-    def test_a_lane_spawn_records_its_lane_in_job_json_and_the_private_record(self):
-        """Recovery reads the lane back from the private record only, so the
-        spawner has to write it there; job.json carries the same id as
-        information, beside the `parent_lane` F1 already wrote."""
+    def test_a_lane_spawn_records_its_lane_in_job_json(self):
+        """job.json carries the validated id as a label on the worker's own file,
+        beside the `parent_lane` F1 already wrote. Checked everywhere: writing it
+        is not platform-dependent."""
         lane = "l2-repo-tag-phase"
-        job, record = self._spawned_lane_records(lane)
+        job, _record = self._spawned_lane_records(lane)
         self.assertEqual(job.get("lane"), lane, job)
         self.assertEqual(job.get("parent_lane"), lane, job)
+
+    @unittest.skipIf(os.name == "nt", "the runner-private kill record is POSIX-only "
+                                      "(write_kill_record is a no-op on nt)")
+    def test_a_lane_spawn_records_its_lane_in_the_private_record(self):
+        """Recovery reads the lane back from the private record only, so the
+        spawner has to write it there — the copy in job.json is the worker's."""
+        lane = "l2-repo-tag-phase"
+        _job, record = self._spawned_lane_records(lane)
         self.assertEqual(record.get("lane"), lane, record)
 
     def test_an_absent_or_invalid_lane_env_records_no_lane_and_never_errors(self):
