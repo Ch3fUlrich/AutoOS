@@ -65,6 +65,11 @@ import urllib.request
 GRAPH_ID = "autoos"
 PROJECT_SLUG = "autoos"
 
+# D-1038 A3: Omnigraph 0.13.0 answers 400 api_contract_mismatch to any request
+# that does not declare the contract it speaks.
+CONTRACT_HEADER = "omnigraph-http-api"
+CONTRACT_VERSION = "0.13"
+
 # Kept small and meaningful: top-level dirs/modules that matter, not one node per file.
 COMPONENTS = [
     ("autoos-windows-lib", "Windows installer library", "lib", "lib/windows/"),
@@ -403,10 +408,24 @@ def load_confirmed(res, sent, edge_only=0):
     the prior permissive behavior for a batch with no edge-only record; an
     edge-only record has no @key and would silently duplicate, so an
     unconfirmed edge batch must not be marked. Otherwise every reported table
-    must be error-free and must report rows when records were sent."""
-    tables = (res or {}).get("tables", [])
+    must be error-free and must report rows when records were sent.
+
+    D-1038 A3 adds the 0.13.0 shape: flat ``total_entities`` is the evidence and
+    must equal what was sent (fewer is a partial load, more is not this batch);
+    a non-empty flat ``error`` means the whole load failed, there is no
+    per-table list. A dict with neither ``tables`` nor ``total_entities`` is an
+    unknown shape and reads as unconfirmed - the permissive node-only path would
+    mark edges that never landed as loaded, and they are gone for good."""
+    if not isinstance(res, dict):
+        return False
+    if res.get("error"):
+        return False
+    total = res.get("total_entities")
+    if isinstance(total, int) and not isinstance(total, bool):
+        return total == sent
+    tables = res.get("tables") or []
     if not tables:
-        return edge_only == 0
+        return "tables" in res and edge_only == 0
     for t in tables:
         if t.get("error"):
             return False
@@ -419,13 +438,34 @@ def load_confirmed(res, sent, edge_only=0):
     return True
 
 
+def load_summary(res):
+    """Counts to log for a load response: the per-table map of the 0.8.1 shape,
+    the per-type map (``{name: entities_loaded}`` over nodes + edges) of the
+    0.13.0 shape. Tolerates any shape - this only feeds a log line."""
+    if not isinstance(res, dict):
+        return {}
+    tables = res.get("tables") or []
+    if isinstance(tables, list) and tables:
+        return {t.get("table_key"): t.get("rows_loaded")
+                for t in tables if isinstance(t, dict)}
+    counts = {}
+    for group in ("nodes", "edges"):
+        rows = res.get(group) or []
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    counts[row.get("name")] = row.get("entities_loaded")
+    return counts
+
+
 def post_load(base_url, token, lines):
     body = json.dumps({"branch": "main", "mode": "merge",
                        "data": "\n".join(lines) + "\n"}).encode()
     url = base_url.rstrip("/") + f"/graphs/{GRAPH_ID}/load"
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Authorization": "Bearer " + token,
-                                          "content-type": "application/json"})
+                                          "content-type": "application/json",
+                                          CONTRACT_HEADER: CONTRACT_VERSION})
     return json.load(urllib.request.urlopen(req, timeout=120))
 
 
@@ -504,8 +544,7 @@ def main(argv=None, root=None, env=None):
                   f"({exc.reason}); ledger NOT marked - fix and retry.",
                   file=sys.stderr)
             return 1
-        print("loaded:", {t["table_key"]: t["rows_loaded"]
-                           for t in res.get("tables", [])}, file=sys.stderr)
+        print("loaded:", load_summary(res), file=sys.stderr)
         if not load_confirmed(res, len(lines), edge_only):
             print("ERROR: load NOT confirmed by server response "
                   f"({res!r}); refusing to mark {len(new)} records as loaded. "
