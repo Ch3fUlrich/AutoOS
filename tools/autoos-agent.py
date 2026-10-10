@@ -2422,6 +2422,41 @@ def user_site_packages() -> str:
     return site.getusersitepackages()
 
 
+# SEAT-PYTHON (P4-FIX2, measured): the interpreter version is part of the path, so
+# asking the spawner (3.13 here) handed a 3.12 seat a directory it does not have. Ask
+# the `python3` the seat will run; its answer goes through the same qualification.
+SEAT_PY_USER_SITE_TIMEOUT = 5.0
+_SEAT_PY_USER_SITE_CACHE: dict = {}
+
+
+def seat_python_user_site(py: str, src: dict) -> str | None:
+    """What `py -I` prints for its own user site, or None: an error, a timeout or a
+    non-absolute / multi-line answer is a None and the caller falls back. Cached per
+    (interpreter, HOME), because a fallthrough re-plan builds the plan again. The PYTHON*
+    scrub is load-bearing: `-I` does not ignore PYTHONUSERBASE — site.py reads it
+    itself — so the toolhome redirect would come back as the seat's real site."""
+    key = (py, src.get("HOME") or "")
+    if key not in _SEAT_PY_USER_SITE_CACHE:
+        answer = None
+        try:
+            # subprocess-audit: one read-only path query against the seat's own
+            # interpreter — chosen env, no shell, a timeout, output validated below.
+            got = subprocess.run([py, "-I", "-c",
+                                  "import site,sys;"
+                                  "sys.stdout.write(site.getusersitepackages())"],
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                                 env={n: v for n, v in src.items()
+                                      if not n.startswith("PYTHON")},
+                                 timeout=SEAT_PY_USER_SITE_TIMEOUT)
+            out = got.stdout.strip() if not got.returncode else ""
+            if out and "\n" not in out and os.path.isabs(out):
+                answer = out
+        except Exception:
+            answer = None
+        _SEAT_PY_USER_SITE_CACHE[key] = answer
+    return _SEAT_PY_USER_SITE_CACHE[key]
+
+
 def qualified_user_site(user_site: str, home: str) -> str | None:
     """`user_site` when it is safe to hand a seat read access to it, else None: a
     real directory, no symlink anywhere up to HOME, a strict descendant of HOME, and
@@ -2455,14 +2490,18 @@ def qualified_user_site(user_site: str, home: str) -> str | None:
 
 
 def seat_user_site_path(base: dict | None = None) -> str | None:
-    """The one PYTHONPATH value a seat may get, or None — computed here and checked
-    against the HOME of the environment the seat is built from. Any failure to read
-    the interpreter or the group database is a None, never a raised error: a seat
-    brief that says its tests may not run beats a spawner that crashes."""
+    """The one PYTHONPATH value a seat may get, or None — the user site of the
+    interpreter the seat will run, resolved on the PATH and checked against the HOME of
+    the environment it is built from; anything unusable falls back to the spawner's own
+    interpreter and then to no PYTHONPATH. Every failure is a None, never a raised
+    error: a seat brief that says its tests may not run beats a spawner that crashes."""
     src = os.environ if base is None else base
+    home = src.get("HOME") or os.path.expanduser("~")
     try:
-        return qualified_user_site(user_site_packages(),
-                                   src.get("HOME") or os.path.expanduser("~"))
+        py = shutil.which("python3", path=src.get("PATH"))
+        seat_site = qualified_user_site(seat_python_user_site(py, src) if py else None,
+                                        home)
+        return seat_site or qualified_user_site(user_site_packages(), home)
     except Exception:
         return None
 

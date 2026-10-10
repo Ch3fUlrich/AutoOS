@@ -24403,5 +24403,107 @@ class SeatUserSitePasslistTests(unittest.TestCase):
         self.assertEqual(self.site, env.get("PYTHONPATH"))
 
 
+@unittest.skipIf(os.name == "nt", "an executable probe script; POSIX only")
+class SeatPythonProbeTests(unittest.TestCase):
+    """P4-FIX2: the interpreter version is part of the user-site path, so P4's
+    spawner-side answer (3.13 here) named a directory a 3.12 seat does not have and
+    `import pytest` still failed. The `python3` the SEAT runs decides; anything
+    unusable falls back to the spawner's answer, and never raises."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.spawner_site = os.path.join(self.home, ".local/lib/python3.13/site-packages")
+        self.seat_site = os.path.join(self.home, ".local/lib/python3.12/site-packages")
+        for d in (self.spawner_site, self.seat_site):
+            os.makedirs(d, 0o755)
+
+    def fake_py(self, body, path_extra=""):
+        """A fake `python3` running `body`, in a fresh bin dir per call so the cache
+        never answers for another test's fake. Returns the seat env that finds it."""
+        bin_ = os.path.join(self.tmp, "bin%d" % len(os.listdir(self.tmp)))
+        os.mkdir(bin_)
+        with io.open(os.path.join(bin_, "python3"), "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\n" + body)
+        os.chmod(os.path.join(bin_, "python3"), 0o755)
+        return {"PATH": bin_ + path_extra, "HOME": self.home}
+
+    def site_of(self, src):
+        """The seat site for `src`, with the spawner's own answer pinned to a
+        DIFFERENT directory, so a fallback is visible rather than accidental."""
+        with mock.patch.object(self.agent, "user_site_packages", lambda: self.spawner_site):
+            return self.agent.seat_user_site_path(src)
+
+    def test_the_seat_python3_answers_and_the_seat_env_carries_its_site(self):
+        src = self.fake_py('echo "%s"\n' % self.seat_site)
+        found = self.site_of(src)
+        self.assertEqual(self.seat_site, found)
+        env = self.agent.worker_env({"cwd": self.tmp, "env": {}, "user_site_path": found},
+                                    None, base=src)
+        self.assertEqual(self.seat_site, env["PYTHONPATH"])
+
+    def test_an_unusable_answer_falls_back_and_never_sets_an_unsafe_site(self):
+        world = os.path.join(self.home, "world")
+        os.makedirs(world)
+        os.chmod(world, 0o777)          # makedirs' mode is umask-masked; only chmod is exact
+        for label, body in (("garbage", 'echo "not a path"\n'),
+                            ("relative", 'echo ".local/lib/python3.12/site-packages"\n'),
+                            ("multi-line", 'echo "%s"; echo more\n' % self.seat_site),
+                            ("world-writable", 'echo "%s"\n' % world),
+                            ("outside-HOME", 'echo "%s"\n' % os.path.join(self.tmp, "out")),
+                            ("empty", "true\n"), ("nonzero-exit", "exit 3\n")):
+            self.assertEqual(self.spawner_site, self.site_of(self.fake_py(body)), label)
+        self.assertEqual(self.spawner_site, self.site_of({"PATH": self.tmp,
+                                                          "HOME": self.home}),
+                         "no python3 on the seat PATH is a fallback, not a crash")
+
+    def test_one_probe_per_interpreter_and_a_hang_costs_only_its_timeout(self):
+        src = self.fake_py('echo "%s"\n' % self.seat_site)
+        calls, real = [], self.agent.subprocess.run
+
+        def spy(*a, **k):
+            calls.append(a[0][1:3])
+            return real(*a, **k)
+        with mock.patch.object(self.agent.subprocess, "run", spy):
+            twice = [self.site_of(src) for _ in range(2)]
+        self.assertEqual([self.seat_site, self.seat_site], twice)
+        self.assertEqual([["-I", "-c"]], calls, "plan building re-asks python each seat")
+        with mock.patch.object(self.agent, "SEAT_PY_USER_SITE_TIMEOUT", 1):
+            started = time.time()
+            self.assertEqual(self.spawner_site, self.site_of(
+                self.fake_py("sleep 30\n", os.pathsep + "/bin" + os.pathsep + "/usr/bin")))
+        self.assertTrue(1 <= time.time() - started < 10, "the probe outlived its timeout")
+
+    def test_a_real_seat_imports_pytest_only_through_the_recomputed_path(self):
+        """The measured gap, run on this host: with PYTHONUSERBASE redirected into the
+        toolhome, the seat imports pytest only through its own python3's user site."""
+        toolhome = os.path.join(self.tmp, "sb.toolhome")
+        for py in [p for p in (shutil.which("python3"), "/usr/bin/python3")
+                   if p and os.path.exists(p)]:
+            base = {"PATH": os.pathsep.join((os.path.dirname(py), os.environ["PATH"])),
+                    "HOME": os.path.expanduser("~")}
+            found = self.agent.seat_user_site_path(base)
+            if not found:
+                continue
+            env = self.agent.worker_env({"cwd": toolhome, "user_site_path": found,
+                                         "env": {"PYTHONUSERBASE": toolhome}},
+                                        None, base=base)
+            self.assertEqual(found, env["PYTHONPATH"], py)
+            run = lambda e: subprocess.run([py, "-c", "import pytest"], capture_output=True,
+                                           text=True, stdin=subprocess.DEVNULL, env=e,
+                                           timeout=60)  # subprocess-audit: the seat env
+            if run({n: v for n, v in env.items() if n != "PYTHONPATH"}).returncode == 0:
+                continue  # reachable anyway: this interpreter proves nothing
+            self.assertEqual(0, run(env).returncode,
+                             "%s lost its own pytest (site=%s)" % (py, found))
+            return
+        self.skipTest("no python3 here imports pytest only through its user site")
+
+
 if __name__ == "__main__":
     unittest.main()
