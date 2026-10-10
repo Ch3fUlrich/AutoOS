@@ -17519,6 +17519,68 @@ class FamilyFenceMcpPlumbingTests(unittest.TestCase):
                          mcp_server.result(out["id"]).get("text"))
 
 
+class McpReviewBasePlumbingTests(unittest.TestCase):
+    """AO-MCP-REVIEW-BASE: the MCP `spawn` tool carries the CLI's `--review-base
+    SHA` to its argv, validates it as the CLI's arg half does (before any run dir),
+    records it in job.json, and leaves the unknown-rev / no-isolate rc 2 to the CLI."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+    def _spawn(self, **over):
+        return mcp_server.spawn(dict({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                      "card": {"role": "review"}}, **over))
+
+    def test_review_base_reaches_the_cli_argv_when_asked_and_never_otherwise(self):
+        argv, _ = mcp_server.build_argv({"task": "t", "card": {"role": "review"},
+                                         "review_base": "deadbeef"})
+        self.assertEqual(argv[argv.index("--review-base") + 1], "deadbeef")
+        self.assertNotIn("--review-base", mcp_server.build_argv({"task": "t", "tier": 2})[0])
+
+    def test_a_blank_or_option_shaped_base_is_refused_before_a_run_dir_exists(self):
+        # A blank value or a leading '-' is what `resolve_review_base` answers None
+        # for, and an option-shaped one would reach the argv as a flag.
+        for bad in ("", "   ", "-x", "--isolate", "two words", "!!", "a" * 65):
+            with self.subTest(bad=bad):
+                self.assertIn("review_base", self._spawn(review_base=bad)["error"])
+        self.assertEqual(os.listdir(mcp_server.state_root()) if os.path.isdir(
+            mcp_server.state_root()) else [], [])
+
+    def test_a_spawn_records_the_base_in_job_json(self):
+        # Not only in the runner-private record: job.json's `request` carries it.
+        out = self._spawn(review_base="HEAD")
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["review_base"], "HEAD")
+        self.assertIn("--review-base", job["argv"])
+
+    def test_an_unknown_base_surfaces_the_cli_rc_2_and_no_isolate_also_does(self):
+        # A review role gets isolation, so an unknown rev is the CLI's own rc 2.
+        self.assertIn("not a reachable commit",
+                      self._spawn(review_base="f00d" * 8)["error"])
+        self.assertIn("--review-base needs --isolate",
+                      self._spawn(card={"role": "orchestrate"},
+                                  review_base="HEAD")["error"])
+
+    def test_the_spawn_tool_schema_and_docstring_advertise_the_param(self):
+        # R-orch-11: a param absent from the advertised schema names nothing.
+        import asyncio
+        if not importlib.util.find_spec("mcp"):
+            self.skipTest("the mcp package is not installed")
+        tool = [t for t in asyncio.run(mcp_server.build_server().list_tools())
+                if t.name == "spawn"][0]
+        self.assertIn("review_base", tool.inputSchema["properties"])
+        self.assertIn("review_base", tool.description)
+
+
 class FamilyFenceRecordTests(unittest.TestCase):
     """FAMILYFENCE, the two places a new exit code has to land the same moment it
     is added: the docstring table every caller reads (R-orch-11) and the track
