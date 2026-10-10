@@ -30,6 +30,7 @@ Examples:
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -42,6 +43,30 @@ from _omni_env import LOCAL_MINIO_VOLUME, LOCAL_NET, describe, detect_minio_stor
 
 LABEL = {"Project": "name", "Decision": "title", "Rule": "statement",
          "Preference": "statement", "Convention": "name", "Component": "name", "Task": "title"}
+
+# The whole-store wipe in step 3 is an omnigraph-server 0.8.x procedure. On 0.13 the
+# cluster root lives in bucket `omnigraph-013` and the untouched 0.8.1 bucket
+# `omnigraph` is the ROLLBACK FALLBACK sitting in the same MinIO directory, so the
+# wipe destroys both. Anything from this tag up (and anything unversioned — better
+# to refuse a run than to guess) is refused before a single docker call.
+UNSUPPORTED_FROM = (0, 13)
+_TAG_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.\d+)?$")
+
+
+def refuse_unsupported_image(image):
+    """Abort unless `image` is a tagged omnigraph-server below UNSUPPORTED_FROM."""
+    ref = image.partition("@")[0]              # an @sha256:… digest says nothing about version
+    _, sep, tag = ref.rpartition(":")
+    m = _TAG_RE.match(tag) if sep and "/" not in tag else None
+    if m and (int(m.group(1)), int(m.group(2))) < UNSUPPORTED_FROM:
+        return
+    raise SystemExit(
+        f"[dedup] ABORT: image {image!r} is not a verifiable omnigraph-server v0.8.x tag. "
+        f"This script rebuilds graphs by wiping the entire MinIO store, which is a 0.8-only "
+        f"procedure: on 0.13 the cluster root lives in bucket `omnigraph-013` while the "
+        f"untouched 0.8.1 bucket `omnigraph` is the rollback fallback in the SAME MinIO "
+        f"directory, so the wipe would destroy both. For a 0.13 store use the export/import "
+        f"path instead: scripts/omnigraph-migrate-013.py (Server repo).")
 
 
 def sh(cmd, **kw):
@@ -159,6 +184,26 @@ def clean_records(nodes, edges, dupes, forced):
     return merged, out_edges, edge_dupes
 
 
+def snapshot_node_count(d):
+    """Node rows in a parsed `omnigraph snapshot --json` document.
+
+    0.13 answers `{"datasets": [{"entity_kind","type_name","entity_count", …}]}`;
+    0.8.1 answered `{"tables": [{"tableKey": "node:Decision", "rowCount": 16}]}`.
+    -1 for a shape this cannot read: the callers treat -1 as "the probe FAILED" and
+    abort rather than load onto a non-empty graph, so this must never raise.
+    """
+    try:
+        if "datasets" in d:
+            return sum(int(x["entity_count"]) for x in d["datasets"]
+                       if x.get("entity_kind") == "node")
+        if "tables" in d:
+            return sum(int(t["rowCount"]) for t in d["tables"]
+                       if t["tableKey"].startswith("node"))
+    except Exception:  # noqa: BLE001  — any unreadable shape is -1, never a traceback
+        return -1
+    return -1
+
+
 def node_count(a, token, graph="memory", retries=6):
     """Total node rows in the graph (via snapshot). -1 on failure. Retries so a
     just-restarted server (HTTP not ready yet) doesn't spuriously report -1."""
@@ -168,14 +213,17 @@ def node_count(a, token, graph="memory", retries=6):
              "-e", f"OMNIGRAPH_BEARER_TOKEN={token}", "-e", f"OG={a.server}", "-e", "HOME=/tmp", "-w", "/tmp",
              "--entrypoint", "sh", a.image, "-c",
              'mkdir -p /tmp/.omnigraph; printf "servers:\\n  local:\\n    url: %s\\n" "$OG">/tmp/.omnigraph/config.yaml; '
-             f'omnigraph snapshot --server local --graph {shlex.quote(graph)} 2>/dev/null'],
+             f'omnigraph snapshot --server local --graph {shlex.quote(graph)} --json 2>/dev/null'],
             capture_output=True, text=True)
         try:
             d = json.loads(r.stdout[r.stdout.index("{"):])
-            return sum(t["rowCount"] for t in d.get("tables", []) if t["tableKey"].startswith("node"))
         except Exception:  # noqa: BLE001
-            if attempt < retries - 1:
-                time.sleep(3)
+            d = None
+        got = snapshot_node_count(d)
+        if got >= 0:
+            return got
+        if attempt < retries - 1:
+            time.sleep(3)
     return -1
 
 
@@ -206,6 +254,10 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     add_go_args(ap)
     a = ap.parse_args()
+    # First thing, before the gate and before any docker call, and under --dry-run too:
+    # a 0.13 stack means the store wipe below destroys the live cluster AND the 0.8.1
+    # rollback bucket beside it, and a dry run must not be the run that finds out.
+    refuse_unsupported_image(a.image)
     # Fleet rule D-825: dedup resets the store and `load --mode overwrite`s every graph,
     # so a run that is not --dry-run proceeds only on a judge GO naming this checkout's
     # HEAD. The gate runs before any docker call, so a refused run touches nothing.
