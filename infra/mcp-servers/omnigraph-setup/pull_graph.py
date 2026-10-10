@@ -29,11 +29,15 @@ import urllib.request
 from collections import Counter
 
 IMAGE = "modernrelay/omnigraph-server:v0.8.1"
+# Omnigraph 0.13.0 answers 400 {"code":"api_contract_mismatch"} to every request
+# (except /healthz) that does not carry this header.
+CONTRACT_HEADERS = {"omnigraph-http-api": "0.13"}
 
 
 def export(url, token, graph):
     req = urllib.request.Request(f"{url.rstrip('/')}/graphs/{graph}/export", data=b"{}",
-        headers={"Authorization": f"Bearer {token}", "content-type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "content-type": "application/json",
+                 **CONTRACT_HEADERS},
         method="POST")
     body = urllib.request.urlopen(req, timeout=300).read().decode()
     return [json.loads(line) for line in body.splitlines() if line.strip()]
@@ -42,7 +46,8 @@ def export(url, token, graph):
 def mutate(url, token, graph, query):
     req = urllib.request.Request(f"{url.rstrip('/')}/graphs/{graph}/mutate",
         data=json.dumps({"query": query}).encode(),
-        headers={"Authorization": f"Bearer {token}", "content-type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "content-type": "application/json",
+                 **CONTRACT_HEADERS},
         method="POST")
     with urllib.request.urlopen(req, timeout=300) as r:
         return json.loads(r.read().decode())

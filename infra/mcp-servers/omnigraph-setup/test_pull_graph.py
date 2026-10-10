@@ -5,7 +5,7 @@ import os
 
 # Add the current directory to sys.path so we can import pull_graph
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from pull_graph import export
+from pull_graph import export, mutate
 
 class TestPullGraph(unittest.TestCase):
     @patch('pull_graph.urllib.request.urlopen')
@@ -32,7 +32,8 @@ class TestPullGraph(unittest.TestCase):
         mock_request_cls.assert_called_once_with(
             "http://example.com/graphs/my_graph/export",
             data=b"{}",
-            headers={"Authorization": "Bearer my_token", "content-type": "application/json"},
+            headers={"Authorization": "Bearer my_token", "content-type": "application/json",
+                     "omnigraph-http-api": "0.13"},
             method="POST"
         )
 
@@ -66,7 +67,8 @@ class TestPullGraph(unittest.TestCase):
         mock_request_cls.assert_called_once_with(
             "http://example.com/api/graphs/g/export",
             data=b"{}",
-            headers={"Authorization": "Bearer t", "content-type": "application/json"},
+            headers={"Authorization": "Bearer t", "content-type": "application/json",
+                     "omnigraph-http-api": "0.13"},
             method="POST"
         )
 
@@ -79,9 +81,42 @@ class TestPullGraph(unittest.TestCase):
         mock_request_cls.assert_called_once_with(
             "http://example.com/api/graphs/g/export",
             data=b"{}",
-            headers={"Authorization": "Bearer t", "content-type": "application/json"},
+            headers={"Authorization": "Bearer t", "content-type": "application/json",
+                     "omnigraph-http-api": "0.13"},
             method="POST"
         )
+
+    @patch('pull_graph.urllib.request.urlopen')
+    @patch('pull_graph.urllib.request.Request')
+    def test_export_sends_contract_header(self, mock_request_cls, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"id": 1}\n'
+        mock_urlopen.return_value = mock_response
+
+        export("http://example.com", "my_token", "my_graph")
+
+        url = mock_request_cls.call_args.args[0]
+        headers = mock_request_cls.call_args.kwargs["headers"]
+        self.assertEqual("http://example.com/graphs/my_graph/export", url)
+        self.assertEqual("0.13", headers["omnigraph-http-api"])
+        self.assertEqual("Bearer my_token", headers["Authorization"])
+        self.assertEqual("application/json", headers["content-type"])
+
+    @patch('pull_graph.urllib.request.urlopen')
+    @patch('pull_graph.urllib.request.Request')
+    def test_mutate_sends_contract_header(self, mock_request_cls, mock_urlopen):
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{}'
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        mutate("http://example.com", "my_token", "my_graph", "query purge() { }")
+
+        url = mock_request_cls.call_args.args[0]
+        headers = mock_request_cls.call_args.kwargs["headers"]
+        self.assertEqual("http://example.com/graphs/my_graph/mutate", url)
+        self.assertEqual("0.13", headers["omnigraph-http-api"])
+        self.assertEqual("Bearer my_token", headers["Authorization"])
+        self.assertEqual("application/json", headers["content-type"])
 
 if __name__ == '__main__':
     unittest.main()
