@@ -104,6 +104,8 @@ Usage:
     python3 tools/autoos-agent.py context                          # this session's fill
     python3 tools/autoos-agent.py context --transcript s.jsonl --json
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
+    python3 tools/autoos-agent.py ready status/<lane>.<name>.md --branch <B> --sha <SHA> \
+        --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>   # both, always
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
@@ -5802,7 +5804,9 @@ def cmd_ready(args) -> int:
     refused at exit 1 as `writer-guards: --base must be a strict ancestor of --sha`
     / `writer-guards: empty lane diff` — an empty diff otherwise reads as "touched
     nothing risky" and clears the gate. When the diff says ops, `--brief` and
-    `--report` are required; whenever `--brief` is given the brief's canonical
+    `--report` are required — AO-READY-CALLERS is that every CALLER passes both on
+    every run, the requirement being decided from the diff, which is the one thing a
+    caller has not read; whenever `--brief` is given the brief's canonical
     FILES line becomes the allow-list and `scope_fence` refuses any touched path
     outside it, naming every violation. An ops lane's REPORT must carry CHECK
     1-6 with a PASS verdict and evidence (`report_checks`). A GuardError from any
@@ -5868,11 +5872,20 @@ def cmd_ready(args) -> int:
     except (ready_guards.GuardError, ValueError) as exc:
         print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
         return 1
+
+    def guards_command():
+        """The exact call that clears this lane's guard gate, its own arguments filled
+        in (AO-READY-CALLERS): a refusal naming only a missing flag is one the caller
+        has to guess its way out of."""
+        return ("python3 tools/autoos-agent.py ready %s --branch %s --sha %s "
+                "--inbox %s --brief <BRIEF path> --report <REPORT path>"
+                % (args.record, args.branch, args.sha, args.inbox))
+
     if brief_arg or ops_required:
         if not brief_arg:
-            print("ready: not appended -- writer-guards: ops lane without --brief; "
+            print("ready: not appended -- writer-guards: ops lane without --brief/--report; "
                   "the diff reaches R2, so the rendered brief is what names the "
-                  "files this lane was allowed to touch")
+                  "files this lane was allowed to touch. Run: %s" % guards_command())
             return 1
         brief_text, brief_error = read_guards_text(brief_arg)
         if brief_error:
@@ -13296,7 +13309,9 @@ def _parser_ready(sub):
         "ready", help="declare a lane ready INSTEAD of typing the inbox line by "
                       "hand: gate on review-status and on --sha being the tip of "
                       "origin/--branch, then append one line to the controller's "
-                      "inbox (REVGATE)")
+                      "inbox (REVGATE). Pass --brief and --report on every call: "
+                      "the gate requires them as soon as the DIFF reaches R2, "
+                      "whatever the card says (AO-WRITER-GUARDS, AO-READY-CALLERS)")
     ready_p.add_argument("record", help="the lane record (status/<lane>.<name>.md), or - for stdin")
     ready_p.add_argument("--branch", required=True,
                          help="the lane branch, checked as refs/heads/<branch> on origin")

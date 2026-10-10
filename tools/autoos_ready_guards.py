@@ -9,6 +9,7 @@ import re
 import shutil
 import unicodedata
 
+from autoos_blank import is_invisible_char as _is_invisible_char
 from autoos_writer_rule import R_LEVELS, required_r_level
 
 # Windows device stems, mirrored from tools/autoos_brief.py (private there).
@@ -31,20 +32,23 @@ _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
 # The characters a body may NEVER carry: every Unicode category Zs/Zl/Zp/Cc/Cf
-# (whitespace separators, line/paragraph breaks, controls and invisible format
-# characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000, U+200B,
-# the BOM, ...) except the four a real body legitimately carries: ' ', '\t',
-# '\n', '\r'. Each one is either a line break str.splitlines() would invent (so
-# a line such as 'foo\x0c```' used to reach the fence reader as a bare ``` closer
-# and the forged `CHECK 6: PASS` line under it counted), or an unspelled
-# whitespace/format character a path or CHECK line would silently eat (a
-# `files_line(['tools/a.py\xa0'])` once returned 'tools/a.py', a path the brief
-# did not spell). Matching the WHOLE set by category — see _invisible_char —
-# the text fails closed: refuse it outright (see _guard_text) and split on
-# '\n' only (see _lines). ' ' stays legal because it is the template's own
-# separator; '\t' stays legal inside a line because it can neither break a line
+# member (whitespace separators, line/paragraph breaks, controls and invisible
+# format characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000,
+# U+200B, the BOM, ...) PLUS the blank-LOOKING code points no category covers
+# (U+3164, U+2800, the Hangul fillers, the variation selectors), except the four a
+# real body legitimately carries: ' ', '\t', '\n', '\r'. Each one is either a line
+# break str.splitlines() would invent (so a line such as 'foo\x0c```' used to reach
+# the fence reader as a bare ``` closer and the forged `CHECK 6: PASS` line under it
+# counted), or an unspelled whitespace/format character a path or CHECK line would
+# silently eat (a `files_line(['tools/a.py\xa0'])` once returned 'tools/a.py', a
+# path the brief did not spell; a `CHECK 1: PASS \u3164` tail once read as a passed
+# required CHECK). ONE shared predicate decides all of it — `_invisible_char` calls
+# `tools/autoos_blank.is_invisible_char` (imported as `_is_invisible_char`), the
+# same object the recovery reader judges with, so a blank never passes this gate and
+# hides a footer there. The text fails closed: refuse it outright (see _guard_text)
+# and split on '\n' only (see _lines). ' ' stays legal because it is the template's
+# own separator; '\t' stays legal inside a line because it can neither break a line
 # nor indent a fence (' ' indent only, see _FENCE_RE).
-_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
 _ALLOWED_CHARS = frozenset(" \t\n\r")
 # A verdict needs a non-empty tail after it: a bare 'PASS' proves nothing.
 _VERDICT_RE = re.compile(r"^(PASS|FAIL|INPUT_REQUIRED)[ \t]+\S.*$")
@@ -66,15 +70,17 @@ class GuardError(ValueError):
 
 
 def _invisible_char(text):
-    """The first character of `text` no brief or report may carry: any Unicode
-    category Zs/Zl/Zp/Cc/Cf character that is not ' ', '\\t', '\\n' or '\\r'.
-    Decided by `unicodedata.category`, never by a hand-listed codepoint set, so
-    an exotic separator (U+180E, a U+2000-U+200A en-dash-space, the BOM) is
-    refused as surely as '\\x0c'."""
+    """The first character of `text` no brief or report may carry: any character
+    `tools/autoos_blank.is_invisible_char` refuses — every Zs/Zl/Zp/Cc/Cf member and
+    every blank-LOOKING code point no category covers — that is not ' ', '\\t',
+    '\\n' or '\\r'. ONE predicate, imported and never restated here, because the
+    recovery reader has to refuse exactly the same characters: an exotic separator
+    (U+180E, a U+2000-U+200A en-dash-space, the BOM) is refused as surely as
+    '\\x0c', and so is a HANGUL FILLER or U+2800 wearing a blank."""
     for ch in text:
         if ch in _ALLOWED_CHARS:
             continue
-        if unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             return ch
     return None
 
