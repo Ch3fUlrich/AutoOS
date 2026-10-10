@@ -820,5 +820,141 @@ class LoadGuardTests(unittest.TestCase):
         self.assertTrue(self._ledger_untouched(root))
 
 
+class MarkerTests(unittest.TestCase):
+    """D-1038 P2g: the ``--load`` attempt marker. A load whose answer is lost or
+    ambiguous may still have landed; nodes dedupe by @key slug but 0.13 merge does
+    not dedupe edges, so a blind re-send duplicates every edge in the batch."""
+
+    KNOWN = "routing-d-085,routing-d-088,routing-d-100"
+
+    def setUp(self):
+        self.mod = load_script()
+        self.root = fixture_root()
+        self.ledger = self.root / ".state" / "graph-loaded.txt"
+        self.marker = self.root / ".state" / "graph-load-pending"
+        pending = self.mod.emit(self.root, self.ledger)
+        self.keys = [k for k, _, _ in pending]
+        self.sent = (sum(1 for _, n, _ in pending if n is not None)
+                     + sum(len(es) for _, _, es in pending))
+        self.assertGreater(self.sent, 1, "fixture batch needs nodes and edges")
+
+    def _run(self, argv, post_load):
+        orig = self.mod.post_load
+        self.mod.post_load = post_load
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = self.mod.main(["--known-slugs", self.KNOWN] + list(argv),
+                                   root=self.root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            self.mod.post_load = orig
+        return rc, err.getvalue()
+
+    def _confirmed(self, *args):
+        return dict(NEW_LOAD_OK, total_entities=self.sent)
+
+    def _never(self, *args, **kwargs):
+        raise AssertionError("post_load must not be called")
+
+    def _url_error(self, *args, **kwargs):
+        raise urllib.error.URLError("the read operation timed out")
+
+    def _http_error(self, code):
+        def boom(*args, **kwargs):
+            raise urllib.error.HTTPError(
+                "http://127.0.0.1:1/graphs/autoos/load", code, "reason", {}, None)
+        return boom
+
+    def test_confirmed_load_leaves_no_marker_and_marks_ledger(self):
+        """(a) A confirmed load is done: ledger marked, marker gone."""
+        rc, err = self._run(["--load"], self._confirmed)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(self.marker.exists(), err)
+        self.assertEqual(set(self.ledger.read_text().split()), set(self.keys))
+
+    def test_lost_answer_writes_marker_with_the_batch_it_sent(self):
+        """(b) The answer may have landed: attempt marked, ledger untouched."""
+        rc, err = self._run(["--load"], self._url_error)
+        self.assertEqual(rc, 1, err)
+        self.assertTrue(self.marker.exists())
+        data = json.loads(self.marker.read_text())
+        self.assertEqual(data["lines"], self.sent)
+        self.assertEqual(data["keys"], self.keys)
+        self.assertFalse(self.ledger.exists() and self.ledger.read_text().split())
+
+    def test_marker_present_refuses_second_load_without_posting(self):
+        """(c) No blind re-send: nothing is sent, the marker is untouched."""
+        self._run(["--load"], self._url_error)
+        rc, err = self._run(["--load"], self._never)
+        self.assertEqual(rc, 1)
+        self.assertIn("did not finish cleanly", err)
+        self.assertIn("--clear-pending", err)
+        self.assertIn(str(self.sent) + " lines", err)
+        self.assertTrue(self.marker.exists())
+        self.assertFalse(self.ledger.exists() and self.ledger.read_text().split())
+
+    def test_client_error_clears_marker_server_error_keeps_it(self):
+        """(d) 4xx rejected the whole load, so a retry is safe; 5xx says nothing."""
+        rc, err = self._run(["--load"], self._http_error(400))
+        self.assertEqual(rc, 1, err)
+        self.assertFalse(self.marker.exists())
+        rc, err = self._run(["--load"], self._http_error(503))
+        self.assertEqual(rc, 1, err)
+        self.assertTrue(self.marker.exists())
+
+    def test_unconfirmed_response_keeps_the_marker(self):
+        """(e) total_entities != sent is ambiguous: not marked, not re-sent."""
+        rc, err = self._run(["--load"],
+                            lambda *a: dict(NEW_LOAD_OK, total_entities=self.sent - 1))
+        self.assertEqual(rc, 1, err)
+        self.assertIn("NOT confirmed", err)
+        self.assertTrue(self.marker.exists())
+
+    def test_clear_pending_then_load_proceeds(self):
+        """(f) A load that did not land: drop the marker, no network, then load."""
+        self._run(["--load"], self._url_error)
+        rc, err = self._run(["--clear-pending"], self._never)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("cleared pending marker", err)
+        self.assertFalse(self.marker.exists())
+        rc, err = self._run(["--load"], self._confirmed)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(set(self.ledger.read_text().split()), set(self.keys))
+        self.assertFalse(self.marker.exists())
+
+    def test_clear_pending_without_a_marker_is_a_noop(self):
+        rc, err = self._run(["--clear-pending"], self._never)
+        self.assertEqual(rc, 0, err)
+        self.assertFalse(self.marker.exists())
+
+    def test_mark_with_marker_marks_and_clears_nothing_sent(self):
+        """(g) A load that did land: --mark records the batch and clears the marker."""
+        self._run(["--load"], self._url_error)
+        rc, err = self._run(["--mark"], self._never)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("marked", err)
+        self.assertEqual(set(self.ledger.read_text().split()), set(self.keys))
+        self.assertFalse(self.marker.exists())
+
+    def test_malformed_marker_still_blocks_a_load(self):
+        """(h) A marker we cannot parse is still evidence of an attempt."""
+        self.marker.parent.mkdir(parents=True, exist_ok=True)
+        self.marker.write_bytes(b"not json")
+        rc, err = self._run(["--load"], self._never)
+        self.assertEqual(rc, 1)
+        self.assertIn("did not finish cleanly", err)
+        self.assertEqual(self.marker.read_bytes(), b"not json")
+
+    def test_print_mode_with_marker_prints_and_succeeds(self):
+        """(i) Only --load refuses; a dump run needs no reconciliation."""
+        self._run(["--load"], self._url_error)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            rc = self.mod.main([], root=self.root, env={})
+        self.assertEqual(rc, 0)
+        self.assertTrue([json.loads(line) for line in out.getvalue().splitlines()])
+        self.assertTrue(self.marker.exists())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

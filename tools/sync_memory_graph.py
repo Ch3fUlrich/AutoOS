@@ -40,7 +40,13 @@ Decision->Decision ``Implements`` edge - no such schema edge exists.
 Usage: tools/sync_memory_graph.py > out.ndjson   (then load with omnigraph `load` mode=merge)
        tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs)
        tools/sync_memory_graph.py --load          (POST new records to $OMNIGRAPH_BASE_URL/graphs/autoos/load, then --mark)
+       tools/sync_memory_graph.py --clear-pending (after an ambiguous --load that did NOT land: drop the attempt marker)
        tools/sync_memory_graph.py --known-slugs FILE --load
+
+``--load`` writes an attempt marker ``.state/graph-load-pending`` before the POST and
+clears it only on a confirmed load or a 4xx (D-1038 P2g); a marker left behind means the
+answer was lost or ambiguous while the batch may have landed, so the next ``--load``
+refuses until a human runs ``--mark`` (it landed) or ``--clear-pending`` (it did not).
 
 ``--load`` refuses (non-zero, nothing marked) when the batch carries an
 edge-only Implements/Supersedes record and no ``--known-slugs`` was given: an
@@ -61,6 +67,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 GRAPH_ID = "autoos"
 PROJECT_SLUG = "autoos"
@@ -247,6 +254,43 @@ def repo_root(explicit=None):
 
 def ledger_path(root):
     return os.path.join(repo_root(root), ".state", "graph-loaded.txt")
+
+
+def pending_path(root):
+    """D-1038 P2g: the ``--load`` attempt marker, beside the ledger (machine state)."""
+    return os.path.join(os.path.dirname(ledger_path(root)), "graph-load-pending")
+
+
+def write_pending(root, keys, lines):
+    """Record the attempt before POSTing: {"ts", "lines", "keys"}."""
+    path = pending_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = json.dumps({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          "lines": lines, "keys": list(keys)})
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(payload + "\n")
+    os.replace(tmp, path)
+
+
+def read_pending(root):
+    """Marker contents, ``{}`` when present but unreadable, ``None`` when absent."""
+    path = pending_path(root)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clear_pending(root):
+    try:
+        os.remove(pending_path(root))
+    except FileNotFoundError:
+        pass
 
 
 def loaded(root):
@@ -516,9 +560,23 @@ def main(argv=None, root=None, env=None):
     env = os.environ if env is None else env
     root = repo_root(root)
     known, argv = _take_known_slugs(list(argv))
+    if "--clear-pending" in argv:
+        clear_pending(root)
+        print("cleared pending marker", file=sys.stderr)
+        return 0
     new = emit(root, ledger_path(root), known)
     edge_only = sum(1 for _, node, _ in new if node is None)
     if "--load" in argv:
+        pending = read_pending(root)
+        if pending is not None:
+            print(f"ERROR: a previous --load attempt "
+                  f"({pending.get('ts', '?')}, {pending.get('lines', '?')} lines) "
+                  "did not finish cleanly; it may have landed. Do NOT re-run "
+                  "blindly: edges would be duplicated. Check commits_list head "
+                  "and snapshot edge counts against the values before that load, "
+                  "then run --mark (it landed) or --clear-pending (it did not).",
+                  file=sys.stderr)
+            return 1
         if not new:
             print("nothing new", file=sys.stderr)
             return 0
@@ -531,6 +589,7 @@ def main(argv=None, root=None, env=None):
             return 1
         lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new if n is not None] + \
                 [json.dumps(e) for _, _, es in new for e in es]
+        write_pending(root, [k for k, _, _ in new], len(lines))
         try:
             res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
                             env["OMNIGRAPH_TOKEN"], lines)
@@ -538,6 +597,9 @@ def main(argv=None, root=None, env=None):
             print(f"ERROR: the omnigraph server rejected the load "
                   f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
                   "retry.", file=sys.stderr)
+            # A 4xx rejected the whole load, so nothing landed and a retry is safe.
+            if 400 <= exc.code < 500:
+                clear_pending(root)
             return 1
         except urllib.error.URLError as exc:
             print(f"ERROR: could not reach the omnigraph server "
@@ -554,6 +616,7 @@ def main(argv=None, root=None, env=None):
         argv = list(argv) + ["--mark"]
     if "--mark" in argv:
         mark(root, ledger_path(root), new)
+        clear_pending(root)
         print(f"marked {len(new)} records as loaded", file=sys.stderr)
         return 0
     for _, node, _ in new:
