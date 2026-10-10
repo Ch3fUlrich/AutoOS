@@ -6,6 +6,8 @@ with importlib exactly like test_split_project_graph.py loads its script.
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 import sys
 import types
 
@@ -152,3 +154,95 @@ def test_clean_records_redirects_a_case_variant_to_the_canonical_lowercase_slug(
     assert merged["foo"]["data"]["why"] == "extra"
     assert [(e["edge"], e["from"], e["to"]) for e in out_edges] == [
         ("Affects", "foo", "dec-1")]
+
+
+# ── D-1038 P2d2 (judge HOLD D-852): these tests must be physically unable to
+# reach a real docker. `dedup-graph.py` wipes the MinIO store; one test patched
+# subprocess.run itself, but nothing stopped another test from falling through
+# to the real spawn. The autouse fixture below stubs every spawn entry point,
+# pins PATH to an empty dir and DOCKER_HOST to an unreachable socket.
+SPAWN_STUB_MSG = "test reached a real process spawn"
+SPAWN_CALLS = []      # every argv the stub refused, newest last — tests inspect this
+EMPTY_BIN = None      # the fixture's empty PATH dir; None until the fixture runs
+
+
+@pytest.fixture(autouse=True)
+def no_real_process_spawns(monkeypatch, tmp_path):
+    """Autouse shield (D-1038 P2d2): no test in this file can spawn a process.
+
+    `dedup_graph.subprocess` / `dedup_graph.os` ARE the stdlib modules (plain
+    `import subprocess` / `import os` in the script), so patching the modules
+    covers every call site: sh, cli, list_graphs, export_graph, node_count and
+    main(). A test may still opt into a specific fake by monkeypatching
+    `dedup_graph.subprocess.run` itself AFTER this fixture (the node_count test
+    above does) — fixture patches land first and unwind last.
+    """
+    global EMPTY_BIN
+    del SPAWN_CALLS[:]
+    EMPTY_BIN = tmp_path / "empty-bin"
+    EMPTY_BIN.mkdir()
+
+    def argv_repr(args):
+        for item in args:
+            if isinstance(item, (list, tuple)):
+                return " ".join(str(x) for x in item)
+            if isinstance(item, str):
+                return item
+        return repr(args[0] if args else "")
+
+    def no_spawn(*args, **kwargs):
+        argv = argv_repr(args)
+        SPAWN_CALLS.append(argv)
+        raise AssertionError(f"{SPAWN_STUB_MSG}: {argv}")
+
+    for module, names in (
+            (subprocess, ("run", "Popen", "call", "check_call", "check_output")),
+            (os, ("system", "execv", "execvp", "spawnvp", "posix_spawn"))):
+        for name in names:
+            if hasattr(module, name):  # posix_spawn/spawnvp are not on every platform
+                monkeypatch.setattr(module, name, no_spawn)
+    # `docker` can no longer be found by any lookup, and even a remembered socket
+    # path points nowhere.
+    monkeypatch.setenv("PATH", str(EMPTY_BIN))
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent-og013-test.sock")
+
+
+def test_no_real_docker_reachable():
+    # (a) no lookup finds docker, (b) every spawn path raises the stub, (c) even
+    # the module's own wrapper `sh` cannot fall through to a real process.
+    assert shutil.which("docker") is None
+    assert os.environ["PATH"] == str(EMPTY_BIN)
+    assert os.environ["DOCKER_HOST"] == "unix:///nonexistent-og013-test.sock"
+    with pytest.raises(AssertionError, match=SPAWN_STUB_MSG):
+        subprocess.run(["docker", "ps"])
+    with pytest.raises(AssertionError, match=SPAWN_STUB_MSG):
+        dedup_graph.sh(["docker", "ps"])
+
+
+def test_main_dry_run_is_intercepted_by_the_spawn_stub(monkeypatch):
+    # The parser requires nothing beyond the script name (every option has a
+    # default) plus the brief's --image/--dry-run: with --dry-run the D-825 gate
+    # is skipped (enforce returns at once for a non-mutating run), so main()'s
+    # first spawn is _omni_env.detect_network's `docker inspect omnigraph-server`
+    # — which must hit the stub, never a real process.
+    monkeypatch.delenv("OMNI_NET", raising=False)
+    monkeypatch.setattr(sys, "argv", [script_path, "--image",
+                                      "modernrelay/omnigraph-server:v0.8.1", "--dry-run"])
+    with pytest.raises(AssertionError, match=SPAWN_STUB_MSG):
+        dedup_graph.main()
+    assert SPAWN_CALLS, "main() should have reached the stub, not run silently"
+    assert any("docker inspect omnigraph-server" in c for c in SPAWN_CALLS)
+
+
+def test_every_spawning_function_raises_under_the_fixture():
+    a = types.SimpleNamespace(network="mcp-server_mcp-net", server="http://omnigraph-server:8080",
+                              image="modernrelay/omnigraph-server:v0.8.1")
+    for call in (lambda: dedup_graph.sh(["docker", "ps"]),
+                 lambda: dedup_graph.cli("omnigraph snapshot", a.network, a.image, "tok"),
+                 lambda: dedup_graph.list_graphs(a.server, a.network, a.image, "tok"),
+                 lambda: dedup_graph.export_graph(a.server, a.network, a.image, "tok"),
+                 # retries=1 keeps a pre-fixture failure fast; post-fixture the
+                 # stub raises on the first attempt anyway.
+                 lambda: dedup_graph.node_count(a, "tok", retries=1)):
+        with pytest.raises(AssertionError, match=SPAWN_STUB_MSG):
+            call()
