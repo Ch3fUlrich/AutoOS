@@ -35,15 +35,16 @@ log cannot.
 The optional ``gitleaks`` leg is asked for the same range and its own output is
 printed as it came back, because gitleaks was told to ``--redact``.
 
-SKIPPED IS NEVER A FAILURE
---------------------------
-No names file configured, a configured path that is not there, a file with no
-real entries in it, no gitleaks installed: each prints one line saying the leg
-was skipped and returns 0. This gate is an extra pair of eyes a host may or may
-not have opted into; making it mandatory would refuse every push on a machine
-that never asked for it, and a gate that cries wolf gets overridden. What *is*
-a refusal: a names file that is configured, present, and cannot be read (that is
-the one state where the check was asked for and did not happen), and a hit.
+ONLY AN UNCONFIGURED LEG SKIPS
+------------------------------
+A leg nobody opted into prints one line saying the leg was skipped and returns
+0: no ``AUTOOS_PRIVATE_PATTERNS``, a file with no real entries in it, no
+``AUTOOS_GITLEAKS`` and no gitleaks on ``PATH``. A leg that *was* configured and
+did not happen is a refusal (1) — a hit, the names file absent or unreadable, a
+named gitleaks that is not an executable, a diff or an answer that is not valid
+UTF-8 — and a range the leg could not read at all is 2. AutoOS is public, so the
+operator rule is that a configured gate fails closed: no verdict is never a
+green.
 
 A leg that RAN reports itself in the gate's ``results`` — ``private-pattern-gate``
 or ``gitleaks``, with ``ok`` — so a green certificate records that the check
@@ -77,14 +78,20 @@ COULD_NOT_RUN = 2
 TAIL_LINES = 20
 #: ``@@ -a,b +c,d @@`` — only the new side's start and length matter here.
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+#: What the diff legs return for a patch that is not valid UTF-8: neither a diff
+#: nor its absence, because "could not read it" is not "nothing was added".
+NOT_UTF8 = object()
+#: A UTF-8 locale for both children. ``text=True`` alone decodes with the host's,
+#: so under ``LC_ALL=C`` or Windows cp1252 a non-ASCII added line arrived as
+#: replacement characters, matched nothing, and the leg went green on a real hit.
+UTF8_LOCALE = {"LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"}
 
 
 def load_entries(path):
     """The names file's real entries, in file order.
 
-    Raises ``OSError``: the caller distinguishes "not there" (skipped) from
-    "there and unreadable" (refused) before it ever gets here, so a failure to
-    read a file that exists is the second case and must not look like the first.
+    Raises ``OSError``: the caller has already refused a names file that is not
+    there, so a failure to read one that exists must not look like the empty case.
 
     ``utf-8-sig`` because a hand-edited names file often opens with a BOM, and
     ``str.strip()`` keeps U+FEFF: read as plain utf-8 the BOM glued itself to
@@ -97,10 +104,18 @@ def load_entries(path):
 
 
 def _diff_text(repo, base):
-    proc = subprocess.run(
-        ["git", "-C", str(repo), "-c", "core.quotepath=false", "diff",
-         "--no-color", "--no-ext-diff", "-U0", "%s..HEAD" % base],
-        capture_output=True, text=True, errors="replace")
+    # An empty base or one starting with "-" is an option, not a revision: git
+    # would write the patch to a file and report success over nothing.
+    if not base or base.startswith("-"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "-c", "core.quotepath=false", "diff",
+             "--no-color", "--no-ext-diff", "-U0", "%s..HEAD" % base],
+            capture_output=True, text=True, encoding="utf-8", errors="strict",
+            env=dict(os.environ, **UTF8_LOCALE))
+    except (UnicodeDecodeError, ValueError):
+        return NOT_UTF8
     if proc.returncode != 0:
         return None
     return proc.stdout
@@ -143,8 +158,8 @@ def added_lines(repo, base):
     trailing ``'\r'`` in the text, which none of the header tests mind.
     """
     text = _diff_text(repo, base)
-    if text is None:
-        return None
+    if text is NOT_UTF8 or text is None:
+        return text
     rows = []
     path = None
     line = 0
@@ -208,8 +223,11 @@ def pattern_leg(repo, base, env):
         print("prepush: private-pattern gate skipped (%s not set)" % PATTERNS_ENV)
         return OK, []
     if not os.path.isfile(path):
-        print("prepush: private-pattern gate skipped (%s file missing)" % PATTERNS_ENV)
-        return OK, []
+        # Configured and absent is the check not happening; a public repo's gate
+        # fails closed. The path is never echoed — it is where the tree lives.
+        print("prepush: refused — %s is set but the names file is missing"
+              % PATTERNS_ENV)
+        return REFUSED, [_result(PATTERN_COMMAND, False)]
     try:
         entries = load_entries(path)
     except OSError as exc:
@@ -222,6 +240,10 @@ def pattern_leg(repo, base, env):
         print("prepush: private-pattern gate skipped (names file has no entries)")
         return OK, []
     added = added_lines(repo, base)
+    if added is NOT_UTF8:
+        print("prepush: private-pattern gave no verdict — the diff is not "
+              "valid UTF-8")
+        return COULD_NOT_RUN, []
     if added is None:
         print("prepush: private-pattern gate could not read the diff — no verdict")
         return COULD_NOT_RUN, []
@@ -251,21 +273,30 @@ def resolve_gitleaks(env):
 def gitleaks_leg(repo, base, env):
     """``(status, results)`` — gitleaks over the same range, when it is installed."""
     named = (env.get(GITLEAKS_ENV) or "").strip()
+    if not base or base.startswith("-"):
+        print("prepush: gitleaks was not asked — the base is unusable")
+        return COULD_NOT_RUN, []
     binary = resolve_gitleaks(env)
     if not binary:
-        print("prepush: gitleaks skipped (%s)" % (
-            "%s is not an executable" % GITLEAKS_ENV if named
-            else "%s is not on PATH" % GITLEAKS_FALLBACK))
+        if named:
+            print("prepush: refused — %s is set but is not an executable"
+                  % GITLEAKS_ENV)
+            return REFUSED, [_result(GITLEAKS_COMMAND, False)]
+        print("prepush: gitleaks skipped (%s is not on PATH)" % GITLEAKS_FALLBACK)
         return OK, []
     cmd = [binary, "git", "--no-banner", "--redact", "--log-opts",
            "%s..HEAD" % base, str(repo)]
     try:
-        proc = subprocess.run(cmd, cwd=str(repo), env=dict(env),
-                              capture_output=True, text=True, errors="replace")
+        proc = subprocess.run(cmd, cwd=str(repo), env=dict(env, **UTF8_LOCALE),
+                              capture_output=True, text=True,
+                              encoding="utf-8", errors="strict")
     except OSError as exc:
         print("prepush: gitleaks skipped (it could not be started: %s)"
               % exc.__class__.__name__)
         return OK, []
+    except (UnicodeDecodeError, ValueError):
+        print("prepush: refused — gitleaks answered in bytes that are not UTF-8")
+        return REFUSED, [_result(GITLEAKS_COMMAND, False)]
     if proc.returncode != 0:
         print(_tail((proc.stdout or "") + (proc.stderr or "")))
         print("prepush: refused — gitleaks exit status %d" % proc.returncode)

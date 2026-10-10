@@ -43,9 +43,14 @@ WHAT IT DOES, IN ORDER
      names file lives in the private one, so this tree hardcodes no path, no host
      and no person's name. A hit prints ``path:line: private-pattern #<entry
      number>`` and nothing else — never the matched text, never the entry, never
-     the line it came from. Unset, missing or empty prints one line saying skipped
-     and is never a failure; a names file that is there and cannot be read
-     refuses. The optional ``gitleaks`` leg (``AUTOOS_GITLEAKS`` naming an
+     the line it came from. Only a leg nobody configured skips — unset, or a
+     names file with no real entries in it — and a leg that was configured and
+     could not run refuses, because a gate on a public repo fails closed: the
+     names file absent or unreadable, the leg module not importable, a named
+     gitleaks that is not an executable, or a diff that is not valid UTF-8 (both
+     legs decode as UTF-8 with ``LC_ALL``/``LANG`` pinned to ``C.UTF-8``, so a
+     host locale of ``C`` or cp1252 cannot blind the scan over a non-ASCII
+     entry). The optional ``gitleaks`` leg (``AUTOOS_GITLEAKS`` naming an
      executable, else ``gitleaks`` on PATH) is asked for the same ``base..HEAD``
      range with ``--redact``, and a non-zero exit is a refusal that prints what
      gitleaks itself printed. A leg that RAN adds ``private-pattern-gate`` /
@@ -124,9 +129,13 @@ except ImportError:  # the pre-push hook's shim may run a copy of this file
     clients = None                     # alone; store_root() falls back to the
                                        # same formula from the script's own dir
 try:
-    from prepush_private import run_private_gate
+    from prepush_private import GITLEAKS_ENV, PATTERNS_ENV, run_private_gate
 except ImportError:  # a stripped checkout carrying a copy of this file alone
     run_private_gate = None
+    # The env names are restated, not imported: gate() has to ask whether a leg
+    # was configured even now that the module which owns them is missing.
+    GITLEAKS_ENV = "AUTOOS_GITLEAKS"
+    PATTERNS_ENV = "AUTOOS_PRIVATE_PATTERNS"
 
 DEFAULT_BASE = "origin/main"
 OVERRIDE_ENV = "AUTOOS_PREPUSH_OVERRIDE"
@@ -632,6 +641,13 @@ def gate(repo, base: str):
         return REFUSED
     private_results = []
     if run_private_gate is None:
+        if any((os.environ.get(name) or "").strip()
+               for name in (PATTERNS_ENV, GITLEAKS_ENV)):
+            # A leg was asked for and the module that runs it is not here: the
+            # skip note would certify a push nothing scanned.
+            print("prepush: refused — a leg is configured but "
+                  "tools/prepush_private.py is not importable beside this file")
+            return REFUSED
         print("prepush: private-pattern gate skipped (tools/prepush_private.py "
               "is not importable beside this file)")
     else:

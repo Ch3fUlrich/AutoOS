@@ -8,9 +8,10 @@ production lives in a private repository, so nothing here may quote one from it
 — the entries are ``zz-fixture-*`` strings. No network, and no real gitleaks.
 
 The host's gitleaks is deliberately pinned out of every test that does not mean
-to run the fake one (``AUTOOS_GITLEAKS`` pointed at a path inside the temp dir),
-because a leg that reads the ``PATH`` would answer differently on two machines —
-which is how a suite goes green here and red in CI.
+to run the fake one (``AUTOOS_GITLEAKS`` pointed at a path inside the temp dir,
+or ``resolve_gitleaks`` patched to answer None — an absent path is a refusal
+now), because a leg that reads the ``PATH`` would answer differently on two
+machines — which is how a suite goes green here and red in CI.
 
 The fixture shape — a synthetic repo with a ``refs/remotes/origin/main`` written
 without a network, and the stub ``tools/affected-tests.py`` that answers with
@@ -42,8 +43,18 @@ SCRIPT = ROOT / "tools" / "prepush.py"
 ALPHA = "zz-fixture-alpha"
 BETA = "zz-fixture-beta"
 GAMMA = "zz-fixture-gamma"
+#: Written with an escape so this source file stays ASCII on a cp1252 host.
+CAFE = "zz-fixture-caf\u00e9"
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+#: The leg run in a child interpreter whose locale really is ``C`` — patching
+#: in-process cannot reproduce it, the codec is chosen when the interpreter starts.
+LOCALE_DRIVER = ('import os, sys\n'
+                 'sys.path.insert(0, os.environ["ZZ_TOOLS_DIR"])\n'
+                 'import prepush_private as leg\n'
+                 'st = leg.run_private_gate(*sys.argv[1:3], os.environ)[0]\n'
+                 'print("STATUS=%d" % st)\n')
 
 #: The stub mapper, copied from tests/test_prepush.py: it answers with whatever
 #: plan the test put in the environment, so the integration tests below decide
@@ -106,15 +117,23 @@ class PrivateGateTests(unittest.TestCase):
         path.write_text(text, encoding=encoding)
         return path
 
+    def commit_bytes(self, rel, data, msg="bytes"):
+        self.commit(rel, "")
+        (self.repo / rel).write_bytes(data)
+        run_git("add", rel, cwd=self.repo)
+        run_git("commit", "-q", "-m", msg, cwd=self.repo)
+
     def gate(self, env=None):
         """The leg, with the host's gitleaks pinned out unless the test names one."""
-        full = {"AUTOOS_GITLEAKS": str(self.tmp / "no-gitleaks-on-this-host")}
-        full.update(env or {})
+        full = dict(env or {})
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.redirect_stdout(out))
+            if not (full.get(private.GITLEAKS_ENV) or "").strip():
+                stack.enter_context(mock.patch.object(
+                    private, "resolve_gitleaks", return_value=None))
             status, results = private.run_private_gate(self.repo, self.base, full)
         return status, results, out.getvalue()
-
     def patterns(self, text):
         return self.gate({"AUTOOS_PRIVATE_PATTERNS": str(self.names_file(text))})
 
@@ -125,12 +144,19 @@ class PrivateGateTests(unittest.TestCase):
         self.assertEqual((status, results), (0, []))
         self.assertIn("private-pattern gate skipped", out)
         self.assertIn("AUTOOS_PRIVATE_PATTERNS not set", out)
+        self.assertIn("gitleaks is not on PATH", out)
 
-    def test_a_names_file_that_is_not_there_is_skipped_not_failed(self):
+    def test_a_names_file_set_but_absent_refuses_instead_of_skipping(self):
+        # The operator rule: on a public repo a gate that is configured fails
+        # closed. A names file that was asked for and is not there is the check
+        # not happening, which is not something a push may be certified over.
         status, results, out = self.gate(
             {"AUTOOS_PRIVATE_PATTERNS": str(self.tmp / "absent-names.txt")})
-        self.assertEqual((status, results), (0, []))
-        self.assertIn("file missing", out)
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("is set but the names file is missing", out)
+        self.assertNotIn(str(self.tmp), out, "the private location leaked")
+        self.assertEqual(results, [{"command": "private-pattern-gate",
+                                    "ok": False, "passed": None}])
 
     def test_an_empty_names_file_is_skipped_saying_so(self):
         status, results, out = self.patterns("# only a comment\n\n   \n")
@@ -275,6 +301,62 @@ class PrivateGateTests(unittest.TestCase):
         self.assertIn('qa"b.txt:1: private-pattern #1', out)
         self.assertNotIn('b/qa', out, "the b/ prefix leaked into the refusal")
 
+    # --- the diff is decoded as UTF-8, whatever the host locale says ----------
+
+    @unittest.skipIf(os.name == "nt", "the C-locale child is a POSIX run")
+    def test_a_non_ascii_entry_is_still_seen_under_an_ascii_host_locale(self):
+        # ``text=True`` decoded with the *host's* locale, so under LC_ALL=C (and
+        # under Windows cp1252) the é arrived as a replacement character, matched
+        # no entry, and the gate went green over the line it exists to catch. The
+        # child interpreter really is a C locale — PYTHONUTF8 and
+        # PYTHONCOERCECLOCALE off — because patching in-process cannot change the
+        # codec the interpreter picked when it started.
+        self.commit("tracked.txt", "third %s third\n" % CAFE, append=True)
+        driver = self.tmp / "driver.py"
+        driver.write_text(LOCALE_DRIVER, encoding="utf-8")
+        names = str(self.names_file(CAFE + "\n"))
+        env = dict(os.environ)
+        env.update({"LC_ALL": "C", "LANGUAGE": "C", "PYTHONCOERCECLOCALE": "0",
+                    "PYTHONUTF8": "0", "ZZ_TOOLS_DIR": str(MODULE.parent),
+                    "PATH": "/usr/bin:/bin",
+                    "AUTOOS_PRIVATE_PATTERNS": names, "AUTOOS_GITLEAKS": "",
+                    # Only the child's own stdout: PYTHONIOENCODING leaves
+                    # getpreferredencoding() ASCII, so the decode under test is the
+                    # diff's, not the message's.
+                    "PYTHONIOENCODING": "utf-8"})
+        env.pop("AUTOOS_AGENT_RUN_ID", None)
+        proc = subprocess.run([sys.executable, str(driver), str(self.repo),
+                               self.base],
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", env=env, cwd=str(self.repo))
+        out = proc.stdout + proc.stderr
+        self.assertIn("STATUS=%d" % private.REFUSED, out, out)
+        self.assertIn("tracked.txt:3: private-pattern #1", out)
+        self.assertNotIn(CAFE, out, "the matched text was printed")
+
+    def test_an_invalid_utf8_byte_on_an_added_line_gives_no_verdict(self):
+        # The strict decoder raises over bytes this push added; saying so is the
+        # honest answer — reading them as replacement characters and calling the
+        # tree clean is the fail-open. (Only a NUL would make git call a file
+        # binary, so the raw byte really does reach the patch.)
+        self.commit_bytes("blob.txt", b"caf\xe9 \xff\xfe bad\n")
+        status, results, out = self.patterns(ALPHA + "\n")
+        self.assertEqual((status, results), (private.COULD_NOT_RUN, []))
+        self.assertIn("not valid UTF-8", out)
+
+    def test_a_base_that_starts_with_a_dash_is_never_handed_to_git(self):
+        # ``git diff --output=x..HEAD`` is an option, not a revision: the patch
+        # lands in a file, nothing is scanned, and both legs report green.
+        for base in ("--output=x", ""):
+            self.assertIsNone(private.added_lines(self.repo, base), base)
+        script, seen = self.fake_gitleaks(0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            status, results = private.gitleaks_leg(
+                self.repo, "--output=x", {"AUTOOS_GITLEAKS": str(script)})
+        self.assertEqual((status, results), (private.COULD_NOT_RUN, []))
+        self.assertFalse(seen.exists(), "the fake gitleaks ran on the bad base")
+
     # --- the gitleaks leg -----------------------------------------------------
 
     @unittest.skipIf(os.name == "nt", "the fake gitleaks is a shebang script")
@@ -315,17 +397,20 @@ class PrivateGateTests(unittest.TestCase):
                                     "passed": None}])
         self.assertIn("fake gitleaks ran", out)
 
-    def test_a_gitleaks_that_is_not_installed_skips_the_leg_never_fails(self):
+    def test_a_named_but_absent_gitleaks_refuses_instead_of_skipping(self):
         status, results, out = self.gate(
             {"AUTOOS_GITLEAKS": str(self.tmp / "not-installed")})
-        self.assertEqual((status, results), (0, []))
-        self.assertIn("gitleaks skipped", out)
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("is set but is not an executable", out)
+        self.assertNotIn(str(self.tmp), out, "the configured path leaked")
+        self.assertEqual(results, [{"command": "gitleaks", "ok": False,
+                                    "passed": None}])
 
     # --- through the gate itself ----------------------------------------------
 
-    def install_gate(self):
+    def install_gate(self, with_leg=True):
         """The gate and its new leg, plus the stubs that keep the checks cheap."""
-        for src in (SCRIPT, MODULE):
+        for src in [SCRIPT] + ([MODULE] if with_leg else []):
             (self.repo / "tools").mkdir(parents=True, exist_ok=True)
             shutil.copy(str(src), str(self.repo / "tools" / src.name))
         (self.repo / "tools" / "affected-tests.py").write_text(AFFECTED_STUB,
@@ -344,7 +429,9 @@ class PrivateGateTests(unittest.TestCase):
         full = dict(os.environ)
         full.pop("AUTOOS_AGENT_RUN_ID", None)
         full["AUTOOS_STATE_DIR"] = str(self.tmp / "store")
-        full["AUTOOS_GITLEAKS"] = str(self.tmp / "no-gitleaks-on-this-host")
+        # A configured-but-absent binary is a refusal now, so pinning the host's
+        # gitleaks out means naming a green one instead of pointing at nothing.
+        full["AUTOOS_GITLEAKS"] = str(self.fake_gitleaks(0)[0])
         full["PREPUSH_FIXTURE_PLAN"] = "{}"
         full.update(env or {})
         proc = subprocess.run([sys.executable,
@@ -391,6 +478,23 @@ class PrivateGateTests(unittest.TestCase):
         self.assertIn("private-pattern gate skipped", out)
         self.assertEqual(len(self.store_records()), 1)
         self.assertNotIn("private-pattern-gate", self.store_records()[0]["commands"])
+
+    def test_a_gate_without_its_leg_module_refuses_when_a_leg_is_configured(self):
+        # prepush_private.py not importable beside prepush.py, and someone asked
+        # for the scan: the skip note would certify an unscanned push.
+        self.install_gate(with_leg=False)
+        rc, out = self.run_gate({"AUTOOS_PRIVATE_PATTERNS":
+                                     str(self.names_file(ALPHA)),
+                                 "AUTOOS_GITLEAKS": ""})
+        self.assertEqual(rc, 1, out)
+        self.assertIn("not importable", out)
+
+    def test_a_gate_without_its_leg_module_continues_when_none_is_set(self):
+        self.install_gate(with_leg=False)
+        rc, out = self.run_gate({"AUTOOS_PRIVATE_PATTERNS": "",
+                                 "AUTOOS_GITLEAKS": ""})
+        self.assertEqual(rc, 0, out)
+        self.assertIn("not importable", out)
 
 
 if __name__ == "__main__":
