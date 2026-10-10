@@ -838,14 +838,15 @@ class MarkerTests(unittest.TestCase):
                      + sum(len(es) for _, _, es in pending))
         self.assertGreater(self.sent, 1, "fixture batch needs nodes and edges")
 
-    def _run(self, argv, post_load):
+    def _run(self, argv, post_load, env=None):
         orig = self.mod.post_load
         self.mod.post_load = post_load
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err):
                 rc = self.mod.main(["--known-slugs", self.KNOWN] + list(argv),
-                                   root=self.root, env={"OMNIGRAPH_TOKEN": "t"})
+                                   root=self.root,
+                                   env=env if env is not None else {"OMNIGRAPH_TOKEN": "t"})
         finally:
             self.mod.post_load = orig
         return rc, err.getvalue()
@@ -891,6 +892,15 @@ class MarkerTests(unittest.TestCase):
         self.assertIn("--clear-pending", err)
         self.assertIn(str(self.sent) + " lines", err)
         self.assertTrue(self.marker.exists())
+        self.assertFalse(self.ledger.exists() and self.ledger.read_text().split())
+
+    def test_missing_token_sends_nothing_and_writes_no_marker(self):
+        """(c2) A missing token fails before the marker — no request could land,
+        so a later --load must not refuse on a stale attempt."""
+        rc, err = self._run(["--load"], self._never, env={})
+        self.assertEqual(rc, 1, err)
+        self.assertIn("OMNIGRAPH_TOKEN is not set", err)
+        self.assertFalse(self.marker.exists())
         self.assertFalse(self.ledger.exists() and self.ledger.read_text().split())
 
     def test_client_error_clears_marker_server_error_keeps_it(self):

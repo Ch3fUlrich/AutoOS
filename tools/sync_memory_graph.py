@@ -589,10 +589,17 @@ def main(argv=None, root=None, env=None):
             return 1
         lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new if n is not None] + \
                 [json.dumps(e) for _, _, es in new for e in es]
+        base_url = env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080")
+        token = env.get("OMNIGRAPH_TOKEN")
+        if not token:
+            # Refused before the marker: a request that was never sent can
+            # never have landed, so the next --load must not refuse on it.
+            print("ERROR: OMNIGRAPH_TOKEN is not set; nothing sent.",
+                  file=sys.stderr)
+            return 1
         write_pending(root, [k for k, _, _ in new], len(lines))
         try:
-            res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
-                            env["OMNIGRAPH_TOKEN"], lines)
+            res = post_load(base_url, token, lines)
         except urllib.error.HTTPError as exc:
             print(f"ERROR: the omnigraph server rejected the load "
                   f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
