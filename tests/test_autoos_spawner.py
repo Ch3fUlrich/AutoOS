@@ -7107,6 +7107,107 @@ class ProviderStopFallthroughTests(unittest.TestCase):
                       out + err)
 
 
+class CooldownRetryTests(unittest.TestCase):
+    """AO-SPAWN-COOLDOWN-RETRY (S2, measured 2026-10-09T16:40Z: the two runs
+    logs/agents/20261009-164000-gw-strict-hex-seat1b-a859a4 and
+    20261009-164036-mem-tools-seat3-a51764, both --isolate reviews, both rc 1 in
+    under 90 s). The gateway answered a combo leg with its per-credential
+    cooldown — a line inside PROVIDER_STOP_MARKERS that states its own window —
+    and the run neither waited nor fell through. The stop WAS classified (the
+    output.log carries the `provider ... unavailable until` line only the
+    classified path prints); what never happened was a WAIT. A leg that says
+    "back in 3 seconds" is worth the same leg again after the window; a long or
+    unstated one is an outage to re-plan around. `cooldown_sleep` is patched
+    here, so no test in this class ever sleeps."""
+
+    # The last five lines of that output.log, bytes intact: the ESC-culled
+    # reset line, the two route marks that precede it (the real tail carried
+    # eleven) and the blank the client opens with.
+    REAL_TAIL = ("\x1b[0m\n"
+                 "> l1-orchestrator → l1-orchestrator\n"
+                 "> l1-orchestrator → l1-orchestrator\n"
+                 "\x1b[91m\x1b[1mError: \x1b[0mAll credentials for model "
+                 "deepseek/deepseek-v4-flash-0731free:free are cooling "
+                 "down%s\n")
+    STOPPED_LINE = ("Error: All credentials for model "
+                    "deepseek/deepseek-v4-flash-0731free:free are cooling down"
+                    " (reset after 3s)")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.sleeps = []
+
+    def _tail(self, window):
+        """The real line, stating `window` ("3s", "120s", None = unstated)."""
+        return self.REAL_TAIL % (" (reset after %s)" % window if window else "")
+
+    def _run(self, route_ids, stops, window="3s", **kw):
+        kw.setdefault("stop_rc", 1)  # the shape the field failed in
+        with mock.patch.object(self.agent, "cooldown_sleep", self.sleeps.append):
+            return _fallthrough_run(self, route_ids, stops,
+                                    stop_tail=self._tail(window), **kw)
+
+    def test_the_real_coloured_output_log_line_is_a_provider_stop(self):
+        # The cause check, on the bytes the two runs actually wrote: the ANSI
+        # colour/bold around "Error: " must not break the error-prefix rule, the
+        # stated window must read, and it must be a COOLDOWN rather than a rate
+        # limit (no " 429", no rate-limit wording — the digits sit in the model id).
+        line = self.agent.provider_stop(self._tail("3s"))
+        self.assertEqual(line, self.STOPPED_LINE)
+        self.assertTrue(self.agent.cooldown_stop(line))
+        self.assertEqual(self.agent.cooldown_wait(line), 3)
+        self.assertFalse(self.agent.rate_limit_stop(line))
+
+    def test_a_short_cooldown_waits_and_re_runs_the_same_route(self):
+        # ONE route in the registry: a re-plan has nowhere to go, so the only way
+        # this run reaches rc 0 is the same route again.
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free"], out + err)
+        self.assertEqual(calls["attempts"], [1, 2], "the retry is its own launch")
+        self.assertEqual(self.sleeps, [4], "the stated 3 s, plus one")
+        self.assertNotIn("falling through", out + err)
+
+    def test_a_second_cooldown_falls_through_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=2)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free", "r-cheap"],
+                         out + err)
+        self.assertEqual(self.sleeps, [4], "one wait for one retry, never a second")
+        self.assertIn("-> falling through to r-cheap", out + err)
+
+    def test_a_long_reset_never_waits_and_moves_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                           window="120s")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [], "minutes is an outage, not a nap")
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_an_unstated_cooldown_moves_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                           window=None)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_no_fallthrough_retries_the_same_leg_then_ends_on_the_stop_rc(self):
+        # The retry is not a re-plan, so --no-fallthrough keeps it; what it does
+        # refuse is the next route, so the cooled-down retry ends the run.
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=2,
+                                           args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 2, "the retry, and nothing after it")
+        self.assertEqual(self.sleeps, [4])
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("--no-fallthrough", out + err)
+
+    def test_no_fallthrough_with_a_long_reset_ends_without_waiting(self):
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1, window="120s",
+                                           args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(rc, 8, out + err)
+
+
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
                "opencode/muse-spark-1.3-contributor-free",
                "opencode/mimo-v2.6-flash-free"]

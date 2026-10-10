@@ -8254,6 +8254,48 @@ def parse_reset(text: str) -> int | None:
     return int(m.group(1)) * unit if unit else None
 
 
+# AO-SPAWN-COOLDOWN-RETRY (S2, measured 2026-10-09T16:40Z, the two runs named in
+# the test): the gateway's per-credential cooldown is not an outage, it is a
+# countdown — the SAME credential, back in the seconds it states. Re-planning
+# around a 3 s window spends a route and a clone to solve a nap, so a stop that
+# states a window this short waits and re-runs the leg it is on. Longer or
+# unstated, it is an outage and falls through as a rate limit does.
+COOLDOWN_SAME_LEG_MAX_SECONDS = 60
+
+_COOLDOWN_MARKER = "are cooling down"
+
+
+def cooldown_stop(line: str) -> bool:
+    """Is this provider-stop line the gateway counting one credential down?
+
+    Call it on a line `provider_stop` returned, like `rate_limit_stop`: the
+    error-prefix rule that keeps the task's own quoted text out of it already
+    ran there.
+    """
+    return _COOLDOWN_MARKER in (line or "").lower()
+
+
+def cooldown_wait(line: str) -> int | None:
+    """Seconds to wait before re-running THIS leg, or None: wait elsewhere.
+
+    None when the line is no cooldown, states no window, or states more than
+    COOLDOWN_SAME_LEG_MAX_SECONDS — a leg that says "back in two minutes" is not
+    serving this run either way, and the next leg is.
+    """
+    if not cooldown_stop(line):
+        return None
+    secs = parse_reset(line)
+    return secs if secs is not None and secs <= COOLDOWN_SAME_LEG_MAX_SECONDS else None
+
+
+def cooldown_sleep(seconds: float) -> None:
+    """The nap between a cooldown stop and its same-leg retry.
+
+    A name of its own so a test can patch it out; nothing else sleeps here.
+    """
+    time.sleep(seconds)
+
+
 def _leg_provider_model(leg, registry):
     """A route leg as ``(provider_id, model_id)``, or None if it does not resolve.
 
@@ -11860,6 +11902,11 @@ def cmd_run(args, cfg: dict) -> int:
     # How many re-runs this run has already started (route or free model): the
     # one bound MAX_FALLTHROUGH is about.
     fallthroughs = 0
+    # AO-SPAWN-COOLDOWN-RETRY: the wait-and-retry-the-same-leg, ONCE per run.
+    # Deliberately not counted in `fallthroughs` — a 3 s cooldown must not spend
+    # the run's re-plan budget — but counted with it when a launch is numbered
+    # below, because the kill store and the scope unit key on the attempt.
+    cooldown_retries = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -12000,7 +12047,7 @@ def cmd_run(args, cfg: dict) -> int:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
-                                                         attempt=fallthroughs + 1)
+                                                         attempt=fallthroughs + cooldown_retries + 1)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec
@@ -12053,7 +12100,8 @@ def cmd_run(args, cfg: dict) -> int:
                                 # fallthrough re-run — leads a new session, so every
                                 # attempt re-records its group in the runner-private
                                 # store `cancel` kills from.
-                                run_id=plan.get("run_id"), attempt=fallthroughs + 1)
+                                run_id=plan.get("run_id"),
+                                attempt=fallthroughs + cooldown_retries + 1)
             scope_rec = getattr(run_rc, "scope", None) or scope_rec
         except ClientMissing as exc:
             # WINSHIM: gone between the pre-check and this attempt (a fallthrough
@@ -12109,6 +12157,10 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
+        # and not from the window it stated — a cooldown that states nothing is
+        # still a cooldown, and still exits the run on the stop's rc.
+        cooling = stop is not None and cooldown_stop(stop)
         if stop is not None:
             # REVROUTE (S2) item 3: when the stop line states its own reset,
             # that window becomes the provider's unavailable_until for every
@@ -12135,16 +12187,37 @@ def cmd_run(args, cfg: dict) -> int:
                             datetime.timezone.utc))}
                     print("rate limit: provider %s benched for this run's next "
                           "leg (%s)" % (benched, _iso_zulu(until)))
-        if stop is not None and (rc in (0, 3, 6) or (rate_limited and rc == 1)):
+        if stop is not None and (rc in (0, 3, 6)
+                                 or ((rate_limited or cooling) and rc == 1)):
             # SB-B (RATELIMITRETRY): rc 1 joins the upgrade only for a rate limit,
             # which is the shape the field actually failed in (the client printed
             # its 429 and exited 1). Other rc-1 exits stay the client's own failure
             # class: a provider that refused service is exit 8, a client that
-            # crashed is not.
+            # crashed is not. AO-SPAWN-COOLDOWN-RETRY: the cooldown is the same
+            # shape (both field runs), and leaving it at the client's 1 is what
+            # made a refused leg read as a failed task.
             print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
         if rc == 0 and client.promo:
             clients.record_probe(client.name)
+        # AO-SPAWN-COOLDOWN-RETRY: the gateway named the model and counted the
+        # credential down in seconds — that is THIS leg, shortly, not a dead one.
+        # Sleep the stated window out and re-launch the SAME plan: same combo,
+        # same sandbox, same work in it, no re-plan, no bench, no fallthrough
+        # spent. Once per run; a second cooldown, or a window too long or unstated,
+        # falls through below exactly as a rate-limit stop does, and
+        # --no-fallthrough ends the run on the stop's own rc. Nor is the stopped
+        # attempt track-recorded like a fallthrough's: a leg that serves 3 s later
+        # did not fail the route it belongs to.
+        nap = cooldown_wait(stop) if cooling else None
+        if nap is not None and not cooldown_retries and not args.joinable:
+            cooldown_retries += 1
+            nap += 1  # the window stated, plus a beat for the clock to roll over
+            print("autoos-agent: cooldown on %s: %s - waiting %ds and re-running "
+                  "the same route" % (plan["model"] or plan["route"].get("combo"),
+                                      redact_output(stop), nap), file=sys.stderr)
+            cooldown_sleep(nap)
+            continue
         # SPAWNCAP (S2): a provider-stopped resolver-routed --isolate run
         # re-runs the SAME task in the SAME sandbox on the next route (WIPfix
         # preserved the work but stranded it on a dead route). At most
