@@ -16975,6 +16975,56 @@ class FamilyFencePinnedModelTests(unittest.TestCase):
                 self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
                 self.assertIn("no model outside family qwen left", err)
 
+    def test_a_nested_vendor_token_still_names_the_longer_family(self):
+        # S1 fix round 2 F1: `openai_oss` names TWO table tokens — `openai-oss`
+        # and `openai` — but the shorter span lies INSIDE the longer's, so the id
+        # names the provider-prefixed family; only DISJOINT spans stay unplaceable.
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        for pin in ("openai_oss", "omniroute/openai-oss-120b"):
+            with self.subTest(pin=pin):
+                self.assertEqual(self.agent.fence_family_of(pin, {}), "openai-oss")
+                self.assertFalse(self.agent.fence_blocks_model(pin, {}, fence))
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/deepseek-r1-distill-qwen-32b", {}))
+
+    def test_a_registry_route_is_never_read_by_its_own_name(self):
+        # S1 fix round 2 F2: a carried route whose legs span several families
+        # names NO family — the fence must not fall through and read the route's
+        # own name (`deepseek-mixed` would sit outside a qwen fence while its
+        # qwen leg serves it). Refused at the run level on the --tier=3 pin path.
+        routes = self.ROUTES + ["deepseek-mixed"]
+        legs = dict(self.LEGS, **{"deepseek-mixed": [self.LEGS["r-deepseek"][0],
+                                                     self.LEGS["r-qwen"][0]]})
+        registry = _fallthrough_registry(routes, legs=legs, families=self.FAMILIES)
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/deepseek-mixed", registry))
+        self.assertTrue(self.agent.fence_blocks_model(
+            "omniroute/deepseek-mixed", registry, fence))
+        rc, out, err, _calls, _ = _fallthrough_run(
+            self, routes, 0,
+            args_over={"tier": 3, "card": None,
+                       "model": "omniroute/deepseek-mixed", "not_family": ["qwen"]},
+            legs=legs, families=self.FAMILIES)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family qwen left", err)
+
+    def test_a_multi_vendor_leg_is_not_read_by_the_longer_token(self):
+        # S1 fix round 2 F2 (the leg half): route_family on the FENCE path reads
+        # each leg with the fence's unique rule, so a route whose legs all read
+        # as deepseek under the longest token but for one multi-vendor id is
+        # unplaceable — while the record's default route_family read is unchanged.
+        legs = {"mixed-vendor": ["deepseek/deepseek-r1-distill-qwen-32b",
+                                 "deepseek/deepseek-v4.1-flash"]}
+        registry = _fallthrough_registry(["mixed-vendor"], legs=legs)
+        self.assertEqual(self.agent.route_family("mixed-vendor", registry),
+                         "deepseek")
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/mixed-vendor", registry))
+        self.assertTrue(self.agent.fence_blocks_model(
+            "omniroute/mixed-vendor", registry, fence))
+
 
 class FamilyFenceUnknownNameTests(unittest.TestCase):
     """FAMILYFENCE-3 B2: a `--not-family` naming no family the registry carries

@@ -4688,25 +4688,31 @@ def vendor_family_name_unique(spelling) -> str | None:
     names both `deepseek` and `qwen`, and picking the longer read it as deepseek, so
     a `--not-family qwen` review accepted a Qwen-derived model. Same for
     `nvidia/qwen3-nemotron`, which reads nvidia and slips the qwen fence. Two
-    distinct vendors in one id → None (unplaceable): a review's strict fence refuses
-    it, a write role's fence does not block, which is the existing unknown semantics.
+    distinct vendors in one id at DISJOINT spans → None (unplaceable): a review's
+    strict fence refuses it, a write role does not block — the existing unknown
+    semantics. A shorter match nested INSIDE a longer one is that name's provider
+    prefix, not a second vendor, so the longer family wins (S1 F1 round 2).
     """
     key = _family_spelling(spelling)
     if not key:
         return None
     segments = _family_segments(key)
-    found = None
+    spans = []
     for _neg_len, family, token in _FAMILY_TOKEN_SEGMENTS:
         if not token:
             continue
         width = len(token)
-        if any(tuple(segments[i:i + width]) == token
-               for i in range(len(segments) - width + 1)):
-            if found is None:
-                found = family
-            elif found != family:
-                return None
-    return found
+        for i in range(len(segments) - width + 1):
+            if tuple(segments[i:i + width]) == token:
+                spans.append((i, i + width, family))
+                break
+    if not spans:
+        return None
+    families = {family for start, end, family in spans
+                if not any(family != other
+                           and start >= other_start and end <= other_end
+                           for other_start, other_end, other in spans)}
+    return families.pop() if len(families) == 1 else None
 
 
 def names_client_default(client, model, registry=None, cfg=None) -> bool:
@@ -4763,12 +4769,14 @@ def witnessed_family(family, family_source, family_reason, proven) -> dict:
             "family_source": family_source if proven else FAMILY_SOURCE_PLANNED}
 
 
-def route_family(route_id, registry) -> str | None:
+def route_family(route_id, registry, unique_legs=False) -> str | None:
     """The ONE family every leg of a route declares, or None when they differ.
 
     A combo is a fall-through list, so a chain whose legs sit in two families names
     neither, and a leg the registry cannot place makes the whole route unknown —
-    the same rule `fence_blocks_route` applies to a chain.
+    the same rule `fence_blocks_route` applies to a chain. `unique_legs` reads each
+    leg with the fence's own unique rule instead of the longest-token one (S1 F2
+    round 2); the record's read keeps the default.
     """
     entry = (registry.get("routes") or {}).get(route_id) if route_id else None
     legs = (entry or {}).get("legs") or []
@@ -4779,8 +4787,8 @@ def route_family(route_id, registry) -> str | None:
         except ValueError:
             model_id = None  # a leg the registry cannot place names no family
         spelling = model_id or leg
-        key = (_family_of_one_spelling(spelling, registry)
-               or vendor_family_name(spelling))
+        leg_read = vendor_family_name_unique if unique_legs else vendor_family_name
+        key = (_family_of_one_spelling(spelling, registry) or leg_read(spelling))
         if not key:
             return None
         if family is None:
@@ -6912,9 +6920,10 @@ def fence_family_of(spelling, registry):
     role does not block — the existing unknown semantics). A gateway pin the
     client config declares and the registry lists no row for but that names
     ONE vendor — `omniroute/deepseek-direct-flash` is one — is still judged on
-    that family (AO-FAMILYFENCE-QWEN). The fence is a check on the declared
-    family of the pin and its legs, not proof of what the gateway served — the
-    post-run serving-family backstop still applies."""
+    that family (AO-FAMILYFENCE-QWEN). A route the registry CARRIES is judged on
+    its legs alone, never by its own name (S1 F2 round 2: `deepseek-mixed` with a
+    qwen leg). The fence is a check on the declared family of the pin and its
+    legs, not proof of what the gateway served — the post-run backstop applies."""
     text = str(spelling or "").strip()
     if not text or text == PLAN_MODEL_UNNAMED:
         return None
@@ -6922,7 +6931,10 @@ def fence_family_of(spelling, registry):
     family = reviewer_family(text, registry) or reviewer_family(bare, registry)
     if family:
         return family
-    family = route_family(_combo_of(text), registry)
+    combo = _combo_of(text)
+    if combo and combo in (registry.get("routes") or {}):
+        return route_family(combo, registry, unique_legs=True)
+    family = route_family(combo, registry, unique_legs=True)
     if family:
         return family
     return vendor_family_name_unique(bare)
