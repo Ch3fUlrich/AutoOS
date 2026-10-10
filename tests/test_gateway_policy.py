@@ -556,6 +556,48 @@ class GatewayPolicyTests(unittest.TestCase):
             self.assertEqual(_read_fallback(path.read_text(encoding="utf-8")), bundle,
                              f"{path.name} must parse identically on both readers")
 
+    def test_memory_policy_declares_no_workstation_and_export_actor_holds_no_write_action(self):
+        """POLICY-SYNC-PIN: memory.policy.yaml declares no `workstation` group and no rule
+        whose actors reference the `workstation` group or actor, and plangraph-kg-export's
+        granted set carries no write action in either bundle. Both readers are checked, so
+        a grant in a shape one of them cannot parse still trips the test rather than passing."""
+        pinned_write_actions = ["change", "branch_create", "branch_merge", "branch_delete",
+                                "schema_apply", "admin", "load"]
+
+        def actor_terms(actors_spec) -> list:
+            """Every group/actor name a rule's `actors:` value can reference, any shape."""
+            if isinstance(actors_spec, dict):
+                return [str(v) for v in actors_spec.values()]
+            if isinstance(actors_spec, list):
+                return [str(v) for v in actors_spec]
+            return [str(actors_spec)]
+
+        for path in (MEMORY_POLICY_PATH, PROJECT_GRAPHS_POLICY_PATH):
+            text = path.read_text(encoding="utf-8")
+            readers = [("fallback", _read_fallback(text))]
+            if _UniqueKeySafeLoader is not None:
+                readers.append(("pyyaml", parse_policy_yaml(text)))
+
+            for reader, bundle in readers:
+                tag = f"{path.name} [{reader} reader]"
+                if path is MEMORY_POLICY_PATH:
+                    self.assertNotIn(
+                        "workstation", bundle.get("groups", {}),
+                        f"{tag}: memory.policy.yaml must declare no workstation group",
+                    )
+                    for rule in bundle.get("rules", []):
+                        self.assertNotIn(
+                            "workstation", actor_terms(rule.get("allow", {}).get("actors", {})),
+                            f"{tag}: rule '{rule.get('id')}' must not reference the workstation group or actor",
+                        )
+                granted = {a for a in self.KNOWN_ACTIONS + self.UNLISTED_ACTIONS + pinned_write_actions
+                           if evaluate_permission(bundle, "plangraph-kg-export", a)}
+                self.assertEqual(
+                    granted.intersection(pinned_write_actions), set(),
+                    f"{tag}: plangraph-kg-export must be DENIED write action(s) "
+                    f"{sorted(granted.intersection(pinned_write_actions))}",
+                )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
