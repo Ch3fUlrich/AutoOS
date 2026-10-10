@@ -4799,9 +4799,10 @@ if it "aistack: vertex the omniroute U2 stage patches at build time and hands th
     # autoos3 (D-626): the runtime rootfs is read-only and has no python, so the reviewed
     # tools/apply-vertex-patch.py runs in a python build stage over a copy of the chunks. The
     # stage must stop the build on a patcher error, must not pipe (no pipefail in /bin/sh), and
-    # must drop the backups. D-859 (lane VERTEX-GUARD): the counts alone cannot tell the v2
-    # guard from the v1 one it replaces - both install at the same anchors and both report the
-    # same numbers, so the stage also judges the guard's own bytes.
+    # must drop the backups. D-859 (lane VERTEX-GUARD): the counts alone cannot tell the guard
+    # from the v1 one it replaces - both install at the same anchors and both report the same
+    # numbers, so the stage also judges the guard's own bytes. D-908 (lane VERTEX-LIVE): the
+    # guard is v3, which splits a mixed tool/text user turn before the v2 pop/refill.
     # gate 06c19a (lane VERTEX-GUARD): what it used to judge them over was the 6 chunk names
     # the patcher's table carries, and that fails OPEN - a FROM bump adding a 13th call site in
     # a new chunk, or renaming one of the 6, ships an unpatched gateway with every number
@@ -4847,10 +4848,12 @@ if it "vertex gate: counts every mergeConsecutiveSameRoleContents call site in t
     out="$(python3 tests/test_vertex_patch_gate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-if it "vertex guard: pops the whole model tail, refills emptied contents, upgrades v1 in place, fails loudly on anything else (unit tests)"; then
+if it "vertex guard: splits mixed tool/text user turns, pops the model tail, refills emptied contents, upgrades v1/v2 in place, fails loudly on anything else (unit tests)"; then
     # tests/test_vertex_trailing_turn_patch.py is hermetic (D-852): fixture copies of the 6
     # compiled chunks, node --check plus a shape harness over the patched handler bodies, and
     # pwsh over a fake package tree where it is installed. It never builds or runs a container.
+    # D-908 (lane VERTEX-LIVE): v3 splits a user turn that mixes a functionResponse with text
+    # before the v2 pop/refill, covering the body that ends on user yet still 400s.
     out="$(python3 tests/test_vertex_trailing_turn_patch.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 

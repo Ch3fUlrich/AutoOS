@@ -97,6 +97,9 @@ from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
 # The spawner resolves the run-state root with this helper; a lane's children are
 # looked for under the SAME root, never under a path this module invented (F4).
 import autoos_clients  # noqa: E402
+# AO-RECOVER-L2-LOOP: the stall loop asks recovery what it plans for a child
+# that died — plan only; this module never calls `record` or `spawn` from here.
+import autoos_recovery  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = REPO_ROOT / "catalog" / "ai-registry.json"
@@ -845,6 +848,7 @@ def stalled(name):
         return dict(base, stalled=False, reason="ok")
     if _already_woken(_read_heartbeat(lane), verdict, newest):
         return dict(base, stalled=False, reason="already-woken")
+    verdict["lane"] = name          # AO-RECOVER-L2-LOOP: a plan is per-lane
     verdict["next_action"] = _next_action(verdict)
     return dict(base, stalled=True, **verdict)
 
@@ -876,6 +880,37 @@ def _poll_activity(lane, out):
         out["activity_error"] = type(e).__name__
 
 
+def _recovery(info):
+    """AO-RECOVER-L2-LOOP: what recovery plans for the child that just exited —
+    {action, attempts, state} — or None, cached on the verdict so one stall costs
+    one plan. It speaks for THIS lane only: the id comes back from the spawner's
+    runner-private record, never job.json, and another lane's record says nothing
+    here — one lane may not spend another's attempts. A child that exited 0 has
+    nothing to recover. Any fault is None: a wake is never blocked on recovery.
+    """
+    if "recovery" not in info:
+        info["recovery"] = None
+        rc, lane = info.get("rc"), info.get("lane")
+        if (info.get("reason") == "child-exited" and type(rc) is int
+                and rc != 0 and lane and info.get("run_id")):
+            try:
+                if autoos_recovery.record_lane(info["run_id"]) == lane:
+                    plan = autoos_recovery.plan(info["run_id"])
+                    info["recovery"] = {"action": plan.get("action"),
+                                        "attempts": plan.get("attempts"),
+                                        "state": plan.get("state")}
+            except Exception:                   # noqa: BLE001 - fail open: no hint
+                info["recovery"] = None
+    return info["recovery"]
+
+
+def _recovery_phrase(rec):
+    """The wake's own words for a plan: the action and the attempt count. Both
+    come out of another process's record, so both go through `_safe_text`."""
+    return "recovery: %s (attempts %s)" % (_safe_text(rec["action"]),
+                                          _safe_text(rec.get("attempts")))
+
+
 def _next_action(verdict):
     """What the stall says to do next, in one clause.
 
@@ -884,8 +919,12 @@ def _next_action(verdict):
     the wake prompt, `resume`'s answer and `status`'s detail all carry the one
     wording."""
     if verdict.get("reason") == "child-exited":
-        return ("read %s result via autoos-agent result and continue the phase "
-                "plan" % verdict.get("run_id"))
+        action = ("read %s result via autoos-agent result and continue the phase "
+                  "plan" % verdict.get("run_id"))
+        rec = _recovery(verdict)
+        if rec is not None:
+            action = "%s; %s" % (action, _recovery_phrase(rec))
+        return action
     return ("re-read the last tool error, retry the failed step once, then "
             "continue the phase plan")
 
@@ -898,6 +937,9 @@ def _wake_text(info):
     would otherwise end the wake line and start an instruction of its own."""
     nxt = _safe_text(info.get("next_action") or "the next phase step")
     if info.get("reason") == "child-exited":
+        rec = _recovery(info)
+        if rec is not None and "recovery:" not in nxt:
+            nxt = "%s; %s" % (nxt, _recovery_phrase(rec))
         return ("Wake: child %s exited rc=%s; %s. Reply with "
                 "one short line of what you do next."
                 % (_safe_text(info.get("run_id")), _safe_text(info.get("rc")), nxt))
@@ -1035,7 +1077,7 @@ def cmd_resume(name):
                "http_status": status,
                "detail": "the wake prompt returned HTTP %s - a healthy lane is "
                          "left alone, not restarted" % status}
-        for key in ("run_id", "rc", "next_action"):
+        for key in ("run_id", "rc", "next_action", "recovery"):
             if info.get(key) is not None:
                 out[key] = info[key]
         return out
@@ -1043,7 +1085,7 @@ def cmd_resume(name):
     out = {"lane": name, "resumed": True, "restarted": False,
            "reason": info.get("reason"),
            "detail": "woke session %s (%s)" % (state["session_id"], info["reason"])}
-    for key in ("run_id", "rc", "next_action"):
+    for key in ("run_id", "rc", "next_action", "recovery"):
         if info.get(key) is not None:
             out[key] = info[key]
     return out

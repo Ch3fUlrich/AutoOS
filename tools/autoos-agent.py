@@ -125,8 +125,12 @@ chain onto the writer's family and labelled the result a cross-family review
 (measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
 from the WHOLE plan — the model or route picked up front and every fallthrough
 candidate — and a plan with nothing outside the fence left exits 12 instead of
-serving the run inside it. A name the registry carries no family under is refused
-(rc 2) before any leg choice, because a fence that excludes nothing reads as a
+serving the run inside it. The family a spelling is judged on is the registry's row
+for it, the vendor named inside the id, or the one family a route's legs all declare
+(`fence_family_of`) — a pin the registry lists no row for names its own family from
+its id and sits inside only the fence that names it (AO-FAMILYFENCE-QWEN). A name
+the registry carries no family under is refused (rc 2) before any leg choice,
+because a fence that excludes nothing reads as a
 guard while it is none (FAMILYFENCE-3 B2). It removes them from what SERVES: when
 `--free` (or an own-account `--model` pin) already decided the model, the fence is
 judged on that model, and a gateway combo whose legs no run of this shape ever
@@ -4681,6 +4685,42 @@ def vendor_family_name(spelling) -> str | None:
     return None
 
 
+def vendor_family_name_unique(spelling) -> str | None:
+    """The ONE family a model id names, or None when it names two.
+
+    The fence's own read of a model id (`fence_family_of`). The longest-token
+    tie-break above is right for a run's record (some family has to be named for
+    the writer line) and wrong for a fence: `omniroute/deepseek-r1-distill-qwen-32b`
+    names both `deepseek` and `qwen`, and picking the longer read it as deepseek, so
+    a `--not-family qwen` review accepted a Qwen-derived model. Same for
+    `nvidia/qwen3-nemotron`, which reads nvidia and slips the qwen fence. Two
+    distinct vendors in one id at DISJOINT spans → None (unplaceable): a review's
+    strict fence refuses it, a write role does not block — the existing unknown
+    semantics. A shorter match nested INSIDE a longer one is that name's provider
+    prefix, not a second vendor, so the longer family wins (S1 F1 round 2).
+    """
+    key = _family_spelling(spelling)
+    if not key:
+        return None
+    segments = _family_segments(key)
+    spans = []
+    for _neg_len, family, token in _FAMILY_TOKEN_SEGMENTS:
+        if not token:
+            continue
+        width = len(token)
+        for i in range(len(segments) - width + 1):
+            if tuple(segments[i:i + width]) == token:
+                spans.append((i, i + width, family))
+                break
+    if not spans:
+        return None
+    families = {family for start, end, family in spans
+                if not any(family != other
+                           and start >= other_start and end <= other_end
+                           for other_start, other_end, other in spans)}
+    return families.pop() if len(families) == 1 else None
+
+
 def names_client_default(client, model, registry=None, cfg=None) -> bool:
     """Whether ``model`` IS the model this own-account client serves as its default.
 
@@ -4735,12 +4775,14 @@ def witnessed_family(family, family_source, family_reason, proven) -> dict:
             "family_source": family_source if proven else FAMILY_SOURCE_PLANNED}
 
 
-def route_family(route_id, registry) -> str | None:
+def route_family(route_id, registry, unique_legs=False) -> str | None:
     """The ONE family every leg of a route declares, or None when they differ.
 
     A combo is a fall-through list, so a chain whose legs sit in two families names
     neither, and a leg the registry cannot place makes the whole route unknown —
-    the same rule `fence_blocks_route` applies to a chain.
+    the same rule `fence_blocks_route` applies to a chain. `unique_legs` reads each
+    leg with the fence's own unique rule instead of the longest-token one (S1 F2
+    round 2); the record's read keeps the default.
     """
     entry = (registry.get("routes") or {}).get(route_id) if route_id else None
     legs = (entry or {}).get("legs") or []
@@ -4751,8 +4793,8 @@ def route_family(route_id, registry) -> str | None:
         except ValueError:
             model_id = None  # a leg the registry cannot place names no family
         spelling = model_id or leg
-        key = (_family_of_one_spelling(spelling, registry)
-               or vendor_family_name(spelling))
+        leg_read = vendor_family_name_unique if unique_legs else vendor_family_name
+        key = (_family_of_one_spelling(spelling, registry) or leg_read(spelling))
         if not key:
             return None
         if family is None:
@@ -6966,15 +7008,48 @@ def family_fence(args, registry=None):
                         if review_of and not writer_family else None)}
 
 
+def fence_family_of(spelling, registry):
+    """The family a spelling denotes, or None when nothing can say.
+
+    Three reads, in the order the fence trusts them: the registry's row for the
+    spelling (`reviewer_family`), then the ONE family a route's legs all declare
+    (`route_family`), then the vendor word inside the id via
+    `vendor_family_name_unique` — NOT `vendor_family_name`'s longest-token
+    tie-break, which let `omniroute/deepseek-r1-distill-qwen-32b` read as
+    deepseek and slip a `--not-family qwen` review (S1 F1: an unrowed pin whose
+    id names two vendors is unplaceable, so a review refuses it and a write
+    role does not block — the existing unknown semantics). A gateway pin the
+    client config declares and the registry lists no row for but that names
+    ONE vendor — `omniroute/deepseek-direct-flash` is one — is still judged on
+    that family (AO-FAMILYFENCE-QWEN). A route the registry CARRIES is judged on
+    its legs alone, never by its own name (S1 F2 round 2: `deepseek-mixed` with a
+    qwen leg). The fence is a check on the declared family of the pin and its
+    legs, not proof of what the gateway served — the post-run backstop applies."""
+    text = str(spelling or "").strip()
+    if not text or text == PLAN_MODEL_UNNAMED:
+        return None
+    bare = text.rpartition("/")[2] if "/" in text else text
+    family = reviewer_family(text, registry) or reviewer_family(bare, registry)
+    if family:
+        return family
+    combo = _combo_of(text)
+    if combo and combo in (registry.get("routes") or {}):
+        return route_family(combo, registry, unique_legs=True)
+    family = route_family(combo, registry, unique_legs=True)
+    if family:
+        return family
+    return vendor_family_name_unique(bare)
+
+
 def fence_blocks_model(spelling, registry, fence):
     """True when `spelling` may not serve a run carrying `fence`.
 
-    The family is the registry's declaration for that spelling (`reviewer_family`,
-    which also reads `policy.reviewers`), never a guess from the name. Unknown is
-    unsafe only for a review — see `family_fence`."""
+    The family is what the registry and the spelling's own vendor name declare
+    (`fence_family_of`), never a guess from an arbitrary word. Unknown is unsafe
+    only for a review — see `family_fence`."""
     if not fence or not fence.get("families"):
         return False
-    family = reviewer_family(spelling, registry)
+    family = fence_family_of(spelling, registry)
     if family is None:
         return bool(fence.get("strict"))
     return family in fence["families"]
@@ -8280,6 +8355,48 @@ def parse_reset(text: str) -> int | None:
     return int(m.group(1)) * unit if unit else None
 
 
+# AO-SPAWN-COOLDOWN-RETRY (S2, measured 2026-10-09T16:40Z, the two runs named in
+# the test): the gateway's per-credential cooldown is not an outage, it is a
+# countdown — the SAME credential, back in the seconds it states. Re-planning
+# around a 3 s window spends a route and a clone to solve a nap, so a stop that
+# states a window this short waits and re-runs the leg it is on. Longer or
+# unstated, it is an outage and falls through as a rate limit does.
+COOLDOWN_SAME_LEG_MAX_SECONDS = 60
+
+_COOLDOWN_MARKER = "are cooling down"
+
+
+def cooldown_stop(line: str) -> bool:
+    """Is this provider-stop line the gateway counting one credential down?
+
+    Call it on a line `provider_stop` returned, like `rate_limit_stop`: the
+    error-prefix rule that keeps the task's own quoted text out of it already
+    ran there.
+    """
+    return _COOLDOWN_MARKER in (line or "").lower()
+
+
+def cooldown_wait(line: str) -> int | None:
+    """Seconds to wait before re-running THIS leg, or None: wait elsewhere.
+
+    None when the line is no cooldown, states no window, or states more than
+    COOLDOWN_SAME_LEG_MAX_SECONDS — a leg that says "back in two minutes" is not
+    serving this run either way, and the next leg is.
+    """
+    if not cooldown_stop(line):
+        return None
+    secs = parse_reset(line)
+    return secs if secs is not None and secs <= COOLDOWN_SAME_LEG_MAX_SECONDS else None
+
+
+def cooldown_sleep(seconds: float) -> None:
+    """The nap between a cooldown stop and its same-leg retry.
+
+    A name of its own so a test can patch it out; nothing else sleeps here.
+    """
+    time.sleep(seconds)
+
+
 def _leg_provider_model(leg, registry):
     """A route leg as ``(provider_id, model_id)``, or None if it does not resolve.
 
@@ -9573,7 +9690,7 @@ def proc_start_time(pid) -> int | None:
         return None
 
 
-def kill_store_dir() -> str:
+def kill_store_dir(state: str | None = None) -> str:
     """The runner-private home of each run's decided-at-spawn record (SB-A3,
     D-103 item C; the run MODE joined it in SB-A4).
 
@@ -9596,16 +9713,19 @@ def kill_store_dir() -> str:
     the same record from inside `run_client`, and a second copy of a store is a
     second place a killer's answer can come from. The server reads and writes it
     through this one implementation.
+
+    `state` overrides the state root for a reader handed one (a recovery plan
+    pointed at another tree): the store is always <root>/kill, never a second layout.
     """
-    return os.path.join(clients.state_dir(), "kill")
+    return os.path.join(state or clients.state_dir(), "kill")
 
 
-def kill_store_path(run_id: str) -> str:
+def kill_store_path(run_id: str, state: str | None = None) -> str:
     """The one record file for `run_id`, named so no run id escapes the store."""
     name = os.path.basename(os.path.normpath(str(run_id or "")))
     if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         raise ValueError("bad run id %r" % (run_id,))
-    return os.path.join(kill_store_dir(), name + ".json")
+    return os.path.join(kill_store_dir(state), name + ".json")
 
 
 def write_kill_record(run_id: str, record: dict) -> bool:
@@ -9613,8 +9733,9 @@ def write_kill_record(run_id: str, record: dict) -> bool:
 
     SB-A4 (D-103, the rest of item C) grew this from a group record into the run's
     whole decided-at-spawn identity: `run_id`, `mode` (review|write), `scope`,
-    `dry_run`, `allow_mode_only`, `created_at`, plus the `pgid`/`start` group
-    record and the RUNMODEL `writer` the run resolves at its end. It is the only
+    `dry_run`, `allow_mode_only`, the spawning `lane` (AO-JOB-LANE-ID),
+    `created_at`, plus the `pgid`/`start` group record and the RUNMODEL `writer`
+    the run resolves at its end. It is the only
     place any of that is read from, because everything a killer or a dispatcher
     decides must come from a record the worker cannot rewrite through its own
     `job.json`.
@@ -9641,7 +9762,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
         for key in ("pgid", "start", "writer", "attempt"):
             if record.get(key) is not None:
                 merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run", "allow_mode_only"):
+        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
             if record.get(key) is not None:
                 merged.setdefault(key, record[key])
         tmp = "%s.tmp-%d" % (path, os.getpid())
@@ -9656,12 +9777,13 @@ def write_kill_record(run_id: str, record: dict) -> bool:
     return True
 
 
-def read_kill_record(run_id: str):
+def read_kill_record(run_id: str, state: str | None = None):
     """The private record, or None. A run with no record is a run whose group and
     mode were never decided by a server — the direct CLI path — and a killer must
-    say so rather than kill what it cannot identify."""
+    say so rather than kill what it cannot identify. `state` reads the store of
+    that state root instead of the ambient one."""
     try:
-        path = kill_store_path(run_id)
+        path = kill_store_path(run_id, state)
         with io.open(path, encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError):
@@ -11886,6 +12008,11 @@ def cmd_run(args, cfg: dict) -> int:
     # How many re-runs this run has already started (route or free model): the
     # one bound MAX_FALLTHROUGH is about.
     fallthroughs = 0
+    # AO-SPAWN-COOLDOWN-RETRY: the wait-and-retry-the-same-leg, ONCE per run.
+    # Deliberately not counted in `fallthroughs` — a 3 s cooldown must not spend
+    # the run's re-plan budget — but counted with it when a launch is numbered
+    # below, because the kill store and the scope unit key on the attempt.
+    cooldown_retries = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -12009,7 +12136,12 @@ def cmd_run(args, cfg: dict) -> int:
         # attempt left is announced. A --free run never reaches the track
         # record (track_entry returns None for it), so a queue timeout costs
         # the route nothing.
-        if args.free and fallthroughs:
+        # AO-SPAWN-COOLDOWN-RETRY seat note: a cooldown retry is a fresh start
+        # too, and it spends no fallthrough — so the gate cannot key on
+        # `fallthroughs` alone. This run's worker record is closed while it naps,
+        # and another --free run claims the freed slot in that window; retrying
+        # without a re-claim would run as cap+1 over policy.free_concurrency.
+        if args.free and (fallthroughs or cooldown_retries):
             queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
             if queue_msg is not None:
                 print("autoos-agent: %s" % queue_msg, file=sys.stderr)
@@ -12026,7 +12158,7 @@ def cmd_run(args, cfg: dict) -> int:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
-                                                         attempt=fallthroughs + 1)
+                                                         attempt=fallthroughs + cooldown_retries + 1)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec
@@ -12079,7 +12211,8 @@ def cmd_run(args, cfg: dict) -> int:
                                 # fallthrough re-run — leads a new session, so every
                                 # attempt re-records its group in the runner-private
                                 # store `cancel` kills from.
-                                run_id=plan.get("run_id"), attempt=fallthroughs + 1)
+                                run_id=plan.get("run_id"),
+                                attempt=fallthroughs + cooldown_retries + 1)
             scope_rec = getattr(run_rc, "scope", None) or scope_rec
         except ClientMissing as exc:
             # WINSHIM: gone between the pre-check and this attempt (a fallthrough
@@ -12135,6 +12268,10 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
+        # and not from the window it stated — a cooldown that states nothing is
+        # still a cooldown, and still exits the run on the stop's rc.
+        cooling = stop is not None and cooldown_stop(stop)
         if stop is not None:
             # REVROUTE (S2) item 3: when the stop line states its own reset,
             # that window becomes the provider's unavailable_until for every
@@ -12161,16 +12298,37 @@ def cmd_run(args, cfg: dict) -> int:
                             datetime.timezone.utc))}
                     print("rate limit: provider %s benched for this run's next "
                           "leg (%s)" % (benched, _iso_zulu(until)))
-        if stop is not None and (rc in (0, 3, 6) or (rate_limited and rc == 1)):
+        if stop is not None and (rc in (0, 3, 6)
+                                 or ((rate_limited or cooling) and rc == 1)):
             # SB-B (RATELIMITRETRY): rc 1 joins the upgrade only for a rate limit,
             # which is the shape the field actually failed in (the client printed
             # its 429 and exited 1). Other rc-1 exits stay the client's own failure
             # class: a provider that refused service is exit 8, a client that
-            # crashed is not.
+            # crashed is not. AO-SPAWN-COOLDOWN-RETRY: the cooldown is the same
+            # shape (both field runs), and leaving it at the client's 1 is what
+            # made a refused leg read as a failed task.
             print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
         if rc == 0 and client.promo:
             clients.record_probe(client.name)
+        # AO-SPAWN-COOLDOWN-RETRY: the gateway named the model and counted the
+        # credential down in seconds — that is THIS leg, shortly, not a dead one.
+        # Sleep the stated window out and re-launch the SAME plan: same combo,
+        # same sandbox, same work in it, no re-plan, no bench, no fallthrough
+        # spent. Once per run; a second cooldown, or a window too long or unstated,
+        # falls through below exactly as a rate-limit stop does, and
+        # --no-fallthrough ends the run on the stop's own rc. Nor is the stopped
+        # attempt track-recorded like a fallthrough's: a leg that serves 3 s later
+        # did not fail the route it belongs to.
+        nap = cooldown_wait(stop) if cooling else None
+        if nap is not None and not cooldown_retries and not args.joinable:
+            cooldown_retries += 1
+            nap += 1  # the window stated, plus a beat for the clock to roll over
+            print("autoos-agent: cooldown on %s: %s - waiting %ds and re-running "
+                  "the same route" % (plan["model"] or plan["route"].get("combo"),
+                                      redact_output(stop), nap), file=sys.stderr)
+            cooldown_sleep(nap)
+            continue
         # SPAWNCAP (S2): a provider-stopped resolver-routed --isolate run
         # re-runs the SAME task in the SAME sandbox on the next route (WIPfix
         # preserved the work but stranded it on a dead route). At most

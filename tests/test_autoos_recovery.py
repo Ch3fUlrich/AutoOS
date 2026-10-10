@@ -1353,10 +1353,11 @@ class SuspectRecords(TempCase):
 
 
 class LaneKeyRequired(TempCase):
-    """D-914 (P4c removal delta): the lane key is ALWAYS caller-supplied. Every
-    defect rounds 7-9 found was rooted in deriving it from free task text, so the
-    derivation is gone: `plan` without `--lane` is a usage error (exit 2), library
-    and CLI alike, whatever the record holds — the refusal reads nothing."""
+    """D-914 (P4c removal delta): the lane key is NEVER derived from free task
+    text. Every defect rounds 7-9 found was rooted in that derivation. `plan`
+    without `--lane` is a usage error (exit 2) unless the RUNNER'S PRIVATE kill
+    record names the lane its spawner ran it under (AO-JOB-LANE-ID) — job.json is
+    the worker's own file and names nothing."""
 
     def broken(self, state=None, job=SKIP):
         st = state or self.state
@@ -1378,10 +1379,10 @@ class LaneKeyRequired(TempCase):
         self.broken()
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            with self.assertRaises(SystemExit) as caught:
-                r.main(["plan", RUN])
-        self.assertEqual(caught.exception.code, 2)   # argparse: --lane is required
+            code = r.main(["plan", RUN])
+        self.assertEqual(code, 2)         # no --lane, and no private record names one
         self.assertEqual(out.getvalue(), "")
+        self.assertIn("L2 lane", err.getvalue())
 
     def test_no_lane_record_is_written_for_a_refused_plan(self):
         self.broken()
@@ -1401,6 +1402,78 @@ class LaneKeyRequired(TempCase):
             self.assertIsNone(p["continue_task"], job)
             self.assertIsNone(p["spawn_hint"], job)
             self.assertEqual(p["lane_key"], LANE, job)
+
+
+class LaneFromThePrivateRecord(TempCase):
+    """AO-JOB-LANE-ID: `plan` may take its lane from the runner-private kill
+    record the SPAWNER wrote — the one store a worker cannot rewrite (R-orch-17).
+    A `lane` in job.json is a label the worker could paint, and names nothing."""
+
+    def kill(self, lane=LANE, state=None):
+        root = os.path.join(state or self.state, "kill")
+        os.makedirs(root, exist_ok=True)
+        write_text(os.path.join(root, RUN + ".json"), json.dumps({"lane": lane}))
+
+    def died(self, state=None, **job_over):
+        job = {"run_id": RUN, "task": TASK, "cwd": "/repo", "started": NOW}
+        make_record(state or self.state, exit_json={"rc": 1}, job_json=dict(job, **job_over))
+
+    def test_plan_reads_the_record_lane_from_the_state_root_it_was_given(self):
+        """`record_lane` honours `plan(state=X)` — the lane lookup and the run-record
+        read are one store, so a plan pointed at another tree is neither graded on
+        nor refused for want of the ambient state dir's record."""
+        st = self.other_state()
+        self.died(state=st)
+        self.kill(state=st)
+        p = r.plan(RUN, state=st, now=NOW, pid_probe=dead)
+        self.assertEqual((p["lane_key"], p["state"], p["action"]),
+                         (LANE, "died", "rerun"), p)
+        # The ambient store names nothing here, so only X's record can name a lane.
+        self.assertIsNone(r.record_lane(RUN))
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, now=NOW, pid_probe=dead)
+
+    def test_plan_without_a_lane_reads_the_record_lane(self):
+        self.died()
+        self.kill()
+        p = r.plan(RUN, now=NOW, pid_probe=dead)
+        self.assertEqual((p["lane_key"], p["state"], p["action"]),
+                         (LANE, "died", "rerun"), p)
+        self.assertEqual(r.plan(RUN, lane_key=LANE, now=NOW,
+                                pid_probe=dead)["lane_key"], LANE)
+
+    def test_no_record_lane_is_still_the_usage_refusal(self):
+        self.died()
+        for argv in ("none", "{oops", 42, "", "not a lane key"):
+            if argv == "none":
+                pass
+            elif argv == "{oops":
+                self.kill(lane=LANE)
+                write_text(os.path.join(self.state, "kill", RUN + ".json"), "{oops")
+            else:
+                self.kill(lane=argv)
+            self.assertIsNone(r.record_lane(RUN), argv)
+            with self.assertRaises(r.RecoveryError, msg=repr(argv)) as caught:
+                r.plan(RUN, now=NOW, pid_probe=dead)
+            self.assertIn("--lane", str(caught.exception))
+            self.assertIn("L2 lane", str(caught.exception))
+
+    def test_a_caller_that_names_another_lane_is_refused(self):
+        self.died()
+        self.kill()
+        other = "lane-someone-elses"
+        with self.assertRaises(r.RecoveryError) as caught:
+            r.plan(RUN, lane_key=other, now=NOW, pid_probe=dead)
+        self.assertIn(other, str(caught.exception))
+        self.assertIn(LANE, str(caught.exception))
+
+    def test_a_lane_written_into_job_json_names_nothing(self):
+        self.died(lane="lane-the-worker-invented")
+        with self.assertRaises(r.RecoveryError):
+            r.plan(RUN, now=NOW, pid_probe=dead)
+        self.kill(lane="l2-real-lane")
+        self.assertEqual(r.plan(RUN, now=NOW, pid_probe=dead)["lane_key"],
+                         "l2-real-lane")
 
 
 class PidBounds(TempCase):
@@ -2810,19 +2883,29 @@ class Cli(TempCase):
                 r.plan = real_plan
 
     def test_usage_errors_exit_two(self):
-        for argv in (["record", RUN], ["plan"], [],
-                     # D-914: --lane is required for `plan` too — no key, no plan.
-                     ["plan", RUN], ["plan", RUN, "--lane"]):
+        for argv in (["record", RUN], ["plan"], [], ["plan", RUN, "--lane"]):
             with self.assertRaises(SystemExit) as caught:
                 self.cli(argv)
             self.assertEqual(caught.exception.code, 2)
+        # AO-JOB-LANE-ID: `plan RUN` with no --lane left argparse's hands — the
+        # module asks the runner-private record for the lane the spawner wrote,
+        # and with none recorded it is STILL usage exit 2, now in its own words.
+        code, out, err = self.cli(["plan", RUN])
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("--lane", err)
 
 
 class Hermetic(TempCase):
+    # `importlib` is the one loader, used ONLY to reach the kill store's own
+    # reader in tools/autoos-agent.py for `record_lane` (AO-JOB-LANE-ID): the
+    # lane recovery may plan on must come from the record the worker cannot
+    # rewrite, and the reader is not copied here. Lazy, and a store that will not
+    # load answers 'no lane' — never a second path implementation, never a spawn.
     ALLOWED_IMPORTS = {"__future__", "argparse", "errno", "hashlib", "io", "json", "os",
                        "re", "shlex", "sys", "tempfile", "time", "unicodedata", "ctypes",
-                       "stat", "fcntl", "msvcrt", "autoos_clients", "autoos_report",
-                       "autoos_ready_guards"}
+                       "stat", "fcntl", "msvcrt", "importlib",
+                       "autoos_clients", "autoos_report", "autoos_ready_guards"}
     FORBIDDEN_IMPORTS = {"subprocess", "socket", "http", "urllib", "ftplib", "pty",
                          "signal", "multiprocessing", "pwd", "grp", "asyncio",
                          "threading", "autoos_agent_mcp", "requests"}

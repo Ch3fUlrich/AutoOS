@@ -208,7 +208,11 @@ child state is the run's own `exit.json` — never `pgrep -f`, which matches the
 
 `resume` wakes a stalled lane with one short prompt naming the child or the error and the next action the stall implies (`child
 <run-id> exited rc=N; read <run-id> result via autoos-agent result and continue the phase plan`, and for an errored turn `re-read
-the last tool error, retry the failed step once, then continue the phase plan`) — `stalled` puts that on the verdict as `next_action`
+the last tool error, retry the failed step once, then continue the phase plan`). A child that died non-zero whose spawner recorded
+THIS lane in its runner-private kill record gets one clause more — `; recovery: <action> (attempts N)` — from `autoos_recovery.py
+plan <run-id>` run in-process: plans only, never a record and never a spawn. That record is why `plan --lane` is optional once the
+spawner recorded the lane (a `--lane` differing from it is refused — one lane may not spend another's attempts). `stalled` puts the
+action on the verdict as `next_action`
 so the wake, the answer and the `status` detail all say the same thing — and the three outcomes are distinguishable in that one JSON
 object.
 ONE wake per stall (F2): the wake is recorded in the lane's `heartbeat.json` (`last_wake_ts`, `last_wake_key`, the run id), and
