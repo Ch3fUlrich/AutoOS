@@ -125,8 +125,12 @@ chain onto the writer's family and labelled the result a cross-family review
 (measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
 from the WHOLE plan — the model or route picked up front and every fallthrough
 candidate — and a plan with nothing outside the fence left exits 12 instead of
-serving the run inside it. A name the registry carries no family under is refused
-(rc 2) before any leg choice, because a fence that excludes nothing reads as a
+serving the run inside it. The family a spelling is judged on is the registry's row
+for it, the vendor named inside the id, or the one family a route's legs all declare
+(`fence_family_of`) — a pin the registry lists no row for names its own family from
+its id and sits inside only the fence that names it (AO-FAMILYFENCE-QWEN). A name
+the registry carries no family under is refused (rc 2) before any leg choice,
+because a fence that excludes nothing reads as a
 guard while it is none (FAMILYFENCE-3 B2). It removes them from what SERVES: when
 `--free` (or an own-account `--model` pin) already decided the model, the fence is
 judged on that model, and a gateway combo whose legs no run of this shape ever
@@ -6865,15 +6869,29 @@ def family_fence(args, registry=None):
                         if review_of and not writer_family else None)}
 
 
+def fence_family_of(spelling, registry):
+    """The family a spelling denotes, or None when nothing can say.
+
+    The layered read the run record already uses (`run_model_family`'s first three
+    layers: the registry's row for the spelling, the vendor named inside the model
+    id, the one family a route's legs all declare), not the registry ROW alone. A
+    gateway pin can name a model the client config declares and the registry lists
+    no row for — `omniroute/deepseek-direct-flash` is one — and `reviewer_family`
+    answers None for it. That None is not "qwen": read as inside every fence, it
+    made a review refuse EVERY unrowed pin, whatever family the id named
+    (AO-FAMILYFENCE-QWEN)."""
+    return run_model_family(spelling, registry=registry)[0]
+
+
 def fence_blocks_model(spelling, registry, fence):
     """True when `spelling` may not serve a run carrying `fence`.
 
-    The family is the registry's declaration for that spelling (`reviewer_family`,
-    which also reads `policy.reviewers`), never a guess from the name. Unknown is
-    unsafe only for a review — see `family_fence`."""
+    The family is what the registry and the spelling's own vendor name declare
+    (`fence_family_of`), never a guess from an arbitrary word. Unknown is unsafe
+    only for a review — see `family_fence`."""
     if not fence or not fence.get("families"):
         return False
-    family = reviewer_family(spelling, registry)
+    family = fence_family_of(spelling, registry)
     if family is None:
         return bool(fence.get("strict"))
     return family in fence["families"]

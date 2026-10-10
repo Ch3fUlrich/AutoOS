@@ -16817,6 +16817,125 @@ class FamilyFenceServingModelTests(unittest.TestCase):
         self.assertIn("use --free or pin --model outside family nvidia", err)
 
 
+class FamilyFencePinnedModelTests(unittest.TestCase):
+    """AO-FAMILYFENCE-QWEN (S1): the fence excludes ONLY the families it names.
+
+    Measured on the branch: `--tier=3 --not-family qwen --model
+    omniroute/deepseek-direct-flash` exited 12 saying "no model outside family
+    qwen left". The pin's family is answered by the registry ROW alone
+    (`reviewer_family`), and an opencode-declared gateway model that has no row
+    answers None — which the review role's `strict` then read as INSIDE the fence.
+    Under a review every unrowed pin is inside every fence, so the fence refused
+    every model instead of the named family. The three routes below declare their
+    families as rows; the three pins name their family only inside their own id.
+    """
+
+    ROUTES = ["r-qwen", "r-deepseek", "r-nvidia"]
+    LEGS = {"r-qwen": ["qwen/qwen3.8-27b"],
+            "r-deepseek": ["deepseek/deepseek-v4.1-flash"],
+            "r-nvidia": ["nvidia/nemotron-3-ultra"]}
+    FAMILIES = {"qwen3.8-27b": "qwen", "deepseek-v4.1-flash": "deepseek",
+                "nemotron-3-ultra": "nvidia"}
+    PINS = {"qwen": "omniroute/qwen-direct-3.8",
+            "deepseek": "omniroute/deepseek-direct-flash",
+            "nvidia": "omniroute/nemotron-direct-ultra"}
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, over, prepare=None):
+        args_over = {"card": "kind=review", "dry_run": True}
+        args_over.update(over)
+        return _fallthrough_run(self, self.ROUTES, 0, args_over=args_over,
+                                legs=self.LEGS, families=self.FAMILIES,
+                                prepare=prepare)
+
+    @staticmethod
+    def _writer_record(agent, statedir, root, family):
+        """The writer's runner-private record, written through the real store."""
+        assert agent.kill_store_dir() == os.path.join(statedir, "kill"), \
+            "prepare() must run inside the test's own AUTOOS_STATE_DIR"
+        agent.write_kill_record(FENCE_WRITER_RUN, {
+            "mode": "write",
+            "writer": {"provider": family, "model": "%s-direct-1" % family,
+                       "family": family}})
+
+    def test_the_fence_judges_a_pin_by_the_family_its_id_names(self):
+        # The root cause, asked of the one predicate every path reads: a pin whose
+        # family the id names sits inside ONLY the fence that names that family.
+        registry = _fallthrough_registry(self.ROUTES, legs=self.LEGS,
+                                         families=self.FAMILIES)
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        for family, pin in self.PINS.items():
+            self.assertEqual(self.agent.fence_blocks_model(pin, registry, fence),
+                             family == "qwen", pin)
+
+    def test_a_pin_outside_the_fence_serves_a_tier3_review(self):
+        for fenced, other in [("qwen", "deepseek"), ("deepseek", "nvidia"),
+                              ("nvidia", "qwen")]:
+            with self.subTest(fence=fenced, pin=other):
+                rc, out, err, _calls, _ = self._run(
+                    {"tier": 3, "card": None, "model": self.PINS[other],
+                     "not_family": [fenced]})
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("FAMILYFENCE", out + err)
+                self.assertIn("--model %s" % self.PINS[other], out)
+
+    def test_a_pin_inside_the_fence_is_refused_at_tier3(self):
+        for fenced, pin in self.PINS.items():
+            with self.subTest(fence=fenced):
+                rc, out, err, _calls, _ = self._run(
+                    {"tier": 3, "card": None, "model": pin,
+                     "not_family": [fenced]})
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family %s left" % fenced, err)
+
+    def test_a_pin_outside_the_fence_serves_a_review_card(self):
+        # Both card paths, not just --tier: v2 goes through the resolver, v1
+        # through select_combo, and both call the same predicate on the pin.
+        for card in ("kind=review", "role=review"):
+            for fenced, other in [("qwen", "nvidia"), ("nvidia", "deepseek")]:
+                with self.subTest(card=card, fence=fenced):
+                    rc, out, err, _calls, _ = self._run(
+                        {"card": card, "model": self.PINS[other],
+                         "not_family": [fenced]})
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertNotIn("FAMILYFENCE", out + err)
+                    self.assertIn("--model %s" % self.PINS[other], out)
+
+    def test_a_pin_inside_the_fence_is_refused_for_a_review_card(self):
+        for fenced, pin in self.PINS.items():
+            with self.subTest(card="kind=review", fence=fenced):
+                rc, out, err, _calls, _ = self._run(
+                    {"card": "kind=review", "model": pin, "not_family": [fenced]})
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family %s left" % fenced, err)
+
+    def test_an_unpinned_review_plan_carries_no_fenced_leg(self):
+        # The fence still costs what it used to cost: a plan picks a route whose
+        # legs all sit outside it, and never announces the fenced one.
+        for fenced in self.FAMILIES.values():
+            with self.subTest(fence=fenced):
+                rc, out, err, _calls, _ = self._run({"not_family": [fenced]})
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("route: r-%s " % fenced, out)
+                self.assertIn("route: r-", out)
+
+    @unittest.skipIf(os.name == "nt", "the kill record the fence reads is POSIX-only")
+    def test_the_review_of_path_still_fences_the_writers_family(self):
+        # Unchanged by the fix: `--review-of` names the writer, and a pin of that
+        # family is refused while a pin of any other family runs.
+        for pin_family, expect_rc in [("deepseek", self.agent.EXIT_NO_OTHER_FAMILY),
+                                      ("nvidia", 0)]:
+            with self.subTest(pin=pin_family):
+                rc, out, err, _calls, _ = self._run(
+                    {"model": self.PINS[pin_family], "review_of": FENCE_WRITER_RUN},
+                    prepare=lambda s, r: self._writer_record(self.agent, s, r,
+                                                             "deepseek"))
+                self.assertEqual(rc, expect_rc, out + err)
+
+
 class FamilyFenceUnknownNameTests(unittest.TestCase):
     """FAMILYFENCE-3 B2: a `--not-family` naming no family the registry carries
     (e.g. "mimo" while the registry says the model's family is "xiaomi") excluded
