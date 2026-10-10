@@ -21940,6 +21940,105 @@ class T2IsolateSecretsS2ExclusionsTests(unittest.TestCase):
         self.assertEqual(sorted(allowed), expected)
 
 
+class T2IsolateIgnoredTrackedTests(unittest.TestCase):
+    """AO-ISOLATE-IGNORED-TRACKED: a file TRACKED in the source that matches the
+    source's own .gitignore (force-added there) rode in the worktree but not in
+    the sandbox's one commit — `git add -A` honours the .gitignore the
+    materialiser itself had just written."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def _repo(self, ignore, force):
+        """Throwaway repo: `ignore` as .gitignore, `force` committed with `add -f`."""
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        subprocess.run(self.git + ["init", "-q", root], check=True)
+
+        def put(rel, text):
+            full = os.path.join(root, rel.replace("/", os.sep))
+            parent = os.path.dirname(full)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with io.open(full, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        put(".gitignore", ignore)
+        for rel in force:
+            put(rel, "bytes of %s\n" % rel)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "add", "-f", "--"] + list(force),
+                       check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"],
+                       check=True)
+        return root
+
+    def _sandbox(self, root, branch, pair=None):
+        dest = os.path.join(tempfile.mkdtemp(), "sandbox")
+        self.addCleanup(shutil.rmtree, os.path.dirname(dest), True)
+        return dest, self.cli.isolate_clone(root, dest, branch, pair)
+
+    def _count(self, dest):
+        return subprocess.run(["git", "-C", dest, "rev-list", "--all", "--count"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_a_force_added_ignored_file_is_in_the_sandbox_commit(self):
+        # the second name carries a literal `*`, which no Windows path may hold:
+        # it is the I1 case (a name that is a glob), and only POSIX can create it.
+        force = ["seed/README.md"]
+        if os.name != "nt":
+            force.append("sub/weird*name")
+        root = self._repo("*.md\nweird*\n", force)
+        dest, _ = self._sandbox(root, "agent/aoit1")
+        tree = _t2_tree(self.cli, dest)
+        for rel in force:
+            self.assertIn(rel, tree)
+            with io.open(os.path.join(dest, rel.replace("/", os.sep)),
+                         encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "bytes of %s\n" % rel)
+        self.assertEqual(self._count(dest), "1")
+        self.assertEqual(subprocess.run(["git", "-C", dest, "status", "--short"],
+                                        capture_output=True,
+                                        text=True).stdout.strip(), "",
+                         "the seat tree is clean")
+
+    def test_an_untracked_ignored_file_still_stays_out(self):
+        root = self._repo("*.log\n", ["keep.md"])
+        with io.open(os.path.join(root, "debug.log"), "w", encoding="utf-8") as fh:
+            fh.write("FAKE-PLAINTEXT-NOT-COMMITTED\n")
+        dest, _ = self._sandbox(root, "agent/aoit2")
+        self.assertEqual(_t2_tree(self.cli, dest), [".gitignore", "keep.md"])
+        self.assertFalse(os.path.exists(os.path.join(dest, "debug.log")))
+
+    def test_a_force_added_excluded_secret_still_stays_out(self):
+        root = self._repo("secrets-generated/\n", ["secrets-generated/key.pem"])
+        dest, _ = self._sandbox(root, "agent/aoit3")
+        self.assertEqual(_t2_tree(self.cli, dest), [".gitignore"])
+
+    def test_the_patch_survives_a_gitignore_that_ignores_patch_files(self):
+        root = self._repo("*.patch\n", ["keep.md"])
+        base = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+        with io.open(os.path.join(root, "keep.md"), "w", encoding="utf-8") as fh:
+            fh.write("changed\n")
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-am", "head2"],
+                       check=True)
+        pair = self.cli.resolve_review_base(root, base[:8])
+        dest, _ = self._sandbox(root, "agent/aoit4", pair)
+        self.assertIn(self.cli.REVIEW_DIFF_FILE, _t2_tree(self.cli, dest))
+        self.assertEqual(self._count(dest), "1", "the patch rides in the one commit")
+
+    def test_a_repo_with_no_ignored_tracked_files_is_unchanged(self):
+        root = _t2_repo(self.git, {"keep.txt": "keep\n", "sub/a.md": "a\n"},
+                        tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        dest, _ = self._sandbox(root, "agent/aoit5")
+        self.assertEqual(_t2_tree(self.cli, dest), ["keep.txt", "sub/a.md"])
+        self.assertEqual(self._count(dest), "1")
+
+
 class T2IsolateSecretsS3RefusePlaintextTests(unittest.TestCase):
     """S3: tracked plaintext-secret names refuse before any sandbox exists."""
 
