@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 CLUSTER_DIR = ROOT / "infra" / "mcp-servers" / "cluster"
 GATEWAY_POLICY_PATH = CLUSTER_DIR / "gateway.policy.yaml"
 CLUSTER_SCHEMA_PATH = CLUSTER_DIR / "cluster.schema.json"
+MEMORY_POLICY_PATH = CLUSTER_DIR / "memory.policy.yaml"
+PROJECT_GRAPHS_POLICY_PATH = CLUSTER_DIR / "project-graphs.policy.yaml"
 
 WRITE_CLASS_ACTIONS = [
     "change", "schema_apply", "branch_create", "branch_delete", "branch_merge",
@@ -246,6 +248,17 @@ def evaluate_permission(bundle: dict, actor: str, action: str) -> bool:
 
 
 class GatewayPolicyTests(unittest.TestCase):
+    KG_EXPORT_ACTIONS = {"read", "export", "invoke_query"}
+    WORKSTATION_ACTIONS = {
+        "read", "export", "invoke_query", "change", "branch_create", "branch_merge",
+    }
+    KNOWN_ACTIONS = sorted(set(WRITE_CLASS_ACTIONS) | {
+        "read", "invoke_query", "branch_create", "branch_merge",
+    })
+    UNLISTED_ACTIONS = [
+        "admin", "delete", "drop_graph", "graph_create", "graph_delete", "cluster_restart",
+    ]
+
     def setUp(self):
         self.assertTrue(GATEWAY_POLICY_PATH.exists(), f"Missing {GATEWAY_POLICY_PATH}")
         self.raw_text = GATEWAY_POLICY_PATH.read_text(encoding="utf-8")
@@ -497,6 +510,51 @@ class GatewayPolicyTests(unittest.TestCase):
             parse_policy_yaml(duplicate_actions_policy)
         self.assertIn("actions", str(ctx_yaml.exception).lower())
         self.assertIn("duplicate", str(ctx_yaml.exception).lower())
+
+    def test_cluster_policy_grants_export_and_workstation_groups_exactly(self):
+        """memory + project-graphs bundles carry the live-cluster actors: both new groups
+        exist and each grants EXACTLY its action set — the workstation gets no admin,
+        schema_apply, branch_delete or graph create/delete; the export actor stays read-only."""
+        bundles = {
+            MEMORY_POLICY_PATH: parse_policy_yaml(MEMORY_POLICY_PATH.read_text(encoding="utf-8")),
+            PROJECT_GRAPHS_POLICY_PATH: parse_policy_yaml(
+                PROJECT_GRAPHS_POLICY_PATH.read_text(encoding="utf-8")
+            ),
+        }
+        for path, bundle in bundles.items():
+            self.assertEqual(
+                bundle.get("groups", {}).get("plangraph-kg-export"), ["plangraph-kg-export"],
+                f"{path.name} must define the plangraph-kg-export group",
+            )
+
+        def granted(bundle, actor):
+            return {a for a in self.KNOWN_ACTIONS + self.UNLISTED_ACTIONS
+                    if evaluate_permission(bundle, actor, a)}
+
+        projects = bundles[PROJECT_GRAPHS_POLICY_PATH]
+        self.assertEqual(projects.get("groups", {}).get("workstation"), ["workstation"],
+                         "project-graphs.policy.yaml must define the workstation group")
+
+        for path, bundle in bundles.items():
+            self.assertEqual(
+                granted(bundle, "plangraph-kg-export"), self.KG_EXPORT_ACTIONS,
+                f"{path.name}: plangraph-kg-export actor grants exactly read/export/invoke_query",
+            )
+        self.assertEqual(
+            granted(projects, "workstation"), self.WORKSTATION_ACTIONS,
+            "project-graphs.policy.yaml: workstation actor grants exactly the read/write set",
+        )
+        for action in ["admin", "schema_apply", "branch_delete"] + self.UNLISTED_ACTIONS:
+            self.assertFalse(evaluate_permission(projects, "workstation", action),
+                             f"workstation must be DENIED '{action}'")
+            self.assertFalse(evaluate_permission(projects, "plangraph-kg-export", action),
+                             f"plangraph-kg-export must be DENIED '{action}'")
+
+        # The standard-library fallback reader must see the same grants, or the
+        # cross-bundle write checks above would be blind to these rules.
+        for path, bundle in bundles.items():
+            self.assertEqual(_read_fallback(path.read_text(encoding="utf-8")), bundle,
+                             f"{path.name} must parse identically on both readers")
 
 
 if __name__ == "__main__":
