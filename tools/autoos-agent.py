@@ -1916,6 +1916,16 @@ WORKER_ENV_DENY_PREFIXES = ("AWS_", "AZURE_", "GCP_", "GOOGLE_", "ANTHROPIC_",
                             "OPENAI_", "OPENROUTER_", "DEEPSEEK_", "GH_",
                             "GITHUB_", "GITLAB_", "SLACK_",
                             "LD_", "DYLD_", "GIT_", "SSH_", "KUBE", "DOCKER_")
+# TOOLHOME (AO-L2-SEAT-INTEGRITY P3a): the cache roots the measured seat writes
+# used (a qwen seat ran `ansible-galaxy collection install ansible.posix` and
+# filled ~/.ansible, outside its sandbox — HOME and every tool cache are
+# inherited). An --isolate worker gets each one repointed into a sandbox-private
+# toolhome; the names MUST stay in sync with WORKER_PLAN_ENV_PASSLIST below
+# (tests: the passlist and the redirect set cannot drift).
+TOOL_HOME_REDIRECTS = ("ANSIBLE_HOME", "ANSIBLE_LOCAL_TEMP", "ANSIBLE_REMOTE_TEMP",
+                       "ANSIBLE_COLLECTIONS_PATH", "PIP_CACHE_DIR", "npm_config_cache",
+                       "CARGO_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME",
+                       "PYTHONUSERBASE")
 # And what the *plan* is allowed to add, on top of clearing the deny check. The
 # allowlist above only ever covered the caller's own exports: plan["env"] was
 # copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
@@ -1928,7 +1938,7 @@ WORKER_PLAN_ENV_PASSLIST = ("OPENCODE_CONFIG_CONTENT", "XDG_DATA_HOME",
                             clients.GEMINI_CUSTOM_HEADERS_ENV,
                             # D8: the pin that keeps a gemini-cli internal call on
                             # the leg this run routed instead of its `auto` default.
-                            clients.GEMINI_MODEL_ENV)
+                            clients.GEMINI_MODEL_ENV) + TOOL_HOME_REDIRECTS
 WORKER_PLAN_ENV_PASSLIST_PREFIXES = ("AUTOOS_AGENT_",)
 
 # git in the worker must fail rather than ask: askpass helpers that always exit
@@ -2091,6 +2101,16 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     pin = worker_shell()
     if pin:
         env["SHELL"] = pin
+    # TOOLHOME (P3a), and the HOME split it lives with: own-account clients
+    # (claude, qoder, qwen, agy, codex, gemini) authenticate from $HOME, so
+    # they inherit the operator's HOME and only the caches named in
+    # TOOL_HOME_REDIRECTS move; a gateway client (opencode) needs nothing from
+    # HOME, so its builder asks for the toolhome as home with plan["forced_home"].
+    # It is honoured only when it is exactly the sandbox's own `.toolhome`
+    # sibling — the passlist gate on HOME itself stays the way it was.
+    forced_home = plan.get("forced_home")
+    if forced_home is not None and forced_home == str(plan.get("cwd", "")) + ".toolhome":
+        env["HOME"] = forced_home
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
     _drop_extra_git_config(env)
@@ -2340,9 +2360,11 @@ def provision_worker_dirs(env: dict) -> bool:
     because an absent or hostile one is the same exposure the refusal was for.
 
     An env that names no dir (the scrub pops both when the plan has no state
-    tree) is not a refusal: there is nothing to provision.
+    tree) is not a refusal: there is nothing to provision. The TOOLHOME cache
+    roots an --isolate plan redirects are provisioned under the same rule: the
+    sandbox-private toolhome appears as their parent, mode 0700.
     """
-    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME"):
+    for name in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME") + TOOL_HOME_REDIRECTS:
         path = env.get(name)
         if not path:
             continue
@@ -2354,6 +2376,76 @@ def provision_worker_dirs(env: dict) -> bool:
                   file=sys.stderr)
             return False
     return True
+
+
+def toolhome_dir(sandbox_path: str) -> str:
+    """The sandbox-private tool-cache home: a sibling of the clone, removed
+    with it (the `discard:` line names both), created 0700 by the provisioner."""
+    return sandbox_path + ".toolhome"
+
+
+def redirect_tool_caches(env: dict, toolhome: str) -> None:
+    """Repoint every measured tool-cache root into the sandbox-private toolhome
+    (P3a: HOME and the caches are inherited, and an `ansible-galaxy` install
+    from a seat wrote into ~/.ansible with nothing watching — the parent leak
+    check reads the parent checkout, and ~/.ansible is in neither tree).
+
+    HOME itself is NOT touched here: own-account clients (claude, qoder, qwen,
+    agy, codex, gemini) authenticate from $HOME, so redirecting it breaks the
+    login; a gateway client (opencode) needs nothing from it, and that split is
+    decided by `forced_home` in the plan and applied in `worker_env`."""
+    for name in TOOL_HOME_REDIRECTS:
+        env[name] = os.path.join(toolhome, name.lower())
+
+
+# TOOLWATCH (P3a): the well-known tool dirs under the REAL home, as the
+# measured escapes wrote to them. Before and after an --isolate run each one
+# is *statted* — never opened, never followed through a symlink, and a read
+# that raises is skipped in silence: a hygiene warning is not allowed to break
+# the run it is watching.
+TOOL_WATCH_DIRS = (".ansible", os.path.join(".cache", "pip"), ".npm",
+                   os.path.join(".cargo", "registry"), os.path.join(".cache", "uv"),
+                   os.path.join(".local", "lib"))
+
+
+def tool_watch_paths(home: str) -> list:
+    return [os.path.join(home, *d.split(os.sep)) for d in TOOL_WATCH_DIRS]
+
+
+def tool_watch_snapshot(paths: list) -> dict:
+    """{path: "absent" | (mtime_ns, entry_count) | None} — None means "no claim":
+    the read raised, and no verdict is ever built on it."""
+    out = {}
+    for p in paths:
+        try:
+            if not os.path.lexists(p):
+                out[p] = "absent"
+                continue
+            st = os.lstat(p)              # lstat: never follow a symlink
+        except (OSError, ValueError):
+            out[p] = None
+            continue
+        count = None
+        if stat.S_ISDIR(st.st_mode):      # only a real directory is counted
+            try:                          # scandir never opens an entry
+                count = sum(1 for _ in os.scandir(p))
+            except (OSError, ValueError):
+                count = None
+        out[p] = (st.st_mtime_ns, count)
+    return out
+
+
+def tool_watch_changes(before: dict, after: dict, home: str) -> list:
+    """The watched dirs that changed during the run, home-relative (`~/.ansible`):
+    a name for a WARNING line and a run record, never an absolute path with the
+    operator's username in it (AGENTS.md 7)."""
+    out = []
+    for p, b in before.items():
+        a = after.get(p)
+        if b is None or a is None or b == a:
+            continue
+        out.append("~/%s" % os.path.relpath(p, home).replace(os.sep, "/"))
+    return out
 
 
 def fence_sandbox_push(sandbox: str) -> None:
@@ -6395,6 +6487,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # update is unconditional on purpose: a GEMINI_MODEL the caller's shell happens
     # to hold is not a leg this lane routed, so the routed model wins. (G3, RWP3)
     env.update(clients.gemini_side_model_env(client.name, model))
+    forced_home = None
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
@@ -6434,6 +6527,17 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
                                                    os.environ.get("AUTOOS_TASK_DIR"))
+        # TOOLHOME (P3a): an --isolate worker writes its tool caches under the
+        # inherited HOME (measured: a qwen seat's `ansible-galaxy install` filled
+        # ~/.ansible outside its sandbox). Every cache root named in
+        # TOOL_HOME_REDIRECTS moves into the sandbox-private `<sandbox>.toolhome`;
+        # the HOME split (own-account clients keep $HOME for their login, the
+        # gateway client gets the toolhome as home) is documented at `forced_home`
+        # in worker_env.
+        _toolhome = toolhome_dir(sandbox["path"])
+        redirect_tool_caches(env, _toolhome)
+        if client.gateway:
+            forced_home = _toolhome
     if sandbox is None and getattr(args, "review_base", None):
         raise ReviewBaseRefused("--review-base needs --isolate: the diff lands in the "
                                 "sandbox, not in a shared checkout")
@@ -6555,6 +6659,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             "route": route, "depth": (depth, max_depth), "free": bool(args.free),
             "run_id": run_id, "sandbox": sandbox,
             "cwd": sandbox["path"] if sandbox else os.getcwd(),
+            # TOOLHOME (P3a): the gateway client's HOME, applied by worker_env
+            # only when it names this sandbox's own .toolhome sibling.
+            "forced_home": forced_home,
             "session_tag": tag}
 
 
@@ -8782,16 +8889,46 @@ def _porcelain_path_is_logs(p: str) -> bool:
     return p == "logs" or p.startswith("logs/")
 
 
-def _filtered_parent_status(root: str) -> dict:
+def _porcelain_path_is_sandbox(p: str, rel: str) -> bool:
+    """True when a porcelain path (quoted or not) is the seat tree itself,
+    anything under it, or one of its sandbox-private siblings (`<seat>.toolhome`,
+    `<seat>.opencode-data`) — the dot prefix is the sibling rule. A name that
+    merely shares a stem (`<seat>-notes.txt`) is NOT sandbox-side."""
+    p = p.strip().strip('"').rstrip("/")
+    return p == rel or p.startswith(rel + "/") or p.startswith(rel + ".")
+
+
+def _sandbox_rel(root: str, sandbox: str | None) -> str | None:
+    """The sandbox path relative to the parent checkout, git-style (forward
+    slashes), or None when the sandbox is not a subtree of the root (a foreign
+    repo's clone under ~/fleet, the same tree, another drive on Windows) — then
+    there is nothing to subtract and the caller judges every path."""
+    if not sandbox:
+        return None
+    try:
+        rel = os.path.relpath(sandbox, root)
+    except ValueError:
+        return None
+    if rel in (os.curdir, "") or rel.split(os.sep)[0] == os.pardir:
+        return None
+    return rel.replace(os.sep, "/")
+
+
+def _filtered_parent_status(root: str, sandbox: str | None = None) -> dict:
     """{path-part: XY} of `git status --porcelain --untracked-files=all`, logs/ excluded.
 
     The --isolate clone and every run log live under logs/ (clients.state_dir),
     so logs/ paths are the spawner's own, never a worker's leak. Only entries
     where EVERY path is under logs/ drop; a rename with one side outside
     (e.g. `R  catalog/x -> logs/x`) is kept, keyed by the non-logs side.
+
+    With a `sandbox`, paths inside the seat tree (and its `.toolhome` /
+    `.opencode-data` siblings) drop the same way — the state dir is not always
+    git-ignored under logs/, and a sandbox-private write is not a parent leak.
     """
     # Untracked files count too: a worker with write rights (qoder
     # bypass_permissions, review of 6622d29) can drop a NEW file into the parent.
+    rel = _sandbox_rel(root, sandbox)
     r = subprocess.run(["git", "-C", root, "status", "--porcelain",
                         "--untracked-files=all"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
     out = {}
@@ -8802,7 +8939,9 @@ def _filtered_parent_status(root: str) -> dict:
             continue
         rest = line[3:] if len(line) > 3 else ""
         paths = [p.strip() for p in rest.split(" -> ")]
-        if all(_porcelain_path_is_logs(p) for p in paths):
+        if all(_porcelain_path_is_logs(p)
+               or (rel is not None and _porcelain_path_is_sandbox(p, rel))
+               for p in paths):
             continue
         out[rest] = line[:2]
     return out
@@ -8952,10 +9091,11 @@ def parent_leak(snapshot, root=None, sandbox=None):
       onto another lane is reported and only the frozen-parent rule (skill
       R-coord-01) tells the operator it was their own move - the exit-7
       message says so;
-    - any tracked path outside logs/ whose porcelain state is DIRTY after
-      and differs from before (new dirt is the worker-shaped signal; a path
-      that became clean - the orchestrator committing its own WIP - is not a
-      leak).
+    - any tracked path outside logs/ and outside the seat tree (the sandbox and
+      its `.toolhome` / `.opencode-data` siblings) whose porcelain state is
+      DIRTY after and differs from before (new dirt is the worker-shaped
+      signal; a path that became clean - the orchestrator committing its own
+      WIP - is not a leak).
 
     KNOWN HOLES, both inherited from 75f2866~1 and accepted with the strict
     rule: a worker that commits on a branch CREATED during the run and then
@@ -9009,7 +9149,7 @@ def parent_leak(snapshot, root=None, sandbox=None):
             side.append("%s %s" % (name, sha))
     if side:
         leaks.append("worker commits on moved parent branches: %s" % ", ".join(side))
-    after_status = _filtered_parent_status(root)
+    after_status = _filtered_parent_status(root, sandbox)
     changed = sorted(p for p, xy in after_status.items()
                      if before_status.get(p) != xy)
     if changed:
@@ -9759,7 +9899,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
         merged.setdefault("run_id", run_id)
         merged.setdefault("created_at", _iso_zulu(datetime.datetime.now(
             datetime.timezone.utc)))
-        for key in ("pgid", "start", "writer", "attempt"):
+        for key in ("pgid", "start", "writer", "attempt", "outside_writes"):
             if record.get(key) is not None:
                 merged[key] = record[key]
         for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
@@ -12053,6 +12193,7 @@ def cmd_run(args, cfg: dict) -> int:
     if admission is not None:
         return refuse(admission, EXIT_HOST_ADMISSION)
     parent_snap = None
+    watch_home = watch_paths = watch_before = None
     if plan["sandbox"]:
         sb = plan["sandbox"]
         # Snapshot the parent checkout before the run: a worker that writes
@@ -12061,6 +12202,13 @@ def cmd_run(args, cfg: dict) -> int:
         # not the checkout this script happens to live in (KEYDENY3g item 7).
         source = sb.get("source") or isolate_source()
         parent_snap = parent_snapshot(source)
+        # OUTSIDEWATCH (P3a): the tool caches the redirect above cannot cover
+        # (a tool that ignores its env, or a write made with a hardcoded path)
+        # are caught by watching the well-known dirs under the REAL home before
+        # and after the run - a warning line, never a changed exit code.
+        watch_home = os.path.expanduser("~")
+        watch_paths = tool_watch_paths(watch_home)
+        watch_before = tool_watch_snapshot(watch_paths)
         # I12: the plaintext-secret refusal runs BEFORE anything is created,
         # so a denied card leaves no ~/fleet directory in the operator's home.
         try:
@@ -12579,7 +12727,11 @@ def cmd_run(args, cfg: dict) -> int:
                 else:
                     print("take it: git -C %s branch <name> %s   (detached HEAD)"
                           % (q, rest.split()[0]))
-        extra = " " + shlex.quote(sb["path"] + ".opencode-data") if client.name == "opencode" else ""
+        # TOOLHOME (P3a): the sandbox-private toolhome is removed with the
+        # sandbox, like the opencode data dir beside it.
+        extra = " " + shlex.quote(sb["path"] + ".toolhome")
+        if client.name == "opencode":
+            extra += " " + shlex.quote(sb["path"] + ".opencode-data")
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
         # SPAWNFIX3c (S2): only a read-only run is judged on an untouched
@@ -12596,8 +12748,21 @@ def cmd_run(args, cfg: dict) -> int:
             reflog=", ".join(reset_away),
             brief=plan.get("brief") or "",
             extra="; ".join(off_ref))
-        leak = parent_leak(parent_snap, root=sb.get("source") or ROOT,
+        # LEAKTREE (P3a): `root` must be the tree the snapshot above was taken
+        # of — both fall back to isolate_source(), not one to ROOT (a different
+        # checkout), which compared snapshot and verdict across two trees.
+        leak = parent_leak(parent_snap, root=sb.get("source") or isolate_source(),
                            sandbox=sb["path"])
+        # OUTSIDEWATCH (P3a): sandbox-private writes never reach this list (the
+        # redirect moved them), a real write to the operator's tool dirs does —
+        # warning and record only, the exit code stays whatever the run earned.
+        if watch_before is not None:
+            outside = tool_watch_changes(watch_before,
+                                         tool_watch_snapshot(watch_paths), watch_home)
+            if outside:
+                print("WARNING: --isolate run wrote outside its sandbox: %s"
+                      % ", ".join(outside), file=sys.stderr)
+                write_kill_record(plan.get("run_id"), {"outside_writes": outside})
         if leak:
             # A LEAK overrides the child's rc AND the NO-OP verdict: the run
             # did change something, just in the wrong checkout. Never reverts
