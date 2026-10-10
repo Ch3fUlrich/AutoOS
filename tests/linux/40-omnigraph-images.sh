@@ -490,3 +490,162 @@ if it "D-825: guard (D-852) pwsh resolves the stand-in dir first too (when pwsh 
     [[ -z "$problems" ]] && pass || fail "PowerShell resolved outside the stand-in dir: $problems"
 fi
 
+# ─── D-1038 A6 (P7a): the Omnigraph 0.13 compose-wrapper scripts ─────────────
+# Measured (server-L1 rehearsal 2026-10-10): 0.13 retains its cluster admission
+# lock on EVERY shutdown, clean `docker stop` included, and the next boot dies
+# with state_lock_held — so `restart: unless-stopped` crash-loops. start-server-013.sh
+# and apply-fresh-013.sh release that exact id. They talk to the storage root on
+# every path, so every case runs against a recording stand-in `omnigraph` that
+# gate_stub_run puts first on PATH (<dir>/bin), never against a live root.
+describe "omnigraph 0.13 compose wrappers"
+
+OG13_START="$ROOT/infra/mcp-servers/cluster/start-server-013.sh"
+OG13_APPLY="$ROOT/infra/mcp-servers/cluster/apply-fresh-013.sh"
+OG13_ROOT="s3://omnigraph-013/cluster"
+
+# og13_stub <dir> — stand-ins for `omnigraph` and the server entrypoint. Each call
+# is appended to $STUB_LOG; behaviour comes from the env: STUB_STATUS_{OUT,RC},
+# STUB_APPLY_{OUT,RC}, STUB_UNLOCK_RC (every rc defaults to 0).
+og13_stub() {
+    local _d="$1"
+    mkdir -p "$_d/bin" "$_d/cluster"
+    : >"$_d/calls.log"
+    cat >"$_d/bin/omnigraph" <<'OG13'
+#!/bin/sh
+printf 'omnigraph %s\n' "$*" >>"$STUB_LOG"
+case "$1 $2" in
+    "cluster status")       printf '%s\n' "${STUB_STATUS_OUT:-}"; exit "${STUB_STATUS_RC:-0}" ;;
+    "cluster apply")        printf '%s\n' "${STUB_APPLY_OUT:-}";  exit "${STUB_APPLY_RC:-0}" ;;
+    "cluster force-unlock") exit "${STUB_UNLOCK_RC:-0}" ;;
+esac
+exit 0
+OG13
+    cat >"$_d/bin/omnigraph-entrypoint" <<'OG13'
+#!/bin/sh
+printf 'ENTRY %s\n' "$*" >>"$STUB_LOG"
+exit 0
+OG13
+    chmod +x "$_d/bin/omnigraph" "$_d/bin/omnigraph-entrypoint"
+}
+
+og13_start() {
+    local _d="$1"; shift
+    gate_stub_run "$_d" "OMNIGRAPH_CLUSTER=$OG13_ROOT" "OMNIGRAPH_ENTRYPOINT=$_d/bin/omnigraph-entrypoint" \
+        "STUB_LOG=$_d/calls.log" -- sh "$OG13_START" "$@"
+}
+
+og13_apply() {
+    gate_stub_run "$1" "STUB_LOG=$1/calls.log" -- sh "$OG13_APPLY" "$1/cluster" "$OG13_ROOT"
+}
+
+# og13_seq <log> — the unlock/exec sequence reduced to "FU" / "EN" tokens, so a
+# wrapper that unlocked AFTER execing is caught by the same assertion.
+og13_seq() {
+    sed -n 's/^omnigraph cluster force-unlock.*/FU/p; s/^ENTRY.*/EN/p' "$1" | tr '\n' ' ' | sed 's/ *$//'
+}
+
+if it "omnigraph 0.13 start: releases the retained lock id, then execs the entrypoint"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": "01ABC", "phase": "retained"}' \
+        og13_start "$d" serve --config /srv/c.yaml 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "the wrapper exited $rc: $out" >&2; }
+    [[ "$(og13_seq "$d/calls.log")" == "FU EN" ]] \
+        || { ok=0; echo "wrong sequence: [$(og13_seq "$d/calls.log")] $out" >&2; }
+    grep -qF "omnigraph cluster force-unlock 01ABC --cluster $OG13_ROOT" "$d/calls.log" \
+        || { ok=0; echo "no exact-id unlock against this root: $(cat "$d/calls.log")" >&2; }
+    grep -qF 'ENTRY serve --config /srv/c.yaml' "$d/calls.log" \
+        || { ok=0; echo "the entrypoint lost the passthrough args: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-server-013.sh did not release-then-exec"; fi
+fi
+
+if it "omnigraph 0.13 start: a status with no lock id means no force-unlock"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": null, "phase": "fresh"}' og13_start "$d" serve 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(og13_seq "$d/calls.log")" == "EN" ]] \
+        && pass || fail "a fresh root was unlocked anyway or the server never started: rc=$rc [$(og13_seq "$d/calls.log")] $out"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start: an unreadable cluster status refuses to start"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_OUT='{"error": "storage unavailable"}' STUB_STATUS_RC=1 og13_start "$d" serve 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "status rc 1 became exit $rc: $out" >&2; }
+    [[ "$out" == *"refusing to start"* ]] || { ok=0; echo "no refusal message: $out" >&2; }
+    [[ "$(og13_seq "$d/calls.log")" == "" && "$out" == *"storage unavailable"* ]] \
+        || { ok=0; echo "the wrapper neither stopped at status nor showed its output: [$(cat "$d/calls.log")] $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-server-013.sh started on an unreadable status"; fi
+fi
+
+if it "omnigraph 0.13 start: a failed force-unlock never execs the entrypoint"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": "01ABC"}' STUB_UNLOCK_RC=1 og13_start "$d" serve 2>&1)"; rc=$?
+    [[ $rc -eq 1 && "$(og13_seq "$d/calls.log")" == "FU" && "$out" == *"FAILED"* ]] \
+        && pass || fail "the server booted on a lock that is still held: rc=$rc [$(og13_seq "$d/calls.log")] $out"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start: no OMNIGRAPH_CLUSTER means no start at all"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(gate_stub_run "$d" "OMNIGRAPH_ENTRYPOINT=$d/bin/omnigraph-entrypoint" "STUB_LOG=$d/calls.log" \
+        -- env -u OMNIGRAPH_CLUSTER sh "$OG13_START" serve 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *OMNIGRAPH_CLUSTER* && ! -s "$d/calls.log" ]] \
+        && pass || fail "an unset root reached the stack: rc=$rc $out [$(cat "$d/calls.log")]"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply: an existing store is left alone, apply never called"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_RC=0 og13_apply "$d" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "a skipped re-apply exited $rc: $out" >&2; }
+    [[ "$out" == *"existing store"* ]] || { ok=0; echo "no skip line: $out" >&2; }
+    grep -q "cluster apply" "$d/calls.log" && { ok=0; echo "apply ran on an existing store: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-fresh-013.sh is not non-destructive"; fi
+fi
+
+if it "omnigraph 0.13 apply: releases the admission lock id that apply printed"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT=$'applied cluster default\nAdmission lock: 01XYZ; retain until prior work is quiescent, then exact-ID force-unlock' \
+        og13_apply "$d" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "a fresh apply exited $rc: $out" >&2; }
+    [[ "$out" == *"released admission lock 01XYZ"* ]] || { ok=0; echo "no release line: $out" >&2; }
+    grep -qF "omnigraph cluster force-unlock 01XYZ --config $d/cluster" "$d/calls.log" \
+        || { ok=0; echo "no exact-id unlock on the config dir: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-fresh-013.sh left the fresh root locked"; fi
+fi
+
+if it "omnigraph 0.13 apply: a failed apply exits non-zero with no unlock"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='{"error": "schema rejected"}' STUB_APPLY_RC=1 og13_apply "$d" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "a failed apply exited $rc: $out" >&2; }
+    [[ "$out" == *"apply FAILED"* && "$out" == *"schema rejected"* ]] \
+        || { ok=0; echo "the apply failure was swallowed: $out" >&2; }
+    grep -q "force-unlock" "$d/calls.log" && { ok=0; echo "unlocked after a failed apply: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-fresh-013.sh reported success on a failed apply"; fi
+fi
+
+if it "omnigraph 0.13 apply: an apply that printed no admission lock succeeds quietly"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='applied cluster default' og13_apply "$d" 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(og13_seq "$d/calls.log")" == "" && "$out" == *"no admission lock"* ]] \
+        && pass || fail "rc=$rc seq=[$(og13_seq "$d/calls.log")] out=$out"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply: an empty lock id is a failure, never a guessed unlock"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='Admission lock: ; retain until prior work is quiescent' og13_apply "$d" 2>&1)"; rc=$?
+    [[ $rc -eq 1 && "$(og13_seq "$d/calls.log")" != *FU* ]] \
+        && pass || fail "an unparsed lock id still unlocked: rc=$rc [$(og13_seq "$d/calls.log")] $out"
+    rm -rf "$d"
+fi
+
