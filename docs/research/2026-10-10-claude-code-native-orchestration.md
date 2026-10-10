@@ -37,8 +37,11 @@ must stay ours?
   `prompt-caching`, `fast-mode`, `costs`, `model-config` and `tools-reference` via the docs leg.
   Version numbers below are the ones each page states.
 - **Two sources per claim:** each key claim was read by the `claude-code-guide` docs leg and then
-  re-read verbatim by this session. A different-family leg cross-checked the claims and the
-  file:line anchors (see `.l2/REPORT.md`, not committed).
+  re-read verbatim by this session. A different-family leg (NVIDIA Nemotron, free tier) then
+  re-fetched the pages and opened the code. It agreed on 21 of 21 checks: 13 doc claims and 8
+  file:line anchors. One check it marked "WRONG", but its correction restates the claim. It gave
+  verdicts without the quotes it was asked for, so treat that leg as weak corroboration, not proof
+  (R-orch-14).
 - **Unverified claims** are marked **UNVERIFIED**.
 - **Our side:** read at main `52fbd792`. Every anchor is `path:line` at that commit.
 
