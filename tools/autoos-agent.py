@@ -1299,8 +1299,12 @@ _REFUSE_LINK = "could not create the link"
 _REFUSE_OPEN = "could not open for writing"
 
 
-def _isolate_materialise(root: str, entries: list, dest: str) -> None:
+def _isolate_materialise(root: str, entries: list, dest: str) -> list:
     """Write the allowed HEAD entries into `dest`, verbatim from the object DB.
+
+    Returns the paths actually WRITTEN, in sort order — the staging step (AO-
+    ISOLATE-IGNORED-TRACKED) needs exactly that set, not the entry list it was
+    handed, because a refused entry never reaches the disk.
 
     WHY this replaced `git archive HEAD -- <paths>` (the design change the
     cross-family review asked for; I1 + I2 + I3):
@@ -1390,6 +1394,32 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
             fh.write(data)
         os.chmod(full, 0o755 if mode == "100755" else 0o644)
         written.add(path)
+    return sorted(written)
+
+
+def _isolate_stage(dest: str, staged) -> None:
+    """Stage EXACTLY the materialised paths, forcing past the repo's own ignore rules.
+
+    `git add -A` walks the worktree and honours the `.gitignore` the materialiser
+    had just written, so a file TRACKED in the source that matches an ignore
+    pattern (force-added there, like `seed/README.md`) was written to the sandbox
+    and then never committed — the seat lost a HEAD file and the worker could not
+    commit it either (AO-ISOLATE-IGNORED-TRACKED). An explicit `-f` list is the
+    other half of the fix: it stages nothing the exclusion filter dropped, and no
+    ignored-and-UNtracked file, because those paths are not in `staged`.
+    Every name is a `:(literal)` pathspec, so a tracked file called `*` cannot
+    glob the tree back open (I1), and the list rides on stdin, not the argv (I2).
+    `--pathspec-from-file` is git 2.25+; on an older git this fails the build
+    loudly (check=True, and `isolate_clone`'s cleanup leaves no sandbox) rather
+    than quietly shipping a seat that is missing HEAD files.
+    """
+    if not staged:
+        return
+    payload = b"".join(b":(literal)" + p.encode("utf-8", "surrogateescape") + b"\x00"
+                       for p in staged)
+    subprocess.run(["git", "-C", dest, "add", "-f",
+                    "--pathspec-from-file=-", "--pathspec-file-nul"],
+                   input=payload, check=True, stdout=subprocess.DEVNULL)
 
 
 def is_autoos_source(source: str) -> bool:
@@ -1434,9 +1464,8 @@ def _isolate_build(root: str, path: str, source_sha: str, allowed: list, review_
     sandbox directory at all (I11). A `review_base` pair rides base..head in too.
     """
     subprocess.run(["git", "init", "-q", path], check=True, stdin=subprocess.DEVNULL)
-    _isolate_materialise(root,
-                         _isolate_batch_entries(root, source_sha, allowed), path)
-    subprocess.run(["git", "-C", path, "add", "-A"], check=True, stdin=subprocess.DEVNULL)
+    _isolate_stage(path, _isolate_materialise(
+        root, _isolate_batch_entries(root, source_sha, allowed), path))
     if review_base is not None:
         write_review_diff(root, path, review_base, allowed)
         subprocess.run(["git", "-C", path, "add", "-f", "--", REVIEW_DIFF_FILE], check=True,
@@ -1657,8 +1686,12 @@ def isolate_clone(root: str, path: str, branch: str, review_base=None) -> str:
 
     The steps are one function because the containment claim is about the
     directory the worker lands in: the sandbox holds committed allowed files
-    only, so nothing git-ignored and nothing untracked exists in it (KEYDENY3b),
-    and the push fence plus the credential-free env make a push out of it an
+    only, staged from the materialiser's own list, so nothing untracked and
+    nothing the filter dropped exists in it (KEYDENY3b) — while a file the
+    source force-tracks through an ignore pattern is kept (AO-ISOLATE-
+    IGNORED-TRACKED: `git add -A` silently dropped it), because "allowed" is
+    `ls-tree`, never the ignore rules. The push fence plus the credential-free
+    env make a push out of it an
     accident guard, not a boundary (FF1, D-106).
 
     ISOLATION STATEMENT (accepted by canary — tests/test_autoos_spawner.py
