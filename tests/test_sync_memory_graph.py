@@ -71,6 +71,30 @@ def fixture_root_with_tasks(rows):
     return tmp
 
 
+# D-1038 A3: the Omnigraph 0.13.0 load response, measured from a server-L1
+# rehearsal. ``_NEW_LOAD`` is the envelope both samples share; NEW_LOAD_OK is
+# the "small append" (1 JSONL line sent), NEW_LOAD_126 the 126-line sample with
+# its nodes/edges abbreviated to the types quoted in the measurement. The
+# rehearsal's storage uri is an environment path, not part of the contract, so
+# the fixture carries an obviously fake one (AGENTS.md rule 1).
+_NEW_LOAD = {
+    "uri": "s3://example/cluster/graphs/autoos.omni",
+    "branch": "main", "base_branch": None, "branch_created": False, "mode": "merge",
+    "actor_id": "default",
+    "commit": {"graph_commit_id": "hb1.01M4K", "graph_branch": None,
+               "graph_manifest_version": 2, "parent_commit_id": "01M4K",
+               "merged_parent_commit_id": None, "actor_id": "default",
+               "created_at": 1791657392112775},
+}
+NEW_LOAD_OK = dict(_NEW_LOAD, total_entities=1, embedding_generation=None,
+                   nodes=[{"name": "Preference", "entities_loaded": 1}], edges=[])
+NEW_LOAD_126 = dict(_NEW_LOAD, total_entities=126,
+                    embedding_generation="unsupported",
+                    nodes=[{"name": "Component", "entities_loaded": 8},
+                           {"name": "Rule", "entities_loaded": 20}],
+                    edges=[{"name": "Affects", "entities_loaded": 12}])
+
+
 class LedgerTests(unittest.TestCase):
     def setUp(self):
         self.mod = load_script()
@@ -190,6 +214,7 @@ class LoadModeTests(unittest.TestCase):
                 length = int(self.headers.get("Content-Length", 0))
                 seen["path"] = self.path
                 seen["auth"] = self.headers.get("Authorization")
+                seen["contract"] = self.headers.get("omnigraph-http-api")
                 seen["body"] = json.loads(self.rfile.read(length) or b"{}")
                 # Detailed per-table response so the load is confirmed (an
                 # empty-tables response would now refuse an edge batch).
@@ -218,6 +243,8 @@ class LoadModeTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(seen["path"], "/graphs/autoos/load")
         self.assertEqual(seen["auth"], "Bearer test-token")
+        # D-1038 A3: 0.13.0 answers 400 api_contract_mismatch without this.
+        self.assertEqual(seen["contract"], "0.13")
         self.assertEqual(seen["body"]["branch"], "main")
         self.assertEqual(seen["body"]["mode"], "merge")
         lines = seen["body"]["data"].strip().split("\n")
@@ -337,6 +364,117 @@ class LoadConfirmTests(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("NOT confirmed", err.getvalue())
         self.assertEqual(set(ledger.read_text().split()), before)
+
+
+class LoadConfirm013Tests(unittest.TestCase):
+    """D-1038 A3: the 0.13.0 load response shape, and the contract header."""
+
+    KNOWN = "routing-d-085,routing-d-088,routing-d-100"
+
+    def _batch(self, mod, root):
+        """(records, POSTed lines) exactly as --load would send them."""
+        pending = mod.emit(root, root / ".state" / "graph-loaded.txt")
+        return pending, (sum(1 for _, n, _ in pending if n is not None)
+                         + sum(len(es) for _, _, es in pending))
+
+    def test_total_entities_equal_sent_is_confirmed(self):
+        """Every sent record landed, so the no-@key edges flowed once."""
+        mod = load_script()
+        self.assertTrue(mod.load_confirmed(NEW_LOAD_OK, 1, edge_only=0))
+        self.assertTrue(mod.load_confirmed(NEW_LOAD_OK, 1, edge_only=1))
+        self.assertTrue(mod.load_confirmed(NEW_LOAD_126, 126, edge_only=12))
+
+    def test_total_entities_other_than_sent_is_not_confirmed(self):
+        """Fewer is a partial load, more is not our batch, zero loaded nothing."""
+        mod = load_script()
+        cases = [(dict(NEW_LOAD_OK, total_entities=0), 1, 0),
+                 (dict(NEW_LOAD_OK, total_entities=0), 1, 1),
+                 (dict(NEW_LOAD_OK, total_entities=3), 4, 1),
+                 (NEW_LOAD_OK, 0, 0),
+                 (NEW_LOAD_126, 127, 12)]
+        for res, sent, edge_only in cases:
+            with self.subTest(sent=sent, total_entities=res["total_entities"]):
+                self.assertFalse(mod.load_confirmed(res, sent, edge_only=edge_only))
+
+    def test_flat_error_response_is_not_confirmed(self):
+        """0.13 errors are flat HTTP 400 bodies, not a per-table list."""
+        mod = load_script()
+        err = {"error": "__src 'no-such-decision' not found in Decision",
+               "code": "bad_request"}
+        self.assertFalse(mod.load_confirmed(err, 1, edge_only=0))
+        # A non-empty error outranks a matching total_entities.
+        self.assertFalse(mod.load_confirmed(
+            dict(NEW_LOAD_OK, error="load failed"), 1, edge_only=0))
+
+    def test_unknown_shape_fails_closed(self):
+        """Neither `tables` nor `total_entities` is no evidence: never the
+        permissive node-only path (a re-sent edge batch would duplicate)."""
+        mod = load_script()
+        self.assertFalse(mod.load_confirmed({"unexpected": 1}, 1, edge_only=0))
+        self.assertFalse(mod.load_confirmed({}, 1, edge_only=0))
+
+    def test_log_line_for_new_shape_does_not_raise_and_marks(self):
+        """Integration: --load against a 0.13 response prints per-type counts
+        (never a KeyError) and marks the ledger."""
+        mod = load_script()
+        root = fixture_root()
+        pending, sent = self._batch(mod, root)
+        self.assertGreater(sent, 0)
+        res = dict(NEW_LOAD_OK, total_entities=sent,
+                   nodes=[{"name": "Task", "entities_loaded": sent}],
+                   edges=[{"name": "Implements", "entities_loaded": 2}])
+        orig = mod.post_load
+        mod.post_load = lambda *a, **k: res
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = mod.main(["--known-slugs", self.KNOWN, "--load"],
+                              root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertEqual(rc, 0)
+        text = err.getvalue()
+        self.assertNotIn("Traceback", text)
+        self.assertIn("loaded: {'Task': %d, 'Implements': 2}" % sent, text)
+        self.assertIn("marked %d records" % len(pending), text)
+        ledger = root / ".state" / "graph-loaded.txt"
+        self.assertEqual(set(ledger.read_text().split()),
+                         {k for k, _, _ in pending})
+
+    def test_new_shape_that_missed_records_leaves_ledger_untouched(self):
+        """A partial 0.13 load must not mark, or the missing edges are lost."""
+        mod = load_script()
+        root = fixture_root()
+        pending, sent = self._batch(mod, root)
+        ledger = root / ".state" / "graph-loaded.txt"
+        orig = mod.post_load
+        mod.post_load = lambda *a, **k: dict(NEW_LOAD_OK, total_entities=sent - 1)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                rc = mod.main(["--known-slugs", self.KNOWN, "--load"],
+                              root=root, env={"OMNIGRAPH_TOKEN": "t"})
+        finally:
+            mod.post_load = orig
+        self.assertNotEqual(rc, 0)
+        self.assertIn("NOT confirmed", err.getvalue())
+        self.assertFalse(ledger.exists() and ledger.read_text().split())
+        self.assertEqual(len(mod.emit(root, ledger)), len(pending))
+
+    def test_load_summary_never_raises_on_any_dict(self):
+        mod = load_script()
+        for res in (NEW_LOAD_OK, NEW_LOAD_126, {"unexpected": 1}, {},
+                    {"tables": []}, {"tables": [{"rows_loaded": 1}]},
+                    {"tables": ["nonsense"]}, {"nodes": [{"name": "Rule"}]},
+                    {"nodes": None}, {"nodes": "x", "edges": None},
+                    None, "not-a-dict"):
+            with self.subTest(res=res):
+                self.assertIsInstance(mod.load_summary(res), dict)
+
+    def test_contract_header_constants(self):
+        mod = load_script()
+        self.assertEqual(mod.CONTRACT_HEADER, "omnigraph-http-api")
+        self.assertEqual(mod.CONTRACT_VERSION, "0.13")
 
 
 class CitationParserTests(unittest.TestCase):
