@@ -10242,21 +10242,23 @@ class LedgerWriteTests(unittest.TestCase):
     def rows(self):
         return writer_ledger.load(self.target)[0]
 
-    def seat_line(self, text=ACCEPT, extra=" run=" + RUNS, name="seat.md"):
+    def seat_line(self, text=ACCEPT, extra=" run=" + RUNS, name="seat.md", verdict=None):
+        if verdict is None:  # F1: the default is a PAIR — the line says the seat's own word
+            verdict = text.split(":", 1)[1].split("\n", 1)[0].strip()
         os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"),
                     exist_ok=True)
         with io.open(os.path.join(ev, name), "w", encoding="utf-8") as fh:
             fh.write(text)
         return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                "reviewer=omniroute/muse verdict=ACCEPT evidence=%s%s"
-                % ("logs/briefs/evidence/" + name, extra))
+                "reviewer=omniroute/muse verdict=%s evidence=%s%s"
+                % (verdict, "logs/briefs/evidence/" + name, extra))
 
-    def record_text(self, text=ACCEPT, extra=" run=" + RUNS, final=None):
-        return "\n".join([self.seat_line(text, extra), CROSS_FAMILY_LINE_2,
+    def record_text(self, text=ACCEPT, extra=" run=" + RUNS, final=None, verdict=None):
+        return "\n".join([self.seat_line(text, extra, verdict=verdict), CROSS_FAMILY_LINE_2,
                           final or FINAL_LINE]) + "\n"
 
-    def status(self, text=ACCEPT, extra=" run=" + RUNS, final=None, **kw):
-        return self.agent.review_status(self.record_text(text, extra, final),
+    def status(self, text=ACCEPT, extra=" run=" + RUNS, final=None, verdict=None, **kw):
+        return self.agent.review_status(self.record_text(text, extra, final, verdict),
                                         self.registry, root=self.root, **kw)
 
     def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False):
@@ -10304,6 +10306,7 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.rows()), 1)
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: the ledger lock is fcntl.flock")
     def test_two_parallel_calls_write_one_row(self):
         text = self.record_text()  # the evidence file is written once, then read twice
         box = []
@@ -10330,12 +10333,52 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertTrue(all(r["ready"] for r in box), box)
         self.assertEqual(len(self.rows()), 1, self.rows())
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: fcntl.flock is what is being raced")
+    def test_two_processes_race_the_gate_and_write_one_row(self):
+        # F2: the thread test above patches `load` in ONE interpreter, so it never races
+        # two processes taking the lock — which is what two lanes actually are.
+        src = ("import importlib.util, os, sys, time\n"
+               "sys.path.insert(0, os.path.dirname(os.environ['GATE_AGENT']))\n"
+               "import autoos_writer_ledger as wl; wl.writer_for_run = lambda run: @W@\n"
+               "real, delay = wl.load, float(os.environ['GATE_DELAY']); "
+               "wl.load = lambda *a, **k: (time.sleep(delay), real(*a, **k))[1]\n"
+               "spec = importlib.util.spec_from_file_location('a', os.environ['GATE_AGENT'])\n"
+               "agent = importlib.util.module_from_spec(spec); spec.loader.exec_module(agent)\n"
+               "open(sys.argv[1], 'w').close(); f, end = os.path.dirname(sys.argv[1]), "
+               "time.time() + 60\n"
+               "while time.time() < end and not all(os.path.exists(os.path.join(f,"
+               " 'b%d' % i)) for i in (0, 1)):\n"
+               "    time.sleep(0.02)\n"
+               "sys.exit(agent.main(sys.argv[2:]))\n").replace("@W@", repr(self.WRITER))
+        Path(child := os.path.join(self.folder, "gate-child.py")).write_text(src)
+        Path(rec := os.path.join(self.root, "rec.md")).write_text(self.record_text())
+        kids = [subprocess.Popen([sys.executable, child, os.path.join(self.folder, "b%d" % i),
+                                  "review-status", rec, "--registry", self.registry_path],
+                                 env=dict(os.environ, GATE_AGENT=str(AGENT), GATE_DELAY="0.3"),
+                                 cwd=self.root, stdout=subprocess.DEVNULL) for i in (0, 1)]
+        self.assertEqual([k.wait(90) for k in kids], [0, 0])
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
     def test_a_reject_proofs_a_rejected_row_with_a_failure_class(self):
-        self.status(self.REJECT, extra=" run=run-a failure=tests-missing")
-        self.assertEqual(self.rows()[0]["failure_class"], "tests-missing")
+        # F1: REJECT + REJECT is a MATCHING rejection — the data the clock must tick on.
+        report = self.status(self.REJECT, extra=" run=run-a failure=tests-missing")
+        self.assertFalse(report["ready"], report)
+        self.assertEqual([(r["verdict"], r["failure_class"]) for r in self.rows()],
+                         [("rejected", "tests-missing")])
         self.status(self.REJECT, extra=" run=run-b")
         self.assertEqual([r["failure_class"] for r in self.rows()],
                          ["tests-missing", "other"])
+
+    def test_a_mismatch_writes_no_row_in_either_direction(self):
+        # F1: the row comes from the PAIR; a disagreement records nothing either way, and
+        # the refusal text is the one this gate already said.
+        for entry, text, why in (("ACCEPT", self.REJECT, "evidence verdict REJECT != entry ACCEPT"),
+                                 ("REJECT", self.ACCEPT, "verdict REJECT")):
+            with self.subTest(entry=entry, evidence=text.splitlines()[0]):
+                report = self.status(text, verdict=entry)
+                self.assertFalse(report["ready"], report)
+                self.assertEqual(self.rows(), [])
+                self.assertIn(why, report["cross_family"]["detail"])
 
     def test_two_rejects_from_one_writer_demote_it(self):
         self.status(self.REJECT, extra=" run=run-a")
@@ -10376,6 +10419,26 @@ class LedgerWriteTests(unittest.TestCase):
         rc, out = self.cmd(no_ledger=True)
         self.assertEqual(rc, 0, out)
         self.assertEqual(os.listdir(self.folder), [])
+
+    def test_a_present_but_unknown_ledger_field_refuses_the_seat(self):
+        # F3 (FAIL-CLOSED, no defaulting): a typo'd task would be ledgered under the wrong
+        # type and slip the writer rule's R-tiering. Refuse, name it, write nothing.
+        for field, bad, why in (("task", "opz", "ledger: task=opz is not one of ops, code, docs, infra"),
+                                ("failure", "typo", "ledger: failure=typo is not one of"),
+                                ("risk", "R9", "ledger: risk=R9 is not one of")):
+            with self.subTest(field=field):
+                extra = " run=%s %s=%s" % (self.RUNS, field, bad)
+                report = self.status(extra=extra)
+                self.assertFalse(report["ready"], report)
+                self.assertIn(why, report["cross_family"]["detail"])
+                self.assertEqual(self.rows(), [])
+                rc, out = self.cmd(extra=extra)
+                self.assertEqual((rc, why in out), (1, True), out)
+
+    def test_an_absent_ledger_field_keeps_its_default(self):
+        self.assertTrue(self.status()["ready"])
+        self.assertEqual(self.rows()[0]["task_type"], "code")
+        self.assertNotIn("risk", self.rows()[0])
 
     @unittest.skipIf(os.name == "nt", "POSIX-only: chmod / symlink / directory ledger paths")
     def test_an_unwritable_ledger_refuses_the_seat_and_exits_non_zero(self):

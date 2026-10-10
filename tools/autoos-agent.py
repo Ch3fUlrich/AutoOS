@@ -5164,7 +5164,8 @@ def _ledger_record_seat(entry, parsed, ref, write):
     """Append this seat's verdict to the writer ledger (AO-LEDGER-WRITE P6), and
     return the reason the seat must not pass the gate, or None. `ref` is the sha256
     of the evidence text, so re-running the gate over the same answer is a no-op and
-    a changed answer is a new row. Notes ride on the entry for review_status."""
+    a changed answer is a new row. Notes ride on the entry for review_status. P6-FIX F1:
+    called only for a PAIR that agrees, never for a mismatch the gate refused."""
     verdict = LEDGER_VERDICTS.get(parsed["verdict"]) if parsed["countable"] else None
     if verdict is None or not write:
         return None
@@ -5180,8 +5181,7 @@ def _ledger_record_seat(entry, parsed, ref, write):
            "writer_model_served": writer[1], "task_type": entry.get("task") or "code",
            "reviewer": entry.get("reviewer"), "ref": ref}
     if verdict == "rejected":
-        row["failure_class"] = (entry.get("failure")
-                                if entry.get("failure") in writer_ledger.FAILURES else "other")
+        row["failure_class"] = entry.get("failure") or "other"  # F3 refused an unknown one
     if entry.get("risk") in writer_ledger.RISKS:
         row["risk"] = entry["risk"]
     try:
@@ -5195,11 +5195,25 @@ def _ledger_record_seat(entry, parsed, ref, write):
     return None
 
 
+def _ledger_field_refusal(entry):
+    """F3 (AO-LEDGER-WRITE P6-FIX, FAIL-CLOSED): why a PRESENT but unknown ledger field
+    refuses this seat, or None. An absent field keeps its default; a typo is never
+    guessed at (`task=opz` would be ledgered under the wrong type and slip the writer
+    rule's R-tiering), so the seat is refused naming field, value and valid values."""
+    for name, allowed in (("task", writer_ledger.TASKS), ("failure", writer_ledger.FAILURES),
+                          ("risk", writer_ledger.RISKS)):
+        value = (entry.get(name) or "").strip()
+        if value and value not in allowed:
+            return "ledger: %s=%s is not one of %s" % (name, value, ", ".join(allowed))
+    return None
+
+
 def _evidence_reason(entry, root, write_ledger=True):
     """Why this entry's evidence file does not back its verdict, or None when it does:
     it must sit inside the repo, be readable, be a valid `parse_verdict` answer, say
     the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose —
-    and have its verdict recorded in the writer ledger (P6)."""
+    and have its verdict recorded in the writer ledger (P6). P6-FIX F1: the PAIR decides
+    the row — the ledger step runs only where the seat's answer AGREEs with the entry."""
     raw = (entry.get("evidence") or "").strip()
     if not raw:
         return None
@@ -5244,13 +5258,12 @@ def _evidence_reason(entry, root, write_ledger=True):
     parsed = seat_verdict.parse_verdict(text)
     if not parsed["valid"]:
         return "evidence invalid: %s" % parsed["reason"]
-    unrecorded = _ledger_record_seat(entry, parsed,
-                                     hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                                     write_ledger)
     word = (seat_verdict.verdict_word(entry.get("verdict")) or "").upper()
     if parsed["verdict"] != ("ACCEPT" if word.lower() in READY_VERDICTS else word):
         return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
-    return unrecorded
+    return _ledger_record_seat(entry, parsed,
+                               hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                               write_ledger)
 
 
 def _review_entry_verdict(entry, root=None, write_ledger=True):
@@ -5258,11 +5271,12 @@ def _review_entry_verdict(entry, root=None, write_ledger=True):
     (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
     HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
     names an `evidence=` file, that file has to say the same thing (P2/G1a), and its
-    verdict has to reach the writer ledger (P6)."""
+    verdict has to reach the writer ledger (P6). P6-FIX F1: the evidence is read on BOTH
+    paths — a finding is not ready, and its matching rejection is still data."""
     raw = (entry.get("verdict") or "").strip()
+    refused = _ledger_field_refusal(entry) or _evidence_reason(entry, root, write_ledger)
     if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
         return False, "verdict %s" % (raw or "missing")
-    refused = _evidence_reason(entry, root, write_ledger)
     if refused:
         return False, refused
     return True, None
