@@ -838,6 +838,14 @@ if it "public ids: no real GCP project id or service-account address ships (unit
     out="$(python3 tests/test_public_ids.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Secret-argv gate (AO-SECRET-ARGV, routing D-962): `-e NAME=<expanded>` puts the
+# secret's VALUE in the child's command line, which every local user reads with `ps`.
+# Scans tracked .sh/.ps1/.json/.jsonc/.md under infra/ .agents/ tools/ configuration/
+# for it; names-only (`-e NAME`) and env / environment blocks are the allowed form.
+if it "secret argv: no secret is expanded into a command line (unit tests)"; then
+    out="$(python3 tests/test_secret_argv.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "omnigraph gateway policy: static refusal and least-privilege checks (unit tests)"; then
     out="$(python3 tests/test_gateway_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

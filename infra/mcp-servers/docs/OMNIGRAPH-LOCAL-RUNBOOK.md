@@ -132,8 +132,8 @@ Windows paths in `docker run -v`; feeding the file on stdin avoids it entirely:
 
 ```bash
 cd infra/mcp-servers; set -a; . ./.env.shared; set +a
-docker run --rm -i --network mcp-server_mcp-net \
-  -e OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" \
+OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" \
+docker run --rm -i --network mcp-server_mcp-net -e OMNIGRAPH_BEARER_TOKEN \
   --entrypoint sh modernrelay/omnigraph-server:v0.8.1 -c \
   'cat > /tmp/d.jsonl; omnigraph load --server http://omnigraph-server:8080 --graph memory --data /tmp/d.jsonl --mode merge --yes --json' \
   < cluster/seed/sibling-analysis-repo.jsonl
@@ -143,6 +143,9 @@ docker run --rm -i --network mcp-server_mcp-net \
   and address the server as `http://omnigraph-server:8080` — reliable, no host
   loopback issues.
 - The CLI reads the bearer from **`OMNIGRAPH_BEARER_TOKEN`** (not `OMNIGRAPH_TOKEN`).
+- **`-e NAME`, never `-e NAME=<expanded>`.** A name-only flag makes docker inherit the
+  value from this shell's environment; expanding it into the flag writes the bearer into
+  the docker process's command line, and `ps` shows a command line to every local user.
 - `--mode merge` is idempotent by slug; re-running is safe.
 
 ---

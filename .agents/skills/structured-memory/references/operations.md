@@ -236,10 +236,13 @@ Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
     correct (it protects a clean local); clean central (rule 6) then re-sync.
 
 13. **Remote ops from a client** use the CLI-in-container (bearer + public URL),
-    e.g. `docker run --rm -i --network <compose-net> -e OMNIGRAPH_BEARER_TOKEN=…
-    --entrypoint omnigraph <image> query|mutate|load|export --server <URL>
-    --graph memory`. Destructive remote writes need `--yes`. You **cannot** reset
-    the central store from a client (needs coding.example.internal docker access).
+    e.g. `OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" docker run --rm -i --network
+    <compose-net> -e OMNIGRAPH_BEARER_TOKEN --entrypoint omnigraph <image>
+    query|mutate|load|export --server <URL> --graph memory`. Pass the bearer as a
+    **name** (`-e OMNIGRAPH_BEARER_TOKEN`) and let docker inherit its value from the
+    shell: an expanded `-e NAME=<bearer>` lands in the process command line, which any
+    local user can read with `ps`. Destructive remote writes need `--yes`. You **cannot**
+    reset the central store from a client (needs coding.example.internal docker access).
 
 ## Quick reference — safe write patterns
 

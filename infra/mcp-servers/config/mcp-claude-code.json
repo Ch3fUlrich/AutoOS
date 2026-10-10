@@ -22,7 +22,12 @@
     "enabledMcpjsonServers (untracked; a tracked .mcp.json cannot approve itself). An unapproved",
     "server is skipped silently. Verify graphify wiring -- single user-scope entry, NO project",
     "graphify entry, graph built -- with:",
-    "  bash scripts/linux/check-graphify-scope.sh --fix"
+    "  bash scripts/linux/check-graphify-scope.sh --fix",
+    "",
+    "SECRETS IN ARGS: the omnigraph `args` carry env var NAMES only (`-e`, `OMNIGRAPH_TOKEN`) and",
+    "the values come from the `env` block. A name expanded into an arg -- `-e` followed by a",
+    "NAME=assignment -- is passed to docker as a command-line argument, and any local user reads",
+    "a command line with `ps`. Same reason the root .mcp.json uses an env block (AO-SECRET-ARGV)."
   ],
   "mcpServers": {
     "serena": {
@@ -65,13 +70,18 @@
         "--network",
         "mcp-server_mcp-net",
         "-e",
-        "OMNIGRAPH_BASE_URL=http://omnigraph-server:8080",
+        "OMNIGRAPH_BASE_URL",
         "-e",
-        "OMNIGRAPH_GRAPH_ID=${OMNIGRAPH_GRAPH_ID:-memory}",
+        "OMNIGRAPH_GRAPH_ID",
         "-e",
-        "OMNIGRAPH_TOKEN=${OMNIGRAPH_TOKEN}",
+        "OMNIGRAPH_TOKEN",
         "omnigraph-mcp:latest"
-      ]
+      ],
+      "env": {
+        "OMNIGRAPH_BASE_URL": "http://omnigraph-server:8080",
+        "OMNIGRAPH_GRAPH_ID": "${OMNIGRAPH_GRAPH_ID:-memory}",
+        "OMNIGRAPH_TOKEN": "${OMNIGRAPH_TOKEN}"
+      }
     },
     "superpowers": {
       "command": "node",

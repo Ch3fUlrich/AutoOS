@@ -131,8 +131,13 @@ BEFORE=$(count); echo "  memory nodes before: $BEFORE"
 # edge-deduping — no data lost) and delete it first. The server must be UP for
 # branch ops, so do this BEFORE the stop below.
 echo "› reconciling non-main branches before apply…"
-ogcli() { docker run --rm --network "$NET" -e OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" \
-  --entrypoint omnigraph "$IMAGE" "$@"; }
+# AO-SECRET-ARGV (D-962): the bearer travels in the container's ENVIRONMENT, never
+# in its argv. `-e NAME="$SECRET"` is expanded by the shell before docker is exec'd,
+# so the value sits in `/proc/<pid>/cmdline` — world-readable to any local `ps`.
+# The assignment prefix is not argv, and `-e NAME` with no `=` makes docker copy the
+# value it already has in its own environment.
+ogcli() { OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" docker run --rm --network "$NET" \
+  -e OMNIGRAPH_BEARER_TOKEN --entrypoint omnigraph "$IMAGE" "$@"; }
 for g in $(curl -s http://127.0.0.1:8080/graphs -H "Authorization: Bearer ${OMNIGRAPH_TOKEN}" \
            | grep -o '"graph_id":"[^"]*"' | cut -d'"' -f4); do
   for b in $(curl -s "http://127.0.0.1:8080/graphs/$g/branches" -H "Authorization: Bearer ${OMNIGRAPH_TOKEN}" \
@@ -148,11 +153,19 @@ echo "› stopping omnigraph-server (releases the state lock)…"
 docker stop omnigraph-server >/dev/null
 
 echo "› applying cluster config…"
-docker run --rm --network "$NET" -v "$CLUSTER_SRC:/cluster:ro" --entrypoint omnigraph \
-  -e AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER" -e AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD" \
-  -e AWS_REGION="${AWS_REGION:-us-east-1}" -e AWS_ENDPOINT_URL_S3="$S3" \
-  -e AWS_ALLOW_HTTP=true -e AWS_S3_FORCE_PATH_STYLE=true \
-  "$IMAGE" cluster apply --config /cluster --yes --as default || { echo "apply failed — restarting server unchanged"; docker start omnigraph-server >/dev/null; exit 1; }
+# AO-SECRET-ARGV (D-962): the MinIO credentials reach the container through its
+# environment (`-e NAME` inherits from this shell), not through argv — an expanded
+# `-e NAME="$SECRET"` is readable by any local user in `ps`. The subshell keeps the
+# two renamed exports scoped to this one command.
+(
+  export AWS_ACCESS_KEY_ID="$MINIO_ROOT_USER"
+  export AWS_SECRET_ACCESS_KEY="$MINIO_ROOT_PASSWORD"
+  docker run --rm --network "$NET" -v "$CLUSTER_SRC:/cluster:ro" --entrypoint omnigraph \
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+    -e AWS_REGION="${AWS_REGION:-us-east-1}" -e AWS_ENDPOINT_URL_S3="$S3" \
+    -e AWS_ALLOW_HTTP=true -e AWS_S3_FORCE_PATH_STYLE=true \
+    "$IMAGE" cluster apply --config /cluster --yes --as default
+) || { echo "apply failed — restarting server unchanged"; docker start omnigraph-server >/dev/null; exit 1; }
 
 echo "› starting omnigraph-server to pick up new graphs…"
 docker start omnigraph-server >/dev/null

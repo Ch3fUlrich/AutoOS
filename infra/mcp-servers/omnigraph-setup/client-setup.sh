@@ -50,11 +50,21 @@ Keep the bearer OUT of a tracked file — reference the env var:
     "command": "docker",
     "args": ["run", "-i", "--rm",
              "--network", "\${OMNIGRAPH_NET:-mcp-server_mcp-net}",
-             "-e", "OMNIGRAPH_BASE_URL=$1",
-             "-e", "OMNIGRAPH_GRAPH_ID=<repo-folder-name>",
-             "-e", "OMNIGRAPH_TOKEN=\${OMNIGRAPH_TOKEN}",
-             "omnigraph-mcp:latest"]
+             "-e", "OMNIGRAPH_BASE_URL",
+             "-e", "OMNIGRAPH_GRAPH_ID",
+             "-e", "OMNIGRAPH_TOKEN",
+             "omnigraph-mcp:latest"],
+    "env": {
+      "OMNIGRAPH_BASE_URL": "$1",
+      "OMNIGRAPH_GRAPH_ID": "<repo-folder-name>",
+      "OMNIGRAPH_TOKEN": "\${OMNIGRAPH_TOKEN}"
+    }
   }
+
+The args list carries NAMES only and the env block carries the values, the way this
+repository's own .mcp.json does. An "-e", "NAME=<the expanded secret>" arg instead puts
+the bearer in the process command line before docker is even exec'd, and `ps` shows a
+command line to every local user.
 
 Then export these once per machine, before launching the agent:
   export OMNIGRAPH_TOKEN=$2

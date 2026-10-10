@@ -5322,6 +5322,15 @@ Test-Case 'public ids: no real GCP project id or service-account address ships (
     Assert-Equal $rc 0 "public-ids unit tests failed: $out"
 }
 
+Test-Case 'secret argv: no secret is expanded into a command line (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_secret_argv.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "secret-argv unit tests failed: $out"
+}
+
 Test-Case 'omnigraph gateway policy: static refusal and least-privilege checks (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
