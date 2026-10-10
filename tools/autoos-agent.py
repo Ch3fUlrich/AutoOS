@@ -1492,6 +1492,10 @@ class ReviewBaseRefused(ValueError):
     """--review-base named no commit the seat can diff from."""
 
 
+# S5-FIX1: a rev RANGE makes rev-parse print 3-4 lines; the stamp needs two full shas.
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
 def resolve_review_base(root: str, base):
     """`(base_sha, head_sha)` full shas, or None when `base` names no commit in the
     parent - the seat's snapshot IS the parent's HEAD, so the parent names it."""
@@ -1500,7 +1504,13 @@ def resolve_review_base(root: str, base):
     proc = subprocess.run(["git", "-C", root, "rev-parse", "%s^{commit}" % base,
                            "HEAD^{commit}"], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL)
-    return tuple(proc.stdout.split()) if proc.returncode == 0 else None
+    if proc.returncode != 0:
+        return None
+    tokens = proc.stdout.split()
+    # exactly two 40-hex tokens name the pair; a 3-4-line range is refused, not stamped
+    if len(tokens) != 2 or not all(_FULL_SHA_RE.fullmatch(t) for t in tokens):
+        return None
+    return tuple(tokens)
 
 
 def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
