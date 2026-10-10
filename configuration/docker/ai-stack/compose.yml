@@ -96,7 +96,9 @@ services:
       - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/qoder-home:/home/qoder
     ports:
       - "${AUTOOS_STACK_BIND:-0.0.0.0}:20128:20128"
-    mem_limit: ${OMNIROUTE_MEM_LIMIT:-2560m}
+    # D-1041 (2026-10-10): the 2.5 GiB cap tripped the resourcePressure guard
+    # (reason=cgroup_ratio) ~70x 12:37-12:53Z, memory.events max=6658, oom_kill 0.
+    mem_limit: ${OMNIROUTE_MEM_LIMIT:-4096m}
     pids_limit: 512
     stop_grace_period: 40s
     healthcheck:

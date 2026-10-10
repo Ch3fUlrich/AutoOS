@@ -521,11 +521,11 @@ Hardened probe containers: OmniRoute 486 MB after warm-up, opencode 100 MB.
 
 | Service | Heap / limit | Reasoning |
 |---|---|---|
-| omniroute | `OMNIROUTE_MEMORY_MB=1536`, `mem_limit 2560m` | the image default heap (1024) is sized for a dashboard; coding agents on `/v1/responses` need more. Upstream sizes one coding agent at 8 GiB heap / 10 GB container - more than this host has free. 1.5 GiB heap is the ceiling this host can give without starving the agents; native buffers sit outside V8, hence the 1 GB headroom. **Documented ceiling**: two overlapping long `/v1/responses` contexts can exhaust it - the container then restarts instead of the host swapping. Raise both on a bigger host. |
+| omniroute | `OMNIROUTE_MEMORY_MB=1536`, `mem_limit 4096m` | the image default heap (1024) is sized for a dashboard; coding agents on `/v1/responses` need more. Upstream sizes one coding agent at 8 GiB heap / 10 GB container - more than this host has free. 1.5 GiB heap is the ceiling this host can give without starving the agents; native buffers sit outside V8. The container cap was raised from 2560m to 4096m on 2026-10-10 (D-1041) after the 2.5 GiB one tripped the image's resourcePressure guard repeatedly under load. **Documented ceiling**: two overlapping long `/v1/responses` contexts can exhaust it - the container then restarts instead of the host swapping. Raise both on a bigger host. |
 | opencode | `mem_limit 1536m` | 100 MB idle; MCP children (`npx`, `uvx`) and sessions grow it |
 | openhands | `mem_limit 2g` (`AUTOOS_OPENHANDS_MEMORY`) | unchanged from start-stack.sh; sandboxes are separate containers outside this limit |
 
-Total ceilings 6 GB; typical use ~1.5 GB, about what the native processes used.
+Total ceilings 7.5 GB; typical use ~1.5 GB, about what the native processes used.
 
 **Chat admission gate** (omniroute only): `OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6`
 (parallel heavy requests the gateway admits) and
