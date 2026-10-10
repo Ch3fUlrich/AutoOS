@@ -908,5 +908,44 @@ class LedgerTests(unittest.TestCase):
                     "expected two blank lines before def %s" % name)
 
 
+class RefKeyTests(unittest.TestCase):
+    """AO-LEDGER-WRITE (P6): a seat row names the evidence it came from. `ref` is
+    optional and hex-shaped, old rows without it keep loading, and the ledger's
+    home is overridable so a test never touches the real logs/writer-ledger.jsonl."""
+
+    def setUp(self):
+        self._real_now = ledger._now
+        ledger._now = lambda: NOW
+
+    def tearDown(self):
+        ledger._now = self._real_now
+
+    def test_ref_round_trips_and_is_shape_checked(self):
+        self.assertEqual(ledger.record(entry(ref="a" * 64), path=path())["ref"], "a" * 64)
+
+        for bad in ("f" * 6, "g" * 64, "A" * 64, "a" * 65, "has space", 7):
+            with self.subTest(bad=str(bad)[:12]):
+                self.assertRaises(ValueError, ledger.record, entry(ref=bad), path())
+
+    def test_rows_without_ref_still_load_and_rollup(self):
+        target = path()
+        ledger.record(entry(), path=target)
+        ledger.record(entry(run_id="r2", ref="b" * 8), path=target)
+        self.assertEqual([r.get("ref") for r in ledger.load(target)[0]], [None, "b" * 8])
+        self.assertEqual(ledger.rollup(path=target)["gemini-3.8-flash"]["code"]["rejected"], 2)
+
+    def test_default_path_honours_the_env(self):
+        old = os.environ.get("AUTOOS_LEDGER_PATH")
+        os.environ["AUTOOS_LEDGER_PATH"] = os.path.join(path(), "led.jsonl")
+
+        try:
+            self.assertEqual(ledger.default_path(), os.environ["AUTOOS_LEDGER_PATH"])
+        finally:
+            if old is None:
+                del os.environ["AUTOOS_LEDGER_PATH"]
+            else:
+                os.environ["AUTOOS_LEDGER_PATH"] = old
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
