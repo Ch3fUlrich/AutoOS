@@ -34,17 +34,26 @@
 #   local graph at 0 nodes / 0 edges, and nothing restores it automatically. The next
 #   run refuses — which is the safe outcome — and says so:
 #     [graph] local is dirty or empty — refusing to sync this graph. Backup: <file>
-#   <file> is $BACKUP_DIR/local-<graph>-<UTC ts>.jsonl, the newest one for that graph:
-#   step 0 exports local before it writes anything. Restore ONLY into the EMPTY local
-#   graph — edges have no @key, so merge-loading into a non-empty graph APPENDS a
-#   duplicate of every edge. Using the variables this script reads (OMNIGRAPH_IMAGE,
-#   DOCKER_NET, LOCAL_TOKEN, LOCAL_URL_CONTAINER, BACKUP_DIR), <graph> and <ts> from
-#   the refusing run's own message:
+#   <file> is $BACKUP_DIR/local-<graph>-<UTC ts>.jsonl, but it is NOT the file to
+#   restore from: step 0 exports local before it writes anything, and after a kill that
+#   local graph is already EMPTY — so the refusing run's own message names a NEW 0-byte
+#   export. Restoring from it loads nothing and the operator believes the graph came
+#   back. The file to restore from is the newest NON-EMPTY backup — the pre-kill one:
+#     ls -t "$BACKUP_DIR"/local-<graph>-*.jsonl        # first entry with size > 0
+#     find "$BACKUP_DIR" -name 'local-<graph>-*.jsonl' -size +0 | sort | tail -1
+#   Restore ONLY into the EMPTY local graph — edges have no @key, so merge-loading into
+#   a non-empty graph APPENDS a duplicate of every edge. OMNIGRAPH_IMAGE, DOCKER_NET and
+#   BACKUP_DIR are normally unset in your shell: the script defaults them internally
+#   (image = the IMAGE default near the top of this script, DOCKER_NET default `host`,
+#   BACKUP_DIR default `<script dir>/backups`), so substitute those values below before
+#   pasting — an unset one expands to empty and `docker run --network ""` is not what
+#   you meant. Using LOCAL_TOKEN and LOCAL_URL_CONTAINER (which you do set), <graph>
+#   from the refusing run's own message, and <backup> from the selector above:
 #     docker run --rm -i --network "$DOCKER_NET" \
 #       -e OMNIGRAPH_BEARER_TOKEN="$LOCAL_TOKEN" -e LOCAL_URL_CONTAINER="$LOCAL_URL_CONTAINER" \
 #       --entrypoint sh "$OMNIGRAPH_IMAGE" \
 #       -c 'cat > /tmp/d.jsonl; omnigraph load --server "$LOCAL_URL_CONTAINER" --graph <graph> --data /tmp/d.jsonl --mode merge --yes --json' \
-#       < "$BACKUP_DIR/local-<graph>-<ts>.jsonl"
+#       < "$BACKUP_DIR/local-<graph>-<ts>.jsonl"   # = <backup>, the NON-EMPTY one above
 #   The second -e is load-bearing: the -c string is single-quoted, so it is the
 #   CONTAINER's sh that expands $LOCAL_URL_CONTAINER, and a name it was never given
 #   resolves to empty — `--server` with no URL.

@@ -1638,6 +1638,13 @@ if it "omnigraph-client: the device sync scripts send the 0.13 contract header";
     # graph empty, so the script's own help has to carry the restore command.
     restore_doc="$(grep -c 'RESTORE after a kill' "$sync_sh" || true)"
     restore_cmd="$(grep -cF -- '--mode merge --yes --json' "$sync_sh" || true)"
+    # (g) D-1038 P2f3: the restore text must not point the operator at the refusing
+    # run's own Backup: file — that export is of the already-EMPTY graph, so loading
+    # it "restores" nothing. It has to name the newest NON-EMPTY backup, and warn
+    # that the variables it pastes are normally unset in the operator's shell.
+    non_empty="$(grep -c 'NON-EMPTY' "$sync_sh" || true)"
+    size_sel="$(grep -cF -- 'size +0' "$sync_sh" || true)"
+    unset_vars="$(grep -c 'normally unset' "$sync_sh" || true)"
     [[ "$n_curls" -ge 2 ]] || { ok=0; echo "only $n_curls curl line(s) address /graphs - the check would be vacuous" >&2; }
     [[ -z "$bare_curls" ]] || { ok=0; echo "curl line(s) to /graphs without the header: $bare_curls" >&2; }
     [[ "$n_defines" == 1 ]] || { ok=0; echo "the header constant is defined $n_defines time(s), expected exactly one" >&2; }
@@ -1652,6 +1659,9 @@ if it "omnigraph-client: the device sync scripts send the 0.13 contract header";
     [[ "$pull_old_image" == 0 ]] || { ok=0; echo "pull_graph.py still assigns the v0.8.1 image to IMAGE ($pull_old_image time(s))" >&2; }
     [[ "$restore_doc" == 1 ]] || { ok=0; echo "the sync header documents the restore $restore_doc time(s), expected 1" >&2; }
     [[ "$restore_cmd" -ge 1 ]] || { ok=0; echo "the sync header carries no merge-load restore command" >&2; }
+    [[ "$non_empty" -ge 1 ]] || { ok=0; echo "the restore text never names the NON-EMPTY backup ($non_empty)" >&2; }
+    [[ "$size_sel" -ge 1 ]] || { ok=0; echo "the restore text has no '-size +0' backup selector ($size_sel)" >&2; }
+    [[ "$unset_vars" -ge 1 ]] || { ok=0; echo "the restore text pastes variables without saying they are normally unset ($unset_vars)" >&2; }
     (( ok )) && pass || fail "the contract header / 0.13 image pin is not in place"
 fi
 
