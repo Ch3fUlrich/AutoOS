@@ -161,8 +161,22 @@ _WAKE_COOLDOWN_S = 10 * 60.0
 _SAFE_TEXT_MAX = 200
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
+# AO-L2-SEAT-INTEGRITY (P4): the skill only exists in this repo's `.agents/skills`
+# (or the user's skills dir), so a phase lane launched in a scratch/foreign repo
+# errored `Unable to load skill unattended-orchestration` and never worked. The
+# load is best-effort now and the few rules an L2 acts on travel with the footer
+# as ONE line — no private content, and who may spawn what is unchanged.
+INLINE_RULES_LINE = (
+    "R-coord-14: you orchestrate, so follow this contract - never fix or research "
+    "yourself, and spawn L3 workers sized to the complexity; R-coord-09: an L3's "
+    "spawn, routing and status go through the `autoos-agent` MCP only; "
+    "R-orch-01/R-orch-22: report terse, one line per fact, evidence by pointer, "
+    "and end every wave with a visible `GOAL / DONE / NEXT / BLOCKED` text block; "
+    "R-coord-08: keep the heartbeat and read the L1 inbox before every launch.")
 ROLE_LINES = (
-    "You are the L2 orchestrator of this phase (%s). Load the `%s` skill first.",
+    "You are the L2 orchestrator of this phase (%s). Load the `%s` skill if it is "
+    "available (try the Skill tool once); if it is not present in this repo, do "
+    "NOT stop or error - follow the inline rule pointer instead: %s",
     "You NEVER edit code and you never run a write against the repository: "
     "every file-mutating and spawn permission of this session (`edit`, `write`, "
     "`patch`, `task`) is denied and the shell guard runs in `l2` role, which "
@@ -361,7 +375,7 @@ def first_prompt_text(brief_text, name, l1_inbox):
     """The brief verbatim plus the fixed footer; the hint line is the L1
     launcher's own (one home for how MCP is reached under opencode)."""
     role = "\n".join([
-        ROLE_LINES[0] % (name, SKILL),
+        ROLE_LINES[0] % (name, SKILL, INLINE_RULES_LINE),
         ROLE_LINES[1],
         ROLE_LINES[2] % str(l1_inbox),
     ])
