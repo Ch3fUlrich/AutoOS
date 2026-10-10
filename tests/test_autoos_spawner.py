@@ -16839,6 +16839,13 @@ class FamilyFencePinnedModelTests(unittest.TestCase):
     PINS = {"qwen": "omniroute/qwen-direct-3.8",
             "deepseek": "omniroute/deepseek-direct-flash",
             "nvidia": "omniroute/nemotron-direct-ultra"}
+    # F3/F4: an unrowed pin that names TWO vendors is not one family or the
+    # other; the fence must call it unplaceable, not read the longer token.
+    MULTI_VENDOR_PINS = ["omniroute/deepseek-r1-distill-qwen-32b",
+                         "nvidia/qwen3-nemotron"]
+    # F3: an unrowed pin that names no vendor at all — already unknown today,
+    # and the multi-vendor fix must not accidentally let these through either.
+    UNPLACEABLE_PIN = "omniroute/widget-9"
 
     def setUp(self):
         self.agent = load_agent()
@@ -16934,6 +16941,39 @@ class FamilyFencePinnedModelTests(unittest.TestCase):
                     prepare=lambda s, r: self._writer_record(self.agent, s, r,
                                                              "deepseek"))
                 self.assertEqual(rc, expect_rc, out + err)
+
+    def test_the_fence_refuses_a_pin_whose_id_names_two_vendors(self):
+        # S1 review F1/F4: an unrowed id that names MORE THAN ONE known vendor is
+        # unplaceable — the fence must not read the longer token and let it slip
+        # through the shorter family's fence (`deepseek-r1-distill-qwen-32b`
+        # read as deepseek under a qwen fence, `qwen3-nemotron` read as nvidia).
+        # So each is refused under both --not-family qwen and --not-family
+        # deepseek, while the single-vendor `deepseek-direct-flash` stays allowed.
+        registry = _fallthrough_registry(self.ROUTES, legs=self.LEGS,
+                                         families=self.FAMILIES)
+        for fenced in ("qwen", "deepseek"):
+            fence = {"families": [fenced], "review": True, "strict": True}
+            for pin in self.MULTI_VENDOR_PINS:
+                with self.subTest(fence=fenced, pin=pin):
+                    self.assertTrue(self.agent.fence_blocks_model(
+                        pin, registry, fence), pin)
+        qwen = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertFalse(self.agent.fence_blocks_model(
+            self.PINS["deepseek"], registry, qwen))
+
+    def test_an_unplaceable_pin_is_refused_at_tier3_and_for_a_review_card(self):
+        # S1 review F3: a pin no layer places (no registry row, no combo, no
+        # vendor word) is not "outside" the fence — a review still refuses it,
+        # across --tier=3 and both card paths, and the multi-vendor fix must not
+        # widen the escape hatch that nameless pins already had.
+        for over in ({"tier": 3, "card": None},
+                     {"card": "role=review"},
+                     {"card": "kind=review"}):
+            with self.subTest(**over):
+                rc, out, err, _calls, _ = self._run(
+                    dict(over, model=self.UNPLACEABLE_PIN, not_family=["qwen"]))
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family qwen left", err)
 
 
 class FamilyFenceUnknownNameTests(unittest.TestCase):

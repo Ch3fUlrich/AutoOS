@@ -4679,6 +4679,36 @@ def vendor_family_name(spelling) -> str | None:
     return None
 
 
+def vendor_family_name_unique(spelling) -> str | None:
+    """The ONE family a model id names, or None when it names two.
+
+    The fence's own read of a model id (`fence_family_of`). The longest-token
+    tie-break above is right for a run's record (some family has to be named for
+    the writer line) and wrong for a fence: `omniroute/deepseek-r1-distill-qwen-32b`
+    names both `deepseek` and `qwen`, and picking the longer read it as deepseek, so
+    a `--not-family qwen` review accepted a Qwen-derived model. Same for
+    `nvidia/qwen3-nemotron`, which reads nvidia and slips the qwen fence. Two
+    distinct vendors in one id → None (unplaceable): a review's strict fence refuses
+    it, a write role's fence does not block, which is the existing unknown semantics.
+    """
+    key = _family_spelling(spelling)
+    if not key:
+        return None
+    segments = _family_segments(key)
+    found = None
+    for _neg_len, family, token in _FAMILY_TOKEN_SEGMENTS:
+        if not token:
+            continue
+        width = len(token)
+        if any(tuple(segments[i:i + width]) == token
+               for i in range(len(segments) - width + 1)):
+            if found is None:
+                found = family
+            elif found != family:
+                return None
+    return found
+
+
 def names_client_default(client, model, registry=None, cfg=None) -> bool:
     """Whether ``model`` IS the model this own-account client serves as its default.
 
@@ -6872,15 +6902,30 @@ def family_fence(args, registry=None):
 def fence_family_of(spelling, registry):
     """The family a spelling denotes, or None when nothing can say.
 
-    The layered read the run record already uses (`run_model_family`'s first three
-    layers: the registry's row for the spelling, the vendor named inside the model
-    id, the one family a route's legs all declare), not the registry ROW alone. A
-    gateway pin can name a model the client config declares and the registry lists
-    no row for — `omniroute/deepseek-direct-flash` is one — and `reviewer_family`
-    answers None for it. That None is not "qwen": read as inside every fence, it
-    made a review refuse EVERY unrowed pin, whatever family the id named
-    (AO-FAMILYFENCE-QWEN)."""
-    return run_model_family(spelling, registry=registry)[0]
+    Three reads, in the order the fence trusts them: the registry's row for the
+    spelling (`reviewer_family`), then the ONE family a route's legs all declare
+    (`route_family`), then the vendor word inside the id via
+    `vendor_family_name_unique` — NOT `vendor_family_name`'s longest-token
+    tie-break, which let `omniroute/deepseek-r1-distill-qwen-32b` read as
+    deepseek and slip a `--not-family qwen` review (S1 F1: an unrowed pin whose
+    id names two vendors is unplaceable, so a review refuses it and a write
+    role does not block — the existing unknown semantics). A gateway pin the
+    client config declares and the registry lists no row for but that names
+    ONE vendor — `omniroute/deepseek-direct-flash` is one — is still judged on
+    that family (AO-FAMILYFENCE-QWEN). The fence is a check on the declared
+    family of the pin and its legs, not proof of what the gateway served — the
+    post-run serving-family backstop still applies."""
+    text = str(spelling or "").strip()
+    if not text or text == PLAN_MODEL_UNNAMED:
+        return None
+    bare = text.rpartition("/")[2] if "/" in text else text
+    family = reviewer_family(text, registry) or reviewer_family(bare, registry)
+    if family:
+        return family
+    family = route_family(_combo_of(text), registry)
+    if family:
+        return family
+    return vendor_family_name_unique(bare)
 
 
 def fence_blocks_model(spelling, registry, fence):
