@@ -29,6 +29,28 @@
 #   * Every docker invocation's exit code is checked. The old version discarded stderr and
 #     `|| true`-d over failures, so a fully failed sync still reported success.
 #
+# RESTORE after a kill between purge and load (D-1038 P2f2, known gap):
+#   The pull purges LOCAL and only then refills it. A kill in that window leaves the
+#   local graph at 0 nodes / 0 edges, and nothing restores it automatically. The next
+#   run refuses — which is the safe outcome — and says so:
+#     [graph] local is dirty or empty — refusing to sync this graph. Backup: <file>
+#   <file> is $BACKUP_DIR/local-<graph>-<UTC ts>.jsonl, the newest one for that graph:
+#   step 0 exports local before it writes anything. Restore ONLY into the EMPTY local
+#   graph — edges have no @key, so merge-loading into a non-empty graph APPENDS a
+#   duplicate of every edge. Using the variables this script reads (OMNIGRAPH_IMAGE,
+#   DOCKER_NET, LOCAL_TOKEN, LOCAL_URL_CONTAINER, BACKUP_DIR), <graph> and <ts> from
+#   the refusing run's own message:
+#     docker run --rm -i --network "$DOCKER_NET" \
+#       -e OMNIGRAPH_BEARER_TOKEN="$LOCAL_TOKEN" -e LOCAL_URL_CONTAINER="$LOCAL_URL_CONTAINER" \
+#       --entrypoint sh "$OMNIGRAPH_IMAGE" \
+#       -c 'cat > /tmp/d.jsonl; omnigraph load --server "$LOCAL_URL_CONTAINER" --graph <graph> --data /tmp/d.jsonl --mode merge --yes --json' \
+#       < "$BACKUP_DIR/local-<graph>-<ts>.jsonl"
+#   The second -e is load-bearing: the -c string is single-quoted, so it is the
+#   CONTAINER's sh that expands $LOCAL_URL_CONTAINER, and a name it was never given
+#   resolves to empty — `--server` with no URL.
+#   Then run the sync again; it will carry the restored state on to central.
+#   Automatic restore on a partial pull is a known follow-up, NOT implemented.
+#
 # Config via env (or a .env next to this script):
 #   CENTRAL_URL, CENTRAL_TOKEN, LOCAL_TOKEN                      (required)
 #   LOCAL_URL(=http://127.0.0.1:8080)        local API as seen from THIS HOST
@@ -180,9 +202,12 @@ sync_graph() {
 
 rc=0
 for g in "${GRAPH_LIST[@]}"; do
-  if ! sync_graph "$g"; then
-    rc=$?
-    log "[$g] sync returned $rc — continuing with remaining graphs"
+  # `if ! sync_graph; then rc=$?` would read the status of the NEGATION — always 0 —
+  # so a failing graph would exit 0 and the timer would never fire. Capture it here.
+  sync_graph "$g"; grc=$?
+  if [ "$grc" -ne 0 ]; then
+    rc=$grc
+    log "[$g] sync returned $grc — continuing with remaining graphs"
   fi
 done
 [ -n "${DRY_RUN:-}" ] && log "DRY_RUN complete — no writes made."

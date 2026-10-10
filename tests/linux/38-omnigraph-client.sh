@@ -1596,7 +1596,8 @@ fi
 # `omnigraph` CLI/load calls are untouched — the 0.13 CLI sends the header
 # itself — and so are the two exempt reads: /healthz, and the viewer's
 # /api/sync-ping, which is not an Omnigraph request at all. Hermetic: static
-# reads of the two scripts and one `bash -n`; no network, no server.
+# reads of the two scripts plus pull_graph.py and one `bash -n`; no network, no
+# server.
 if it "omnigraph-client: the device sync scripts send the 0.13 contract header"; then
     sync_sh='infra/mcp-servers/omnigraph-setup/omnigraph-sync.sh'
     sync_ps='infra/mcp-servers/omnigraph-setup/sync-windows.ps1'
@@ -1624,6 +1625,19 @@ if it "omnigraph-client: the device sync scripts send the 0.13 contract header";
     sh_pin="$(grep -cF "OMNIGRAPH_IMAGE:-$IMAGE_PIN" "$sync_sh" || true)"
     ps_pin="$(grep -cF "else { '$IMAGE_PIN' }" "$sync_ps" || true)"
     old_pin="$(grep -h 'v0\.8\.1' "$sync_sh" "$sync_ps" | wc -l | tr -d '[:space:]')"
+    # (e) D-1038 P2f2 W2 / F1: pull_graph.py runs the pull's own preflight and its
+    # load in THIS image, so it must carry the same 0.13.0 pin — the 0.8.1 CLI
+    # sends no contract header and the 0.13 server answers it 400. Asserted on the
+    # assignment, not a bare grep: the file's comments still name v0.8.1 as where
+    # the Lance incidents were measured.
+    pull_py='infra/mcp-servers/omnigraph-setup/pull_graph.py'
+    [[ -f "$pull_py" ]] || { ok=0; echo "pull_graph.py is missing" >&2; }
+    pull_pin="$(grep -cF "IMAGE = \"$IMAGE_PIN\"" "$pull_py" || true)"
+    pull_old_image="$(grep -cF 'IMAGE = "modernrelay/omnigraph-server:v0.8.1"' "$pull_py" || true)"
+    # (f) D-1038 P2f2 W2 / F3: a kill between the purge and the load leaves the local
+    # graph empty, so the script's own help has to carry the restore command.
+    restore_doc="$(grep -c 'RESTORE after a kill' "$sync_sh" || true)"
+    restore_cmd="$(grep -cF -- '--mode merge --yes --json' "$sync_sh" || true)"
     [[ "$n_curls" -ge 2 ]] || { ok=0; echo "only $n_curls curl line(s) address /graphs - the check would be vacuous" >&2; }
     [[ -z "$bare_curls" ]] || { ok=0; echo "curl line(s) to /graphs without the header: $bare_curls" >&2; }
     [[ "$n_defines" == 1 ]] || { ok=0; echo "the header constant is defined $n_defines time(s), expected exactly one" >&2; }
@@ -1634,7 +1648,41 @@ if it "omnigraph-client: the device sync scripts send the 0.13 contract header";
     [[ "$sh_pin" == 1 ]] || { ok=0; echo "the sh default image is not the 0.13.0 pin ($sh_pin)" >&2; }
     [[ "$ps_pin" == 1 ]] || { ok=0; echo "the ps1 default image is not the 0.13.0 pin ($ps_pin)" >&2; }
     [[ "$old_pin" == 0 ]] || { ok=0; echo "the old v0.8.1 pin still appears $old_pin time(s) in the two scripts" >&2; }
+    [[ "$pull_pin" == 1 ]] || { ok=0; echo "pull_graph.py IMAGE is not the 0.13.0 pin ($pull_pin)" >&2; }
+    [[ "$pull_old_image" == 0 ]] || { ok=0; echo "pull_graph.py still assigns the v0.8.1 image to IMAGE ($pull_old_image time(s))" >&2; }
+    [[ "$restore_doc" == 1 ]] || { ok=0; echo "the sync header documents the restore $restore_doc time(s), expected 1" >&2; }
+    [[ "$restore_cmd" -ge 1 ]] || { ok=0; echo "the sync header carries no merge-load restore command" >&2; }
     (( ok )) && pass || fail "the contract header / 0.13 image pin is not in place"
+fi
+
+# ─── D-1038 P2f2 W2 / F2: a failed graph must make the sync exit non-zero ────
+#
+# `if ! sync_graph "$g"; then rc=$?` reads the status of the NEGATION, which is
+# always 0, so every failing graph exited the script 0 and the systemd timer /
+# Windows task saw a green run forever. This is the behavioural proof, and it is
+# hermetic: curl is a stub that fails like a refused connection (exit 22, the code
+# `curl -f` returns on an HTTP error) and docker is a stub that reports it is
+# absent, so a sync that got as far as a container is caught. 127.0.0.1:9 (discard)
+# is never actually dialed — the stub answers first.
+if it "omnigraph-client: omnigraph-sync.sh exits non-zero when a graph sync fails"; then
+    sync_sh='infra/mcp-servers/omnigraph-setup/omnigraph-sync.sh'
+    tmp="$(mktemp -d)"; bin="$tmp/bin"
+    mkdir -p "$bin" "$tmp/backups"
+    printf '#!/bin/sh\nexit 22\n' >"$bin/curl"
+    printf '#!/bin/sh\necho "docker: command not found" >&2\nexit 127\n' >"$bin/docker"
+    chmod 755 "$bin/curl" "$bin/docker"
+    err="$(PATH="$bin:$PATH" \
+        CENTRAL_URL='http://127.0.0.1:9' CENTRAL_TOKEN='t' LOCAL_TOKEN='t' \
+        LOCAL_URL='http://127.0.0.1:9' GRAPHS='ga gb' BACKUP_DIR="$tmp/backups" \
+        PYTHON='python3' timeout 60 bash "$sync_sh" 2>&1 >/dev/null)"
+    rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "the sync exited $rc while both graphs failed (must be non-zero)" >&2; }
+    [[ "$err" == *'[ga] sync returned'* ]] || { ok=0; echo "no per-graph verdict for ga: [${err:0:400}]" >&2; }
+    [[ "$err" == *'[gb] sync returned'* ]] || { ok=0; echo "no per-graph verdict for gb (one failure must not abort the rest): [${err:0:400}]" >&2; }
+    [[ "$err" != *'docker: command not found'* ]] || { ok=0; echo "the sync reached docker before it reached a verdict" >&2; }
+    rm -rf "$tmp"
+    (( ok )) && pass || fail "omnigraph-sync.sh does not propagate a failed graph's exit code"
 fi
 
 if it "omnigraph-client: docs name the component and the token rotation procedure"; then
