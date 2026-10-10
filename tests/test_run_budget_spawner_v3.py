@@ -45,6 +45,7 @@ def make_args(**over):
                 dry_run=True, isolate=True, read_only=False, joinable=False,
                 not_family=None, review_of=None, lean=False, allow_training=False,
                 auto=True, no_fallthrough=False, max_depth=None, title=None,
+                review_base=None,
                 allow_mode_only=False)
     base.update(over)
     return argparse.Namespace(**base)

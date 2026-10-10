@@ -599,7 +599,13 @@ if it "autoos-agent: --clean picks the twin, undeclared models and --free --clea
 fi
 
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
-    out="$(AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
+    # SEAT-PYTEST (P4) exports PYTHONPATH only where the seat python3's own user site
+    # exists under $HOME and passes the safety checks, so the real HOME would decide
+    # the answer (D-852: keep it off the host). A fresh empty HOME has no user site on
+    # any host; only this one command sees it, so OPENCODE etc. still reach the plan.
+    home="$(mktemp -d)"
+    out="$(HOME="$home" AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
+    rm -rf "$home"
     assert_contains "$out" "one-commit materialisation of allowed HEAD files"
     # The env the child gets, named in the plan (FF1/FF1b, D-106). Sorted and
     # padded by whatever the caller legitimately exports, so name the entries
@@ -629,6 +635,32 @@ if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never 
     if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
         fail "free/isolated plan mentions a worktree or the gateway key"
     else pass; fi
+fi
+
+# The other half of the same gate: a HOME that does hold a qualifying user site
+# earns PYTHONPATH by name. The VALUE stays pinned in tests/test_autoos_spawner.py
+# (SeatUserSitePasslistTests, SeatPythonProbeTests), because the plan prints names only.
+if it "autoos-agent --isolate names PYTHONPATH when the seat's user site qualifies"; then
+    home="$(mktemp -d)"
+    # The probe the spawner runs: -I does not ignore PYTHONUSERBASE, so scrub it.
+    site="$(env -u PYTHONUSERBASE HOME="$home" python3 -c \
+              'import site,sys;sys.stdout.write(site.getusersitepackages())')"
+    if [[ "$site" != "$home"/* || "$(realpath -m "$site" 2>/dev/null)" != "$site" ]]; then
+        rm -rf "$home"; skip "this host's temp HOME is not a probe-clean path ($site)"
+    else
+        mkdir -p "$site"; chmod 755 "$site"
+        out="$(HOME="$home" AUTOOS_OMNIROUTE_KEY=never-print-this-key python3 tools/autoos-agent.py run --tier 2 --free --isolate --dry-run t)"
+        leaked=""
+        for banned in AUTOOS_KEYS_FILE LD_PRELOAD GIT_SSH_COMMAND; do
+            if grep -q "env: [^\n]*${banned}" <<<"$out"; then
+                leaked="${leaked}${banned} "
+            fi
+        done
+        if grep -q "env: [^\n]*PYTHONPATH" <<<"$out" && [[ -z "$leaked" ]]; then
+            pass
+        else fail "qualifying site gave no PYTHONPATH, or [$leaked] leaked"
+        fi
+    fi
 fi
 
 # ADR 0006 card resolver, the client adapters and the depth budget: one
