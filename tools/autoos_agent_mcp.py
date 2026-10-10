@@ -813,9 +813,10 @@ def review_base_refusal(value) -> str | None:
     and for a leading '-' (it reads as an option), so an unusable value is refused
     here, before a run dir exists, instead of reaching the argv as a flag. The shape
     is one git rev token (a sha, or a ref like `HEAD~1`); whether it NAMES a commit
-    the seat can diff from stays the CLI's own resolution, rc 2 included."""
+    the seat can diff from stays the CLI's own resolution, rc 2 included. S5-FIX1: a
+    revision range (`..`, `...`) is not one rev token, so refuse it early and in text."""
     text = value if isinstance(value, str) else ""
-    if text.strip() != text or not _REVIEW_BASE_REV_RE.fullmatch(text):
+    if text.strip() != text or ".." in text or not _REVIEW_BASE_REV_RE.fullmatch(text):
         return ("review_base must be one git rev token (a sha, or a ref like "
                 "HEAD~1), got %r" % (value,))
     return None
