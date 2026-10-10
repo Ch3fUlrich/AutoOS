@@ -804,6 +804,23 @@ def worktree_of(path: str) -> str:
     return os.path.realpath(top or path)
 
 
+_REVIEW_BASE_REV_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._^~/@{}+-]{0,63}$")
+
+
+def review_base_refusal(value) -> str | None:
+    """The error text for a `review_base` the CLI's own arg half would not take, or
+    None. AO-MCP-REVIEW-BASE: `resolve_review_base` answers None for a blank value
+    and for a leading '-' (it reads as an option), so an unusable value is refused
+    here, before a run dir exists, instead of reaching the argv as a flag. The shape
+    is one git rev token (a sha, or a ref like `HEAD~1`); whether it NAMES a commit
+    the seat can diff from stays the CLI's own resolution, rc 2 included."""
+    text = value if isinstance(value, str) else ""
+    if text.strip() != text or not _REVIEW_BASE_REV_RE.fullmatch(text):
+        return ("review_base must be one git rev token (a sha, or a ref like "
+                "HEAD~1), got %r" % (value,))
+    return None
+
+
 def build_argv(req: dict, run_id: str | None = None,
                cwd: str | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
@@ -989,6 +1006,14 @@ def build_argv(req: dict, run_id: str | None = None,
         # family is read from that run's runner-private record by the CLI, so all
         # this path carries is the id.
         argv += ["--review-of", str(req["review_of"]).strip()]
+    if req.get("review_base") is not None:
+        # AO-MCP-REVIEW-BASE: needs isolation, forced anyway for a spawned tier
+        # and a review role; the CLI's rc 2 for a bad rev or no clone is the
+        # preflight's answer, and review_base rides into job.json's `request`.
+        refusal = review_base_refusal(req["review_base"])
+        if refusal is not None:
+            raise ValueError(refusal)
+        argv += ["--review-base", str(req["review_base"]).strip()]
     if run_id:
         argv += ["--run-id", run_id]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
@@ -1931,6 +1956,7 @@ def build_server(profile: str | None = None):
                not_family: list[str] | None = None,
                review_of: str | None = None,
                no_fallthrough: bool = False,
+               review_base: str | None = None,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
@@ -2003,6 +2029,11 @@ def build_server(profile: str | None = None):
         never a warning and an unfenced run.
         no_fallthrough: a stop on the pinned model ends the run with that rc; no
         re-plan onto another model. Off by default.
+        review_base: a git rev (sha or ref) whose `git diff base..HEAD` rides into the
+        isolated seat as REVIEW-DIFF.patch, stamped "sandbox base: <sha> HEAD <sha>".
+        Needs isolation, forced anyway for tier 2/3 and a review role; same semantics
+        as the CLI flag — a bad rev or a missing clone is a refusal (rc 2) as an
+        error dict, never a traceback.
         `model` is a pin for an own-account client too (FAMILYFENCE-b): a qoder or
         claude model name reaches that CLI's own --model and its family feeds the
         fence like a gateway leg's. The record's writer gains a `source`
@@ -2018,6 +2049,7 @@ def build_server(profile: str | None = None):
                       "allow_mode_only": allow_mode_only,
                       "not_family": not_family, "review_of": review_of,
                       "no_fallthrough": no_fallthrough,
+                      "review_base": review_base,
                       "claude_reason": claude_reason})
 
     @_register("status")
