@@ -116,9 +116,15 @@ def _path_of(target):
 def added_lines(repo, base):
     """``[(path, line_no, text)]`` for the lines ``base..HEAD`` adds, or None.
 
-    ``-U0`` asks git for nothing but the added lines; the counter still advances
-    over context and deletions so the reported number is the line's position in
-    the tree being pushed, whichever diff tuning the host's git config applies.
+    ``-U0`` asks git for nothing but the added lines; the counter advances over
+    context and deletions and resets at every hunk header, so the reported number
+    is the line's position in the tree being pushed, whichever diff tuning the
+    host's git config applies.
+
+    The file header is read only OUTSIDE a hunk, because an added line that starts
+    with ``++ `` arrives as ``+++ b/...`` — byte-identical to the next file's
+    header. Reading it as one would silently re-home every later added line of the
+    real file, and a scan that misses lines is a secret gate failing open.
     """
     text = _diff_text(repo, base)
     if text is None:
@@ -126,18 +132,24 @@ def added_lines(repo, base):
     rows = []
     path = None
     line = 0
+    in_hunk = False
     for row in text.splitlines():
-        if row.startswith("+++ "):
-            path = _path_of(row[4:].strip())
+        if row.startswith("diff --git "):
+            in_hunk = False
+            path = None
             continue
         header = HUNK.match(row)
         if header:
             line = int(header.group(1))
+            in_hunk = True
             continue
-        if path is None:
+        if not in_hunk:
+            if row.startswith("+++ "):
+                path = _path_of(row[4:].strip())
             continue
         if row.startswith("+"):
-            rows.append((path, line, row[1:]))
+            if path is not None:
+                rows.append((path, line, row[1:]))
             line += 1
         elif not row.startswith("-") and not row.startswith("\\"):
             line += 1

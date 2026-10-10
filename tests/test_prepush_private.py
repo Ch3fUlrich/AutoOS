@@ -206,6 +206,34 @@ class PrivateGateTests(unittest.TestCase):
         hits = private.scan([ALPHA, BETA], [("f.txt", 7, "saw " + BETA.lower())])
         self.assertEqual(hits, [("f.txt", 7, 2)])
 
+    def test_an_added_line_shaped_like_a_diff_header_hides_nothing_after_it(self):
+        # A content line that starts with "++ " reaches the patch as "+++ b/..." —
+        # byte-identical to the next file's header — and a parser that reads it as
+        # one attributes every later added line of the real file to a path that does
+        # not exist: a secret gate failing open, on the shape a diff tool's own test
+        # fixture writes.
+        self.commit("tracked.txt", "++ b/not-a-header\nthen %s\n" % ALPHA,
+                    append=True)
+        self.assertEqual([(r[0], r[1]) for r in private.added_lines(self.repo, self.base)],
+                         [("tracked.txt", 3), ("tracked.txt", 4)])
+        status, _results, out = self.patterns(ALPHA + "\n")
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("tracked.txt:4: private-pattern #1", out)
+
+    def test_two_hunks_of_one_file_report_their_own_line_numbers(self):
+        # -U0 splits a push's additions into hunks with unchanged lines between
+        # them; a counter that only reset at the file header would number the
+        # second hunk off the first one and point a reader at the wrong line.
+        self.commit("tracked.txt", "first\nsecond\nthird %s\n" % ALPHA, append=True)
+        self.commit("tracked.txt", "zeroth\nfirst\nsecond\nthird %s\nfourth\n" % ALPHA)
+        rows = private.added_lines(self.repo, self.base)
+        self.assertEqual([(r[0], r[1]) for r in rows],
+                         [("tracked.txt", 1), ("tracked.txt", 4),
+                          ("tracked.txt", 5)], rows)
+        status, _results, out = self.patterns(ALPHA + "\n")
+        self.assertEqual(status, private.REFUSED)
+        self.assertIn("tracked.txt:4: private-pattern #1", out)
+
     # --- the gitleaks leg -----------------------------------------------------
 
     @unittest.skipIf(os.name == "nt", "the fake gitleaks is a shebang script")
