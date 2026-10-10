@@ -37,6 +37,20 @@ WHAT IT DOES, IN ORDER
      and prints ``passed 0 failed 0 skipped 0`` when its filter matches no case, so
      the tally is read as well as the status (R-worker-05 — "no tests ran" exited 0
      and was pushed once already).
+  f. PRIVATE PATTERNS, before any test runs (``tools/prepush_private.py``): the
+     lines this push ADDS are matched against a names file whose path only
+     ``AUTOOS_PRIVATE_PATTERNS`` may give. AutoOS is a public repository and the
+     names file lives in the private one, so this tree hardcodes no path, no host
+     and no person's name. A hit prints ``path:line: private-pattern #<entry
+     number>`` and nothing else — never the matched text, never the entry, never
+     the line it came from. Unset, missing or empty prints one line saying skipped
+     and is never a failure; a names file that is there and cannot be read
+     refuses. The optional ``gitleaks`` leg (``AUTOOS_GITLEAKS`` naming an
+     executable, else ``gitleaks`` on PATH) is asked for the same ``base..HEAD``
+     range with ``--redact``, and a non-zero exit is a refusal that prints what
+     gitleaks itself printed. A leg that RAN adds ``private-pattern-gate`` /
+     ``gitleaks`` to the record's manifest below, so a reader can see the check
+     happened; a leg that was skipped adds nothing to it.
 
 GREEN LEAVES A RECORD: one JSON certificate per commit in the runner-private
 store at ``<state-dir>/prepush/<sha>.json`` (rule D-154). ``store_dir()`` is the
@@ -109,6 +123,10 @@ try:
 except ImportError:  # the pre-push hook's shim may run a copy of this file
     clients = None                     # alone; store_root() falls back to the
                                        # same formula from the script's own dir
+try:
+    from prepush_private import run_private_gate
+except ImportError:  # a stripped checkout carrying a copy of this file alone
+    run_private_gate = None
 
 DEFAULT_BASE = "origin/main"
 OVERRIDE_ENV = "AUTOOS_PREPUSH_OVERRIDE"
@@ -612,6 +630,14 @@ def gate(repo, base: str):
     if not ok:
         print(message)
         return REFUSED
+    private_results = []
+    if run_private_gate is None:
+        print("prepush: private-pattern gate skipped (tools/prepush_private.py "
+              "is not importable beside this file)")
+    else:
+        status, private_results = run_private_gate(repo, base, os.environ)
+        if status:
+            return status
     py = python_executable()
     plan, error = build_plan(repo, base, py)
     if error:
@@ -620,7 +646,7 @@ def gate(repo, base: str):
         print(error)
         return COULD_NOT_RUN
     commands = commands_for(repo, plan, py)
-    results = []
+    results = list(private_results)
     failures = []
     for argv, extra in commands:
         text = render(argv, extra)

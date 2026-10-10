@@ -1063,6 +1063,13 @@ if it "prepush: the gate refuses a push whose tests were never run (unit tests)"
     out="$(python3 tests/test_prepush.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/prepush_private.py: the private-pattern + gitleaks legs of that gate — the
+# added lines of a push matched against a names file only the environment names, a
+# hit reported as path:line and never as its text (AutoOS is a public repo).
+if it "prepush-private: the private-pattern and gitleaks legs of the gate (unit tests)"; then
+    out="$(python3 tests/test_prepush_private.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tests/test_no_cao.py: the no-CAO gate (operator removal lane 2026-09-29) — no CAO
 # path, skill section or example-config block may ship; the file shipped unwired,
 # so the gate existed but nothing ran it until tests/test_suite_wiring.py refused it.
