@@ -300,6 +300,33 @@ _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
 # be told to work on), and judged AFTER the output normaliser has run, so ANSI
 # colour cannot pass as content either (P4c-fixes7, `_has_visible_text`).
 _INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
+# AO-RECOVER-BLANK-CHARS: code points that DRAW a blank but belong to none of those
+# categories, so neither `isspace()` nor `_INVISIBLE_CATS` saw one and a continuation
+# heading hidden behind it read as a brief. A list, deliberately NOT a category: U+2801
+# draws dots, U+AC00 a syllable, a letter wearing U+FE0F a heart — all content.
+_BLANK_LOOKING = frozenset("".join((
+    "\u3164",                     # HANGUL FILLER (Lo) — an empty box
+    "\u115f", "\u1160", "\uffa0",  # the Hangul choseong/jungseong/halfwidth fillers (Lo)
+    "\u2800",                     # BRAILLE PATTERN BLANK (So) — eight unlit dots
+    "\u17b4", "\u17b5",           # KHMER VOWEL INHERENT AQ/AA (Mn) — vowels with no glyph
+    "\u034f",                     # COMBINING GRAPHEME JOINER (Mn) — joins, draws nothing
+    "\U0001d159",                 # MUSICAL SYMBOL NULL NOTEHEAD (So) — a rest
+    # MONGOLIAN FREE VARIATION SELECTOR 1-4 (Mn) and VARIATION SELECTOR-1..256 (Mn):
+    # each picks a form of the glyph BEFORE it and shows nothing (U+180E is a Zs).
+    "".join(chr(c) for c in (0x180b, 0x180c, 0x180d, 0x180f)),
+    "".join(chr(c) for c in range(0xfe00, 0xfe10)),
+    "".join(chr(c) for c in range(0xe0100, 0xe01f0)),
+)))
+
+
+def _is_invisible_char(ch):
+    """Whether `ch` shows nothing a writer could be told to work on: whitespace, a
+    member of `_INVISIBLE_CATS` (Zs/Zl/Zp/Cc/Cf), or a blank-LOOKING code point no
+    category covers. ONE predicate, and EVERY invisibility test calls it (AO-RECOVER-BLANK-CHARS)."""
+    return (ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS
+            or ch in _BLANK_LOOKING)
+
+
 # --- output.log normalisation (P4c-fixes5 (1)) --------------------------------
 #
 # ``output.log`` is the CLIENT's raw captured stdout. A CLI that believes it owns a
@@ -1144,9 +1171,9 @@ def _has_visible_text(task):
     no work — a footer-only brief would otherwise buy a continuation leg (P4c-
     fixes7). The judgement runs on `_normalise_output`'s text, so colour and a
     redraw do not count as content either, and then on what is left once every
-    whitespace character and every Zs/Zl/Zp/Cc/Cf character is gone."""
+    character `_is_invisible_char` refuses is gone."""
     for ch in _normalise_output(task):
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             continue
         return True
     return False
@@ -1172,7 +1199,7 @@ def _heading_form(text):
     parts = []
     origins = []
     for i, ch in enumerate(text):
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             continue
         folded = unicodedata.normalize("NFKC", ch).casefold()
         parts.append(folded)
@@ -1209,7 +1236,7 @@ def _footer_prefix_invisible(prefix):
             if i < n and "\x40" <= prefix[i] <= "\x7e":
                 i += 1
             continue
-        if ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             i += 1
             continue
         return False

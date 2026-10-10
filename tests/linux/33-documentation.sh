@@ -726,6 +726,11 @@ if it "autoos_recovery: run classify, stall clock, attempt budget, continue task
     out="$(python3 tests/test_autoos_recovery.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-READY-CALLERS: a tracked file that shows the ready gate names both guard files.
+if it "ready callers: tracked invocations name --brief and --report (lint)"; then
+    out="$(python3 tests/test_ready_callers.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # Resolver v2 (routing v2 spec section 5): pure bucket/effort tables and measure().
 if it "resolver v2: bucket boundaries, effort rows, clamp (unit tests)"; then
     out="$(python3 tests/test_autoos_resolver.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
