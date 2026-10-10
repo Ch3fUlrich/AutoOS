@@ -38,9 +38,7 @@ docker run --rm -i --network mcp-server_mcp-net -e OMNIGRAPH_BEARER_TOKEN="$OMNI
 ```
 
 Format: NDJSON — `{"type":"NodeType","data":{…}}` and
-`{"edge":"EdgeType","from":"<slug>","to":"<slug>"}`. A node carries **no `id`**: 0.13
-refuses `data.id` on load and derives the id from the `@key(slug)`, while an edge
-references nodes by their `from`/`to` slugs. Schema:
+`{"edge":"EdgeType","from":"<slug>","to":"<slug>"}`. Schema:
 `../../../../.agents/skills/structured-memory/references/schema.md`.
 
 **Vector search:** `Decision` embeddings are intentionally NOT stored in these

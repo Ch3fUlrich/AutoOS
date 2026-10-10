@@ -339,6 +339,11 @@ if it "D-825: the ref-existence gate unit tests (python3 tests/test_go_gate_ref.
         || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "D-1038: agent-skills seed has no data.id, 0.13 refuses it (python3 tests/test_agent_skills_seed.py)"; then
+    out="$(python3 tests/test_agent_skills_seed.py 2>&1)" && pass \
+        || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "D-825: dedup-graph refuses a --go that names no decision, exact id only"; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
