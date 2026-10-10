@@ -1944,6 +1944,27 @@ class InvisiblePrefixFooter(TempCase):
         "\x1b\u200b", "\u200b\x1b\ufeff", "\x1b\ufeff\x1b[",
     )
 
+    # AO-RECOVER-BLANK-CHARS: characters that DRAW a blank yet belong to no Zs/Zl/Zp/
+    # Cc/Cf category, so neither `isspace()` nor `_INVISIBLE_CATS` saw one.
+    BLANK_LOOKING = (
+        "\u3164",                         # HANGUL FILLER (Lo) — an empty box
+        "\u115f", "\u1160", "\uffa0",     # Hangul choseong/jungseong/halfwidth fillers (Lo)
+        "\u2800",                         # BRAILLE PATTERN BLANK (So) — eight unlit dots
+        "\u17b4", "\u17b5",               # KHMER VOWEL INHERENT AQ/AA (Mn)
+        "\u034f",                         # COMBINING GRAPHEME JOINER (Mn)
+        "\u180b", "\u180c", "\u180d", "\u180f",   # MONGOLIAN FREE VARIATION SELECTOR 1-4 (Mn)
+        "\ufe00", "\ufe0f",               # VARIATION SELECTOR-1/-16 (Mn): pick a form
+        "\U000e0100", "\U000e01ef",       # VARIATION SELECTOR-17/-256 (Mn)
+        "\U0001d159",                     # MUSICAL SYMBOL NULL NOTEHEAD (So) — a rest
+    )
+    # Invisible ALONE, never by association: a glyph wearing one stays content.
+    ORDINARY_VISIBLE = (
+        "\uac01\ubc14",                   # Hangul SYLLABLES, not fillers
+        "\u2801\u2802",                   # BRAILLE cells with lit dots, not U+2800
+        "a\u034f",                        # a letter wearing a combining grapheme joiner
+        "\u2764\ufe0f", "\u0e01\ufe00",    # a heart / a letter wearing a variation selector
+    )
+
     def repro(self, prefix):
         """A footer that lost the marker's blank line, with `prefix` in front."""
         return prefix + r.CONTINUE_HEADING + "1/2): AAAA"
@@ -2019,6 +2040,33 @@ class InvisiblePrefixFooter(TempCase):
         for task in ("CONTINUE\u200b FROM CURRENT DIFF (recovery attempt 1/2): AAAA",
                      "\ufeffCONTINUE FROM \x01CURRENT DIFF (recovery attempt 1/2): AAAA"):
             self.assertIsNone(r._usable_task({"task": task}, True), repr(task))
+
+    def test_a_blank_looking_character_hides_the_footer_like_a_zwsp_does(self):
+        """AO-RECOVER-BLANK-CHARS: one of these in front of a footer whose blank line
+        was lost is the content-free record the ZWSP repro is, and alone names no work."""
+        for ch in self.BLANK_LOOKING:
+            with self.subTest(char=ch):
+                self.assertTrue(r._is_invisible_char(ch), repr(ch))
+                self.assertFalse(r._has_visible_text(ch), repr(ch))
+                for prefix in (ch, ch + " ", "\n" + ch + "\t"):
+                    task = self.repro(prefix)
+                    self.assertIsNone(r._usable_task({"task": task}, True), repr(task))
+                    st = self.other_state()
+                    make_record(st, task=task, exit_json={"rc": 1})
+                    p = r.plan(RUN, lane_key=LANE, state=st, now=NOW, pid_probe=dead)
+                    self.assertEqual((p["action"], p["state"], p["record_suspect"]),
+                                     ("escalate", "unknown", True), repr(task))
+                    self.assertIsNone(p["continue_task"], repr(task))
+
+    def test_ordinary_letters_and_marks_are_never_invisible(self):
+        """A list of code points, not a category: a Hangul syllable, a Braille cell
+        with lit dots, a letter wearing a combining mark — all still a brief."""
+        for task in self.ORDINARY_VISIBLE:
+            with self.subTest(task=task):
+                self.assertTrue(r._has_visible_text(task), repr(task))
+                self.assertIsNotNone(r._usable_task({"task": task}, True), repr(task))
+        for task in ("Fix \u3164 the widget.", "Fix \u2800 the widget."):
+            self.assertIsNotNone(r._usable_task({"task": task}, True), repr(task))
 
     def test_real_text_before_a_genuine_footer_still_gets_exactly_one(self):
         """The cut stays literal for a brief: real task text plus the previous leg's
@@ -2905,7 +2953,8 @@ class Hermetic(TempCase):
     ALLOWED_IMPORTS = {"__future__", "argparse", "errno", "hashlib", "io", "json", "os",
                        "re", "shlex", "sys", "tempfile", "time", "unicodedata", "ctypes",
                        "stat", "fcntl", "msvcrt", "importlib",
-                       "autoos_clients", "autoos_report", "autoos_ready_guards"}
+                       "autoos_blank", "autoos_clients", "autoos_report",
+                       "autoos_ready_guards"}
     FORBIDDEN_IMPORTS = {"subprocess", "socket", "http", "urllib", "ftplib", "pty",
                          "signal", "multiprocessing", "pwd", "grp", "asyncio",
                          "threading", "autoos_agent_mcp", "requests"}
