@@ -1261,6 +1261,78 @@ class ResumeTest(unittest.TestCase):
             "next.")
         oc_l2.cmd_stop(result["lane"])
 
+    # (2c'') AO-RECOVER-L2-LOOP: a child that died non-zero wakes with what
+    # recovery plans for it — plan only, never a spawn and never a record.
+    def _kill_record(self, run_id, lane):
+        """The runner-private kill record for one child run, in the store the
+        spawner's own reader looks in (<state>/kill/<run_id>.json)."""
+        root = self.agents.parent / "kill"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ("%s.json" % run_id)).write_text(
+            json.dumps({"run_id": run_id, "lane": lane}), encoding="utf-8")
+
+    def _failed_child(self, rc=1):
+        """A started lane whose newest child ended rc!=0, with a job.json fit to
+        continue (a task), as `spawn` writes it."""
+        result, _ = self._start()
+        self.srv.items = []
+        kid = self._spawn_child(run_id="20261009-120000-dead-a1b2c3", rc=rc)
+        (kid / "job.json").write_text(json.dumps({
+            "run_id": kid.name, "parent_lane": result["lane"],
+            "task": "Implement the widget and run the suite.",
+            "request": {"cwd": str(self.proj)}, "cwd": str(self.proj),
+            "started": time.time(),
+        }), encoding="utf-8")
+        return result, kid.name
+
+    def test_a_failed_child_stall_wakes_with_the_recovery_action(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, result["lane"])
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["recovery"]["action"], "rerun", info)
+        self.assertEqual(info["recovery"]["state"], "died", info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertEqual(out["recovery"], {"action": "rerun", "attempts": 0,
+                                          "state": "died"}, out)
+        text = self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"]
+        self.assertIn("recovery: rerun", text)
+        self.assertIn("attempts 0", text)
+
+    def test_a_clean_exit_names_no_recovery(self):
+        result, run_id = self._failed_child(rc=0)
+        self._kill_record(run_id, result["lane"])
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertIsNone(info["recovery"], info)
+
+    def test_another_lanes_record_adds_nothing_to_the_wake(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, "l2-other-lane-p9")
+        info = oc_l2.stalled(result["lane"])
+        self.assertIsNone(info["recovery"], info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertNotIn("recovery", out)
+        self.assertEqual(
+            self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"],
+            "Wake: child 20261009-120000-dead-a1b2c3 exited rc=1; read "
+            "20261009-120000-dead-a1b2c3 result via autoos-agent result and "
+            "continue the phase plan. Reply with one short line of what you do "
+            "next.")
+
+    def test_a_recovery_fault_never_blocks_a_wake(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, result["lane"])
+        with mock.patch.object(oc_l2.autoos_recovery, "plan",
+                               side_effect=RuntimeError("boom")):
+            out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertNotIn("recovery", out)
+
     def test_an_errored_turn_wakes_with_its_exact_next_action(self):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)

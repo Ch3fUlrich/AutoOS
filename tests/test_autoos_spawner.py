@@ -1135,6 +1135,37 @@ class McpToolTests(unittest.TestCase):
             time.sleep(0.1)
         self.fail("run %s never finished" % run_id)
 
+    def _spawned_lane_records(self, raw):
+        """One dry-run spawn under AUTOOS_L2_LANE=`raw` (None: unset), returning
+        (job.json, the runner-private kill record) it left behind."""
+        with mock.patch.dict(os.environ, clear=False):
+            if raw is None:
+                os.environ.pop("AUTOOS_L2_LANE", None)
+            else:
+                os.environ["AUTOOS_L2_LANE"] = raw
+            out = mcp_server.spawn({"task": "t", "cwd": str(ROOT)})
+            self.assertNotIn("error", out, out)
+            self.wait_done(out["id"])
+            return (mcp_server._read_json(os.path.join(out["dir"], "job.json")),
+                    mcp_server.read_kill_record(out["id"]) or {})
+
+    # --- AO-JOB-LANE-ID: the lane id rides the spawn, validated, in both stores
+    def test_a_lane_spawn_records_its_lane_in_job_json_and_the_private_record(self):
+        """Recovery reads the lane back from the private record only, so the
+        spawner has to write it there; job.json carries the same id as
+        information, beside the `parent_lane` F1 already wrote."""
+        lane = "l2-repo-tag-phase"
+        job, record = self._spawned_lane_records(lane)
+        self.assertEqual(job.get("lane"), lane, job)
+        self.assertEqual(job.get("parent_lane"), lane, job)
+        self.assertEqual(record.get("lane"), lane, record)
+
+    def test_an_absent_or_invalid_lane_env_records_no_lane_and_never_errors(self):
+        for raw in (None, "Not A Lane Key", "x" * 500, ""):
+            job, record = self._spawned_lane_records(raw)
+            self.assertNotIn("lane", job, raw)
+            self.assertNotIn("lane", record, raw)
+
     def test_list_clients_has_the_matrix_and_the_card(self):
         empty = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, empty, True)

@@ -49,8 +49,9 @@ so every field is type-checked before use and a misshapen record never answers
 'completed'), a record with no usable job.json task — absent, unreadable, not an
 object, or empty after the type guard (there is no brief to continue) — or
 a pid this host cannot probe is 'unknown', and 'unknown' is 'escalate'. It is
-never 'completed'. The lane key is ALWAYS caller-supplied (D-914): `plan` needs
-`--lane` exactly like `record` does, and without it is a usage error (exit 2).
+never 'completed'. The lane is never derived from the task text (D-914): `plan`
+takes `--lane`, or the lane the spawner recorded in the runner-private kill
+record; `record` still takes `--lane` always. Neither is a usage error (exit 2).
 
 Residuals, stated rather than hidden:
 
@@ -242,8 +243,9 @@ _TRAILER_MARKS = ("writer:", "scope:", "sandbox changes")
 # The two roots a printed sandbox path must live under to be a directory this
 # module will name as a continuation cwd — the same two `sandbox_path_for` builds
 # in tools/autoos-agent.py (S4). Mirrored, not imported: that file is a
-# hyphen-named launcher and this module loads none of it. A change there has to
-# be repeated here, and the test asserts both halves of the pair.
+# hyphen-named launcher and its only import here is the kill store's one reader
+# (`record_lane`). A change there has to be repeated here, and the test asserts
+# both halves of the pair.
 FLEET_SANDBOX_SUBPATH = os.path.join("fleet", "sandboxes")
 # Above this a number is not a pid on this host (Linux's default kernel.pid_max
 # is 2**22), and `os.kill` answers OverflowError rather than a verdict.
@@ -503,6 +505,45 @@ def _check_key(key):
         raise RecoveryError("bad lane key %r (1-%d chars of [A-Za-z0-9._/-])"
                             % (key, LANE_KEY_MAX_CHARS))
     return key
+
+
+def check_lane_key(key):
+    """Recovery's lane-key rule, public (AO-JOB-LANE-ID): what a spawner records
+    is what `plan` reads back, validated by the one rule, never a second shape."""
+    return _check_key(key)
+
+
+# The runner-private kill record is the one place a lane id may be READ from:
+# job.json is the worker's own file (R-orch-17). Its reader lives in the
+# launcher, loaded once and lazily; a store that will not load is 'no lane'.
+AGENT_CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "autoos-agent.py")
+_UNSET = object()
+_kill_reader = _UNSET
+
+
+def record_lane(run_id):
+    """The lane the SPAWNER recorded for one run, read from the runner-private
+    kill record ONLY. None is 'it names none', which covers no record, an
+    unreadable one, a `lane` of the wrong shape, a run id that is not one and a
+    launcher that will not load: fail closed, never a traceback out of a plan."""
+    global _kill_reader
+    if _kill_reader is _UNSET:
+        try:
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("autoos_agent_cli",
+                                                           AGENT_CLI_PATH)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _kill_reader = getattr(module, "read_kill_record", None)
+        except BaseException:                 # noqa: BLE001 - fail closed: no lane
+            _kill_reader = None
+    try:
+        record = _kill_reader(_check_run_id(run_id))
+        lane = record.get("lane") if isinstance(record, dict) else None
+        return _check_key(lane) if lane is not None else None
+    except (TypeError, ValueError, OSError):  # includes RecoveryError
+        return None
 
 
 def _is_finite(value):
@@ -1663,21 +1704,34 @@ def plan(run_id, lane_key=None, state=None, now=None, stall_secs=STALL_SECS,
 
     {action, state, attempts, sandbox, branch, continue_task, spawn_hint, rc,
     has_report, last_output_age, lane_key, state_corrupt, record_suspect,
-    run_id}. The lane key is ALWAYS caller-supplied (D-914): `lane_key` must name
-    the lane whose attempt budget the run belongs to, validated exactly like
-    `record` validates `--lane`. Without one this raises `RecoveryError` — the
-    CLI's usage exit 2 — because the lane is never derived from free task text.
-    A record whose job.json cannot supply a usable task (absent, unreadable, or
-    nothing but a continuation footer) is suspect whatever its lane: an explicit
-    `lane_key` buys it a budget to count on, never a brief to continue, so the
-    plan escalates rather than continuing a footer. `spawn_hint.cwd` is the kept
-    worktree for the L2/L1 to hand to `spawn` — this module never calls it.
+    run_id}. The lane is never derived from free task text (D-914): `lane_key`
+    names it, validated exactly like `record` validates `--lane`, or the spawner
+    recorded it in the runner-private kill record (`record_lane` — job.json, the
+    worker's own file, names nothing). Neither, or both and differing, raises
+    `RecoveryError` — the CLI's usage exit 2 — and a caller may not spend a lane
+    it does not own. A record whose job.json cannot supply a usable task
+    (absent, unreadable, or nothing but a continuation footer) is suspect
+    whatever its lane: an explicit `lane_key` buys it a budget
+    to count on, never a brief to continue, so the plan escalates rather than
+    continuing a footer. `spawn_hint.cwd` is the kept worktree for the L2/L1 to
+    hand to `spawn` — this module never calls it.
     """
+    recorded = record_lane(run_id)
     if lane_key is None:
-        raise RecoveryError(
-            "plan: a lane key is required — the lane is never derived from the "
-            "run's task text (pass --lane)")
-    key = _check_key(lane_key)
+        if recorded is None:
+            raise RecoveryError(
+                "plan: a lane key is required — the lane is never derived from "
+                "the run's task text (pass --lane, or spawn the run inside an L2 "
+                "lane so its spawner records the id)")
+        lane_key = recorded
+    else:
+        lane_key = _check_key(lane_key)
+        if recorded is not None and recorded != lane_key:
+            raise RecoveryError(
+                "plan: --lane %r is not the lane this run's spawner recorded "
+                "(%r) — one lane's attempt budget is that lane's to spend"
+                % (lane_key, recorded))
+    key = lane_key
     path = run_dir_for(run_id, state)
     job, job_ok = _read_json_dict(os.path.join(path, "job.json"))
     task = _usable_task(job, job_ok)
@@ -1714,9 +1768,10 @@ def main(argv=None):
     p = sub.add_parser("plan", help="print the recovery plan for RUN_ID as JSON "
                                     "(exit 0 none/wait, 3 rerun, 4 escalate)")
     p.add_argument("run_id")
-    p.add_argument("--lane", dest="lane", required=True,
-                   help="lane key sharing the attempt budget (required: the lane "
-                        "is never derived from the task text)")
+    p.add_argument("--lane", dest="lane", default=None,
+                   help="lane key sharing the attempt budget; without it the "
+                        "spawner's runner-private record names the lane (the "
+                        "lane is never derived from the task text)")
     p.add_argument("--stall-secs", dest="stall_secs", type=float, default=STALL_SECS,
                    help="quiet for this long is stalled, a finite number of seconds "
                         "between %d and %d (default %d)"

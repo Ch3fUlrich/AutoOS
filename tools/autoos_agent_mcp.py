@@ -97,6 +97,7 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(TOOLS_DIR, "autoos-agent.py")
 sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
+import autoos_recovery as recovery  # noqa: E402
 import autoos_report as report_parser  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
@@ -574,6 +575,19 @@ def write_kill_record(run_id: str, record: dict) -> bool:
 
 def read_kill_record(run_id: str):
     return agent.read_kill_record(run_id)
+
+
+def spawn_lane(env=None):
+    """AO-JOB-LANE-ID: this spawn's lane id — `AUTOOS_L2_LANE`, validated with
+    recovery's own key rule so what is recorded is what `plan` reads back. An
+    unset or unusable value is simply no lane: a spawn is never refused over a
+    label. The kill record's copy is the one recovery trusts (R-orch-17);
+    `parent_lane` stays as F1 wrote it, for `oc_l2`'s child attribution."""
+    raw = (os.environ if env is None else env).get(ENV_L2_LANE)
+    try:
+        return recovery.check_lane_key(raw)
+    except ValueError:
+        return None
 
 
 def _read_json(path: str):
@@ -1231,6 +1245,13 @@ def spawn(req: dict) -> dict:
            # child and wake it for someone else's process.
            "parent_lane": os.environ.get(ENV_L2_LANE) or None,
            "started": time.time()}
+    # AO-JOB-LANE-ID: the validated id goes in beside it, and only when it IS a
+    # lane — a run started outside a lane records nothing the worker can be
+    # graded on. The same value goes to the kill record below, which is the copy
+    # recovery reads; this one is a label on the worker's own file.
+    lane = spawn_lane()
+    if lane:
+        job["lane"] = lane
     _write_json(os.path.join(path, "job.json"), job)
     # SB-A4: the run's decided-at-spawn record, written before the child exists so
     # a run that dies instantly still has one, and written to the private store
@@ -1249,7 +1270,12 @@ def spawn(req: dict) -> dict:
         # the runner-private record, because the run's MODEFLIP verdict reads it.
         # job.json is the worker's own directory — an opt-out a worker could write
         # into the file it is graded from is not an opt-out, it is an escape.
-        "allow_mode_only": bool(req.get("allow_mode_only")) or None})
+        "allow_mode_only": bool(req.get("allow_mode_only")) or None,
+        # AO-JOB-LANE-ID: the same lane id, in the store the worker does not own,
+        # because that is the only copy `autoos_recovery` may believe (R-orch-17).
+        # None is not written at all: `write_kill_record` skips it, so a run
+        # outside a lane keeps a record that names no lane.
+        "lane": lane})
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats

@@ -9629,8 +9629,9 @@ def write_kill_record(run_id: str, record: dict) -> bool:
 
     SB-A4 (D-103, the rest of item C) grew this from a group record into the run's
     whole decided-at-spawn identity: `run_id`, `mode` (review|write), `scope`,
-    `dry_run`, `allow_mode_only`, `created_at`, plus the `pgid`/`start` group
-    record and the RUNMODEL `writer` the run resolves at its end. It is the only
+    `dry_run`, `allow_mode_only`, the spawning `lane` (AO-JOB-LANE-ID),
+    `created_at`, plus the `pgid`/`start` group record and the RUNMODEL `writer`
+    the run resolves at its end. It is the only
     place any of that is read from, because everything a killer or a dispatcher
     decides must come from a record the worker cannot rewrite through its own
     `job.json`.
@@ -9657,7 +9658,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
         for key in ("pgid", "start", "writer", "attempt"):
             if record.get(key) is not None:
                 merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run", "allow_mode_only"):
+        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
             if record.get(key) is not None:
                 merged.setdefault(key, record[key])
         tmp = "%s.tmp-%d" % (path, os.getpid())
