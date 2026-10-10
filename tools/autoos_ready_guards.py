@@ -3,7 +3,18 @@ scope, the diff's file scope, the report's CHECK evidence, tool preflight, and t
 decision helper for whether the guards are required at all. Every input arrives as an
 argument (diff paths, injected `which`); HERMETIC (D-852): no command, nothing
 installed, no writes — the only disk touch is the default `shutil.which` a caller may
-inject away, and the `isdir` read on whatever that lookup returned."""
+inject away, and the `isdir` read on whatever that lookup returned.
+
+FILES cap (P10, AO-GUARD-LEGACY-BRIEF + FILES-cap rule): the canonical template's
+"<= 3 files" counts the entries a lane may EDIT, and a lane's `CHANGELOG.md` line is
+history rather than an edited source file, so the cap counts every FILES entry EXCEPT
+the one spelled exactly `CHANGELOG.md` (the repo-root name, case-exact, after this
+module's own `_files_item`/`exact_path` normalisation). A brief may therefore carry up
+to 4 entries when one of them is that changelog path; a 4th NON-exempt path —
+`docs/CHANGELOG.md`, `CHANGELOG.md.bak`, `changelog.md`, `README.md`, `deploy/README.md`
+— is refused. Lanes briefed after 2026-10-10 12:00Z must satisfy the guard; the one-time
+exception for F1a eac8dda6 is logged in ready-inbox and is NOT encoded here (no
+allowlist entry, no sha special-case)."""
 import os
 import re
 import shutil
@@ -59,6 +70,13 @@ MAX_TEXT_CHARS = 1 << 20          # 1 MiB of characters
 MAX_PATH_CHARS = 200
 MAX_COMPONENT_CHARS = 100
 MAX_PATH_COMPONENTS = 20
+# The FILES cap (P10): MAX_FILES is the canonical template's "<= 3 files", and
+# CHANGELOG_ENTRY is the ONE path the count skips. The comparison is against the
+# NORMALISED exact name, case-exact, so `changelog.md` and `docs/CHANGELOG.md` are
+# ordinary files and the total a brief can spell stays <= 4 (a duplicate CHANGELOG is
+# refused by the duplicate check, never counted twice).
+MAX_FILES = 3
+CHANGELOG_ENTRY = "CHANGELOG.md"
 # Documented install step, quoted for the operator; nothing runs it here.
 INSTALL_HELP = ("pipx install yamllint ansible-core ansible-lint pre-commit\n"
                 "gitleaks: the vendor release binary on PATH "
@@ -247,6 +265,15 @@ def _files_item(item):
 def brief_files(brief_text):
     """Normalised paths the brief allows, from its ONE canonical FILES line.
 
+    The cap counts the entries the lane may EDIT: every entry EXCEPT the one spelled
+    exactly `CHANGELOG.md` (the repo-root name, case-exact, after `_files_item` plus
+    `exact_path` normalisation, so './CHANGELOG.md' is exempt and 'changelog.md',
+    'docs/CHANGELOG.md', 'CHANGELOG.md.bak' are ordinary files). Up to `MAX_FILES`
+    counted entries pass, which is at most 4 items in total, because the duplicate
+    check lets only one CHANGELOG line through. Lanes briefed after 2026-10-10 12:00Z
+    must satisfy this; the one-time exception for F1a eac8dda6 is logged in
+    ready-inbox and is NOT encoded here (no allowlist entry, no sha special-case).
+
     The line must start at column 0 with `_CANON_PREFIX` in the canonical
     wording. A FILES-looking line that is indented, CR-terminated, quoted, or
     sitting inside a ``` / ~~~ fence is never used silently — it raises, as does
@@ -286,8 +313,15 @@ def brief_files(brief_text):
     items = [_files_item(p) for p in raw.split(",")]
     out = [exact_path(p) for p in items]
     folded = [norm_path(p) for p in items]
-    if None in out or len(out) > 3 or len(folded) != len(set(folded)):
-        raise GuardError("FILES paths unusable (unparsable, duplicate, >3): %r" % raw[:120])
+    if None in out or len(folded) != len(set(folded)):
+        raise GuardError("FILES paths unusable (unparsable, duplicate): %r" % raw[:120])
+    counted = [p for p in out if p != CHANGELOG_ENTRY]
+    if len(counted) > MAX_FILES:
+        raise GuardError("FILES is >3 files not counting CHANGELOG.md: %d counted "
+                         "against the cap of %d. The exemption is the one repo-root "
+                         "path %r spelled case-exactly; docs/CHANGELOG.md, "
+                         "CHANGELOG.md.bak and changelog.md are ordinary files: %r"
+                         % (len(counted), MAX_FILES, CHANGELOG_ENTRY, raw[:120]))
     return out
 
 
