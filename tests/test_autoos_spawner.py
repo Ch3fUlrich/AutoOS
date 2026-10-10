@@ -24256,5 +24256,152 @@ class OutsideWriteRecordTests(unittest.TestCase):
         self.assertEqual(["~/.ansible"], rec["outside_writes"])
 
 
+class SeatUserSitePasslistTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P4 (measured): the P3a PYTHONUSERBASE redirect hides the
+    user site-packages, so in an --isolate seat `python3 -m pytest` printed "No module
+    named pytest" and no seat could RUN the tests it was told to run. Writes stay in
+    the toolhome; one spawner-computed, validated directory reopens read-only, and the
+    name itself stays denied on both sides (FF1b)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = os.path.join(self.tmp, "home")
+        self.site = os.path.join(self.home, ".local", "lib", "python3.12", "site-packages")
+        os.makedirs(self.site, 0o755)
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"},
+                               "t3-reviewer": {"model": "omniroute/y"}},
+                    "providers": {"omniroute": {"models": {"x": {}, "y": {}}}}}
+
+    def seat(self, plan=None, site=None, plan_site=None, plan_env=None, base=None,
+             gr_mem=""):
+        """(worker_env, stderr) for a seat plan: `site` is what the spawner computes
+        for its own interpreter and `plan_site` what the plan writes down (False = no
+        key); both default to the qualifying fake."""
+        site = site or self.site
+        if plan is None:
+            plan_site = site if plan_site is None else plan_site
+            plan = {"cwd": os.path.join(self.tmp, "sb"), "env": dict(plan_env or {})}
+            if plan_site is not False:
+                plan["user_site_path"] = plan_site
+        out = io.StringIO()
+        src = {"PATH": "/usr/bin", "HOME": self.home, "USER": "t"}
+        src.update(base or {})
+        fake_grp = types.SimpleNamespace(getgrgid=gr_mem if callable(gr_mem) else (
+            lambda gid: types.SimpleNamespace(gr_name="g", gr_gid=gid,
+                                              gr_mem=[m for m in gr_mem.split(",") if m])))
+        with mock.patch.object(self.agent, "user_site_packages", lambda: site), \
+                mock.patch.dict(sys.modules, {"grp": fake_grp}), \
+                contextlib.redirect_stderr(out):
+            return self.agent.worker_env(plan, None, base=src), out.getvalue()
+
+    def isolate_plan(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp, "HOME": self.home}), \
+                mock.patch.object(self.agent, "user_site_packages", lambda: self.site):
+            return self.agent.build_plan(seat_run_args(isolate=True, **kw), self.cfg)
+
+    def test_an_isolate_plan_names_the_qualifying_site_for_every_client(self):
+        for client in ("claude", "opencode"):
+            with self.subTest(client=client):
+                plan = self.isolate_plan(client=client, tier=2)
+                self.assertEqual(self.site, plan["user_site_path"], client)
+                env, err = self.seat(plan=plan)
+                self.assertEqual(self.site, env.get("PYTHONPATH"), client)
+                self.assertEqual(plan["cwd"] + self.agent.TOOLHOME_SUFFIX +
+                                 os.sep + "pythonuserbase", env["PYTHONUSERBASE"], client)
+                self.assertEqual("", err, client)
+
+    def test_pythonpath_from_the_plan_or_the_caller_is_still_refused(self):
+        env, err = self.seat(plan_env={"PYTHONPATH": "/evil/site"}, plan_site=False)
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertIn("PYTHONPATH", err, "a refused plan entry must be announced")
+        env, _ = self.seat(base={"PYTHONPATH": "/evil/site"}, plan_site=False)
+        self.assertNotIn("PYTHONPATH", env)
+        # a plan key that is not what the spawner recomputes is ignored, and so is a
+        # plan that carries no key at all: the seat simply gets no PYTHONPATH
+        for bad in (False, "/home/tester/.local/lib/python3.12/site-packages"):
+            env, err = self.seat(plan_site=bad)
+            self.assertNotIn("PYTHONPATH", env, bad)
+            self.assertEqual("", err)
+
+    def test_the_name_stays_denied_and_off_the_passlist(self):
+        self.assertIn("PYTHONPATH", self.agent.WORKER_ENV_DENY)
+        self.assertNotIn("PYTHONPATH", self.agent.WORKER_PLAN_ENV_PASSLIST)
+        self.assertNotIn("PYTHONPATH", self.agent.TOOL_HOME_REDIRECTS)
+        self.assertIn("PYTHONUSERBASE", self.agent.TOOL_HOME_REDIRECTS)
+
+    def test_a_site_that_is_not_a_real_dir_under_HOME_is_never_set(self):
+        link = os.path.join(self.home, "link")
+        os.symlink(self.site, link)
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        outside = os.path.join(elsewhere, "site-packages")
+        os.makedirs(outside)
+        # a HOME-level parent that is a symlink, escaping HOME or not: the leaf
+        # exists through it, and only the realpath check may catch that
+        home2 = os.path.join(self.tmp, "home2")
+        os.mkdir(home2)
+        os.symlink(elsewhere, os.path.join(home2, ".local"))
+        escaping = os.path.join(home2, ".local", "lib", "python3", "sp")
+        os.makedirs(os.path.join(elsewhere, "lib", "python3", "sp"))
+        for bad in (link, outside, os.path.join(self.home, "gone", "site-packages"),
+                    self.home, escaping):
+            env, _ = self.seat(site=bad)
+            self.assertNotIn("PYTHONPATH", env, bad)
+
+    @unittest.skipIf(os.name == "nt", "mode bits and group membership; POSIX only")
+    def test_a_site_writable_by_other_hands_is_never_set(self):
+        # world-write is refused outright; group-write only when the group is not our
+        # own empty one — 0775 with an empty group is the accepted case below.
+        for mode, members in ((0o777, ""), (0o775, "intruder"), (0o770, "intruder")):
+            shared = os.path.join(self.home, "shared%d" % mode)
+            os.makedirs(shared, 0o755)
+            os.chmod(shared, mode)
+            env, _ = self.seat(site=shared, gr_mem=members)
+            self.assertNotIn("PYTHONPATH", env, "%s %s" % (oct(mode), members))
+
+        # a group database this host cannot read is a refusal, never a crash
+        def raiser(gid):
+            raise KeyError(gid)
+        self.assertNotIn("PYTHONPATH", self.seat(site=os.path.join(
+            self.home, "shared770"), gr_mem=raiser)[0])
+
+    def test_a_real_subprocess_reads_the_site_and_writes_only_the_toolhome(self):
+        with io.open(os.path.join(self.site, "fakepytestmod.py"), "w",
+                     encoding="utf-8") as fh:
+            fh.write("version = '1'\n")
+        toolhome = os.path.join(self.tmp, "sb.toolhome", "pythonuserbase")
+        env, _ = self.seat()
+        env = dict(env, PYTHONUSERBASE=toolhome)
+        probe = ("import fakepytestmod, os, site, sys;"
+                 "os.makedirs(os.path.join(site.USER_BASE, 'lib'), exist_ok=True);"
+                 "sys.stdout.write('MOD=' + fakepytestmod.__file__ +"
+                 " '\\nBASE=' + site.USER_BASE + '\\n')")
+        got = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                             text=True, env=env)
+        self.assertEqual(0, got.returncode, got.stderr)
+        self.assertEqual("MOD=%s\nBASE=%s\n" % (os.path.join(self.site, "fakepytestmod.py"),
+                                                toolhome), got.stdout,
+                         "the module must come from the read-only site and a "
+                         "pip --user write from the toolhome")
+        self.assertTrue(os.path.isdir(os.path.join(toolhome, "lib")))
+        self.assertEqual(set(), set(os.listdir(self.site)) -
+                         {"fakepytestmod.py", "__pycache__"},
+                         "a --user write landed in the read-only site, not the toolhome")
+
+    @unittest.skipIf(os.name == "nt", "mode bits and group membership; POSIX only")
+    def test_the_mode_pip_user_leaves_is_taken_when_the_group_holds_nobody_else(self):
+        # `pip install --user` under umask 002 leaves 0775, and the operator's own
+        # group is empty: that is the measured real site, and refusing it is the
+        # bug this task is about.
+        os.chmod(self.site, 0o775)
+        env, _ = self.seat()
+        self.assertEqual(self.site, env.get("PYTHONPATH"))
+
+
 if __name__ == "__main__":
     unittest.main()

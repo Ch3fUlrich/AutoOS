@@ -281,6 +281,7 @@ from pathlib import Path
 import shlex
 import shutil
 import signal
+import site
 import socket
 import stat
 import subprocess
@@ -2117,6 +2118,11 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     forced_home = plan.get("forced_home")
     if forced_home is not None and forced_home == toolhome_dir(str(plan.get("cwd", ""))):
         env["HOME"] = forced_home
+    # SEAT-PYTEST (P4): honoured only when the plan's key is exactly what this
+    # spawner recomputes now — a plan cannot write down a path of its own.
+    user_site = plan.get("user_site_path")
+    if user_site is not None and user_site == seat_user_site_path(src):
+        env["PYTHONPATH"] = user_site
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
     _drop_extra_git_config(env)
@@ -2402,6 +2408,63 @@ def redirect_tool_caches(env: dict, toolhome: str) -> None:
     decided by `forced_home` in the plan and applied in `worker_env`."""
     for name in TOOL_HOME_REDIRECTS:
         env[name] = os.path.join(toolhome, name.lower())
+
+
+# SEAT-PYTEST (AO-L2-SEAT-INTEGRITY P4, measured): the redirect above moves
+# PYTHONUSERBASE into the toolhome and `site.getusersitepackages()` with it — in an
+# --isolate seat `python3 -m pytest` printed "No module named pytest" (it lives in
+# ~/.local/lib/python3.X/site-packages), so no seat could RUN the tests it was told to
+# run. Writes stay redirected; the read side reopens for exactly ONE spawner-computed
+# directory. PYTHONPATH itself stays denied on both sides (FF1b): never a plan value,
+# never a caller value, only this revalidated one.
+def user_site_packages() -> str:
+    """The user site-packages dir `site` computes for THIS interpreter."""
+    return site.getusersitepackages()
+
+
+def qualified_user_site(user_site: str, home: str) -> str | None:
+    """`user_site` when it is safe to hand a seat read access to it, else None: a
+    real directory, no symlink anywhere up to HOME, a strict descendant of HOME, and
+    writable by nobody but the operator — a directory someone else can write is a
+    module the child would import, the exact exposure the denial is for."""
+    if not user_site or not home:
+        return None
+    user_site, home = os.path.abspath(user_site), os.path.abspath(home)
+    if user_site == home or not user_site.startswith(home + os.sep):
+        return None
+    # realpath resolves every component, so a HOME-level parent that is a symlink —
+    # escaping HOME or not — already failed the equality below.
+    if not os.path.isdir(user_site) or os.path.islink(user_site) or \
+            os.path.realpath(user_site) != user_site:
+        return None
+    if os.name == "nt":
+        return user_site
+    st = os.stat(user_site)
+    if st.st_mode & stat.S_IWOTH:
+        return None
+    if st.st_mode & stat.S_IWGRP:
+        # `pip install --user` under the common umask 002 leaves the real site 0775,
+        # so a flat "no group-write" would refuse the one directory this is for. It
+        # is safe exactly when the group is our own and empty of anyone else — that,
+        # not the mode bit, is the claim.
+        import grp
+        if (st.st_uid != os.getuid() or st.st_gid != os.getgid() or
+                grp.getgrgid(st.st_gid).gr_mem):
+            return None
+    return user_site
+
+
+def seat_user_site_path(base: dict | None = None) -> str | None:
+    """The one PYTHONPATH value a seat may get, or None — computed here and checked
+    against the HOME of the environment the seat is built from. Any failure to read
+    the interpreter or the group database is a None, never a raised error: a seat
+    brief that says its tests may not run beats a spawner that crashes."""
+    src = os.environ if base is None else base
+    try:
+        return qualified_user_site(user_site_packages(),
+                                   src.get("HOME") or os.path.expanduser("~"))
+    except Exception:
+        return None
 
 
 # TOOLWATCH (P3a): the well-known tool dirs under the REAL home, as the
@@ -6525,6 +6588,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # to hold is not a leg this lane routed, so the routed model wins. (G3, RWP3)
     env.update(clients.gemini_side_model_env(client.name, model))
     forced_home = None
+    user_site = None
     if args.isolate:
         if sandbox is None:
             # The readable prefix stays; the hex tail inside the run id is what
@@ -6573,6 +6637,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # in worker_env.
         _toolhome = toolhome_dir(sandbox["path"])
         redirect_tool_caches(env, _toolhome)
+        # SEAT-PYTEST (P4): the seat reads the user site back, read-only.
+        user_site = seat_user_site_path()
         if client.gateway:
             forced_home = _toolhome
     if sandbox is None and getattr(args, "review_base", None):
@@ -6706,6 +6772,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # TOOLHOME (P3a): the gateway client's HOME, applied by worker_env
             # only when it names this sandbox's own .toolhome sibling.
             "forced_home": forced_home,
+            # SEAT-PYTEST (P4): worker_env applies it only if it recomputes to this.
+            "user_site_path": user_site,
             "session_tag": tag}
 
 
