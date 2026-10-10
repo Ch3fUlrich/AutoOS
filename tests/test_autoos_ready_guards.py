@@ -18,6 +18,15 @@ import autoos_ready_guards as g  # noqa: E402
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]
 ALL_OK = [(n, "PASS") for n in SIX]
+# (P10 FILES-cap) The repo-root changelog is the ONE entry that does not count
+# toward the 3-file cap; THREE is a full cap of ordinary files.
+CHANGELOG = "CHANGELOG.md"
+THREE = ["tools/a.py", "tools/b.py", "tests/test_c.py"]
+# Paths that LOOK like the changelog but are not the exact repo-root name, so
+# each is an ordinary file and each completes a 4th counted entry.
+CHANGELOG_IMPOSTORS = ["docs/CHANGELOG.md", "CHANGELOG.md.bak", "changelog.md",
+                       "CHANGELOG.MD", "./docs/CHANGELOG.md", "CHANGELOG"]
+CAP_TEXT = ">3 files not counting CHANGELOG.md"
 
 
 def rendered(paths=PATHS):
@@ -295,6 +304,63 @@ class ReadyGuardsTests(unittest.TestCase):
         for text in texts:
             with self.assertRaises(g.GuardError):
                 g.brief_files(text)
+
+    def test_files_cap_exempts_only_the_exact_changelog_entry(self):
+        # (P10) The cap counts FILES entries other than the repo-root 'CHANGELOG.md'
+        # (after _files_item/exact_path normalisation, case-exact), so a lane that
+        # records its change can still touch 3 code files. Total entries stay
+        # bounded: at most one CHANGELOG.md survives the duplicate check, so the
+        # most a brief can spell is 4.
+        self.assertEqual(g.brief_files(files_line(THREE + [CHANGELOG])),
+                         THREE + [CHANGELOG])
+        self.assertEqual(g.brief_files(files_line([CHANGELOG] + THREE)),
+                         [CHANGELOG] + THREE)
+        # './' is the one normalisation exact_path applies, and the count reads the
+        # normalised name: './CHANGELOG.md' comes back as 'CHANGELOG.md'.
+        self.assertEqual(g.brief_files(files_line(THREE + ["./CHANGELOG.md"])),
+                         THREE + ["CHANGELOG.md"])
+
+    def test_files_cap_refuses_a_fourth_counted_file(self):
+        for paths in (THREE + ["tools/d.py"],                     # 4, none exempt
+                     THREE + [CHANGELOG, "docs/x.md"],            # 5 with CHANGELOG
+                     THREE + [CHANGELOG, CHANGELOG],              # dup CHANGELOG
+                     [CHANGELOG] + ["a.py", "b.py", "c.py", "d.py"]):
+            with self.subTest(paths=paths):
+                with self.assertRaises(g.GuardError):
+                    g.brief_files(files_line(paths))
+
+    def test_files_cap_refusal_names_the_cap_and_the_exemption(self):
+        for paths in (THREE + ["tools/d.py"], THREE + [CHANGELOG, "docs/x.md"]):
+            with self.subTest(paths=paths):
+                with self.assertRaises(g.GuardError) as cm:
+                    g.brief_files(files_line(paths))
+                self.assertIn(CAP_TEXT, str(cm.exception))
+                self.assertIn(CHANGELOG, str(cm.exception))
+
+    def test_changelog_look_alikes_count_as_ordinary_files(self):
+        # Case, a directory prefix and a suffix are all a DIFFERENT file on Linux:
+        # none of them is exempt, so 3 ordinary files + one of these is a 4th
+        # counted entry and the brief is refused.
+        for impostor in CHANGELOG_IMPOSTORS:
+            with self.subTest(impostor=impostor):
+                with self.assertRaises(g.GuardError) as cm:
+                    g.brief_files(files_line(THREE + [impostor]))
+                self.assertIn(CAP_TEXT, str(cm.exception))
+
+    def test_duplicate_changelog_entries_are_refused(self):
+        for dup in ([CHANGELOG, CHANGELOG], ["./CHANGELOG.md", "CHANGELOG.md"],
+                    ["CHANGELOG.md", "changelog.md"]):
+            with self.subTest(dup=dup):
+                with self.assertRaises(g.GuardError):
+                    g.brief_files(files_line(THREE[:1] + dup))
+
+    def test_changelog_exempt_entry_still_passes_the_scope_fence(self):
+        # The returned paths keep the exemption name, so a lane that wrote the
+        # changelog is not a scope violation.
+        allowed = g.brief_files(files_line(THREE + [CHANGELOG]))
+        self.assertEqual(g.scope_fence(THREE + [CHANGELOG], allowed), [])
+        self.assertEqual(g.scope_fence(["docs/CHANGELOG.md"], allowed),
+                         ["docs/CHANGELOG.md"])
 
     def test_scope_fence_flags_every_unlisted_path(self):
         for path in BAD + OUT:
