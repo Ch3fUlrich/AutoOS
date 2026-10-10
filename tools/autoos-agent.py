@@ -1926,6 +1926,11 @@ TOOL_HOME_REDIRECTS = ("ANSIBLE_HOME", "ANSIBLE_LOCAL_TEMP", "ANSIBLE_REMOTE_TEM
                        "ANSIBLE_COLLECTIONS_PATH", "PIP_CACHE_DIR", "npm_config_cache",
                        "CARGO_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME",
                        "PYTHONUSERBASE")
+# The TWO sandbox-private siblings of a seat clone, named once and read by
+# `toolhome_dir`, the plan, the `discard:` line and the leak filter (P3a-FIX).
+TOOLHOME_SUFFIX = ".toolhome"
+OPENCODE_DATA_SUFFIX = ".opencode-data"
+SANDBOX_PRIVATE_SUFFIXES = (TOOLHOME_SUFFIX, OPENCODE_DATA_SUFFIX)
 # And what the *plan* is allowed to add, on top of clearing the deny check. The
 # allowlist above only ever covered the caller's own exports: plan["env"] was
 # copied in behind it, so a builder that set PATH, LD_PRELOAD or PYTHONPATH
@@ -2109,7 +2114,7 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     # It is honoured only when it is exactly the sandbox's own `.toolhome`
     # sibling — the passlist gate on HOME itself stays the way it was.
     forced_home = plan.get("forced_home")
-    if forced_home is not None and forced_home == str(plan.get("cwd", "")) + ".toolhome":
+    if forced_home is not None and forced_home == toolhome_dir(str(plan.get("cwd", ""))):
         env["HOME"] = forced_home
     for n, v in WORKER_GIT_GUARDS:
         env[n] = v
@@ -2381,7 +2386,7 @@ def provision_worker_dirs(env: dict) -> bool:
 def toolhome_dir(sandbox_path: str) -> str:
     """The sandbox-private tool-cache home: a sibling of the clone, removed
     with it (the `discard:` line names both), created 0700 by the provisioner."""
-    return sandbox_path + ".toolhome"
+    return sandbox_path + TOOLHOME_SUFFIX
 
 
 def redirect_tool_caches(env: dict, toolhome: str) -> None:
@@ -6524,7 +6529,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # opencode keys a project by its root commit and remembers the root it
             # saw first; a private data dir keeps the clone from inheriting the
             # main checkout's recorded root.
-            env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
+            env["XDG_DATA_HOME"] = sandbox["path"] + OPENCODE_DATA_SUFFIX
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
                                                    os.environ.get("AUTOOS_TASK_DIR"))
         # TOOLHOME (P3a): an --isolate worker writes its tool caches under the
@@ -8890,12 +8895,14 @@ def _porcelain_path_is_logs(p: str) -> bool:
 
 
 def _porcelain_path_is_sandbox(p: str, rel: str) -> bool:
-    """True when a porcelain path (quoted or not) is the seat tree itself,
-    anything under it, or one of its sandbox-private siblings (`<seat>.toolhome`,
-    `<seat>.opencode-data`) — the dot prefix is the sibling rule. A name that
-    merely shares a stem (`<seat>-notes.txt`) is NOT sandbox-side."""
+    """True when a porcelain path (quoted or not) is the seat tree, anything under
+    it, or one of the TWO siblings named in SANDBOX_PRIVATE_SUFFIXES — exact, never
+    by dot: `<seat>.anything` and `<seat>.toolhome-evil` are parent writes (P3a-FIX)."""
     p = p.strip().strip('"').rstrip("/")
-    return p == rel or p.startswith(rel + "/") or p.startswith(rel + ".")
+    if p == rel or p.startswith(rel + "/"):
+        return True
+    return any(p == rel + s or p.startswith(rel + s + "/")
+               for s in SANDBOX_PRIVATE_SUFFIXES)
 
 
 def _sandbox_rel(root: str, sandbox: str | None) -> str | None:
@@ -12729,9 +12736,9 @@ def cmd_run(args, cfg: dict) -> int:
                           % (q, rest.split()[0]))
         # TOOLHOME (P3a): the sandbox-private toolhome is removed with the
         # sandbox, like the opencode data dir beside it.
-        extra = " " + shlex.quote(sb["path"] + ".toolhome")
+        extra = " " + shlex.quote(toolhome_dir(sb["path"]))
         if client.name == "opencode":
-            extra += " " + shlex.quote(sb["path"] + ".opencode-data")
+            extra += " " + shlex.quote(sb["path"] + OPENCODE_DATA_SUFFIX)
         print("discard: rm -rf %s%s" % (q, extra))
         read_only = bool(plan["route"].get("read_only"))
         # SPAWNFIX3c (S2): only a read-only run is judged on an untouched

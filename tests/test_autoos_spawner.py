@@ -23909,6 +23909,24 @@ class SeatTreeLeakTests(unittest.TestCase):
         leak = self.agent.parent_leak(snap, self.root, sb)
         self.assertTrue(any("run-9-notes.txt" in ln for ln in leak), leak)
 
+    def test_only_the_two_named_private_siblings_subtract_from_the_leak(self):
+        """P3a-FIX: the sibling rule is the two NAMES, not the dot — subtracting
+        every `<seat>.*` hides `<seat>.toolhome-evil`, a parent write in a costume."""
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        leaks = ["run-9.anything", "run-9.toolhome-evil", "run-9.toolhomeX",
+                 "run-9.opencode-data2", "run-9-notes.txt", "run-90/leak.txt"]
+        private = ["run-9.toolhome/caches/blob.bin", "run-9.opencode-data/caches/blob.bin"]
+        for rel in leaks + private:
+            path = os.path.join(self.root, "state", "sandboxes", *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            io.open(path, "w", encoding="utf-8").write("x\n")
+        joined = "\n".join(self.agent.parent_leak(snap, self.root, sb))
+        for rel in leaks:
+            self.assertIn(rel, joined, "a write beside the seat must leak: %s" % rel)
+        for rel in private:
+            self.assertNotIn(rel, joined, "sandbox-private state is not a leak: %s" % rel)
+
 
 class ToolHomeRedirectTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P3a (a): measured — a qwen seat ran
@@ -23931,6 +23949,19 @@ class ToolHomeRedirectTests(unittest.TestCase):
         for name in self.agent.TOOL_HOME_REDIRECTS:
             self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST,
                           "%s is redirected, but the plan guard would refuse it" % name)
+        # The other direction (P3a-FIX): every sibling the tuple names is subtracted
+        # by the filter, and a plan env name bound into the seat is a redirect.
+        for suffix in self.agent.SANDBOX_PRIVATE_SUFFIXES:
+            for leaf in (suffix, suffix + "/blob.bin"):
+                self.assertTrue(self.agent._porcelain_path_is_sandbox("run-9" + leaf, "run-9"),
+                                "the filter does not subtract its own sibling: %s" % leaf)
+        src = io.open(AGENT, encoding="utf-8").read()
+        seat_bound = re.findall('env\\[("[A-Z_]+")\\] = [^\\n]*(?:toolhome|opencode)', src, re.I)
+        for expr in seat_bound or self.fail("the plan binds no seat-private env name"):
+            name = expr.strip('"')
+            self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST, name)
+            self.assertTrue(name in self.agent.TOOL_HOME_REDIRECTS or name == "XDG_DATA_HOME",
+                            "%s is bound into the seat but is not a redirect" % name)
 
     def test_redirect_tool_caches_names_every_cache_under_the_toolhome(self):
         env = {}
