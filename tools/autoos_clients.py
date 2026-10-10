@@ -9,6 +9,8 @@ agy and qoder cannot use the gateway: they run on their own account login.
 
 Permission levels map onto each CLI's own modes:
     read  - role=review: plan / read-only, no edits
+    seat  - an --isolate read run: the same reviewer, in a private clone it is
+            allowed to write its report into (see `seat_level`)
     edit  - the default (--auto): file edits approved, shell asks (and so
             fails headless) unless the CLI's sandbox allows it
     ask   - --no-auto: the CLI's default prompting
@@ -54,7 +56,12 @@ CLIENTS = {c.name: c for c in (
            "tier agents from opencode.jsonc; --isolate adds the outside-path fence"),
     Client("claude", "claude", True, False, True, "claude login (subscription)",
            "-p headless; --joinable = --bg --remote-control session",
-           modes={"read": ["--permission-mode", "plan"], "edit": ["--permission-mode", "acceptEdits"]}),
+           modes={"read": ["--permission-mode", "plan"],
+                  # AO-L2-SEAT-INTEGRITY P3b (measured, run 20261009-165450-mem-tools-
+                  # sonnet-68764c): a review SEAT in a private clone ran `plan` and could
+                  # not write its own REVIEW-FINDINGS.txt. `acceptEdits` writes in there.
+                  "seat": ["--permission-mode", "acceptEdits"],
+                  "edit": ["--permission-mode", "acceptEdits"]}),
     Client("qwen", "qwen", True, True, True, "AUTOOS_OMNIROUTE_KEY (omniroute run)",
            modes={"read": ["--approval-mode", "plan"], "edit": ["--approval-mode", "auto-edit"]}),
     Client("gemini", "gemini", True, True, False, "AUTOOS_OMNIROUTE_KEY (omniroute run)",
@@ -380,6 +387,23 @@ def gateway_header_args(client: Client, headers: dict | None) -> list:
 def gemini_custom_headers(headers: dict | None) -> str:
     """The GEMINI_CLI_CUSTOM_HEADERS value for these headers ('k:v' pairs)."""
     return ",".join("%s:%s" % (name, value) for name, value in (headers or {}).items())
+
+
+def seat_level(client: Client, level: str, isolate: bool = False,
+               read_only: bool = False) -> str:
+    """The mode level for one run: "seat" when `level` is a read run that may write.
+
+    A read run is a reviewer, and a reviewer that runs --isolate works in a private
+    clone: the sandbox confines its writes and the post-run leak check proves the parent
+    checkout stayed clean, so `plan` — a mode that cannot write its report at all — only
+    blocks the seat's deliverable. Two read runs keep `plan`: one NOT isolated, which
+    would otherwise edit the caller's checkout, and one marked --read-only, whose success
+    IS an unchanged sandbox. The seat is declared, never assumed: only a client row with
+    a "seat" mode gets one, so every other CLI's argv is unchanged by construction.
+    """
+    if level == "read" and isolate and not read_only and "seat" in client.modes:
+        return "seat"
+    return level
 
 
 def build_command(client: Client, task: str, combo: str | None, level: str,

@@ -52,6 +52,14 @@ def load_agent():
     return module
 
 
+def seat_sandboxes(names):
+    """The seat names from a `logs/sandboxes` listing: `<seat>.toolhome` and
+    `<seat>.opencode-data` are the run's private dirs beside the clone, not
+    clones themselves (P3a), so a test that expects its one sandbox strips them."""
+    return [n for n in names
+            if not (n.endswith(".toolhome") or n.endswith(".opencode-data"))]
+
+
 def allow_in_place(case, agent):
     """Neutralise the KEYDENY3g isolation gate for a test of something else.
 
@@ -5865,7 +5873,7 @@ class IsolateContainmentTests(unittest.TestCase):
 
     def lone_sandbox(self, statedir):
         base = os.path.join(statedir, "sandboxes")
-        names = os.listdir(base)
+        names = seat_sandboxes(os.listdir(base))
         self.assertEqual(len(names), 1, names)
         return os.path.join(base, names[0])
 
@@ -6862,7 +6870,7 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
          agent.LEGACY_OVERLAY_PATH, agent.PROVIDER_STATE_PATH) = (
             old_root, old_track, old_overlay, old_legacy, old_provider_state)
     base = os.path.join(statedir, "sandboxes")
-    names = os.listdir(base) if os.path.isdir(base) else []
+    names = (seat_sandboxes(os.listdir(base)) if os.path.isdir(base) else [])
     return rc, out.getvalue(), err.getvalue(), calls, names
 
 
@@ -15966,7 +15974,7 @@ class CommittedWorkNotANoOpTests(unittest.TestCase):
 
     def lone(self, state):
         base = os.path.join(state, "sandboxes")
-        names = os.listdir(base)
+        names = seat_sandboxes(os.listdir(base))
         self.assertEqual(len(names), 1, names)
         return os.path.join(base, names[0])
 
@@ -23839,6 +23847,424 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
                                          model_source=agent.WRITER_SOURCE_PIN)
         self.assertEqual(writer["provider"], "opencode")
         self.assertEqual(writer["model"], "gemini-3.8-flash")
+
+
+def seat_run_args(**kw):
+    """A hand-built `run` namespace for a seat plan: the flags build_plan reads."""
+    d = dict(client="claude", tier=3, card="role=review", auto=True,
+             task="review the diff", free=False, isolate=False, joinable=False,
+             model=None, clean=False, title=None, allow_training=False, max_depth=None,
+             lean=False, review_base=None, read_only=False, free_model=None)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+class ClaudeSeatModeTests(unittest.TestCase):
+    """P3b item 1 (measured, run 20261009-165450-mem-tools-sonnet-68764c): a claude
+    review SEAT ran in `plan` and could not write its own REVIEW-FINDINGS.txt. An
+    --isolate read run IS a seat, confined to its private clone by the sandbox and the
+    leak check, so it gets a mode that writes in there. `plan` stays for a run in the
+    caller's checkout and for --read-only, whose success is an unchanged sandbox."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"},
+                               "t3-reviewer": {"model": "omniroute/y"}},
+                    "providers": {"omniroute": {"models": {"x": {}, "y": {}}}}}
+
+    def _cmd(self, **kw):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"]
+
+    def test_an_isolated_review_seat_gets_the_writing_mode(self):
+        cmd = self._cmd(isolate=True)
+        self.assertEqual(["claude", "-p", "--permission-mode", "acceptEdits"], cmd[:4])
+        self.assertNotIn("plan", cmd)
+        # the seat's spawn deny list is unchanged by the mode it writes with
+        self.assertEqual(["--disallowed-tools", "Task", "Agent", "--"], cmd[-5:-1])
+
+    def test_a_review_in_the_callers_checkout_still_plans(self):
+        self.assertEqual(["claude", "-p", "--permission-mode", "plan"], self._cmd()[:4])
+
+    def test_a_read_only_seat_stays_plan_even_isolated(self):
+        # both spellings of a read-only review route: the flag, and a bare --tier 3
+        # seat with no card at all
+        for kw in ({"isolate": True, "read_only": True},
+                   {"isolate": True, "read_only": True, "card": None}):
+            with self.subTest(**kw):
+                self.assertEqual(["claude", "-p", "--permission-mode", "plan"],
+                                 self._cmd(**kw)[:4])
+
+    def test_no_other_client_gets_a_seat_mode(self):
+        # The mode is declared by the client row, so a client without one cannot gain
+        # it: every other CLI's read-run argv is byte-for-byte what it was.
+        task = "review the diff"
+        expect = {
+            "qoder": ["qodercli", "-p", "--permission-mode", "dont_ask",
+                      "--model", clients.QODER_DEFAULT_MODEL, task],
+            "qwen": ["omniroute", "run", "qwen", "--model", "l3-driver",
+                     "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                     "--approval-mode", "plan", "-p", task],
+            "gemini": ["omniroute", "run", "gemini", "--model", "l3-driver",
+                       "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                       "--skip-trust", "--approval-mode", "plan", "-p", task],
+            "codex": ["omniroute", "run", "codex", "--model", "l3-driver",
+                      "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                      "exec", "--sandbox", "read-only", "--skip-git-repo-check", task],
+        }
+        for name, argv in sorted(expect.items()):
+            client = clients.CLIENTS[name]
+            got = clients.seat_level(client, "read", isolate=True, read_only=False)
+            self.assertEqual("read", got, name)
+            self.assertEqual(argv, clients.build_command(client, task, "l3-driver", got),
+                             name)
+
+
+class SeatDepsNoteTests(unittest.TestCase):
+    """P3b item 2 (measured): a seat sandbox had no `mcp`, so the project tests it was
+    told to run could not run and the seat said nothing. The brief says it — a report,
+    never an install."""
+
+    LINE = "project tests unrunnable: missing python modules: mcp"
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.cfg = {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                    "providers": {"omniroute": {"models": {"x": {}}}}}
+
+    def _absent(self, name):
+        return None if name == "mcp" else object()
+
+    def _prompt(self, **kw):
+        kw.update(client="opencode", tier=2, isolate=True, review_base="HEAD")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            return self.cli.build_plan(seat_run_args(**kw), self.cfg)["cmd"][-1]
+
+    def test_the_note_names_exactly_the_missing_modules(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: None):
+            self.assertEqual(self.LINE, self.cli.seat_deps_note())
+            self.assertEqual("project tests unrunnable: missing python modules: mcp, yaml",
+                             self.cli.seat_deps_note(modules=("mcp", "yaml")))
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            self.assertEqual("", self.cli.seat_deps_note())
+
+    def test_a_find_spec_that_raises_reads_as_missing_not_as_a_crash(self):
+        # importlib raises for a missing PARENT package of a dotted name; a seat brief
+        # is never worth a traceback in the spawner.
+        def raiser(name):
+            raise ImportError(name)
+        with mock.patch.object(self.cli.importlib.util, "find_spec", raiser):
+            self.assertIn("mcp", self.cli.seat_deps_note())
+
+    def test_a_seat_brief_says_its_tests_cannot_run_once(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            prompt = self._prompt()
+        self.assertEqual(1, prompt.count(self.LINE), prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_a_seat_brief_stays_clean_when_the_modules_are_present(self):
+        with mock.patch.object(self.cli.importlib.util, "find_spec", lambda name: object()):
+            prompt = self._prompt()
+        self.assertNotIn("project tests unrunnable", prompt)
+        self.assertIn("You are an independent review seat", prompt)
+
+    def test_the_note_is_a_seat_brief_line_and_not_an_implement_prefix(self):
+        # Only the --review-base review seat is briefed with it; a writer with the same
+        # --review-base keeps P1's plain prefix.
+        with mock.patch.object(self.cli.importlib.util, "find_spec", self._absent):
+            self.assertNotIn("project tests unrunnable", self._prompt(card=None))
+
+
+class SeatTreeLeakTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (b): the measured LEAK-FP. The porcelain leg of
+    the leak check compared the WHOLE parent checkout against the snapshot —
+    including the run's own seat. The sandbox tree collapses into one porcelain
+    entry (a nested repository is listed as a directory even under
+    `--untracked-files=all`), but its sandbox-private siblings
+    (`<sandbox>.toolhome`, `<sandbox>.opencode-data`) expand file-by-file, so
+    sandbox-private writes read as "changed tracked paths in the parent
+    checkout" the moment the state tree sat inside the parent checkout without
+    being git-ignored. The verdict must subtract the seat's own tree(s):
+    sandbox-private writes never count as a parent leak, real parent writes
+    still do."""
+
+    WORKER_EMAIL = "autoos-worker@users.noreply.github.com"
+    WORKER_ID = ["-c", "user.name=autoos-worker", "-c", "user.email=" + WORKER_EMAIL]
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def git(self, *args, **kw):
+        return subprocess.run(
+            ["git", "-C", kw.get("cwd") or self.root, *args],
+            capture_output=True, text=True, check=True).stdout.strip()
+
+    def make_seat(self, rel):
+        """The layout `isolate_clone` makes AFTER the parent snapshot: a fresh
+        repository with one base commit, inside the parent checkout at `rel`."""
+        sb = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(sb)
+        self.git("init", "-q", ".", cwd=sb)
+        with open(os.path.join(sb, "base.txt"), "w", encoding="utf-8") as fh:
+            fh.write("base\n")
+        self.git("add", ".", cwd=sb)
+        self.git(*self.WORKER_ID, "commit", "-qm", "sandbox base", cwd=sb)
+        return sb
+
+    def test_writes_inside_the_seat_tree_are_not_parent_leaks(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        # The worker's own work: a commit inside its seat...
+        with open(os.path.join(sb, "work.txt"), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        self.git("add", "work.txt", cwd=sb)
+        self.git(*self.WORKER_ID, "commit", "-qm", "worker change", cwd=sb)
+        # ... and the sandbox-private siblings — not repositories, so the
+        # parent's porcelain expands every one of their files.
+        for name in (".toolhome", ".opencode-data"):
+            d = sb + name
+            os.makedirs(os.path.join(d, "caches"))
+            with open(os.path.join(d, "caches", "blob.bin"), "w",
+                      encoding="utf-8") as fh:
+                fh.write("cache\n")
+        self.assertEqual([], self.agent.parent_leak(snap, self.root, sb))
+
+    def test_a_real_parent_write_beside_the_seat_tree_is_still_a_leak(self):
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        with open(os.path.join(self.root, "stray.txt"), "w", encoding="utf-8") as fh:
+            fh.write("leak\n")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("stray.txt" in ln for ln in leak), leak)
+        # A path that merely SHARES the seat's prefix is not the seat: the
+        # subtraction must be exact (the seat, inside it, its private dots).
+        with open(os.path.join(self.root, "state", "sandboxes",
+                               "run-9-notes.txt"), "w", encoding="utf-8") as fh:
+            fh.write("worker\n")
+        leak = self.agent.parent_leak(snap, self.root, sb)
+        self.assertTrue(any("run-9-notes.txt" in ln for ln in leak), leak)
+
+    def test_only_the_two_named_private_siblings_subtract_from_the_leak(self):
+        """P3a-FIX: the sibling rule is the two NAMES, not the dot — subtracting
+        every `<seat>.*` hides `<seat>.toolhome-evil`, a parent write in a costume."""
+        snap = self.agent.parent_snapshot(self.root)
+        sb = self.make_seat("state/sandboxes/run-9")
+        leaks = ["run-9.anything", "run-9.toolhome-evil", "run-9.toolhomeX",
+                 "run-9.opencode-data2", "run-9-notes.txt", "run-90/leak.txt"]
+        private = ["run-9.toolhome/caches/blob.bin", "run-9.opencode-data/caches/blob.bin"]
+        for rel in leaks + private:
+            path = os.path.join(self.root, "state", "sandboxes", *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            io.open(path, "w", encoding="utf-8").write("x\n")
+        joined = "\n".join(self.agent.parent_leak(snap, self.root, sb))
+        for rel in leaks:
+            self.assertIn(rel, joined, "a write beside the seat must leak: %s" % rel)
+        for rel in private:
+            self.assertNotIn(rel, joined, "sandbox-private state is not a leak: %s" % rel)
+
+
+class ToolHomeRedirectTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (a): measured — a qwen seat ran
+    `ansible-galaxy collection install ansible.posix` and wrote to ~/.ansible,
+    outside its --isolate sandbox: HOME and the tool caches are inherited.
+    Every cache a worker can write goes into a sandbox-private
+    `<sandbox>.toolhome`; HOME itself only for a gateway client, whose login
+    does not live there."""
+
+    EXPECTED = ("ANSIBLE_HOME", "ANSIBLE_LOCAL_TEMP", "ANSIBLE_REMOTE_TEMP",
+                "ANSIBLE_COLLECTIONS_PATH", "PIP_CACHE_DIR", "npm_config_cache",
+                "CARGO_HOME", "UV_CACHE_DIR", "XDG_CACHE_HOME", "PYTHONUSERBASE")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_the_redirect_set_and_the_plan_passlist_cannot_drift(self):
+        self.assertEqual(set(self.EXPECTED), set(self.agent.TOOL_HOME_REDIRECTS))
+        for name in self.agent.TOOL_HOME_REDIRECTS:
+            self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST,
+                          "%s is redirected, but the plan guard would refuse it" % name)
+        # The other direction (P3a-FIX): every sibling the tuple names is subtracted
+        # by the filter, and a plan env name bound into the seat is a redirect.
+        for suffix in self.agent.SANDBOX_PRIVATE_SUFFIXES:
+            for leaf in (suffix, suffix + "/blob.bin"):
+                self.assertTrue(self.agent._porcelain_path_is_sandbox("run-9" + leaf, "run-9"),
+                                "the filter does not subtract its own sibling: %s" % leaf)
+        src = io.open(AGENT, encoding="utf-8").read()
+        seat_bound = re.findall('env\\[("[A-Z_]+")\\] = [^\\n]*(?:toolhome|opencode)', src, re.I)
+        for expr in seat_bound or self.fail("the plan binds no seat-private env name"):
+            name = expr.strip('"')
+            self.assertIn(name, self.agent.WORKER_PLAN_ENV_PASSLIST, name)
+            self.assertTrue(name in self.agent.TOOL_HOME_REDIRECTS or name == "XDG_DATA_HOME",
+                            "%s is bound into the seat but is not a redirect" % name)
+
+    def test_redirect_tool_caches_names_every_cache_under_the_toolhome(self):
+        env = {}
+        self.agent.redirect_tool_caches(env, "/sb.toolhome")
+        for name in self.EXPECTED:
+            self.assertEqual(os.path.join("/sb.toolhome", name.lower()), env[name])
+
+    def scrub(self, plan_env, forced_home=None):
+        out = io.StringIO()
+        plan = {"cwd": "/sb", "env": plan_env}
+        if forced_home is not None:
+            plan["forced_home"] = forced_home
+        base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "t",
+                "XDG_CACHE_HOME": "/home/tester/.cache"}
+        with contextlib.redirect_stderr(out):
+            env = self.agent.worker_env(plan, None, base=base)
+        return env, out.getvalue()
+
+    def test_the_redirected_caches_reach_the_child_and_refuse_nothing(self):
+        plan_env = {n: os.path.join("/sb.toolhome", n.lower())
+                    for n in self.agent.TOOL_HOME_REDIRECTS}
+        env, err = self.scrub(plan_env)
+        self.assertEqual("", err, "a passlisted redirect must not be announced")
+        for name in self.EXPECTED:
+            self.assertEqual(plan_env[name], env[name], name)
+        # the operator's own XDG_CACHE_HOME must not beat the redirect
+        self.assertEqual("/sb.toolhome/xdg_cache_home", env["XDG_CACHE_HOME"])
+
+    def test_home_stays_the_operators_for_an_own_account_worker(self):
+        env, err = self.scrub({})
+        self.assertEqual("/home/tester", env["HOME"])
+        self.assertEqual("", err)
+
+    def test_a_gateway_plan_homes_its_worker_in_the_toolhome(self):
+        env, err = self.scrub({}, forced_home="/sb.toolhome")
+        self.assertEqual("/sb.toolhome", env["HOME"])
+        self.assertEqual("", err)
+
+    def test_a_forced_home_that_is_not_the_sandbox_sibling_is_ignored(self):
+        for evil in ("/home/tester", "/evil.toolhome", "/sb.toolhome.evil"):
+            env, _ = self.scrub({}, forced_home=evil)
+            self.assertEqual("/home/tester", env["HOME"], evil)
+
+    @unittest.skipIf(os.name == "nt", "mode bits; POSIX only")
+    def test_provision_worker_dirs_makes_the_toolhome_and_caches_0700(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        toolhome = os.path.join(tmp, "sb.toolhome")
+        env = {"XDG_RUNTIME_DIR": os.path.join(tmp, "rt"),
+               "XDG_CONFIG_HOME": os.path.join(tmp, "cf"),
+               "ANSIBLE_HOME": os.path.join(toolhome, "ansible_home"),
+               "PIP_CACHE_DIR": os.path.join(toolhome, "pip_cache_dir")}
+        self.assertTrue(self.agent.provision_worker_dirs(env))
+        for path in (toolhome, env["ANSIBLE_HOME"], env["PIP_CACHE_DIR"]):
+            self.assertTrue(os.path.isdir(path), path)
+            self.assertEqual(0o700, os.lstat(path).st_mode & 0o777, path)
+
+
+class OutsideWriteWatchTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P3a (2): a tool write that lands under the real
+    HOME is invisible to the parent leak check — it is outside both trees. The
+    well-known tool directories are stat'd before and after an --isolate run;
+    a changed one is named on one WARNING line and in the run record, and it
+    never changes the exit code. Reads are stat-only: never opened, never a
+    symlink followed, never a traceback."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def watch(self):
+        return self.agent.tool_watch_paths(self.home)
+
+    def test_the_watch_set_names_the_measured_tool_dirs(self):
+        rel = sorted(p[len(self.home) + 1:].replace(os.sep, "/")
+                     for p in self.watch())
+        self.assertEqual([".ansible", ".cache/pip", ".cache/uv",
+                          ".cargo/registry", ".local/lib", ".npm"], rel)
+
+    def test_a_write_under_a_watched_dir_is_named(self):
+        os.makedirs(os.path.join(self.home, ".ansible"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        with open(os.path.join(self.home, ".ansible", "installed.yml"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\n")
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual(["~/.ansible"],
+                         self.agent.tool_watch_changes(before, after, self.home))
+
+    def test_a_tool_dir_created_by_the_run_is_named(self):
+        before = self.agent.tool_watch_snapshot(self.watch())
+        os.makedirs(os.path.join(self.home, ".npm"))
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual(["~/.npm"],
+                         self.agent.tool_watch_changes(before, after, self.home))
+
+    def test_untouched_dirs_are_quiet_and_names_never_carry_the_home(self):
+        os.makedirs(os.path.join(self.home, ".npm"))
+        snap = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(snap, snap, self.home))
+        os.makedirs(os.path.join(self.home, ".cargo", "registry"))
+        after = self.agent.tool_watch_snapshot(self.watch())
+        changes = self.agent.tool_watch_changes(snap, after, self.home)
+        self.assertEqual(["~/.cargo/registry"], changes)
+        for name in changes:
+            self.assertNotIn(self.home, name, "the warning line may not leak "
+                                              "the operator's absolute home")
+
+    @unittest.skipIf(os.name == "nt", "symlink semantics; POSIX only")
+    def test_a_symlinked_tool_dir_is_statted_never_followed(self):
+        real = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, real, True)
+        os.symlink(real, os.path.join(self.home, ".ansible"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        with open(os.path.join(real, "through-the-link.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("x\n")
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+    @unittest.skipIf(os.name == "nt", "mkfifo; POSIX only")
+    def test_a_fifo_at_a_watched_path_is_statted_never_opened(self):
+        os.mkfifo(os.path.join(self.home, ".npm"))
+        before = self.agent.tool_watch_snapshot(self.watch())
+        after = self.agent.tool_watch_snapshot(self.watch())
+        # an open() would block on a FIFO with no writer forever: completing at
+        # all is the proof the read is stat-only.
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "mode 000; POSIX, not root")
+    def test_an_unreadable_tool_dir_raises_nothing(self):
+        d = os.path.join(self.home, ".local", "lib")
+        os.makedirs(d)
+        os.chmod(d, 0o000)
+        self.addCleanup(os.chmod, d, 0o755)
+        before = self.agent.tool_watch_snapshot(self.watch())
+        after = self.agent.tool_watch_snapshot(self.watch())
+        self.assertEqual([], self.agent.tool_watch_changes(before, after, self.home))
+
+
+@unittest.skipIf(os.name == "nt", "write_kill_record is a no-op on nt")
+class OutsideWriteRecordTests(unittest.TestCase):
+    """The warning is for the terminal, the run record for the reviewer:
+    `outside_writes` merges into the runner's private record like `writer`
+    does — it is decided AFTER the run, so a later write must be able to set
+    it while the decided-at-spawn fields stay immutable."""
+
+    RUN_ID = "20261010-000000-seatint-f00001"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_outside_writes_merge_into_the_run_record(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.tmp}):
+            self.assertTrue(self.agent.write_kill_record(
+                self.RUN_ID, {"mode": "write"}))
+            self.assertTrue(self.agent.write_kill_record(
+                self.RUN_ID, {"outside_writes": ["~/.ansible"]}))
+            rec = self.agent.read_kill_record(self.RUN_ID)
+        self.assertEqual("write", rec["mode"])
+        self.assertEqual(["~/.ansible"], rec["outside_writes"])
 
 
 if __name__ == "__main__":
