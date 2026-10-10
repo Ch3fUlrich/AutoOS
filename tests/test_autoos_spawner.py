@@ -7107,6 +7107,193 @@ class ProviderStopFallthroughTests(unittest.TestCase):
                       out + err)
 
 
+class CooldownRetryTests(unittest.TestCase):
+    """AO-SPAWN-COOLDOWN-RETRY (S2, measured 2026-10-09T16:40Z: the two runs
+    logs/agents/20261009-164000-gw-strict-hex-seat1b-a859a4 and
+    20261009-164036-mem-tools-seat3-a51764, both --isolate reviews, both rc 1 in
+    under 90 s). The gateway answered a combo leg with its per-credential
+    cooldown — a line inside PROVIDER_STOP_MARKERS that states its own window —
+    and the run neither waited nor fell through. The stop WAS classified (the
+    output.log carries the `provider ... unavailable until` line only the
+    classified path prints); what never happened was a WAIT. A leg that says
+    "back in 3 seconds" is worth the same leg again after the window; a long or
+    unstated one is an outage to re-plan around. `cooldown_sleep` is patched
+    here, so no test in this class ever sleeps."""
+
+    # The last five lines of that output.log, bytes intact: the ESC-culled
+    # reset line, the two route marks that precede it (the real tail carried
+    # eleven) and the blank the client opens with.
+    REAL_TAIL = ("\x1b[0m\n"
+                 "> l1-orchestrator → l1-orchestrator\n"
+                 "> l1-orchestrator → l1-orchestrator\n"
+                 "\x1b[91m\x1b[1mError: \x1b[0mAll credentials for model "
+                 "deepseek/deepseek-v4-flash-0731free:free are cooling "
+                 "down%s\n")
+    STOPPED_LINE = ("Error: All credentials for model "
+                    "deepseek/deepseek-v4-flash-0731free:free are cooling down"
+                    " (reset after 3s)")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.sleeps = []
+
+    def _tail(self, window):
+        """The real line, stating `window` ("3s", "120s", None = unstated)."""
+        return self.REAL_TAIL % (" (reset after %s)" % window if window else "")
+
+    def _run(self, route_ids, stops, window="3s", **kw):
+        kw.setdefault("stop_rc", 1)  # the shape the field failed in
+        with mock.patch.object(self.agent, "cooldown_sleep", self.sleeps.append):
+            return _fallthrough_run(self, route_ids, stops,
+                                    stop_tail=self._tail(window), **kw)
+
+    def test_the_real_coloured_output_log_line_is_a_provider_stop(self):
+        # The cause check, on the bytes the two runs actually wrote: the ANSI
+        # colour/bold around "Error: " must not break the error-prefix rule, the
+        # stated window must read, and it must be a COOLDOWN rather than a rate
+        # limit (no " 429", no rate-limit wording — the digits sit in the model id).
+        line = self.agent.provider_stop(self._tail("3s"))
+        self.assertEqual(line, self.STOPPED_LINE)
+        self.assertTrue(self.agent.cooldown_stop(line))
+        self.assertEqual(self.agent.cooldown_wait(line), 3)
+        self.assertFalse(self.agent.rate_limit_stop(line))
+
+    def test_a_short_cooldown_waits_and_re_runs_the_same_route(self):
+        # ONE route in the registry: a re-plan has nowhere to go, so the only way
+        # this run reaches rc 0 is the same route again.
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free"], out + err)
+        self.assertEqual(calls["attempts"], [1, 2], "the retry is its own launch")
+        self.assertEqual(self.sleeps, [4], "the stated 3 s, plus one")
+        self.assertNotIn("falling through", out + err)
+
+    def test_a_second_cooldown_falls_through_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=2)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free", "r-cheap"],
+                         out + err)
+        self.assertEqual(self.sleeps, [4], "one wait for one retry, never a second")
+        self.assertIn("-> falling through to r-cheap", out + err)
+
+    def test_a_long_reset_never_waits_and_moves_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                           window="120s")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [], "minutes is an outage, not a nap")
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_an_unstated_cooldown_moves_to_the_next_route(self):
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                           window=None)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"], out + err)
+
+    def test_no_fallthrough_retries_the_same_leg_then_ends_on_the_stop_rc(self):
+        # The retry is not a re-plan, so --no-fallthrough keeps it; what it does
+        # refuse is the next route, so the cooled-down retry ends the run.
+        rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=2,
+                                           args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 2, "the retry, and nothing after it")
+        self.assertEqual(self.sleeps, [4])
+        self.assertEqual(rc, 8, out + err)
+        self.assertIn("--no-fallthrough", out + err)
+
+    def test_no_fallthrough_with_a_long_reset_ends_without_waiting(self):
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1, window="120s",
+                                           args_over={"no_fallthrough": True})
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(rc, 8, out + err)
+
+    def test_a_zero_second_reset_waits_a_beat_and_re_runs_the_same_route(self):
+        # A window the gateway rounds to nothing is still a cooldown: the run
+        # waits the stated 0 s plus the one beat it always adds, and retries.
+        rc, out, err, calls, _ = self._run(["r-free"], stops=1, window="0s")
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [1], "0 s stated, 1 s slept")
+        self.assertEqual(calls["route_marks"], ["r-free", "r-free"], out + err)
+
+    def test_a_reset_with_no_unit_or_a_huge_one_falls_through_without_waiting(self):
+        for window in ("7", "100000s"):
+            with self.subTest(window=window):
+                rc, out, err, calls, _ = self._run(["r-free", "r-cheap"], stops=1,
+                                                   window=window)
+                self.assertEqual(rc, 0, out + err)
+                self.assertEqual(self.sleeps, [])
+                self.assertEqual(calls["route_marks"], ["r-free", "r-cheap"],
+                                 out + err)
+
+
+class FreeCooldownReclaimTests(unittest.TestCase):
+    """AO-SPAWN-COOLDOWN-RETRY, the seat note the L1 confirmed as a real defect:
+    the same-leg retry `continue`s to the top of cmd_run's loop, and the free-slot
+    gate there reads `if args.free and fallthroughs:` — a retry spends no
+    fallthrough, so a --free retry started WITHOUT re-claiming a slot. This run's
+    own worker record is closed during the nap, so another --free run can take the
+    freed slot and the retry then runs as cap+1, over policy.free_concurrency. The
+    gate must run for a cooldown retry exactly as it does for a fallthrough."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+        self.sleeps = []
+
+    def _run(self, route_ids, stops, refuse_claim_at=None, free=True):
+        """The --free cooldown run, with the slot claim and the launch both
+        observed: `claims` records how many launches had happened each time the
+        gate ran, so an ordering claim is a data claim, not a reading of a log."""
+        claims, launches = [], []
+        real_record = self.agent._worker_record_start
+
+        def recording_record(plan, args, directory, attempt=None):
+            launches.append(attempt)
+            return real_record(plan, args, directory, attempt=attempt)
+
+        def fake_wait(provider, cap, directory, **k):
+            if len(claims) + 1 == refuse_claim_at:
+                return 1, True
+            claims.append(len(launches))
+            if k.get("on_free") is not None:
+                k["on_free"]()
+            return 0, False
+
+        over = {"free": free, "free_model": FREE_MODELS[1], "isolate": True}
+        with mock.patch.object(self.agent, "cooldown_sleep", self.sleeps.append):
+            with mock.patch.object(self.agent, "_worker_record_start",
+                                   recording_record):
+                with mock.patch.object(self.agent, "wait_for_free_slot", fake_wait):
+                    rc, out, err, calls, _ = _fallthrough_run(
+                        self, route_ids, stops, args_over=over,
+                        stop_tail=CooldownRetryTests.REAL_TAIL % " (reset after 3s)",
+                        stop_rc=1,
+                        policy={"free_client_models": {"opencode": FREE_MODELS}})
+        return rc, out, err, calls, claims, launches
+
+    def test_the_free_retry_re_claims_its_slot_before_it_launches(self):
+        rc, out, err, calls, claims, launches = self._run(["r-free"], stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.sleeps, [4], out + err)
+        self.assertEqual(claims, [0, 1],
+                         "a second claim, after launch 1 and before launch 2")
+        self.assertEqual(launches, [1, 2], out + err)
+
+    def test_a_free_retry_that_cannot_re_claim_a_slot_exits_9_without_launching(self):
+        rc, out, err, calls, claims, launches = self._run(
+            ["r-free"], stops=1, refuse_claim_at=2)
+        self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
+        self.assertEqual(launches, [1], "the retry never started")
+        self.assertEqual(claims, [0])
+
+    def test_a_non_free_retry_never_touches_the_free_slot_gate(self):
+        rc, out, err, calls, claims, launches = self._run(
+            ["r-free"], stops=1, free=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(claims, [], "no claim, before or after the retry")
+        self.assertEqual(launches, [1, 2], out + err)
+
+
 FREE_MODELS = ["opencode/nemotron-3-ultra-free",
                "opencode/muse-spark-1.3-contributor-free",
                "opencode/mimo-v2.6-flash-free"]
@@ -16817,6 +17004,215 @@ class FamilyFenceServingModelTests(unittest.TestCase):
         self.assertIn("use --free or pin --model outside family nvidia", err)
 
 
+class FamilyFencePinnedModelTests(unittest.TestCase):
+    """AO-FAMILYFENCE-QWEN (S1): the fence excludes ONLY the families it names.
+
+    Measured on the branch: `--tier=3 --not-family qwen --model
+    omniroute/deepseek-direct-flash` exited 12 saying "no model outside family
+    qwen left". The pin's family is answered by the registry ROW alone
+    (`reviewer_family`), and an opencode-declared gateway model that has no row
+    answers None — which the review role's `strict` then read as INSIDE the fence.
+    Under a review every unrowed pin is inside every fence, so the fence refused
+    every model instead of the named family. The three routes below declare their
+    families as rows; the three pins name their family only inside their own id.
+    """
+
+    ROUTES = ["r-qwen", "r-deepseek", "r-nvidia"]
+    LEGS = {"r-qwen": ["qwen/qwen3.8-27b"],
+            "r-deepseek": ["deepseek/deepseek-v4.1-flash"],
+            "r-nvidia": ["nvidia/nemotron-3-ultra"]}
+    FAMILIES = {"qwen3.8-27b": "qwen", "deepseek-v4.1-flash": "deepseek",
+                "nemotron-3-ultra": "nvidia"}
+    PINS = {"qwen": "omniroute/qwen-direct-3.8",
+            "deepseek": "omniroute/deepseek-direct-flash",
+            "nvidia": "omniroute/nemotron-direct-ultra"}
+    # F3/F4: an unrowed pin that names TWO vendors is not one family or the
+    # other; the fence must call it unplaceable, not read the longer token.
+    MULTI_VENDOR_PINS = ["omniroute/deepseek-r1-distill-qwen-32b",
+                         "nvidia/qwen3-nemotron"]
+    # F3: an unrowed pin that names no vendor at all — already unknown today,
+    # and the multi-vendor fix must not accidentally let these through either.
+    UNPLACEABLE_PIN = "omniroute/widget-9"
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _run(self, over, prepare=None):
+        args_over = {"card": "kind=review", "dry_run": True}
+        args_over.update(over)
+        return _fallthrough_run(self, self.ROUTES, 0, args_over=args_over,
+                                legs=self.LEGS, families=self.FAMILIES,
+                                prepare=prepare)
+
+    @staticmethod
+    def _writer_record(agent, statedir, root, family):
+        """The writer's runner-private record, written through the real store."""
+        assert agent.kill_store_dir() == os.path.join(statedir, "kill"), \
+            "prepare() must run inside the test's own AUTOOS_STATE_DIR"
+        agent.write_kill_record(FENCE_WRITER_RUN, {
+            "mode": "write",
+            "writer": {"provider": family, "model": "%s-direct-1" % family,
+                       "family": family}})
+
+    def test_the_fence_judges_a_pin_by_the_family_its_id_names(self):
+        # The root cause, asked of the one predicate every path reads: a pin whose
+        # family the id names sits inside ONLY the fence that names that family.
+        registry = _fallthrough_registry(self.ROUTES, legs=self.LEGS,
+                                         families=self.FAMILIES)
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        for family, pin in self.PINS.items():
+            self.assertEqual(self.agent.fence_blocks_model(pin, registry, fence),
+                             family == "qwen", pin)
+
+    def test_a_pin_outside_the_fence_serves_a_tier3_review(self):
+        for fenced, other in [("qwen", "deepseek"), ("deepseek", "nvidia"),
+                              ("nvidia", "qwen")]:
+            with self.subTest(fence=fenced, pin=other):
+                rc, out, err, _calls, _ = self._run(
+                    {"tier": 3, "card": None, "model": self.PINS[other],
+                     "not_family": [fenced]})
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("FAMILYFENCE", out + err)
+                self.assertIn("--model %s" % self.PINS[other], out)
+
+    def test_a_pin_inside_the_fence_is_refused_at_tier3(self):
+        for fenced, pin in self.PINS.items():
+            with self.subTest(fence=fenced):
+                rc, out, err, _calls, _ = self._run(
+                    {"tier": 3, "card": None, "model": pin,
+                     "not_family": [fenced]})
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family %s left" % fenced, err)
+
+    def test_a_pin_outside_the_fence_serves_a_review_card(self):
+        # Both card paths, not just --tier: v2 goes through the resolver, v1
+        # through select_combo, and both call the same predicate on the pin.
+        for card in ("kind=review", "role=review"):
+            for fenced, other in [("qwen", "nvidia"), ("nvidia", "deepseek")]:
+                with self.subTest(card=card, fence=fenced):
+                    rc, out, err, _calls, _ = self._run(
+                        {"card": card, "model": self.PINS[other],
+                         "not_family": [fenced]})
+                    self.assertEqual(rc, 0, out + err)
+                    self.assertNotIn("FAMILYFENCE", out + err)
+                    self.assertIn("--model %s" % self.PINS[other], out)
+
+    def test_a_pin_inside_the_fence_is_refused_for_a_review_card(self):
+        for fenced, pin in self.PINS.items():
+            with self.subTest(card="kind=review", fence=fenced):
+                rc, out, err, _calls, _ = self._run(
+                    {"card": "kind=review", "model": pin, "not_family": [fenced]})
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family %s left" % fenced, err)
+
+    def test_an_unpinned_review_plan_carries_no_fenced_leg(self):
+        # The fence still costs what it used to cost: a plan picks a route whose
+        # legs all sit outside it, and never announces the fenced one.
+        for fenced in self.FAMILIES.values():
+            with self.subTest(fence=fenced):
+                rc, out, err, _calls, _ = self._run({"not_family": [fenced]})
+                self.assertEqual(rc, 0, out + err)
+                self.assertNotIn("route: r-%s " % fenced, out)
+                self.assertIn("route: r-", out)
+
+    @unittest.skipIf(os.name == "nt", "the kill record the fence reads is POSIX-only")
+    def test_the_review_of_path_still_fences_the_writers_family(self):
+        # Unchanged by the fix: `--review-of` names the writer, and a pin of that
+        # family is refused while a pin of any other family runs.
+        for pin_family, expect_rc in [("deepseek", self.agent.EXIT_NO_OTHER_FAMILY),
+                                      ("nvidia", 0)]:
+            with self.subTest(pin=pin_family):
+                rc, out, err, _calls, _ = self._run(
+                    {"model": self.PINS[pin_family], "review_of": FENCE_WRITER_RUN},
+                    prepare=lambda s, r: self._writer_record(self.agent, s, r,
+                                                             "deepseek"))
+                self.assertEqual(rc, expect_rc, out + err)
+
+    def test_the_fence_refuses_a_pin_whose_id_names_two_vendors(self):
+        # S1 review F1/F4: an unrowed id that names MORE THAN ONE known vendor is
+        # unplaceable — the fence must not read the longer token and let it slip
+        # through the shorter family's fence (`deepseek-r1-distill-qwen-32b`
+        # read as deepseek under a qwen fence, `qwen3-nemotron` read as nvidia).
+        # So each is refused under both --not-family qwen and --not-family
+        # deepseek, while the single-vendor `deepseek-direct-flash` stays allowed.
+        registry = _fallthrough_registry(self.ROUTES, legs=self.LEGS,
+                                         families=self.FAMILIES)
+        for fenced in ("qwen", "deepseek"):
+            fence = {"families": [fenced], "review": True, "strict": True}
+            for pin in self.MULTI_VENDOR_PINS:
+                with self.subTest(fence=fenced, pin=pin):
+                    self.assertTrue(self.agent.fence_blocks_model(
+                        pin, registry, fence), pin)
+        qwen = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertFalse(self.agent.fence_blocks_model(
+            self.PINS["deepseek"], registry, qwen))
+
+    def test_an_unplaceable_pin_is_refused_at_tier3_and_for_a_review_card(self):
+        # S1 review F3: a pin no layer places (no registry row, no combo, no
+        # vendor word) is not "outside" the fence — a review still refuses it,
+        # across --tier=3 and both card paths, and the multi-vendor fix must not
+        # widen the escape hatch that nameless pins already had.
+        for over in ({"tier": 3, "card": None},
+                     {"card": "role=review"},
+                     {"card": "kind=review"}):
+            with self.subTest(**over):
+                rc, out, err, _calls, _ = self._run(
+                    dict(over, model=self.UNPLACEABLE_PIN, not_family=["qwen"]))
+                self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+                self.assertIn("no model outside family qwen left", err)
+
+    def test_a_nested_vendor_token_still_names_the_longer_family(self):
+        # S1 fix round 2 F1: `openai_oss` names TWO table tokens — `openai-oss`
+        # and `openai` — but the shorter span lies INSIDE the longer's, so the id
+        # names the provider-prefixed family; only DISJOINT spans stay unplaceable.
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        for pin in ("openai_oss", "omniroute/openai-oss-120b"):
+            with self.subTest(pin=pin):
+                self.assertEqual(self.agent.fence_family_of(pin, {}), "openai-oss")
+                self.assertFalse(self.agent.fence_blocks_model(pin, {}, fence))
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/deepseek-r1-distill-qwen-32b", {}))
+
+    def test_a_registry_route_is_never_read_by_its_own_name(self):
+        # S1 fix round 2 F2: a carried route whose legs span several families
+        # names NO family — the fence must not fall through and read the route's
+        # own name (`deepseek-mixed` would sit outside a qwen fence while its
+        # qwen leg serves it). Refused at the run level on the --tier=3 pin path.
+        routes = self.ROUTES + ["deepseek-mixed"]
+        legs = dict(self.LEGS, **{"deepseek-mixed": [self.LEGS["r-deepseek"][0],
+                                                     self.LEGS["r-qwen"][0]]})
+        registry = _fallthrough_registry(routes, legs=legs, families=self.FAMILIES)
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/deepseek-mixed", registry))
+        self.assertTrue(self.agent.fence_blocks_model(
+            "omniroute/deepseek-mixed", registry, fence))
+        rc, out, err, _calls, _ = _fallthrough_run(
+            self, routes, 0,
+            args_over={"tier": 3, "card": None,
+                       "model": "omniroute/deepseek-mixed", "not_family": ["qwen"]},
+            legs=legs, families=self.FAMILIES)
+        self.assertEqual(rc, self.agent.EXIT_NO_OTHER_FAMILY, out + err)
+        self.assertIn("no model outside family qwen left", err)
+
+    def test_a_multi_vendor_leg_is_not_read_by_the_longer_token(self):
+        # S1 fix round 2 F2 (the leg half): route_family on the FENCE path reads
+        # each leg with the fence's unique rule, so a route whose legs all read
+        # as deepseek under the longest token but for one multi-vendor id is
+        # unplaceable — while the record's default route_family read is unchanged.
+        legs = {"mixed-vendor": ["deepseek/deepseek-r1-distill-qwen-32b",
+                                 "deepseek/deepseek-v4.1-flash"]}
+        registry = _fallthrough_registry(["mixed-vendor"], legs=legs)
+        self.assertEqual(self.agent.route_family("mixed-vendor", registry),
+                         "deepseek")
+        fence = {"families": ["qwen"], "review": True, "strict": True}
+        self.assertIsNone(self.agent.fence_family_of(
+            "omniroute/mixed-vendor", registry))
+        self.assertTrue(self.agent.fence_blocks_model(
+            "omniroute/mixed-vendor", registry, fence))
+
+
 class FamilyFenceUnknownNameTests(unittest.TestCase):
     """FAMILYFENCE-3 B2: a `--not-family` naming no family the registry carries
     (e.g. "mimo" while the registry says the model's family is "xiaomi") excluded
@@ -22798,6 +23194,415 @@ class HostAdmissionTests(unittest.TestCase):
                                    "cwd": self.tmp}, None, base=src)
         self.assertNotIn("AUTOOS_ADMISSION_OFF", worker,
                          "a client worker never inherits the escape")
+
+
+class P1ReviewBaseSeatTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P1 (measured, greatwiki): the one-commit --isolate seat cannot
+    resolve `git diff <base> HEAD`; --review-base rides that diff in as REVIEW-DIFF.patch."""
+
+    def setUp(self):
+        self.cli = load_agent()
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@e.invalid"]
+
+    def _out(self, *args):
+        return subprocess.run(["git"] + list(args), capture_output=True, text=True, check=True).stdout.strip()
+
+    def _repo(self):
+        """The fixture's two commits plus a third touching keep.txt AND secrets-generated/."""
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "secrets-generated"))
+        for name, text in (("keep.txt", "two\n"), ("secrets-generated/leak.txt", "LEAK")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "head"], check=True)
+        return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
+
+    def test_the_seat_holds_the_diff_as_a_file_in_its_one_commit(self):
+        cli, root, base, head = self.cli, *self._repo()
+        self.assertEqual(cli.resolve_review_base(root, base[:8]), (base, head))
+        self.assertIsNone(cli.resolve_review_base(root, "deadbeefdeadbeef"))
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1rb", (base, head))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+two", patch)
+            self.assertNotIn("LEAK", patch, "a secret-bearing patch is the leak")
+            self.assertEqual(self._out("-C", dest, "rev-list", "--all", "--count"), "1",
+                             "the patch rides IN the base commit: a clean seat tree")
+            self.assertEqual(self._out("-C", dest, "status", "--short"), "")
+            # a parent that moved would have the seat diff a tree it does not hold
+            with self.assertRaises(cli.ReviewBaseRefused):
+                cli.isolate_clone(root, dest + "-2", "agent/p1rb2", (base, base))
+
+    @unittest.skipIf(os.name == "nt", "names `*` and `secrets-*` are illegal on Windows")
+    def test_a_glob_shaped_tracked_name_never_expands_the_patch(self):
+        # P1-FIX2 (cross-family REJECT): the pathspec chunk of write_review_diff
+        # was INTERPRETED, so a tracked file literally named `*` glob-expanded to
+        # every path in the range - `secrets-generated/` included - and the
+        # excluded blob rode out. Same I1 as _isolate_batch_entries names.
+        cli = self.cli
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "secrets-generated"))
+        names = ("*", "secrets-*", "secrets-generated/leak.key")
+        shas = []
+        for tag in ("BASE", "HEAD"):
+            for name in names:
+                with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                    fh.write("STAR-%s\n" % tag if "/" not in name
+                             else "GLOB-%s-LEAK\n" % tag)
+            subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+            subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", tag], check=True)
+            shas.append(self._out("-C", root, "rev-parse", "HEAD"))
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1gl", tuple(shas))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+STAR-HEAD", patch, "the allowed glob-shaped name still diffs")
+            for secret in ("GLOB-BASE-LEAK", "GLOB-HEAD-LEAK"):
+                self.assertNotIn(secret, patch, "an excluded path is never a pathspec match")
+
+    def _sparse_repo(self):
+        """`pkg/hidden.txt` is sparse-hidden in the SOURCE by a non-cone
+        sparse-checkout, so the allowed set drops it - the exclude list alone
+        kept it, and its base..head content rode out in the patch (F1)."""
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        os.mkdir(os.path.join(root, "pkg"))
+        for name, text in (("keep.txt", "one\n"), ("pkg/hidden.txt", "SPARSE-BASE-CONTENT\n")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "sparse base"], check=True)
+        for name, text in (("keep.txt", "two\n"), ("pkg/hidden.txt", "SPARSE-HEAD-CONTENT\n")):
+            with io.open(os.path.join(root, name), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "sparse head"], check=True)
+        subprocess.run(self.git + ["-C", root, "sparse-checkout", "set", "--no-cone",
+                                   "/keep.txt"], check=True)
+        return (root,) + tuple(self._out("-C", root, "rev-parse", "HEAD~1", "HEAD").split())
+
+    def test_a_sparse_hidden_path_never_rides_the_patch(self):
+        cli, root, base, head = self.cli, *self._sparse_repo()
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "sandbox")
+            cli.isolate_clone(root, dest, "agent/p1sp", (base, head))
+            with io.open(os.path.join(dest, cli.REVIEW_DIFF_FILE), encoding="utf-8") as fh:
+                patch = fh.read()
+            self.assertIn("+two", patch)
+            self.assertNotIn("SPARSE-BASE-CONTENT", patch, "sparse-hidden is not allowed")
+            self.assertNotIn("SPARSE-HEAD-CONTENT", patch, "sparse-hidden is not allowed")
+
+    def test_a_plaintext_secret_on_the_base_side_refuses_like_the_head_preflight(self):
+        # F2: a `-` line IS base content - `.env` re-encrypted at head passes the
+        # HEAD preflight, but its base blob would ride out as the removal hunk.
+        root = _init_git_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        commits = ("API_TOKEN=BASE-PLAINTEXT-SECRET\n",
+                   "API_TOKEN=ENC[AES256_GCM,data:ZmFrZQ==,iv:ZmFrZQ==,"
+                   "tag=ZmFrZQ==,type:str]\n")
+        shas = []
+        for text in commits:
+            with io.open(os.path.join(root, ".env"), "w", encoding="utf-8") as fh:
+                fh.write(text)
+            subprocess.run(self.git + ["-C", root, "add", "-A"], check=True)
+            subprocess.run(self.git + ["-C", root, "commit", "-q", "-m", "env"], check=True)
+            shas.append(self._out("-C", root, "rev-parse", "HEAD"))
+        cli = self.cli
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(cli.PrivacyRefused) as cm:
+                cli.isolate_clone(root, os.path.join(tmp, "sandbox"), "agent/p1bs",
+                                  tuple(shas))
+            self.assertNotIn("BASE-PLAINTEXT-SECRET", str(cm.exception),
+                             "the refusal names paths, never contents")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, "sandbox")),
+                             "refused before anything was built")
+
+    def _args(self, review_base):
+        return argparse.Namespace(client="opencode", tier=2, card=None, auto=True,
+                                  task="review the diff", free=False, isolate=True,
+                                  joinable=False, model=None, clean=False, title=None,
+                                  allow_training=False, max_depth=None, lean=False,
+                                  review_base=review_base, free_model=self.cli.DEFAULT_FREE_MODEL)
+
+    def test_build_plan_stamps_prompt_and_record_and_refuses_an_unknown_base(self):
+        agent, cfg = self.cli, {"agents": {"l2-worker": {"model": "omniroute/x"}},
+                                "providers": {"omniroute": {"models": {"x": {}}}}}
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": tmp}):
+            with self.assertRaises(agent.ReviewBaseRefused):
+                agent.build_plan(self._args("deadbeefdeadbeef"), cfg)
+            plan = agent.build_plan(self._args("HEAD"), cfg)
+            head = self._out("-C", agent.ROOT, "rev-parse", "HEAD")
+            stamp = "sandbox base: %s HEAD %s" % (head, head)
+            self.assertEqual(plan["sandbox"]["review_base"], (head, head))
+            self.assertIn(stamp, plan["cmd"][-1])
+            self.assertIn(os.path.join(plan["sandbox"]["path"], agent.REVIEW_DIFF_FILE),
+                          plan["cmd"][-1])
+            _wid, record = agent._worker_record_start(plan, self._args("HEAD"), tmp)
+            self.assertEqual(record.get("sandbox_base"), stamp)
+
+    # P1-FIX3 (attacker-reproduced; every test below FAILS on edf5f640).
+
+    def _commit(self, msg):
+        subprocess.run(self.git + ["-C", self.root, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", self.root, "commit", "-q", "-m", msg], check=True)
+        return self._out("-C", self.root, "rev-parse", "HEAD")
+
+    def test_deletions_and_symlinks_ride_the_patch_only_where_allowed(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        gone, leak = "gone.txt", "secrets-generated/leak.txt"
+        os.makedirs(os.path.join(self.root, "secrets-generated"))
+        io.open(os.path.join(self.root, gone), "w").write("GONE-AT-HEAD\n")
+        io.open(os.path.join(self.root, leak), "w").write("LEAK-GONE\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        base = self._commit("base")
+        if os.name != "nt":
+            os.symlink("keep.txt", os.path.join(self.root, self.cli.REVIEW_DIFF_FILE))
+        self._commit("tracked link")
+        os.remove(os.path.join(self.root, gone))
+        os.remove(os.path.join(self.root, leak))
+        head = self._commit("deleted")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = tmp + "/s"
+            self.cli.isolate_clone(self.root, dest, "agent/p1f3", (base, head))
+            patch = io.open(os.path.join(dest, self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("-GONE-AT-HEAD", patch, "D1: the seat never saw the deletion")
+            self.assertNotIn("LEAK-GONE", patch, "deletions obey the same predicates")
+            if os.name != "nt":   # D2: writing THROUGH a symlink is POSIX-testable
+                self.assertEqual(io.open(os.path.join(dest, "keep.txt")).read(), "one\n",
+                                 "D2: the patch bytes went THROUGH the symlink")
+                self.assertEqual(self._out("-C", dest, "ls-files", "-s", self.cli.REVIEW_DIFF_FILE)
+                                 .split()[0], "100644", "the patch is a file, never a 120000 link")
+
+    def test_a_secret_deleted_at_head_still_refuses_from_the_base_side(self):
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, ".env"), "w").write("API_TOKEN=BASE-PLAIN\n")
+        base = self._commit("plain env")
+        os.remove(os.path.join(self.root, ".env"))
+        head = self._commit("env gone")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(self.cli.PrivacyRefused) as cm:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f3x", (base, head))
+        self.assertIn(".env", str(cm.exception), "D1: a deleted base secret must refuse")
+
+    def test_a_base_vanished_after_plan_refuses_instead_of_traceback(self):
+        root, _b, head = self._repo()
+        gone, allowed = "0" * 40, self.cli._isolate_allowed_files(root)[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):  # D3: was traceback
+                self.cli.review_base_preflight_refuse(root, (gone, head), allowed)
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.write_review_diff(root, tmp, (gone, head), allowed)
+
+    # P1-FIX4 (attacker-reproduced; each test below FAILS on 2b76296a).
+
+    @unittest.skipIf(os.name == "nt", "tracked symlinks are a POSIX shape")
+    def test_a_refused_symlink_never_leaks_its_target_through_the_patch(self):
+        # G1: materialise refuses an escaping link yet `git diff` still named the
+        # path, so the TARGET STRING rode in the patch for a file the seat does
+        # not hold — HEAD side (add) and BASE side (delete, same one leak shape).
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        os.symlink("/etc/TARGET-FROM-BASE-LINK", os.path.join(self.root, "oldlink"))
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "oldlink"))
+        os.symlink("/home/victim/.ssh/id_ed25519", os.path.join(self.root, "escape"))
+        os.symlink("keep.txt", os.path.join(self.root, "inside"))
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        head = self._commit("head")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4a", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertNotIn("/home/victim/.ssh/id_ed25519", patch)
+            self.assertNotIn("TARGET-FROM-BASE-LINK", patch)
+            self.assertIn("inside", patch, "an in-sandbox link is not refused")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, "s", "escape")))
+
+    def test_a_sparse_source_still_carries_its_visible_deletions(self):
+        # G2: HEAD's index answers nothing for a path deleted at HEAD, so a
+        # sparse source dropped EVERY deletion; the pattern matcher decides.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "sub/deep"))
+        io.open(os.path.join(self.root, "gone-visible.txt"), "w").write("GONE-VISIBLE\n")
+        io.open(os.path.join(self.root, "sub/deep/gone-hidden.txt"), "w").write("GONE-HIDDEN\n")
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "gone-visible.txt"))
+        os.remove(os.path.join(self.root, "sub/deep/gone-hidden.txt"))
+        head = self._commit("deletions")
+        subprocess.run(self.git + ["-C", self.root, "sparse-checkout", "set",
+                                   "--cone", "pkg"], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4b", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("-GONE-VISIBLE", patch, "a visible deletion must ride")
+            self.assertNotIn("GONE-HIDDEN", patch, "sparse-hidden stays out (F1)")
+
+    def test_a_noncone_sparse_source_drops_every_deletion(self):
+        # P1-FIX7: cone semantics admit every top-level path, so a non-cone
+        # source carried its sparse-hidden top-level deletion out as a `-` hunk.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        io.open(os.path.join(self.root, "hidden.txt"), "w").write("HIDDEN-TOP-SECRET\n")
+        base = self._commit("base")
+        os.remove(os.path.join(self.root, "hidden.txt"))
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        head = self._commit("head")
+        subprocess.run(self.git + ["-C", self.root, "sparse-checkout", "set",
+                                   "--no-cone", "/keep.txt"], check=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f7a", (base, head))
+            patch = io.open(os.path.join(tmp, "s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertIn("+two", patch, "the visible modification still rides")
+            self.assertNotIn("HIDDEN-TOP-SECRET", patch, "non-cone drops deletions")
+
+    def test_a_directory_shaped_patch_name_refuses_instead_of_traceback2(self):
+        # G3: HEAD tracks `REVIEW-DIFF.patch/x`; materialise builds that directory
+        # and os.remove() on it was an uncaught IsADirectoryError past cmd_run.
+        # A rc2 refusal is the smaller, fail-closed choice over deleting the tree.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        base = self._out("-C", self.root, "rev-parse", "HEAD")
+        os.makedirs(os.path.join(self.root, self.cli.REVIEW_DIFF_FILE))
+        io.open(os.path.join(self.root, self.cli.REVIEW_DIFF_FILE, "x"), "w").write("X\n")
+        head = self._commit("dir-shaped")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f4c", (base, head))
+            self.assertFalse(os.path.lexists(tmp + "/s"))
+
+    # P1-FIX5 (attacker-reproduced; the test below FAILS on 671975d0).
+
+    def _dirfile_repo(self):
+        """BASE keeps `foo/` as a DIRECTORY holding the excluded
+        `foo/secrets-generated/key.pem`; HEAD replaces that tree with one regular
+        file `foo`. `kept` names `foo`, and a literal pathspec still matches as a
+        directory PREFIX, so the diff carried the excluded child out as a removal
+        hunk — which `review_base_preflight_refuse` never saw, as it only
+        iterates `kept`."""
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "foo/secrets-generated"))
+        io.open(os.path.join(self.root, "foo/secrets-generated/key.pem"), "w").write(
+            "EXCLUDEDKEYMATERIAL\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("one\n")
+        base = self._commit("dir base")
+        shutil.rmtree(os.path.join(self.root, "foo"))
+        io.open(os.path.join(self.root, "foo"), "w").write("FOO-AT-HEAD\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("two\n")
+        return base, self._commit("file head")
+
+    def test_a_directory_prefix_expansion_refuses_and_builds_nothing(self):
+        cli = self.cli
+        base, head = self._dirfile_repo()
+        allowed = cli._isolate_allowed_files(self.root)[1]
+        self.assertIn("foo", allowed, "the fixture needs foo as a HEAD file")
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(cli.ReviewBaseRefused) as cm:
+                cli.write_review_diff(self.root, tmp, (base, head), allowed)
+            self.assertNotIn("EXCLUDEDKEYMATERIAL", str(cm.exception),
+                             "the refusal names a path, never content")
+            self.assertFalse(os.path.lexists(os.path.join(tmp, cli.REVIEW_DIFF_FILE)),
+                             "refused before the patch was opened")
+            dest = tmp + "/s"
+            with self.assertRaises(cli.ReviewBaseRefused):
+                cli.isolate_clone(self.root, dest, "agent/p1f5", (base, head))
+            self.assertFalse(os.path.lexists(os.path.join(dest, cli.REVIEW_DIFF_FILE)))
+            self.assertFalse(os.path.lexists(dest))
+
+    def test_an_ordinary_range_still_passes_the_expansion_backstop(self):
+        # The backstop must not refuse a plain diff: its names are kept itself.
+        cli, root, base, head = self.cli, *self._repo()
+        kept = cli._review_diff_paths(root, (base, head),
+                                      cli._isolate_allowed_files(root)[1])
+        cli._review_expansion_refuse(root, (base, head), kept)
+        self.assertIn("keep.txt", kept)
+
+    # P1-FIX6 (cross-family attacker; both tests below FAIL on 2730f06d).
+
+    def test_a_vanished_blob_refuses_instead_of_tracebacking(self):
+        # H1: the name-only passes answer from TREES and survive a missing blob; the
+        # patch write needs the bytes, and no handler turned that into rc2 (I11 too).
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-BASE\n")
+        base = self._commit("base")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-HEAD\n")
+        head = self._commit("head")
+        for sha in (base, head):
+            oid = self._out("-C", self.root, "rev-parse", "%s:keep.txt" % sha)
+            os.remove(os.path.join(self.root, ".git", "objects", oid[:2], oid[2:]))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(self.cli.ReviewBaseRefused):
+                self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f6a", (base, head))
+            self.assertFalse(os.path.lexists(tmp + "/s"))
+
+    @unittest.skipIf(os.name == "nt", "a backslash is a separator there")
+    def test_an_unsafe_path_regular_file_never_rides_the_patch(self):
+        # H2: `accepted` short-circuited on the mode, so the shared PATH predicate
+        # never ran for a regular file the materialiser refuses by name.
+        self.root = _init_git_root()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        io.open(os.path.join(self.root, "back\\slash.txt"), "w").write("BACKSLASH-BASE\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-BASE\n")
+        base = self._commit("base")
+        io.open(os.path.join(self.root, "back\\slash.txt"), "w").write("BACKSLASH-HEAD\n")
+        io.open(os.path.join(self.root, "keep.txt"), "w").write("KEEP-HEAD\n")
+        head = self._commit("head")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.cli.isolate_clone(self.root, tmp + "/s", "agent/p1f6b", (base, head))
+            patch = io.open(os.path.join(tmp + "/s", self.cli.REVIEW_DIFF_FILE)).read()
+            self.assertNotIn("BACKSLASH-", patch, "the seat cannot hold the file")
+            self.assertIn("+KEEP-HEAD", patch, "no collateral damage")
+
+
+class P1PinnedWriterFamilyTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P1 (measured): an L2 child recorded `unresolved` when the
+    gateway log could not be read, although the caller HAD named a model with --model.
+    A pin names the ask but `pinned` is never a proof (FAMILYFENCE-b) - REJECT 3 holds."""
+
+    def _log_named_nothing(self, agent, **extra):
+        plan = {"session_tag": "lane-x", "run_id": "20261009-000000-p1-abcdef",
+                "client": "opencode", "model": "omniroute/l2-worker"}
+        plan.update(extra)
+        with mock.patch.object(agent, "manage_key", lambda env=None: None):
+            return agent.resolved_writer(plan, True, registry={"models": {
+                "gemini-3.8-flash": {"family": "google"}}})
+
+    def test_a_pinned_model_keeps_its_family_when_the_log_names_nothing(self):
+        agent = load_agent()
+        writer = self._log_named_nothing(agent, model="vertex/gemini-3.8-flash",
+                                         model_source=agent.WRITER_SOURCE_PIN)
+        self.assertEqual((writer["provider"], writer["model"]),
+                         ("vertex", "gemini-3.8-flash"))
+        self.assertEqual(writer["family"], "google")
+        self.assertEqual(writer["source"], agent.WRITER_SOURCE_PIN)
+        self.assertEqual(writer["family_source"], agent.FAMILY_SOURCE_PLANNED)
+        self.assertFalse(agent.writer_is_proven(writer), "a pin is never a witness")
+
+    def test_a_run_that_named_no_model_still_answers_unresolved(self):
+        agent = load_agent()
+        writer = self._log_named_nothing(agent)
+        self.assertEqual(writer["source"], agent.WRITER_UNRESOLVED)
+        self.assertIsNone(writer["family"])
+
+    def test_a_no_slash_pin_records_the_client_as_provider(self):
+        # G4: free_provider("gemini-3.8-flash") returned the whole id as provider;
+        # a native pin's provider half is the client name (as the :6529 branch).
+        agent = load_agent()
+        writer = self._log_named_nothing(agent, model="gemini-3.8-flash",
+                                         model_source=agent.WRITER_SOURCE_PIN)
+        self.assertEqual(writer["provider"], "opencode")
+        self.assertEqual(writer["model"], "gemini-3.8-flash")
 
 
 if __name__ == "__main__":

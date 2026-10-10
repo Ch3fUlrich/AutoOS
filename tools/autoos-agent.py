@@ -125,8 +125,12 @@ chain onto the writer's family and labelled the result a cross-family review
 (measured 2026-09-29). `--not-family <fam>` (repeatable) removes those families
 from the WHOLE plan — the model or route picked up front and every fallthrough
 candidate — and a plan with nothing outside the fence left exits 12 instead of
-serving the run inside it. A name the registry carries no family under is refused
-(rc 2) before any leg choice, because a fence that excludes nothing reads as a
+serving the run inside it. The family a spelling is judged on is the registry's row
+for it, the vendor named inside the id, or the one family a route's legs all declare
+(`fence_family_of`) — a pin the registry lists no row for names its own family from
+its id and sits inside only the fence that names it (AO-FAMILYFENCE-QWEN). A name
+the registry carries no family under is refused (rc 2) before any leg choice,
+because a fence that excludes nothing reads as a
 guard while it is none (FAMILYFENCE-3 B2). It removes them from what SERVES: when
 `--free` (or an own-account `--model` pin) already decided the model, the fence is
 judged on that model, and a gateway combo whose legs no run of this shape ever
@@ -991,6 +995,38 @@ def _isolate_sparse_allowed(root: str, head_files: list) -> set | None:
                                  head_files)
 
 
+def _isolate_sparse_keeps_deleted(root: str, deleted) -> set | None:
+    """G2: HEAD's index answers nothing for a path DELETED at HEAD, so a sparse
+    source dropped EVERY deletion from the patch; the pattern-level matcher —
+    the same `_isolate_cone_allowed` over the pattern file
+    `_isolate_sparse_allowed`'s fallback reads — decides instead. None when the
+    source is not sparse. P1-FIX7: cone admits EVERY top-level path, so a
+    NON-cone source leaked its sparse-hidden top-level DELETION as a `-` hunk;
+    an unreproducible pattern matcher must not decide what leaks — on a sparse
+    source, non-cone or unknown drops ALL deletions (documented omission)."""
+    cfg = subprocess.run(["git", "-C", root, "config", "--bool", "core.sparseCheckout"],
+                         capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if cfg.stdout.strip() != "true":
+        return None
+    cone = subprocess.run(["git", "-C", root, "config", "--bool",
+                           "core.sparseCheckoutCone"],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if cone.stdout.strip() != "true":
+        return set()
+    gd = subprocess.run(["git", "-C", root, "rev-parse", "--git-dir"],
+                        capture_output=True, text=True, stdin=subprocess.DEVNULL).stdout.strip()
+    try:
+        with io.open(os.path.join(gd if os.path.isabs(gd) else os.path.join(root, gd),
+                                  "info", "sparse-checkout"), encoding="utf-8") as fh:
+            patterns = [ln.strip() for ln in fh.read().splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
+    except OSError:
+        return set()
+    return _isolate_cone_allowed([p for p in patterns if not p.startswith("!")],
+                                 [p[1:] for p in patterns if p.startswith("!")],
+                                 deleted) if patterns else set()
+
+
 def _isolate_path_excluded(rel: str, agentignore: list) -> bool:
     """Whether a HEAD path stays out of the sandbox.
 
@@ -1048,6 +1084,39 @@ def isolate_preflight_refuse(root: str) -> None:
             "refusing sandbox: source HEAD tracks plaintext secret "
             "file(s): %s (encrypt with SOPS or list them in .agentignore; "
             "nothing was cloned)" % ", ".join(bad))
+
+
+def review_base_preflight_refuse(root: str, pair, allowed) -> None:
+    """Raise PrivacyRefused when the BASE side of --review-base tracks a plaintext
+    secret on a path the patch would carry (F2).
+
+    `isolate_preflight_refuse` reads HEAD only, but a `-` line of REVIEW-DIFF.patch
+    IS base content: a secret committed at base and re-encrypted (or edited away)
+    at head passes that preflight yet rides out as a removal hunk. Same bytes-only
+    rule as the head preflight (`_isolate_blob_plain` on the BASE blob, paths the
+    sandbox allows - the rest never enters the patch), and the same verdict it
+    gives: REFUSE, not a silently narrowed patch. The message names PATHS only.
+    """
+    bad = []
+    for rel in _review_diff_paths(root, pair, allowed):
+        if not _isolate_secret_name(rel):
+            continue
+        # `rev:path` is a tree lookup, not a pathspec: a name like `*` resolves
+        # to the one file called `*` and never globs the tree (P1-FIX2 checked).
+        blob = subprocess.run(["git", "-C", root, "cat-file", "-p",
+                               pair[0] + ":" + rel], capture_output=True,
+                              stdin=subprocess.DEVNULL)
+        if blob.returncode != 0:
+            continue
+        if not _isolate_blob_plain(blob.stdout):
+            continue
+        bad.append(rel)
+    if bad:
+        raise PrivacyRefused(
+            "refusing sandbox: review-base %s tracks plaintext secret file(s): "
+            "%s on the base side (the patch would carry them as removal lines; "
+            "list them in .agentignore; nothing was cloned)"
+            % (pair[0][:8], ", ".join(bad)))
 
 
 def sandbox_repo_slug(source: str) -> str:
@@ -1175,6 +1244,17 @@ def _isolate_link_inside(path: str, target: str) -> bool:
     return rel != ".." and not rel.startswith("../") and rel != "."
 
 
+def _isolate_entry_refusal(path: str, mode: str, target) -> "str | None":
+    """Why `_isolate_materialise` would skip this entry, or None when it would
+    write it. ONE predicate shared with the review-diff filter (G1) so the two
+    cannot drift — and the refusal strings stay what materialise prints."""
+    if not _isolate_safe_path(path):
+        return "unsafe path"
+    if mode == "120000" and not _isolate_link_inside(path, target):
+        return "symlink target escapes the sandbox"
+    return None
+
+
 def _isolate_clear_below(dest: str, rel: str) -> bool:
     """Whether `rel` can be written under `dest` without leaving it (R1c).
 
@@ -1245,12 +1325,10 @@ def _isolate_materialise(root: str, entries: list, dest: str) -> None:
         data = blobs.get(sha)
         if data is None:
             continue
-        if not _isolate_safe_path(path):
-            _isolate_refuse_path(path, "unsafe path")
-            continue
         target = data.decode("utf-8", "surrogateescape")
-        if mode == "120000" and not _isolate_link_inside(path, target):
-            _isolate_refuse_path(path, "symlink target escapes the sandbox")
+        refusal = _isolate_entry_refusal(path, mode, target)
+        if refusal:
+            _isolate_refuse_path(path, refusal)
             continue
         if not _isolate_clear_below(dest, path):
             _isolate_refuse_path(path, "an ancestor is a symlink or outside")
@@ -1341,16 +1419,20 @@ def sandbox_branch_for(source: str, run_id: str) -> str:
     return "%s/%s" % (sandbox_repo_slug(source), run_id)
 
 
-def _isolate_build(root: str, path: str, source_sha: str, allowed: list) -> None:
+def _isolate_build(root: str, path: str, source_sha: str, allowed: list, review_base=None) -> None:
     """Materialise the allowed HEAD entries and commit them as the base sha.
 
     Runs inside isolate_clone's cleanup, so a raise at any step of it leaves no
-    sandbox directory at all (I11).
+    sandbox directory at all (I11). A `review_base` pair rides base..head in too.
     """
     subprocess.run(["git", "init", "-q", path], check=True, stdin=subprocess.DEVNULL)
     _isolate_materialise(root,
                          _isolate_batch_entries(root, source_sha, allowed), path)
     subprocess.run(["git", "-C", path, "add", "-A"], check=True, stdin=subprocess.DEVNULL)
+    if review_base is not None:
+        write_review_diff(root, path, review_base, allowed)
+        subprocess.run(["git", "-C", path, "add", "-f", "--", REVIEW_DIFF_FILE], check=True,
+                       stdin=subprocess.DEVNULL)
     subprocess.run(["git", "-C", path, "-c", "user.name=autoos-worker",
                     "-c", "user.email=" + WORKER_EMAIL, "commit", "-q", "-m",
                     "sandbox base (source %s)" % source_sha], check=True, stdin=subprocess.DEVNULL)
@@ -1399,7 +1481,141 @@ def take_it_hint(sandbox_path: str, branch: str, base_sha: str = "") -> str:
     return line
 
 
-def isolate_clone(root: str, path: str, branch: str) -> str:
+# AO-L2-SEAT-INTEGRITY P1 (measured, greatwiki): the --isolate seat is ONE commit, so
+# `git diff A B` inside it names nothing; `run --review-base` rides that diff in as this.
+REVIEW_DIFF_FILE = "REVIEW-DIFF.patch"
+
+
+class ReviewBaseRefused(ValueError):
+    """--review-base named no commit the seat can diff from."""
+
+
+def resolve_review_base(root: str, base):
+    """`(base_sha, head_sha)` full shas, or None when `base` names no commit in the
+    parent - the seat's snapshot IS the parent's HEAD, so the parent names it."""
+    if not str(base or "").strip() or str(base).startswith("-"):
+        return None
+    proc = subprocess.run(["git", "-C", root, "rev-parse", "%s^{commit}" % base,
+                           "HEAD^{commit}"], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    return tuple(proc.stdout.split()) if proc.returncode == 0 else None
+
+
+def _patch_side_accepted(root: str, sha: str, paths) -> tuple:
+    """G1: `(present, accepted)` for side `sha` — accepted means the
+    materialiser's OWN entry list (`_isolate_batch_entries`) passes its OWN
+    predicate (`_isolate_entry_refusal`), so patch and seat cannot drift. Only
+    symlink blobs are read: the refused target string itself is the leak."""
+    entries = _isolate_batch_entries(root, sha, paths)
+    blobs = _isolate_batch_blobs(root, [e for e in entries if e[0] == "120000"])
+    # P1-FIX6 H2: the PATH predicate is not symlink-only - an unsafe regular name rode the patch.
+    accepted = {path for mode, blob, path in entries if _isolate_entry_refusal(
+        path, mode, (blobs.get(blob) or b"\0").decode("utf-8", "surrogateescape")
+        if mode == "120000" else "") is None}
+    return {e[2] for e in entries}, accepted
+
+
+def _review_expansion_refuse(root: str, pair, kept) -> None:
+    """P1-FIX5 (attacker-reproduced): a LITERAL pathspec still matches as a DIRECTORY
+    PREFIX, so when `foo` is a tree at base (holding the excluded
+    `foo/secrets-generated/key.pem`) and a file at head, `kept` names `foo` and the
+    diff carries that child out as a removal hunk. Upstream predicates are path-level
+    and cannot see a name the pathspec expands to, so ask git what the same pathspec
+    covers and refuse on any name the filter dropped — before the patch is opened,
+    naming the first offending PATH only, never its content."""
+    rng = "%s..%s" % pair
+    kept_set = set(kept)
+    for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
+        try:
+            # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
+            out = subprocess.run(["git", "-C", root, "--literal-pathspecs", "diff",
+                                  "--no-renames", "--name-only", "-z", rng, "--"]
+                                 + kept[i:i + 200], capture_output=True, check=True,
+                                 stdin=subprocess.DEVNULL).stdout
+        except subprocess.CalledProcessError as exc:  # D3: vanished base = rc2 refusal
+            raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                    % (pair[0][:8], root, exc.returncode)) from None
+        for name in out.split(b"\0"):
+            name = name.decode("utf-8", "surrogateescape")
+            if name and name not in kept_set:
+                raise ReviewBaseRefused("review-base: the patch pathspec expands to %s, "
+                                        "which the exclude filter dropped; refusing to "
+                                        "build it" % name)
+
+
+def _review_diff_paths(root: str, pair, allowed) -> list:
+    """The diff names that ride out: the allowed HEAD paths PLUS paths DELETED in
+    the range (D1: `allowed` is HEAD-only, so removals were dropped and the seat -
+    HEAD plus this patch - never saw them); deletions pass the same path-level
+    predicates as HEAD names, re-read here. `--no-renames`: a rename must not hide
+    a deletion end."""
+    def names(*extra):
+        try:
+            # subprocess-audit: git plumbing; only the two resolved shas are dynamic
+            out = subprocess.run(["git", "-C", root, "diff", "--no-renames", "--name-only", "-z"]
+                                 + list(extra) + ["%s..%s" % pair], capture_output=True,
+                                 check=True, stdin=subprocess.DEVNULL).stdout
+        except subprocess.CalledProcessError as exc:  # D3: vanished base = rc2 refusal
+            raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                    % (pair[0][:8], root, exc.returncode)) from None
+        return {n.decode("utf-8", "surrogateescape") for n in out.split(b"\0") if n}
+    deleted, ignore = names("--diff-filter=D"), _isolate_agentignore_patterns(root)
+    sparse = _isolate_sparse_keeps_deleted(root, deleted)  # G2: not HEAD's index
+    kept = sorted((names() & set(allowed)) | {p for p in deleted
+               if not _isolate_path_excluded(p, ignore)
+               and (sparse is None or p in sparse)})
+    # G1: drop (not refuse) paths whose own side's entry the materialiser would
+    # skip — HEAD for adds/mods, BASE for deletions; a type change leaks on
+    # neither side.
+    pres_h, acc_h = _patch_side_accepted(root, pair[1], kept)
+    pres_b, acc_b = _patch_side_accepted(root, pair[0], kept)
+    kept = [p for p in kept if (p not in pres_h or p in acc_h)
+            and (p not in pres_b or p in acc_b)]
+    _review_expansion_refuse(root, pair, kept)  # P1-FIX5 backstop
+    return kept
+
+
+def write_review_diff(root: str, path: str, pair, allowed) -> None:
+    """Ride base..head into the sandbox as REVIEW-DIFF.patch, keeping only the paths
+    the seat materialises (S2: a patch with a plaintext secret in it is itself the
+    leak). F1: the exclude list is NOT the allowed set - a sparse-hidden path is
+    neither excluded nor allowed, and filtering on the exclude list alone carried
+    its full base..head content out. `allowed` is the same set one-commit
+    materialisation uses."""
+    rng = "%s..%s" % pair
+    kept = _review_diff_paths(root, pair, allowed)
+    # D2: the SOURCE may track this very name, and io.open("wb") writes THROUGH
+    # such a symlink: unlink, then create O_EXCL|O_NOFOLLOW - never write through.
+    target = os.path.join(path, REVIEW_DIFF_FILE)
+    if os.path.isdir(target) and not os.path.islink(target):
+        # G3: the source tracks `REVIEW-DIFF.patch/x`; materialise built it and
+        # os.remove() raised IsADirectoryError past cmd_run. Refusing (rc2) is
+        # the smaller, fail-closed choice over deleting the seat's own tree.
+        raise ReviewBaseRefused("review-base: source tracks a directory named "
+                                "%s; the patch cannot ride" % REVIEW_DIFF_FILE)
+    if os.path.lexists(target):
+        os.remove(target)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    with io.open(os.open(target, flags, 0o644), "wb") as fh:
+        for i in range(0, len(kept), 200):   # bounded argv: the ARG_MAX cliff
+            # P1-FIX2 (I1 again, cf. _isolate_batch_entries): a kept NAME may be
+            # `*`, `secrets-*` or `:(glob)**`, and an INTERPRETED pathspec globs it
+            # over the whole range - pulling paths the filter just dropped, secrets
+            # included, back into the patch. Names are literal, always.
+            # P1-FIX6 H1 (D3, unmapped): a vanished base/head BLOB — the name-only
+            # passes read TREES and survive it, this needs the bytes: the siblings' rc2.
+            try:
+                # subprocess-audit: git plumbing again; only its pathspec chunk is dynamic
+                subprocess.run(["git", "-C", root, "-c", "core.quotepath=false",
+                                "--literal-pathspecs", "diff", "--no-renames",
+                                rng, "--"] + kept[i:i + 200],
+                               stdout=fh, check=True, stdin=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as exc:
+                raise ReviewBaseRefused("review-base: %s vanished in %s (`git diff` rc %s)"
+                                        % (pair[0][:8], root, exc.returncode)) from None
+
+
+def isolate_clone(root: str, path: str, branch: str, review_base=None) -> str:
     """Create the --isolate sandbox and return its base sha.
 
     DESIGN (T2-ISOLATE-SECRETS S2, revised after the cross-family review) -
@@ -1451,10 +1667,17 @@ def isolate_clone(root: str, path: str, branch: str) -> str:
     if os.path.lexists(path):
         raise FileExistsError("sandbox destination already exists: %s" % path)
     isolate_preflight_refuse(root)
-    source_sha, allowed, _agentignore = _isolate_allowed_files(root)
+    source_sha, allowed, _ = _isolate_allowed_files(root)
+    if review_base is not None:
+        if review_base[1] != source_sha:
+            raise ReviewBaseRefused("review-base: parent HEAD moved %s -> %s, re-run"
+                                    % (review_base[1], source_sha))
+        # F2: the head preflight cannot see a secret that lives only on the
+        # base side of the range the patch is about to carry.
+        review_base_preflight_refuse(root, review_base, allowed)
     os.makedirs(path, exist_ok=True)
     try:
-        _isolate_build(root, path, source_sha, allowed)
+        _isolate_build(root, path, source_sha, allowed, review_base)
         # The orchestrator still fetches from the sandbox path (unchanged); every
         # remote's push URL is disabled and a pre-push hook is installed, so an
         # unplanned `git push` - to origin or to the parent's absolute path the
@@ -2174,7 +2397,7 @@ def fence_sandbox_push(sandbox: str) -> None:
     os.chmod(path, 0o755)
 
 
-def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -> str:
+def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False, base_line: str = "") -> str:
     """The lines prepended to the task text of an --isolate run.
 
     SPAWNFIX (S3) item 2 (work/L1-routing/LEAKFP.out): a headless worker that
@@ -2183,6 +2406,7 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -
 
     Item 4 adds the third line a research run needs: an edit is not the
     deliverable, and a worker that is never told so will helpfully make one.
+    P1: a review seat is pointed at that file - its own history cannot resolve shas.
     """
     lines = ("Your working directory %s is your only writable checkout; "
              "never cd, git -C or write into %s or any other path outside it.\n"
@@ -2193,6 +2417,11 @@ def isolate_task_prefix(sandbox_path: str, root: str, read_only: bool = False) -
         lines += ("\nThis run is read-only: its deliverable is its REPORT, and "
                   "changing nothing is success - do not edit, commit or "
                   "reorganise anything; read and report.")
+    if base_line:
+        lines += ("\n%s\nThe change under review is written to %s - read that file; "
+                  "`git diff`/`git show` on those shas name nothing here: this seat "
+                  "is a one-commit snapshot."
+                  % (base_line, os.path.join(sandbox_path, REVIEW_DIFF_FILE)))
     return lines
 
 
@@ -4450,6 +4679,42 @@ def vendor_family_name(spelling) -> str | None:
     return None
 
 
+def vendor_family_name_unique(spelling) -> str | None:
+    """The ONE family a model id names, or None when it names two.
+
+    The fence's own read of a model id (`fence_family_of`). The longest-token
+    tie-break above is right for a run's record (some family has to be named for
+    the writer line) and wrong for a fence: `omniroute/deepseek-r1-distill-qwen-32b`
+    names both `deepseek` and `qwen`, and picking the longer read it as deepseek, so
+    a `--not-family qwen` review accepted a Qwen-derived model. Same for
+    `nvidia/qwen3-nemotron`, which reads nvidia and slips the qwen fence. Two
+    distinct vendors in one id at DISJOINT spans → None (unplaceable): a review's
+    strict fence refuses it, a write role does not block — the existing unknown
+    semantics. A shorter match nested INSIDE a longer one is that name's provider
+    prefix, not a second vendor, so the longer family wins (S1 F1 round 2).
+    """
+    key = _family_spelling(spelling)
+    if not key:
+        return None
+    segments = _family_segments(key)
+    spans = []
+    for _neg_len, family, token in _FAMILY_TOKEN_SEGMENTS:
+        if not token:
+            continue
+        width = len(token)
+        for i in range(len(segments) - width + 1):
+            if tuple(segments[i:i + width]) == token:
+                spans.append((i, i + width, family))
+                break
+    if not spans:
+        return None
+    families = {family for start, end, family in spans
+                if not any(family != other
+                           and start >= other_start and end <= other_end
+                           for other_start, other_end, other in spans)}
+    return families.pop() if len(families) == 1 else None
+
+
 def names_client_default(client, model, registry=None, cfg=None) -> bool:
     """Whether ``model`` IS the model this own-account client serves as its default.
 
@@ -4504,12 +4769,14 @@ def witnessed_family(family, family_source, family_reason, proven) -> dict:
             "family_source": family_source if proven else FAMILY_SOURCE_PLANNED}
 
 
-def route_family(route_id, registry) -> str | None:
+def route_family(route_id, registry, unique_legs=False) -> str | None:
     """The ONE family every leg of a route declares, or None when they differ.
 
     A combo is a fall-through list, so a chain whose legs sit in two families names
     neither, and a leg the registry cannot place makes the whole route unknown —
-    the same rule `fence_blocks_route` applies to a chain.
+    the same rule `fence_blocks_route` applies to a chain. `unique_legs` reads each
+    leg with the fence's own unique rule instead of the longest-token one (S1 F2
+    round 2); the record's read keeps the default.
     """
     entry = (registry.get("routes") or {}).get(route_id) if route_id else None
     legs = (entry or {}).get("legs") or []
@@ -4520,8 +4787,8 @@ def route_family(route_id, registry) -> str | None:
         except ValueError:
             model_id = None  # a leg the registry cannot place names no family
         spelling = model_id or leg
-        key = (_family_of_one_spelling(spelling, registry)
-               or vendor_family_name(spelling))
+        leg_read = vendor_family_name_unique if unique_legs else vendor_family_name
+        key = (_family_of_one_spelling(spelling, registry) or leg_read(spelling))
         if not key:
             return None
         if family is None:
@@ -6075,6 +6342,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             env["XDG_DATA_HOME"] = sandbox["path"] + ".opencode-data"
             overlay["permissions"] = outside_fence(env["XDG_DATA_HOME"],
                                                    os.environ.get("AUTOOS_TASK_DIR"))
+    if sandbox is None and getattr(args, "review_base", None):
+        raise ReviewBaseRefused("--review-base needs --isolate: the diff lands in the "
+                                "sandbox, not in a shared checkout")
     if sandbox is not None:
         # The fence denies opencode's file tools outside the clone, but a
         # worker told (or shown) an absolute parent path can still cd, git -C
@@ -6083,8 +6353,17 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # (clients.build_command puts it there; opencode appends it above),
         # and the brief follows the line verbatim.
         sandbox.setdefault("source", isolate_source())
+        # a fallthrough re-plan passes this dict again: resolve once, so the stamp holds
+        if getattr(args, "review_base", None) and not sandbox.get("review_base"):
+            pair = resolve_review_base(sandbox["source"], args.review_base)
+            if pair is None:
+                raise ReviewBaseRefused("--review-base %s is not a reachable commit "
+                                        "in %s" % (args.review_base, sandbox["source"]))
+            sandbox["review_base"] = pair
+            sandbox["base_line"] = "sandbox base: %s HEAD %s" % pair
         cmd[-1] = isolate_task_prefix(sandbox["path"], sandbox["source"],
-                                     read_only=bool(route.get("read_only"))) + "\n" + cmd[-1]
+                                      read_only=bool(route.get("read_only")),
+                                      base_line=sandbox.get("base_line", "")) + "\n" + cmd[-1]
     if client.name == "opencode":
         # WSLSHELL (SB-B): opencode's own config schema carries a top-level
         # `shell` ("Default shell to use for terminal"), which its resolver
@@ -6356,14 +6635,26 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
         session = session_header_value(plan.get("session_tag") or "", plan.get("run_id")) \
             if plan.get("session_tag") else None
         found = gateway_writer(session, gateway=gateway, key=key, fetch=fetch)
-        if found is None:
+        # AO-L2-SEAT-INTEGRITY P1 (measured: L2 children recorded `unresolved` although the
+        # caller pinned a model). A pin names the ask; what a caller typed is its weakest
+        # witness (FAMILYFENCE-b: `pinned` is never a proof, so REJECT 3 keeps holding).
+        pin = _writer_named(plan.get("model")) if not found and plan.get("model_source") == WRITER_SOURCE_PIN else None
+        if found is None and pin is None:
             return {"provider": WRITER_UNRESOLVED, "model": WRITER_UNRESOLVED,
                     "family": None, "source": WRITER_UNRESOLVED,
                     "family_reason": "the gateway call log named no model for "
                                      "this run"}
-        provider, model = found
-        served_id = model
-        source = WRITER_SOURCE_GATEWAY
+        if found is None:
+            # G4: a pin without a `provider/` prefix names the client, not a
+            # provider — as the non-gateway branch (:6529) already records it.
+            provider = ((free_provider(pin) if "/" in pin else plan.get("client"))
+                        or WRITER_UNRESOLVED)
+            model = pin.rpartition("/")[2]
+            served_id, source = pin, WRITER_SOURCE_PIN
+        else:
+            provider, model = found
+            served_id = model
+            source = WRITER_SOURCE_GATEWAY
     else:
         asked = plan.get("model") or None
         if asked == PLAN_MODEL_UNNAMED:
@@ -6616,15 +6907,48 @@ def family_fence(args, registry=None):
                         if review_of and not writer_family else None)}
 
 
+def fence_family_of(spelling, registry):
+    """The family a spelling denotes, or None when nothing can say.
+
+    Three reads, in the order the fence trusts them: the registry's row for the
+    spelling (`reviewer_family`), then the ONE family a route's legs all declare
+    (`route_family`), then the vendor word inside the id via
+    `vendor_family_name_unique` — NOT `vendor_family_name`'s longest-token
+    tie-break, which let `omniroute/deepseek-r1-distill-qwen-32b` read as
+    deepseek and slip a `--not-family qwen` review (S1 F1: an unrowed pin whose
+    id names two vendors is unplaceable, so a review refuses it and a write
+    role does not block — the existing unknown semantics). A gateway pin the
+    client config declares and the registry lists no row for but that names
+    ONE vendor — `omniroute/deepseek-direct-flash` is one — is still judged on
+    that family (AO-FAMILYFENCE-QWEN). A route the registry CARRIES is judged on
+    its legs alone, never by its own name (S1 F2 round 2: `deepseek-mixed` with a
+    qwen leg). The fence is a check on the declared family of the pin and its
+    legs, not proof of what the gateway served — the post-run backstop applies."""
+    text = str(spelling or "").strip()
+    if not text or text == PLAN_MODEL_UNNAMED:
+        return None
+    bare = text.rpartition("/")[2] if "/" in text else text
+    family = reviewer_family(text, registry) or reviewer_family(bare, registry)
+    if family:
+        return family
+    combo = _combo_of(text)
+    if combo and combo in (registry.get("routes") or {}):
+        return route_family(combo, registry, unique_legs=True)
+    family = route_family(combo, registry, unique_legs=True)
+    if family:
+        return family
+    return vendor_family_name_unique(bare)
+
+
 def fence_blocks_model(spelling, registry, fence):
     """True when `spelling` may not serve a run carrying `fence`.
 
-    The family is the registry's declaration for that spelling (`reviewer_family`,
-    which also reads `policy.reviewers`), never a guess from the name. Unknown is
-    unsafe only for a review — see `family_fence`."""
+    The family is what the registry and the spelling's own vendor name declare
+    (`fence_family_of`), never a guess from an arbitrary word. Unknown is unsafe
+    only for a review — see `family_fence`."""
     if not fence or not fence.get("families"):
         return False
-    family = reviewer_family(spelling, registry)
+    family = fence_family_of(spelling, registry)
     if family is None:
         return bool(fence.get("strict"))
     return family in fence["families"]
@@ -7928,6 +8252,48 @@ def parse_reset(text: str) -> int | None:
         return None
     unit = _RESET_UNITS.get(m.group(2))
     return int(m.group(1)) * unit if unit else None
+
+
+# AO-SPAWN-COOLDOWN-RETRY (S2, measured 2026-10-09T16:40Z, the two runs named in
+# the test): the gateway's per-credential cooldown is not an outage, it is a
+# countdown — the SAME credential, back in the seconds it states. Re-planning
+# around a 3 s window spends a route and a clone to solve a nap, so a stop that
+# states a window this short waits and re-runs the leg it is on. Longer or
+# unstated, it is an outage and falls through as a rate limit does.
+COOLDOWN_SAME_LEG_MAX_SECONDS = 60
+
+_COOLDOWN_MARKER = "are cooling down"
+
+
+def cooldown_stop(line: str) -> bool:
+    """Is this provider-stop line the gateway counting one credential down?
+
+    Call it on a line `provider_stop` returned, like `rate_limit_stop`: the
+    error-prefix rule that keeps the task's own quoted text out of it already
+    ran there.
+    """
+    return _COOLDOWN_MARKER in (line or "").lower()
+
+
+def cooldown_wait(line: str) -> int | None:
+    """Seconds to wait before re-running THIS leg, or None: wait elsewhere.
+
+    None when the line is no cooldown, states no window, or states more than
+    COOLDOWN_SAME_LEG_MAX_SECONDS — a leg that says "back in two minutes" is not
+    serving this run either way, and the next leg is.
+    """
+    if not cooldown_stop(line):
+        return None
+    secs = parse_reset(line)
+    return secs if secs is not None and secs <= COOLDOWN_SAME_LEG_MAX_SECONDS else None
+
+
+def cooldown_sleep(seconds: float) -> None:
+    """The nap between a cooldown stop and its same-leg retry.
+
+    A name of its own so a test can patch it out; nothing else sleeps here.
+    """
+    time.sleep(seconds)
 
 
 def _leg_provider_model(leg, registry):
@@ -10598,6 +10964,7 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "route": route.get("combo") or "",
         "title": args.title or "", "cwd": plan.get("cwd"),
         "sandbox": (plan.get("sandbox") or {}).get("path", ""),
+        "sandbox_base": (plan.get("sandbox") or {}).get("base_line", ""),
         "task_head": (task[0] if task else "")[:120], "depth": plan["depth"][0],
         "parent_run_id": parent,
         "host": socket.gethostname(),
@@ -11289,7 +11656,8 @@ def cmd_run(args, cfg: dict) -> int:
         return refuse(str(exc), EXIT_NO_OTHER_FAMILY)
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
-    except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused) as exc:  # plan's / PRIV3's / D-255's own
+    except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused,
+            ReviewBaseRefused) as exc:  # plan's / PRIV3's / D-255's / P1's own
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
@@ -11534,6 +11902,11 @@ def cmd_run(args, cfg: dict) -> int:
     # How many re-runs this run has already started (route or free model): the
     # one bound MAX_FALLTHROUGH is about.
     fallthroughs = 0
+    # AO-SPAWN-COOLDOWN-RETRY: the wait-and-retry-the-same-leg, ONCE per run.
+    # Deliberately not counted in `fallthroughs` — a 3 s cooldown must not spend
+    # the run's re-plan budget — but counted with it when a launch is numbered
+    # below, because the kill store and the scope unit key on the attempt.
+    cooldown_retries = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -11586,8 +11959,8 @@ def cmd_run(args, cfg: dict) -> int:
         # so a denied card leaves no ~/fleet directory in the operator's home.
         try:
             sandbox_root_prepare(source, sb["path"])
-            isolate_clone(source, sb["path"], sb["branch"])
-        except PrivacyRefused as exc:
+            isolate_clone(source, sb["path"], sb["branch"], sb.get("review_base"))
+        except (PrivacyRefused, ReviewBaseRefused) as exc:
             # HOSTADMISSION-RACE: the one exit between the claim and this run's
             # worker record, so it is the one place that gives the host slot back
             # by hand instead of at the handover.
@@ -11657,7 +12030,12 @@ def cmd_run(args, cfg: dict) -> int:
         # attempt left is announced. A --free run never reaches the track
         # record (track_entry returns None for it), so a queue timeout costs
         # the route nothing.
-        if args.free and fallthroughs:
+        # AO-SPAWN-COOLDOWN-RETRY seat note: a cooldown retry is a fresh start
+        # too, and it spends no fallthrough — so the gate cannot key on
+        # `fallthroughs` alone. This run's worker record is closed while it naps,
+        # and another --free run claims the freed slot in that window; retrying
+        # without a re-claim would run as cap+1 over policy.free_concurrency.
+        if args.free and (fallthroughs or cooldown_retries):
             queue_msg, free_reservation = free_slot_refusal(plan, free_policy)
             if queue_msg is not None:
                 print("autoos-agent: %s" % queue_msg, file=sys.stderr)
@@ -11674,7 +12052,7 @@ def cmd_run(args, cfg: dict) -> int:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
-                                                         attempt=fallthroughs + 1)
+                                                         attempt=fallthroughs + cooldown_retries + 1)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec
@@ -11727,7 +12105,8 @@ def cmd_run(args, cfg: dict) -> int:
                                 # fallthrough re-run — leads a new session, so every
                                 # attempt re-records its group in the runner-private
                                 # store `cancel` kills from.
-                                run_id=plan.get("run_id"), attempt=fallthroughs + 1)
+                                run_id=plan.get("run_id"),
+                                attempt=fallthroughs + cooldown_retries + 1)
             scope_rec = getattr(run_rc, "scope", None) or scope_rec
         except ClientMissing as exc:
             # WINSHIM: gone between the pre-check and this attempt (a fallthrough
@@ -11783,6 +12162,10 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
+        # and not from the window it stated — a cooldown that states nothing is
+        # still a cooldown, and still exits the run on the stop's rc.
+        cooling = stop is not None and cooldown_stop(stop)
         if stop is not None:
             # REVROUTE (S2) item 3: when the stop line states its own reset,
             # that window becomes the provider's unavailable_until for every
@@ -11809,16 +12192,37 @@ def cmd_run(args, cfg: dict) -> int:
                             datetime.timezone.utc))}
                     print("rate limit: provider %s benched for this run's next "
                           "leg (%s)" % (benched, _iso_zulu(until)))
-        if stop is not None and (rc in (0, 3, 6) or (rate_limited and rc == 1)):
+        if stop is not None and (rc in (0, 3, 6)
+                                 or ((rate_limited or cooling) and rc == 1)):
             # SB-B (RATELIMITRETRY): rc 1 joins the upgrade only for a rate limit,
             # which is the shape the field actually failed in (the client printed
             # its 429 and exited 1). Other rc-1 exits stay the client's own failure
             # class: a provider that refused service is exit 8, a client that
-            # crashed is not.
+            # crashed is not. AO-SPAWN-COOLDOWN-RETRY: the cooldown is the same
+            # shape (both field runs), and leaving it at the client's 1 is what
+            # made a refused leg read as a failed task.
             print("autoos-agent: PROVIDER-STOP: %s" % redact_output(stop), file=sys.stderr)
             rc = 8
         if rc == 0 and client.promo:
             clients.record_probe(client.name)
+        # AO-SPAWN-COOLDOWN-RETRY: the gateway named the model and counted the
+        # credential down in seconds — that is THIS leg, shortly, not a dead one.
+        # Sleep the stated window out and re-launch the SAME plan: same combo,
+        # same sandbox, same work in it, no re-plan, no bench, no fallthrough
+        # spent. Once per run; a second cooldown, or a window too long or unstated,
+        # falls through below exactly as a rate-limit stop does, and
+        # --no-fallthrough ends the run on the stop's own rc. Nor is the stopped
+        # attempt track-recorded like a fallthrough's: a leg that serves 3 s later
+        # did not fail the route it belongs to.
+        nap = cooldown_wait(stop) if cooling else None
+        if nap is not None and not cooldown_retries and not args.joinable:
+            cooldown_retries += 1
+            nap += 1  # the window stated, plus a beat for the clock to roll over
+            print("autoos-agent: cooldown on %s: %s - waiting %ds and re-running "
+                  "the same route" % (plan["model"] or plan["route"].get("combo"),
+                                      redact_output(stop), nap), file=sys.stderr)
+            cooldown_sleep(nap)
+            continue
         # SPAWNCAP (S2): a provider-stopped resolver-routed --isolate run
         # re-runs the SAME task in the SAME sandbox on the next route (WIPfix
         # preserved the work but stranded it on a dead route). At most
@@ -12359,6 +12763,10 @@ def _parser_run(sub):
                           "denied. Mandatory for every spawned tier (%s): a clone holds "
                           "committed files only, so no git-ignored key file is in the tree it "
                           "greps" % ", ".join(str(t) for t in ISOLATE_TIERS))
+    run.add_argument("--review-base", dest="review_base", metavar="SHA",
+                     help="with --isolate: ride the parent's `git diff SHA..HEAD` into the "
+                          "sandbox as %s, stamp \"sandbox base: <sha> HEAD <sha>\" in the seat "
+                          "prompt and record, refuse an unknown SHA (rc 2)" % REVIEW_DIFF_FILE)
     run.add_argument("--no-auto", dest="auto", action="store_false",
                      help="ask before tools the config does not explicitly allow (default: --auto)")
     run.add_argument("--lean", action="store_true",
