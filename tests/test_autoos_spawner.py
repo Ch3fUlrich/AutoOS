@@ -9934,6 +9934,7 @@ class EvidenceGateTests(unittest.TestCase):
         self.assertFalse(t.is_alive(), "the gate hung on %s" % name)
         return box[0]["cross_family"]["detail"]
 
+    @unittest.skipIf(os.name == "nt", "os.mkfifo/AF_UNIX special files are POSIX-only")
     def test_special_files_and_the_cap_refuse_fast_instead_of_hanging(self):
         NOT, BIG = "not a regular file", "evidence too large"
         cases = []
