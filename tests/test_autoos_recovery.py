@@ -2953,7 +2953,8 @@ class Hermetic(TempCase):
     ALLOWED_IMPORTS = {"__future__", "argparse", "errno", "hashlib", "io", "json", "os",
                        "re", "shlex", "sys", "tempfile", "time", "unicodedata", "ctypes",
                        "stat", "fcntl", "msvcrt", "importlib",
-                       "autoos_clients", "autoos_report", "autoos_ready_guards"}
+                       "autoos_blank", "autoos_clients", "autoos_report",
+                       "autoos_ready_guards"}
     FORBIDDEN_IMPORTS = {"subprocess", "socket", "http", "urllib", "ftplib", "pty",
                          "signal", "multiprocessing", "pwd", "grp", "asyncio",
                          "threading", "autoos_agent_mcp", "requests"}

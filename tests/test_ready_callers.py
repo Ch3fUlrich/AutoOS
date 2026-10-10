@@ -3,7 +3,8 @@
 must name both writer-guards files with it. `ready` requires them only when the DIFF
 reaches R2, so a caller copying a command line out of a doc omits them silently and is
 refused at a gate it had already cleared. Every tracked line spelling the invocation
-must name both flags on that line or its wrapped continuation within 3 lines; prose that
+— whole, or split by a backslash continuation — must name both flags on that line or
+its wrapped continuation within 3 lines; prose that
 only MENTIONS the command is exempted per line with `<!-- ready-no-guards -->`, and
 CHANGELOG.md is exempt wholesale — history records what a lane already ran.
 
@@ -18,6 +19,10 @@ ROOT = Path(__file__).resolve().parent.parent
 # The invocation, assembled by concatenation: a lint matching its own source dies on it.
 CALL = "autoos-agent.py" + " ready"
 CALL_RE = re.compile(r"autoos-agent(?:\.py)? ready")
+# The same call SPLIT by a shell continuation: `tools/autoos-agent.py \` then
+# `ready ...` below. A wrapped command is the copy a caller pastes, so guards are
+# due for it too, within the same window.
+SPLIT_RE = re.compile(r"autoos-agent(?:\.py)?[ \t]*\\[ \t]*\r?\n[ \t]*ready\b")
 GUARDS = ("--brief", "--report")
 EXEMPT = "<!-- ready-no-guards -->"
 WINDOW = 3                      # a command line may wrap this many lines deep
@@ -29,9 +34,13 @@ def scan_lines(lines):
     hits = []
     for i, line in enumerate(lines):
         reach = lines[i:i + WINDOW + 1]
-        if not CALL_RE.search(line) or any(EXEMPT in w for w in reach):
+        if any(EXEMPT in w for w in reach):
             continue
         joined = "".join(reach)
+        # A call is either spelled whole on this line, or split across a shell
+        # continuation onto the next one.
+        if not (CALL_RE.search(line) or SPLIT_RE.search("\n".join(reach))):
+            continue
         missing = [flag for flag in GUARDS if flag not in joined]
         if missing:
             hits.append((i + 1, line, missing))
@@ -67,6 +76,13 @@ class ReadyCallerLint(unittest.TestCase):
         self.assertEqual(scan_lines(wrapped), [])           # guards on the continuation
         self.assertEqual(len(scan_lines([wrapped[0], "x", "y", "z", wrapped[2]])), 1)
         self.assertEqual(scan_lines(["the " + CALL + " gate " + EXEMPT]), [])
+        # the SPLIT command: `tools/autoos-agent.py \` then `ready ...` below is the
+        # same line a caller pastes, so it owes the guards too.
+        split = ["python3 tools/" + "autoos-agent.py \\", "  ready" + " REC --sha s \\",
+                 "--inbox i.md", "nothing else"]
+        self.assertEqual([h[2] for h in scan_lines(split)], [list(GUARDS)])
+        self.assertEqual(scan_lines([split[0], split[1],
+                                     '--brief "$B" --report "$R"', split[3]]), [])
 
     def test_every_tracked_ready_caller_names_both_guards(self):
         files = tracked_files()

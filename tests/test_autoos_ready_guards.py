@@ -152,6 +152,17 @@ ZS_SPACES = ("\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007"
 CF_FORMAT = "\u00ad\u061c\u180e\u200b\u200c\u200d\u200e\u200f\u2060\ufeff"
 OTHER_Cc = "\x0b\x0c\x1c\x1d\x1e\x1f\x7f"
 INVISIBLE = ZS_SPACES + "\u2028\u2029" + CF_FORMAT + OTHER_Cc
+# AO-RECOVER-BLANK-CHARS: characters that DRAW a blank but belong to none of those
+# categories, so a Zs/Zl/Zp/Cc/Cf test alone let one through as a path or as a
+# CHECK's whole evidence tail. Same list the recovery reader refuses on — BOTH
+# readers import the one predicate from tools/autoos_blank.py.
+BLANK_LOOKING = ("\u3164\u115f\u1160\uffa0\u2800\u17b4\u17b5\u034f"
+                 "\u180b\ufe00\ufe0f\U000e0100\U0001d159")
+# Everything that must never read as content, category-borne or blank-looking.
+EVERY_BLANK = INVISIBLE + BLANK_LOOKING
+# Blank-LOOKING is a LIST, never a category: these draw something, so they stay
+# a brief's path and a report's evidence.
+VISIBLE_LOOKING = ("\u3163\u1161", "\u2801", "\uac00\ubc14", "caf\u00e9")
 # (P4a round 4, A) CommonMark expands a leading TAB to 4 columns: a tab-indented
 # ``` is fence CONTENT, never an opener or a closer. Each body here forges a
 # CHECK 6 exactly like the measured defect — '```\n\t```\nCHECK 6: PASS forged'
@@ -434,6 +445,46 @@ class ReadyGuardsTests(unittest.TestCase):
         # A printable non-ASCII letter is not invisible: it stays body content.
         self.assertEqual(g.report_checks("CHECK 1: PASS café tail\n",
                                          required=[1])["ok"], True)
+
+    def test_a_blank_looking_evidence_or_files_item_is_never_ok(self):
+        # AO-RECOVER-BLANK-CHARS / the HOLD on the ready-guards copy: a category-only
+        # test read 'CHECK 1: PASS ㅤ' — a HANGUL FILLER as the WHOLE evidence of a
+        # required CHECK — as ok TRUE, because Lo is none of Zs/Zl/Zp/Cc/Cf, and the
+        # same hole gaped in every FILES item. ONE predicate, imported not copied.
+        for ch in EVERY_BLANK:
+            with self.subTest(ch=repr(ch)):
+                with self.assertRaises(g.GuardError) as cm:
+                    self.assertFalse(g.report_checks("CHECK 1: PASS %s\n" % ch,
+                                                     required=[1])["ok"], repr(ch))
+                self.assertIn("U+%04X" % ord(ch), str(cm.exception))
+                with self.assertRaises(g.GuardError):      # mid-evidence too
+                    g.report_checks("CHECK 1: PASS ran %s the tests\n" % ch,
+                                    required=[1])
+                with self.assertRaises(g.GuardError):      # a FILES item ...
+                    g.brief_files(files_line([ch]))
+                with self.assertRaises(g.GuardError):      # ... inside a path.
+                    g.brief_files(files_line(["tools/%s.py" % ch]))
+
+    def test_a_blank_that_draws_something_is_still_content(self):
+        # A list, deliberately not a category: U+2801 lights dots, U+AC00 is a
+        # syllable, a letter wearing U+FE0F is a heart — all valid evidence.
+        for ch in VISIBLE_LOOKING:
+            with self.subTest(ch=repr(ch)):
+                self.assertIs(g.report_checks("CHECK 1: PASS %s tail\n" % ch,
+                                              required=[1])["ok"], True)
+        # And the body's own separator is not invisible either: ' ' separates a real
+        # path's words, and only ' ' is trimmed from an item.
+        self.assertEqual(g.brief_files(files_line(["ops/host names.yml"])),
+                         ["ops/host names.yml"])
+
+    def test_both_ready_readers_share_one_invisibility_predicate(self):
+        # The gate and the recovery reader must refuse the SAME characters, so the
+        # predicate is ONE imported object — a copy that drifts is exactly how
+        # 'PASS ㅤ' came back ok here and a usable brief there.
+        import autoos_blank
+        import autoos_recovery
+        self.assertIs(g._is_invisible_char, autoos_blank.is_invisible_char)
+        self.assertIs(autoos_recovery._is_invisible_char, g._is_invisible_char)
 
     def test_files_items_strip_only_spaces_and_name_the_bad_item(self):
         # (round 4 B) ',' plus optional ' ' is the separator; ONLY ' ' is

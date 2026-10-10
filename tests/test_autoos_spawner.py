@@ -10949,6 +10949,17 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         self.assertEqual(inbox, "")
         self.assertEqual(len(calls), 1, calls)
 
+    def test_the_ops_refusal_names_the_exact_command_to_rerun(self):
+        # AO-READY-CALLERS: the `Run:` line is what the caller copies back, so it
+        # must be the whole corrected call — record, branch, sha, inbox and BOTH
+        # guard files — never a command that omits the flags it is asking for.
+        rc, out, err, _inbox, _calls = self.ready(diff_paths=["playbooks/x.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("Run: python3 tools/autoos-agent.py ready %s --branch %s "
+                      "--sha %s --inbox %s --brief <BRIEF path> "
+                      "--report <REPORT path>"
+                      % (self.record, self.BRANCH, self.SHA, self.inbox), out + err)
+
     def test_a_mislabelled_docs_card_on_a_playbook_diff_still_needs_brief_and_report(self):
         # The label is only a FLOOR: the diff decides, so `--task-type docs` buys
         # nothing on a playbook edit. No brief -> named. Brief but no report ->

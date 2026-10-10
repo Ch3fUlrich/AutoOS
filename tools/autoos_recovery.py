@@ -173,6 +173,7 @@ import tempfile
 import time
 import unicodedata
 
+import autoos_blank as blank
 import autoos_clients as clients
 import autoos_ready_guards as ready_guards
 import autoos_report as report_parser
@@ -295,36 +296,16 @@ _BLANK_STRIP = " \t"
 # silently eats: separators and controls. ' ' (a Zs) and '\t' (a Cc) are the two
 # a real line legitimately carries; every other member makes a report suspect.
 _SUSPECT_CATS = frozenset(("Zs", "Zl", "Zp", "Cc"))
-# What a task must hold besides it: the same invisible classes, widened with Cf
-# (zero-width joiners, bidi overrides — characters that render nothing a writer can
-# be told to work on), and judged AFTER the output normaliser has run, so ANSI
-# colour cannot pass as content either (P4c-fixes7, `_has_visible_text`).
-_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
-# AO-RECOVER-BLANK-CHARS: code points that DRAW a blank but belong to none of those
-# categories, so neither `isspace()` nor `_INVISIBLE_CATS` saw one and a continuation
-# heading hidden behind it read as a brief. A list, deliberately NOT a category: U+2801
-# draws dots, U+AC00 a syllable, a letter wearing U+FE0F a heart — all content.
-_BLANK_LOOKING = frozenset("".join((
-    "\u3164",                     # HANGUL FILLER (Lo) — an empty box
-    "\u115f", "\u1160", "\uffa0",  # the Hangul choseong/jungseong/halfwidth fillers (Lo)
-    "\u2800",                     # BRAILLE PATTERN BLANK (So) — eight unlit dots
-    "\u17b4", "\u17b5",           # KHMER VOWEL INHERENT AQ/AA (Mn) — vowels with no glyph
-    "\u034f",                     # COMBINING GRAPHEME JOINER (Mn) — joins, draws nothing
-    "\U0001d159",                 # MUSICAL SYMBOL NULL NOTEHEAD (So) — a rest
-    # MONGOLIAN FREE VARIATION SELECTOR 1-4 (Mn) and VARIATION SELECTOR-1..256 (Mn):
-    # each picks a form of the glyph BEFORE it and shows nothing (U+180E is a Zs).
-    "".join(chr(c) for c in (0x180b, 0x180c, 0x180d, 0x180f)),
-    "".join(chr(c) for c in range(0xfe00, 0xfe10)),
-    "".join(chr(c) for c in range(0xe0100, 0xe01f0)),
-)))
-
-
-def _is_invisible_char(ch):
-    """Whether `ch` shows nothing a writer could be told to work on: whitespace, a
-    member of `_INVISIBLE_CATS` (Zs/Zl/Zp/Cc/Cf), or a blank-LOOKING code point no
-    category covers. ONE predicate, and EVERY invisibility test calls it (AO-RECOVER-BLANK-CHARS)."""
-    return (ch.isspace() or unicodedata.category(ch) in _INVISIBLE_CATS
-            or ch in _BLANK_LOOKING)
+# The invisible classes a task may not be made of: Zs/Zl/Zp/Cc widened with Cf
+# (zero-width joiners, bidi overrides), plus the blank-LOOKING code points no
+# category covers. ONE set and ONE predicate, in tools/autoos_blank.py, imported by
+# BOTH ready readers — a copy here and a copy there is how a blank passed the gate's
+# CHECK evidence while hiding a footer from this reader (AO-RECOVER-BLANK-CHARS).
+# Judged AFTER the output normaliser has run, so ANSI colour cannot pass as content
+# either (P4c-fixes7, `_has_visible_text`).
+_INVISIBLE_CATS = blank.INVISIBLE_CATS
+_BLANK_LOOKING = blank.BLANK_LOOKING
+_is_invisible_char = blank.is_invisible_char
 
 
 # --- output.log normalisation (P4c-fixes5 (1)) --------------------------------
