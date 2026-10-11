@@ -70,7 +70,8 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-      S3_BUCKET: ${S3_BUCKET:-omnigraph}
+      # 0.13 never shares a bucket with 0.8.1 — its data layout is incompatible.
+      S3_BUCKET: ${S3_BUCKET:-omnigraph-013}
     networks:
       - mcp-net
     restart: "no"
@@ -78,15 +79,17 @@ services:
   # ─── one-shot: converge the cluster into the S3 storage root, then exit ────
   #   Writes the state ledger the server boots from. Declared config lives in
   #   ./cluster (git); state lives in MinIO (the Terraform split).
+  #   0.13 replaced `cluster import` with apply-fresh-013.sh: cluster status
+  #   decides fresh vs existing, and a fresh apply releases the admission lock it prints.
   omnigraph-init:
-    image: modernrelay/omnigraph-server:v0.8.1
+    image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
     container_name: omnigraph-init
     depends_on:
       minio:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-    entrypoint: ["sh", "-c", "if omnigraph cluster import --config /cluster --yes; then echo 'fresh store: applying cluster config'; omnigraph cluster apply --config /cluster --yes --as default; else echo 'existing store: skipping apply (run apply manually for config changes)'; fi"]
+    entrypoint: ["sh", "/cluster/apply-fresh-013.sh", "/cluster", "s3://${S3_BUCKET:-omnigraph-013}/cluster"]
     environment:
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
@@ -101,10 +104,18 @@ services:
     restart: "no"
 
   # ─── Omnigraph server — graph + vector + full-text memory engine ──────────
+  #   0.13 retains its cluster admission lock on EVERY shutdown, clean `docker stop`
+  #   included, and refuses the next boot with state_lock_held — so the entrypoint must
+  #   be start-server-013.sh (release-then-exec) or `restart: unless-stopped` below
+  #   crash-loops forever. One server container per data root: quiescence is proven by
+  #   there being no other holder.
   omnigraph-server:
-    image: modernrelay/omnigraph-server:v0.8.1
+    image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
     container_name: omnigraph-server
     restart: unless-stopped
+    entrypoint: ["sh", "/cluster/start-server-013.sh"]
+    # The server's graceful-shutdown budget is 25 s; stop must not kill it mid-flush.
+    stop_grace_period: 35s
     depends_on:
       minio:
         condition: service_healthy
@@ -114,8 +125,8 @@ services:
         condition: service_completed_successfully
     environment:
       - OMNIGRAPH_BIND=0.0.0.0:8080
-      # Cluster boot source: the S3 storage-root URI on MinIO.
-      - OMNIGRAPH_CLUSTER=s3://${S3_BUCKET:-omnigraph}/cluster
+      # Cluster boot source: the S3 storage-root URI on MinIO (start-server-013.sh reads it).
+      - OMNIGRAPH_CLUSTER=s3://${S3_BUCKET:-omnigraph-013}/cluster
       # Single bearer token for the implicit `default` actor.
       - OMNIGRAPH_SERVER_BEARER_TOKEN=${OMNIGRAPH_TOKEN:?Set OMNIGRAPH_TOKEN in .env.shared}
       # S3 (MinIO) contract — see Omnigraph docs/user/deployment.md
@@ -130,6 +141,10 @@ services:
     extra_hosts:
       # Resolve the LAN Ollama host from inside the container.
       - "${OLLAMA_HOST_NAME:?set OLLAMA_HOST_NAME in ~/.config/autoos/site.env}:${OLLAMA_HOST_IP:?set OLLAMA_HOST_IP in .env.server}"
+    volumes:
+      # Carries start-server-013.sh into the container at /cluster (same mount
+      # omnigraph-init uses; compose resolves it from this file's directory).
+      - ./cluster:/cluster:ro
     ports:
       - "127.0.0.1:8080:8080"
     networks:
@@ -161,7 +176,7 @@ services:
   # against a stale schema. $$f/$$g are escaped so compose leaves the shell loop
   # variables alone (the bug that broke the old init guard).
   omnigraph-seed:
-    image: modernrelay/omnigraph-server:v0.8.1
+    image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
     container_name: omnigraph-seed
     depends_on:
       omnigraph-server: { condition: service_healthy }

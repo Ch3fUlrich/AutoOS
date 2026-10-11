@@ -1295,3 +1295,62 @@ if it "omnigraph 0.13 apply-fresh-013: the failure preview goes to stderr and st
     rm -rf "$d"
     [[ -z "$p" ]] && pass || fail "$p"
 fi
+# ─── D-1038 A1/A6: the local reference stack boots 0.13 through those wrappers ───
+# docker-compose.server.yml is the stack an operator runs on their own machine, so the
+# properties that made the rehearsal safe are pinned here statically — no docker, no
+# network, no live root. Three things break silently if they drift: the image digest (a
+# floating tag makes a deployed store untraceable, and 0.8.1 has no lock-release path),
+# the bucket (0.13 writing into a bucket holding 0.8.1 data corrupts both), and the
+# omnigraph-server entrypoint (without start-server-013.sh the retained lock makes
+# `restart: unless-stopped` crash-loop the server forever).
+OMNI_COMPOSE="$ROOT/infra/mcp-servers/docker-compose.server.yml"
+OMNI13_IMAGE="modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1"
+
+# og13_svc <service> — the service block: its `  name:` header up to the next one.
+# Service keys are indented exactly two spaces, so a 4-space key never matches.
+og13_svc() {
+    awk -v want="  $1:" '
+        /^  [A-Za-z0-9_-]+:/ { inb = ($0 == want) }
+        inb { print }' "$OMNI_COMPOSE"
+}
+
+if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots it through the wrappers"; then
+    problems=""
+    [[ -f "$OMNI_COMPOSE" ]] || problems+=" missing $OMNI_COMPOSE;"
+    if [[ -z "$problems" ]]; then
+        # Exactly three omnigraph-server images — init, server, seed — and every one
+        # of them the digest server-L1 measured for v0.13.0.
+        got="$(grep -cE '^[[:space:]]*image:[[:space:]]*modernrelay/omnigraph-server:' "$OMNI_COMPOSE")"
+        [[ "$got" -eq 3 ]] || problems+=" $got omnigraph-server image lines (want 3);"
+        pinned="$(grep -cF "image: $OMNI13_IMAGE" "$OMNI_COMPOSE")"
+        [[ "$pinned" -eq 3 ]] || problems+=" $pinned lines carry the v0.13.0 digest (want 3);"
+        grep -qF 'v0.8.1' "$OMNI_COMPOSE" && problems+=" a v0.8.1 reference remains;"
+
+        # The server: one container per data root, unlocked at boot, given the 25 s
+        # graceful-shutdown budget plus slack, and mounted read-only for the script.
+        srv="$(og13_svc omnigraph-server)"
+        grep -qF 'entrypoint: ["sh", "/cluster/start-server-013.sh"]' <<<"$srv" \
+            || problems+=" omnigraph-server has no start-server-013.sh entrypoint;"
+        grep -qE '^[[:space:]]*stop_grace_period:[[:space:]]*35s[[:space:]]*$' <<<"$srv" \
+            || problems+=" omnigraph-server has no stop_grace_period: 35s;"
+        grep -qF './cluster:/cluster:ro' <<<"$srv" \
+            || problems+=" omnigraph-server cannot read /cluster/start-server-013.sh (no mount);"
+        grep -qE '^[[:space:]]*restart:[[:space:]]*unless-stopped[[:space:]]*$' <<<"$srv" \
+            || problems+=" omnigraph-server lost its restart policy;"
+
+        # Init: `cluster import --config` is gone in 0.13 — apply-fresh-013.sh decides
+        # fresh vs existing instead, so a re-deploy must never re-apply.
+        init="$(og13_svc omnigraph-init)"
+        grep -qF 'apply-fresh-013.sh' <<<"$init" \
+            || problems+=" omnigraph-init does not run apply-fresh-013.sh;"
+        grep -qF 'cluster import' <<<"$init" \
+            && problems+=" omnigraph-init still calls the removed cluster import;"
+
+        # Every bucket default in the file is the 0.13-only bucket; a bare `omnigraph`
+        # default would point 0.13 at the 0.8.1 data.
+        bad="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OMNI_COMPOSE" | grep -v '^S3_BUCKET:-omnigraph-013$' | sort -u)"
+        [[ -z "$bad" ]] || problems+=" a non-0.13 bucket default: $(printf '%s' "$bad" | tr '\n' ' ');"
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
