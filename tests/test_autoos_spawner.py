@@ -25129,13 +25129,23 @@ class ToolHomePruneTests(unittest.TestCase):
         self.assertEqual(4242, got["pgid"], "the group record must survive the merge")
 
 
+@unittest.skipIf(os.name == "nt", "fd-relative walk is POSIX-only; nt keeps the documented path-based fallback")
 class ToolHomeFdWalkTests(unittest.TestCase):
     """AO-TOOLHOME-SIZE P8a2 (judge HOLD on P8): the prune walked the toolhome by
     PATH — lstat(path), then scandir/rmdir/unlink(path) — and the seat's own code
     runs at the SAME uid as this cleanup, so it could swap a cache subdirectory for
     a symlink to the operator's home in the window between the check and the use,
     and the delete landed outside the sandbox. Every walk here is fd-relative from
-    one pinned root descriptor."""
+    one pinned root descriptor.
+
+    The guard is on the CLASS, not on the tests one by one, because what each of
+    them asserts is the fd walk: run against `_FD_WALK = False` — the nt branch —
+    6 of these 8 fail (the 1500-deep tree dies in the recursive path walk, and the
+    two root-swap tests never fire their seam, since nt opens no
+    `os.open(toolhome, O_NOFOLLOW)` pin to patch). `tree_bytes` is the one thing
+    here that reads by lstat and so is not walk-dependent, but the test that covers
+    it plants its link with `os.symlink`, which needs privilege on Windows — so
+    nothing in here is separable onto nt."""
 
     MARKER = "p8a2-marker"
 
@@ -25308,7 +25318,11 @@ class ToolHomeFdWalkTests(unittest.TestCase):
         # A directory the prune leaves unreadable would outlive the tmp dir it is in.
         self.addCleanup(lambda: os.chmod(blocked, 0o755) if os.path.isdir(blocked) else None)
         outside = self.outside()
-        os.chmod(outside, 0o700)
+        # r-x, NOT rwx: the retry is `mode | u+rwx`, so on a directory that already
+        # is 0700 a chmod that followed the link would be a no-op and the assertion
+        # below could not see that failure class. From 0500 it would land as 0700.
+        os.chmod(outside, 0o500)
+        self.addCleanup(lambda: os.chmod(outside, 0o700) if os.path.isdir(outside) else None)
         os.symlink(outside, os.path.join(self.cache, "link"))
         real_chmod, through_path = os.chmod, []
 
@@ -25321,7 +25335,7 @@ class ToolHomeFdWalkTests(unittest.TestCase):
             got = self.agent.prune_toolhome(self.sandbox)
         self.assertNotIn("refused", got, got)
         self.assertEqual([], through_path, "a chmod went through a path a link can redirect")
-        self.assertEqual(0o700, os.stat(outside).st_mode & 0o777,
+        self.assertEqual(0o500, os.stat(outside).st_mode & 0o777,
                          "the chmod followed a link out of the seat")
         self.assertFalse(os.path.lexists(blocked), "the dir_fd chmod retry did not run")
         self.assertTrue(os.path.isfile(os.path.join(outside, "canary")))
