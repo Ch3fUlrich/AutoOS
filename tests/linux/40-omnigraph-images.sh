@@ -930,6 +930,69 @@ og13_py_gate() {
     command -v python3 >/dev/null 2>&1
 }
 
+# ─── the fake S3's lifetime ──────────────────────────────────────────────────
+# Every og13_s3 below backgrounds a python http.server on loopback, in a temp dir
+# the case owns. The cases stop it with og13_lease_down, but "a case reaches its
+# last line" is not a guarantee — a mid-case bail, a harness error, or a case
+# written tomorrow that forgets the down leaves the server listening for the rest
+# of the run (AGENTS.md: nothing outlives a test). So each pid/dir pair is
+# registered as it starts and reaped by ONE EXIT trap, which chains whatever
+# handler the sourcing shell already had rather than replacing it.
+__OG13_S3_RUNS=()              # "pid<TAB>dir" per fake S3 still registered
+__OG13_PRIOR_EXIT_CMD=""       # the EXIT handler this file chained, verbatim
+
+# og13_s3_reap — kill every registered fake S3, remove its dir, forget them.
+# Idempotent by construction: the registry is emptied as it is walked, so a second
+# call reaps nothing and no pid is ever killed twice (the OS hands the same number
+# to an unrelated process; killing by a stale pid is worse than not cleaning up).
+# `wait` is not decoration — a killed child stays a zombie until reaped, and a
+# zombie still answers `kill -0`.
+og13_s3_reap() {
+    local _e _pid _dir
+    for _e in "${__OG13_S3_RUNS[@]-}"; do
+        [[ -n "$_e" ]] || continue
+        _pid="${_e%%$'\t'*}"; _dir="${_e#*$'\t'}"
+        if [[ -n "$_pid" ]]; then
+            kill "$_pid" 2>/dev/null || true
+            wait "$_pid" 2>/dev/null || true
+        fi
+        [[ -n "$_dir" ]] && rm -rf -- "$_dir"
+    done
+    __OG13_S3_RUNS=()
+    OG13_S3_PID=""
+    return 0
+}
+
+# og13_s3_exit_trap — the trap's action: reap, then hand control to the handler
+# this file chained.
+og13_s3_exit_trap() {
+    local _st=$?
+    og13_s3_reap
+    [[ -n "$__OG13_PRIOR_EXIT_CMD" ]] || return 0
+    ( exit "$_st" )                 # the saved handler reads $? — restore it
+    eval "$__OG13_PRIOR_EXIT_CMD"
+}
+
+# og13_s3_install_trap — register that ONE trap. Running it twice must not chain
+# our own handler onto itself, so the guard reads the current trap rather than a
+# flag: whoever installed it, it is chained exactly once.
+og13_s3_install_trap() {
+    local _decl _quoted
+    _decl="$(trap -p EXIT)"
+    [[ "$_decl" != *og13_s3_exit_trap* ]] || return 0
+    __OG13_PRIOR_EXIT_CMD=""
+    if [[ -n "$_decl" ]]; then
+        _quoted="${_decl#trap -- }"; _quoted="${_quoted% EXIT}"
+        # The declaration is the command text as ONE quoted word, so let the shell
+        # unquote it instead of stripping quote characters by hand — the text keeps
+        # its own quoting, including the `$?` a handler like run-tests.sh's reads.
+        eval "__OG13_S3_PRIOR=( $_quoted )"
+        __OG13_PRIOR_EXIT_CMD="${__OG13_S3_PRIOR[0]-}"
+    fi
+    trap og13_s3_exit_trap EXIT
+}
+og13_s3_install_trap
+
 # og13_s3 <dir> — start it, set OG13_S3_PID and OG13_S3_PORT (globals, so the stop
 # below can reach the process: a command substitution would lose the pid). State
 # lives in <dir>/s3-state: GET answers the forced status from get_status, else the
@@ -974,16 +1037,33 @@ srv = socketserver.TCPServer(("127.0.0.1", 0), FakeS3)
 ap("port", str(srv.server_address[1])); srv.serve_forever()
 ' "$_d/s3-state" >/dev/null 2>&1 &
     OG13_S3_PID=$!
+    __OG13_S3_RUNS+=("$OG13_S3_PID"$'\t'"$_d")
     for _i in $(seq 1 50); do [[ -s "$_d/s3-state/port" ]] && break; sleep 0.1; done
     OG13_S3_PORT="$(cat "$_d/s3-state/port" 2>/dev/null)"
 }
 
 # og13_s3_stop — no test may leave a server behind (AGENTS.md: nothing outlives it).
+# Stops THIS case's server and blanks its pid in the reap registry, so the trap can
+# never kill a pid the OS later hands to something else while still getting the dir.
+# Idempotent: no pid, an already-dead pid and a second call all return 0 — which is
+# what lets og13_lease_down and the trap both run for the same fixture.
 og13_s3_stop() {
-    [[ -z "${OG13_S3_PID:-}" ]] && return 0
-    kill "$OG13_S3_PID" 2>/dev/null || true
-    wait "$OG13_S3_PID" 2>/dev/null || true
+    local _pid="${OG13_S3_PID-}" _e _dir _kept=()
     OG13_S3_PID=""
+    [[ -n "$_pid" ]] || return 0
+    for _e in "${__OG13_S3_RUNS[@]-}"; do
+        [[ -n "$_e" ]] || continue
+        _dir="${_e#*$'\t'}"
+        if [[ "${_e%%$'\t'*}" == "$_pid" ]]; then
+            kill "$_pid" 2>/dev/null || true
+            wait "$_pid" 2>/dev/null || true
+            _kept+=(""$'\t'"$_dir")
+        else
+            _kept+=("$_e")
+        fi
+    done
+    __OG13_S3_RUNS=("${_kept[@]-}")
+    return 0
 }
 
 # og13_lease_entry <dir> — og13_stub's entrypoint, plus it copies the marker the
@@ -1046,6 +1126,54 @@ og13_reqs_pin() {
     [[ -z "$(grep -v " $OG13_KEY\$" "$1/s3-state/reqs")" ]] \
         || printf 'a request off the guard key [%s]; ' "$_r"
 }
+
+# og13_port_open <port> — does something still accept a connection on this
+# loopback port? Only the fake S3 ever listened there, so an open port after a
+# cleanup means the process outlived the case.
+og13_port_open() {
+    python3 -c '
+import socket, sys
+s = socket.socket(); s.settimeout(1)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1"
+}
+
+if it "omnigraph 0.13 start-server-013: a fake S3 an aborted case left behind dies with the run — one chained EXIT trap reaps pid, port and dir"; then
+    if og13_py_gate; then
+        problems=""
+        # (a) THE CHAIN. tests/run-tests.sh installs its own EXIT trap before
+        # sourcing the suites (tests/run-tests.sh:66) and sources this file into
+        # that shell, so a blind `trap ... EXIT` would silently delete that guard.
+        # Proved in a subshell, where the sentinel stands in for the runner's
+        # handler: it must still run, and still see the status the shell left with
+        # (the registry is emptied here so the reap cannot touch a parent's server).
+        chain="$( {
+            __OG13_S3_RUNS=()
+            trap 'printf "PRIOR rc=%s\n" "$?"' EXIT
+            og13_s3_install_trap
+            exit 7
+        } 2>&1 )"
+        [[ "$chain" == *"PRIOR rc=7"* ]] \
+            || problems+="the EXIT trap already installed was clobbered, not chained: [$chain];"
+        # (b) exactly ONE trap, and its action is the function that reaps.
+        [[ "$(trap -p EXIT)" == *og13_s3_exit_trap* ]] \
+            || problems+="no EXIT trap reaps the fake S3: [$(trap -p EXIT)];"
+        # (c) the leak itself: start the helper, stop NOTHING by hand, then run the
+        # cleanup the way the trap does.
+        d="$(mktemp -d)"; og13_s3 "$d"
+        pid="${OG13_S3_PID:-}"; port="${OG13_S3_PORT:-}"
+        [[ -n "$pid" && -n "$port" ]] || problems+="the fake S3 did not come up (pid [$pid], port [$port]);"
+        kill -0 "$pid" 2>/dev/null || problems+="the fake S3 died before anything stopped it;"
+        og13_port_open "$port" || problems+="nothing listened on port $port to begin with;"
+        og13_s3_reap                                  # exactly what the trap calls
+        kill -0 "$pid" 2>/dev/null && problems+="pid $pid outlived the cleanup;"
+        og13_port_open "$port" && problems+="port $port still accepts a connection after the cleanup;"
+        [[ ! -e "$d" ]] || problems+="temp dir $d outlived the cleanup;"
+        # (d) idempotent — reaping twice and stopping an already-stopped server are
+        # no-ops, so no pid the OS later hands to an unrelated process is ever killed.
+        og13_s3_reap; og13_s3_reap; og13_s3_stop; og13_s3_stop
+        [[ -z "$problems" ]] && pass || fail "$problems"
+    fi
+fi
 
 if it "omnigraph 0.13 start-server-013: an old lock and no heartbeat marker releases, the lease is taken before the boot and dropped on the graceful stop"; then
     if og13_py_gate; then
