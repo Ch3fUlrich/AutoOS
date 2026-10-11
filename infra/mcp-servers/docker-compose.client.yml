@@ -122,17 +122,20 @@ services:
     environment:
       LOCAL_MINIO_USER: ${LOCAL_MINIO_USER:-omnigraph}
       LOCAL_MINIO_PASSWORD: ${LOCAL_MINIO_PASSWORD}
-      S3_BUCKET: ${S3_BUCKET:-omnigraph}
+      # 0.13 never shares a bucket with 0.8.1 — its data layout is incompatible.
+      S3_BUCKET: ${S3_BUCKET:-omnigraph-013}
     networks: [client-net]
     restart: "no"
 
+  #   0.13 replaced `cluster import` with apply-fresh-013.sh: cluster status
+  #   decides fresh vs existing, and a fresh apply releases the admission lock it prints.
   omnigraph-local-init:
-    image: modernrelay/omnigraph-server:v0.8.1
+    image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
     container_name: omnigraph-local-init
     profiles: ["offline"]
     depends_on:
       omnigraph-local-mc: { condition: service_completed_successfully }
-    entrypoint: ["sh", "-c", "omnigraph cluster import --config /cluster --yes 2>/dev/null || true; omnigraph cluster apply --config /cluster --yes --as default"]
+    entrypoint: ["sh", "/cluster/apply-fresh-013.sh", "/cluster", "s3://${S3_BUCKET:-omnigraph-013}/cluster"]
     environment:
       - AWS_ACCESS_KEY_ID=${LOCAL_MINIO_USER:-omnigraph}
       - AWS_SECRET_ACCESS_KEY=${LOCAL_MINIO_PASSWORD}
@@ -145,16 +148,25 @@ services:
     networks: [client-net]
     restart: "no"
 
+  #   0.13 retains its cluster admission lock on EVERY shutdown, clean `docker stop`
+  #   included, and refuses the next boot with state_lock_held — so the entrypoint must
+  #   be start-server-013.sh (release-then-exec) or `restart: unless-stopped` below
+  #   crash-loops forever. One server container per data root (fixed container_name):
+  #   quiescence is proven by there being no other holder.
   omnigraph-local:
-    image: modernrelay/omnigraph-server:v0.8.1
+    image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
     container_name: omnigraph-local
     profiles: ["offline"]
+    entrypoint: ["sh", "/cluster/start-server-013.sh"]
+    # The server's graceful-shutdown budget is 25 s; stop must not kill it mid-flush.
+    stop_grace_period: 35s
     depends_on:
       omnigraph-local-minio: { condition: service_healthy }
       omnigraph-local-init: { condition: service_completed_successfully }
     environment:
       - OMNIGRAPH_BIND=0.0.0.0:8080
-      - OMNIGRAPH_CLUSTER=s3://${S3_BUCKET:-omnigraph}/cluster
+      # Cluster boot source: the S3 storage-root URI on MinIO (start-server-013.sh reads it).
+      - OMNIGRAPH_CLUSTER=s3://${S3_BUCKET:-omnigraph-013}/cluster
       - OMNIGRAPH_SERVER_BEARER_TOKEN=${OMNIGRAPH_TOKEN:?set OMNIGRAPH_TOKEN in .env.shared}
       - AWS_ACCESS_KEY_ID=${LOCAL_MINIO_USER:-omnigraph}
       - AWS_SECRET_ACCESS_KEY=${LOCAL_MINIO_PASSWORD}
@@ -163,6 +175,10 @@ services:
       - AWS_ALLOW_HTTP=true
       - AWS_S3_FORCE_PATH_STYLE=true
       - OLLAMA_DUMMY_KEY=${OLLAMA_DUMMY_KEY:-ollama}
+    volumes:
+      # Carries start-server-013.sh into the container at /cluster (same mount
+      # omnigraph-local-init uses; compose resolves it from this file's directory).
+      - ./cluster:/cluster:ro
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
