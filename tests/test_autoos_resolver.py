@@ -5752,7 +5752,7 @@ class CreditFailOpenTests(unittest.TestCase):
                         removed["r-trial"])
 
 
-@unittest.skipIf(os.name != "posix",
+@unittest.skipIf(os.name == "nt",
                  "the fake qodercli is a POSIX shell script with chmod +x")
 class QoderSigninProbeTests(unittest.TestCase):
     """AO-QODER-ROUTE part 1: qoder gets a sign-in probe, and a probe's success
