@@ -155,6 +155,48 @@ PY
     fi
 fi
 
+# ─── D-1038 P7e3: the example's storage root is the root the stacks apply ─────
+# The compose stacks run apply-fresh-013.sh against `s3://${S3_BUCKET:-…}/cluster`,
+# but an operator who `cp cluster.yaml.example cluster.yaml` unedited gets whatever
+# bucket is WRITTEN there — and apply reads that file, not the compose default. A
+# bare `omnigraph` would have the 0.13 server share a bucket a 0.8.x server wrote
+# to, which corrupts both. The bucket is extracted from both compose files rather
+# than hard-coded, so renaming it in either place fails this test. Static —
+# nothing boots.
+OGC_EXAMPLE="$ROOT/infra/mcp-servers/cluster/cluster.yaml.example"
+OGC_SERVER="$ROOT/infra/mcp-servers/docker-compose.server.yml"
+OGC_CLIENT="$ROOT/infra/mcp-servers/docker-compose.client.yml"
+
+if it "omnigraph cluster: the example's storage root is the compose default bucket"; then
+    problems=""
+    for ogc_f in "$OGC_EXAMPLE" "$OGC_SERVER" "$OGC_CLIENT"; do
+        [[ -f "$ogc_f" ]] || problems+=" missing $ogc_f;"
+    done
+    if [[ -z "$problems" ]]; then
+        srv_bucket="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OGC_SERVER" | head -1)"
+        srv_bucket="${srv_bucket#S3_BUCKET:-}"
+        cli_bucket="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OGC_CLIENT" | head -1)"
+        cli_bucket="${cli_bucket#S3_BUCKET:-}"
+        [[ -n "$srv_bucket" ]] || problems+=" no S3_BUCKET:- default in $OGC_SERVER;"
+        [[ -n "$cli_bucket" ]] || problems+=" no S3_BUCKET:- default in $OGC_CLIENT;"
+        if [[ -n "$srv_bucket" && -n "$cli_bucket" && "$srv_bucket" != "$cli_bucket" ]]; then
+            problems+=" the two compose files default to different buckets ($srv_bucket vs $cli_bucket);"
+        fi
+
+        ogc_lines="$(grep -cE '^[[:space:]]*storage:' "$OGC_EXAMPLE")"
+        [[ "$ogc_lines" -eq 1 ]] || problems+=" $ogc_lines storage: lines (want exactly 1);"
+        storage="$(sed -nE 's/^[[:space:]]*storage:[[:space:]]*([^[:space:]]*).*/\1/p' "$OGC_EXAMPLE" | head -1)"
+        want_root="s3://${srv_bucket}/cluster"
+        [[ "$storage" == "$want_root" ]] \
+            || problems+=" the example writes storage: [$storage], the stacks apply [$want_root];"
+
+        # The old bucket, the one a 0.8.x server wrote to.
+        grep -qF 's3://omnigraph/' "$OGC_EXAMPLE" \
+            && problems+=" the example still names the old s3://omnigraph/ bucket;"
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 # ─── Fleet rule D-825: apply-cluster.sh converges the live store only on a GO ──
 # apply-cluster.sh has no read-only mode — every run applies cluster/ to the live
 # MinIO-backed omnigraph store and restarts the server — so it must refuse without
