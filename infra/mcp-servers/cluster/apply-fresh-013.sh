@@ -7,19 +7,38 @@
 # root this script is the only actor, so quiescence holds and it releases that exact ID (never a guessed one).
 set -eu
 cfg="${1:?config dir}"; root="${2:?storage root uri}"
-if omnigraph cluster status --cluster "$root" >/dev/null 2>&1; then
+# The freshness probe below reads $root, but `apply` acts on the root named in $cfg/cluster.yaml (`storage:`):
+# they MUST be the same root, or an existing root could be applied without the state_missing gate (seat 38b65c).
+cstore="$(sed -n 's/^storage:[[:space:]]*//p' "$cfg/cluster.yaml" 2>/dev/null | head -n 1 | tr -d '\r' | sed 's/[[:space:]]*$//')"
+[ "$cstore" = "$root" ] || { echo "refusing: $cfg/cluster.yaml storage '$cstore' is not the root '$root' being probed" >&2; exit 1; }
+status_out="$(omnigraph cluster status --cluster "$root" 2>&1)" && status_rc=0 || status_rc=$?
+if [ "$status_rc" -eq 0 ]; then
   echo "existing store at $root: skipping apply (config changes are applied deliberately, see the runbook)"
   exit 0
 fi
-out="$(omnigraph cluster apply --config "$cfg" --yes --as default 2>&1)" || { printf '%s\n' "$out" | tail -20; echo "apply FAILED" >&2; exit 1; }
+
+case "$status_out" in
+  *state_missing*)
+    ;;
+  *)
+    printf '%s\n' "$status_out" | tail -5 >&2
+    echo "cannot determine if store at $root is fresh (status failed without state_missing)" >&2
+    exit 1
+    ;;
+esac
+
+out="$(omnigraph cluster apply --config "$cfg" --yes --as default 2>&1)" || { printf '%s\n' "$out" | tail -20 >&2; echo "apply FAILED" >&2; exit 1; }
 printf '%s\n' "$out" | sed -n 1,3p
 line="$(printf '%s\n' "$out" | grep -m1 'Admission lock:' || true)"
 if [ -z "$line" ]; then
   echo "apply reported no admission lock; if the server refuses to boot with state_lock_held, unlock the id it prints" >&2
   exit 0
 fi
-# the id is everything between "Admission lock: " and the ";" -- no assumption about its alphabet
 id="$(printf '%s\n' "$line" | sed -n 's/^.*Admission lock: *\([^;]*\);.*$/\1/p' | head -n 1)"
 if [ -z "$id" ]; then echo "cannot parse the admission lock id from: $line" >&2; exit 1; fi
+if ! printf '%s\n' "$id" | grep -Eq '^[0-9A-HJKMNP-TV-Z]{26}$'; then
+  echo "admission lock id '$id' is not a valid ULID" >&2
+  exit 1
+fi
 omnigraph cluster force-unlock "$id" --config "$cfg"
 echo "released admission lock $id"
