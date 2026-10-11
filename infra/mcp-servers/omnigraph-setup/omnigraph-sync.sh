@@ -39,7 +39,6 @@
 #   local graph is already EMPTY — so the refusing run's own message names a NEW 0-byte
 #   export. Restoring from it loads nothing and the operator believes the graph came
 #   back. The file to restore from is the newest NON-EMPTY backup — the pre-kill one:
-#     ls -t "$BACKUP_DIR"/local-<graph>-*.jsonl        # first entry with size > 0
 #     find "$BACKUP_DIR" -name 'local-<graph>-*.jsonl' -size +0 | sort | tail -1
 #   Restore ONLY into the EMPTY local graph — edges have no @key, so merge-loading into
 #   a non-empty graph APPENDS a duplicate of every edge. OMNIGRAPH_IMAGE, DOCKER_NET and

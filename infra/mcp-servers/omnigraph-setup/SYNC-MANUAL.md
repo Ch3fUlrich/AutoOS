@@ -222,7 +222,7 @@ Proof of what a wrong value does — the name resolves only from inside the netw
 
 ```console
 $ docker run --rm --network mcp-server_mcp-net curlimages/curl -fsS http://omnigraph-server:8080/healthz
-{"status":"ok","version":"0.8.1","internal_schema_version":4}
+{"status":"ok","version":"0.13.0","internal_schema_version":14}
 $ docker run --rm --network bridge curlimages/curl -fsS http://omnigraph-server:8080/healthz
 curl: (6) Could not resolve host: omnigraph-server
 ```
@@ -317,8 +317,9 @@ Four design choices, each bought with an incident:
   exists for node:<Type>`.
 - **No device branch.** On v0.8.1 `branch create` can hit a Lance internal error
   (`Clone operation should not enter build_manifest`) and `branch merge` the concurrent-
-  modification error above. The branch existed for "review before merge", which buys
-  nothing on an unattended 5-minute timer. Safety comes from the delta + backups + verify.
+  modification error above (measured on v0.8.1; not re-measured on 0.13). The branch
+  existed for "review before merge", which buys nothing on an unattended 5-minute timer.
+  Safety comes from the delta + backups + verify.
 - **Purge-then-load for the pull, not `overwrite`.** `load --mode overwrite` into a
   *populated* graph trips a Lance bug (`stage_create_btree_index … all columns in a record
   batch must have the same length`) — and can *land anyway while exiting 1*, so you cannot
@@ -327,6 +328,23 @@ Four design choices, each bought with an incident:
 **The rule behind all of it: verify against the live system, never trust a component's own
 report.** Every failure here was something reporting success while doing the opposite. After
 a sync, check `edges` vs `distinct edges` — not the exit code alone.
+
+---
+
+## On Omnigraph 0.13
+
+The scripts send the 0.13 HTTP contract header — 0.13.0 answers every request except
+`/healthz` with HTTP 400 `{"code":"api_contract_mismatch"}` unless it carries
+`omnigraph-http-api: 0.13` — and the throwaway CLI containers they run default to the
+pinned image
+`modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1`.
+
+`omnigraph-sync.sh` exits non-zero when any graph fails — the exit code is the last
+non-zero one; one graph's failure does not abort the others.
+
+After a kill between the pull's purge and its load, the local graph is empty and the next
+run refuses; restore from the newest NON-EMPTY backup with the command in the
+`omnigraph-sync.sh` header's RESTORE section.
 
 ---
 
@@ -383,7 +401,8 @@ of bug, as it encodes and decodes with the same parent locale so any mismatch ca
   compute the `@embed("rationale")` vector and **erases** it if the record omits one, and an
   unembedded `Decision` is *dropped* from `nearest()` — not ranked low. On v0.8.1 there is
   no working re-embed on a populated graph, so `populate-embeddings.py` only works against a
-  fresh one. The nodes stay findable by traversal and full-text.
+  fresh one (measured on v0.8.1; not re-measured on 0.13). The nodes stay findable by
+  traversal and full-text.
 - **The Linux `omnigraph-sync.sh` is unfixed** (see the warning above).
 - **Conflict resolution is last-writer-wins per node**, decided by payload difference. There
   are no timestamps in the schema, so a genuine two-sided edit of the same node cannot be

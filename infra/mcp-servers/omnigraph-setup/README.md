@@ -181,10 +181,18 @@ does not parse). [`../scripts/dedup-graph.py`](../scripts/dedup-graph.py) fixes
 both: it groups nodes by `(type, casefold(slug))` (add `--by-name` for same-label
 too), picks a canonical slug, redirects the duplicates' edges, merges fields, and
 **de-dupes edges by `(type,from,to)`**, then rebuilds (export → reset store →
-`load --mode overwrite`, the one reliable write path on v0.8.1). It triggers on
+`load --mode overwrite`, the one reliable write path — measured on v0.8.1; not
+re-measured on 0.13). It triggers on
 node **or** edge duplicates, so the hourly timer keeps the graph clean after any
 device sync. It is **idempotent** and a **cheap no-op when clean** (only rebuilds
 when duplicates exist — a brief outage then). Preview with `--dry-run`.
+
+The script now defaults to the 0.13 image and **fails closed** on any image >= 0.13:
+its store wipe is a 0.8.x-only procedure that would destroy the 0.13 bucket and the
+0.8.1 rollback bucket. On a 0.8.x stack pass `--image
+modernrelay/omnigraph-server:v0.8.<patch>` explicitly — a no-argument run aborts by
+design; on a 0.13 stack do NOT use it, use the export/import path
+(`scripts/omnigraph-migrate-013.py`, Server repo).
 
 > **This is the only way to remove duplicate edges** — a client (Windows/laptop)
 > cannot, because the fix needs a store reset (MinIO volume) on the server host.
@@ -207,3 +215,9 @@ cp dedup-graph.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now dedup-graph.timer     # hourly sweep
 ```
+
+> The sweep is a 0.8.x-only procedure: `dedup-graph.py` now fails closed on its 0.13
+> default image (aborts, exit 1), so on a 0.8.x host the unit's `ExecStart` needs
+> `--image modernrelay/omnigraph-server:v0.8.<patch>` appended **before** the timer is
+> enabled. A 0.13 host has no dedup path and should not enable the timer (follow-up
+> AO-DEDUP-013).
