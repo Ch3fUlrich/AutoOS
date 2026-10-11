@@ -32,9 +32,14 @@ OMNIGRAPH_TOKEN = os.environ.get("OMNIGRAPH_TOKEN", "")
 # is deliberately small — the chips switch to the project graphs where the content lives.
 GRAPH_ID = os.environ.get("OMNIGRAPH_GRAPH", "memory")
 TIMEOUT = float(os.environ.get("OMNIGRAPH_TIMEOUT", "15"))
+# omnigraph-server 0.13.0 answers 400 api_contract_mismatch to every request
+# except /healthz that lacks this header, so it rides on every call via _headers.
+CONTRACT_HEADER = "omnigraph-http-api"
+CONTRACT_VERSION = "0.13"
 
 app = Flask(__name__)
-_headers = {"Authorization": f"Bearer {OMNIGRAPH_TOKEN}"}
+_headers = {"Authorization": f"Bearer {OMNIGRAPH_TOKEN}",
+            CONTRACT_HEADER: CONTRACT_VERSION}
 
 NODE_TYPES = ["Project", "Decision", "Rule", "Preference", "Convention", "Component", "Task"]
 # Which field is the human label / the main body text, per node type.

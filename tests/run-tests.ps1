@@ -11345,7 +11345,8 @@ $gateRouting = Join-Path $Root 'tests/fixtures/go-gate/routing'
 $gateWorkers = Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'
 $gateEnvKeys = @(
     'PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE',
-    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG'
+    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG',
+    'OMNIGRAPH_IMAGE'
 ) + $GateStubUrlVars
 function Push-GateEnv {
     # [Environment] rather than $env: because a $null read under Set-StrictMode
@@ -11602,11 +11603,20 @@ Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unc
 # instead of the host's.
 Describe-Group 'compact-graphs D-825 GO gate'
 $gateCompact = Join-Path $Root 'infra/mcp-servers/scripts/compact-graphs.ps1'
+# D-1038 P4c4: compact-graphs.ps1 defaults to the pinned v0.13.0 reference and its image
+# guard fails closed on >= 0.13 — before the GO gate and before any docker call, and
+# -DryRun included. These cases test the GO gate, so they must get past that guard: they
+# name a 0.8 image, the same shared-variable fix APC_IMG08 makes in
+# tests/linux/40-omnigraph-images.sh. One variable, so no case can drift back onto the
+# failing default.
+$gateCompactImage = 'modernrelay/omnigraph-server:v0.8.1'
 
 function Invoke-ChildCompact {
     # D-852: compaction is a docker-first tool — it inspects, stops and restarts the
     # live omnigraph-server — so the stand-in directory is the only thing this case
     # family can honestly run against. The record comes back as 'Calls'.
+    # An empty -Extra OMNIGRAPH_IMAGE clears the 0.8 image and so runs against the
+    # failing default — that is how the guard case below reaches the abort.
     param([string[]]$ScriptArgs, [hashtable]$Extra = @{})
     $prevEap = $ErrorActionPreference
     $saved = Push-GateEnv
@@ -11618,6 +11628,7 @@ function Invoke-ChildCompact {
         $values = Get-GateStubEnv -Stub $stub -Extra @{
             'AUTOOS_ROUTING_DIR' = $gateRouting
             'AUTOOS_WORKERS_DIR' = $gateWorkers
+            'OMNIGRAPH_IMAGE'    = $gateCompactImage
         }
         foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
         Set-GateStubEnv -Values $values
@@ -11704,6 +11715,22 @@ Test-Case 'compact-graphs.ps1 D-825: a valid -Go + -GoSha clears the gate and ec
     Assert-True (Test-GateStubRecord $r.Calls 'docker') `
         "the cleared run reached no stand-in docker: [$(($r.Calls) -replace "`r", ' / ')]"
     Assert-True ($r.Out -match 'omnigraph-server not found') "the stand-in did not stop the run: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-1038: no OMNIGRAPH_IMAGE aborts on the 0.13 default before the gate' {
+    # The guard every case above now has to satisfy, asserted at suite level: with no
+    # image named, the run fails closed on the 0.13 default — and it does so ahead of
+    # the GO gate and ahead of -DryRun, so neither reaches a docker call.
+    $r = Invoke-ChildCompact @() -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'ABORT: image ') "no image abort: $($r.Out)"
+    Assert-True ($r.Out -match 'AO-APPLY-CLUSTER-013') "the abort lost the port item: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "the run reached the GO gate: $($r.Out)"
+    Assert-GateUntouched $r
+    $d = Invoke-ChildCompact @('-DryRun') -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $d.Code 2
+    Assert-True ($d.Out -match 'ABORT: image ') "a dry run skipped the guard: $($d.Out)"
+    Assert-GateUntouched $d
 }
 
 # ─── D-852: the shadow itself is a tested property ────────────────────────────

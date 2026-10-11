@@ -26,7 +26,7 @@ docker compose --env-file .env.shared --env-file .env.server \
 Verify:
 
 ```bash
-curl -fsS http://127.0.0.1:8080/healthz                    # {"status":"ok","version":"0.8.1",...}
+curl -fsS http://127.0.0.1:8080/healthz                    # {"status":"ok","version":"0.13.0","internal_schema_version":14}
 set -a; . ./.env.shared; set +a
 curl -fsS -H "Authorization: Bearer $OMNIGRAPH_TOKEN" http://127.0.0.1:8080/graphs
 ```
@@ -48,12 +48,23 @@ curl -fsS -H "Authorization: Bearer $OMNIGRAPH_TOKEN" http://127.0.0.1:8080/grap
    (`./data/minio`), not a named volume. To truly reset the graph:
    `docker compose … down && rm -rf ./data/minio && … up`.
 
+### Starting and re-starting a 0.13 server
+
+`cluster import --config` is gone on 0.13: a fresh root is applied with
+[`../cluster/apply-fresh-013.sh`](../cluster/apply-fresh-013.sh), and the server is
+started with [`../cluster/start-server-013.sh`](../cluster/start-server-013.sh).
+`cluster apply`, and **every** server shutdown (a clean stop included), retains an
+admission lock that blocks the next boot (`state_lock_held`) until force-unlocked;
+the start wrapper releases it only when it can prove the holder dead. Run **one
+server container per data root**, and never let a 0.13 root share a bucket with
+0.8.x data — the default bucket is `omnigraph-013`.
+
 ---
 
 ## 2. Register the MCP bridge (agent side)
 
 The bridge package is **`@modernrelay/omnigraph-mcp`** (stdio). The env-var names
-it *actually* requires (verified against v0.8.0 of the bridge) are **not** what
+it *actually* requires (verified against v0.13.0 of the bridge) are **not** what
 older docs said:
 
 | Env var | Value | Notes |
@@ -108,12 +119,15 @@ printf '%s\n%s\n%s\n' \
 ```
 
 A healthy bridge returns a `serverInfo` block then a `tools/list`. **Actual tool
-names** (v0.8.0) — note they differ from the schema/branches/queries/mutations/
-ingest naming in older docs:
+names** (v0.13.0, 15 tools) — note they differ from the
+schema/branches/queries/mutations/ingest naming in older docs:
 
-`health`, `snapshot`, `query` (GQ read), `mutate` (GQ write), `load` (NDJSON
-bulk), `schema_get`, `snapshot`, `branches_list/create/delete/merge`,
-`commits_list/get`, `graphs_list`.
+read-only — `health`, `snapshot`, `query` (GQ read), `schema_get`,
+`branches_list`, `graphs_list`, `commits_list`, `commits_get`, `commits_changes`,
+`changes_poll`; write — `mutate` (GQ write, with an optional `ifGraphCommit`
+parameter), `load` (NDJSON bulk), `branches_create`, `branches_delete`,
+`branches_merge`. Tool names are unchanged from 0.8.0; `commits_changes` and
+`changes_poll` are new.
 
 Key usage norms surfaced by the bridge's own `instructions`: read
 `schema_get` first; parameterize queries (never interpolate); `nearest`/`bm25`/
@@ -134,7 +148,7 @@ Windows paths in `docker run -v`; feeding the file on stdin avoids it entirely:
 cd infra/mcp-servers; set -a; . ./.env.shared; set +a
 docker run --rm -i --network mcp-server_mcp-net \
   -e OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" \
-  --entrypoint sh modernrelay/omnigraph-server:v0.8.1 -c \
+  --entrypoint sh modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1 -c \
   'cat > /tmp/d.jsonl; omnigraph load --server http://omnigraph-server:8080 --graph memory --data /tmp/d.jsonl --mode merge --yes --json' \
   < cluster/seed/sibling-analysis-repo.jsonl
 ```
@@ -180,7 +194,7 @@ verify with `docker logs ollama --since 30s | grep /v1/embeddings` after a searc
   vectors produced 0 embedding calls).
 - **`load --mode merge` of vectors fails** with a Lance error
   (`all columns in a record batch must have the same length`) — a v0.8.1 quirk on
-  hand-supplied vector ingest.
+  hand-supplied vector ingest (measured on v0.8.1; not re-measured on 0.13).
 - **The `omnigraph embed` CLI `--spec` provider ignores its base-URL** and
   defaults to OpenRouter (401), so it can't target a local Ollama; `--server`
   and `--cluster` are rejected (`embed` is a local-store command), and `--store`
