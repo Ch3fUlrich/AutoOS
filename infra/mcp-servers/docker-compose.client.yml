@@ -90,8 +90,8 @@ services:
   #   Lets the agent keep working with no connection to the central server.
   #   omnigraph-setup/omnigraph-sync.sh reconciles this into central `main` when online.
   omnigraph-local-minio:
-    image: minio/minio:latest
-    container_name: omnigraph-local-minio
+    image: ${OMNIGRAPH_MINIO_IMAGE:?set OMNIGRAPH_MINIO_IMAGE in .env.shared (an internally mirrored image reference, see .env.shared.example)}
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-local-minio
     profiles: ["offline"]
     command: server /data --console-address ":9001"
     environment:
@@ -100,8 +100,8 @@ services:
     volumes:
       - omnigraph_local_minio:/data
     ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
+      - "127.0.0.1:${LOCAL_MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${LOCAL_MINIO_CONSOLE_PORT:-9001}:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -110,8 +110,8 @@ services:
     networks: [client-net]
 
   omnigraph-local-mc:
-    image: minio/mc:latest
-    container_name: omnigraph-local-mc
+    image: "${OMNIGRAPH_MC_IMAGE:?set OMNIGRAPH_MC_IMAGE in .env.shared (the same mirrored minio image: mc ships inside it)}"
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-local-mc
     profiles: ["offline"]
     depends_on:
       omnigraph-local-minio: { condition: service_healthy }
@@ -131,7 +131,7 @@ services:
   #   decides fresh vs existing, and a fresh apply releases the admission lock it prints.
   omnigraph-local-init:
     image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
-    container_name: omnigraph-local-init
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-local-init
     profiles: ["offline"]
     depends_on:
       omnigraph-local-mc: { condition: service_completed_successfully }
@@ -151,11 +151,13 @@ services:
   #   0.13 retains its cluster admission lock on EVERY shutdown, clean `docker stop`
   #   included, and refuses the next boot with state_lock_held — so the entrypoint must
   #   be start-server-013.sh (release-then-exec) or `restart: unless-stopped` below
-  #   crash-loops forever. One server container per data root (fixed container_name):
-  #   quiescence is proven by there being no other holder.
+  #   crash-loops forever. One server container per data root (the container_name takes
+  #   ${OMNIGRAPH_CONTAINER_PREFIX:-}, whose default is EMPTY, so it stays one fixed name
+  #   unless a second stack on the same host sets a prefix): quiescence is proven by there
+  #   being no other holder.
   omnigraph-local:
     image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
-    container_name: omnigraph-local
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-local
     profiles: ["offline"]
     entrypoint: ["sh", "/cluster/start-server-013.sh"]
     # The server's graceful-shutdown budget is 25 s; stop must not kill it mid-flush.
@@ -186,7 +188,7 @@ services:
     tmpfs:
       - /tmp
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:${OMNIGRAPH_LOCAL_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 15s
@@ -198,6 +200,10 @@ services:
 
 volumes:
   serena_data:
+  # The throwaway offline store: it persists the local graph between runs, and
+  # `docker compose down -v` is what removes it. A different S3_BUCKET (0.13 uses
+  # omnigraph-013) leaves any older data sitting in this same volume untouched —
+  # the bucket separates the stores, not the volume.
   omnigraph_local_minio:
 
 networks:
