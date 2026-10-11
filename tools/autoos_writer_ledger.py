@@ -5,8 +5,12 @@ the writer model that served the text, the task type, and the reviewer.
 demoted() flags a model/task pair after `threshold` rejections inside
 `window_days` with no clearing probe pass in between.
 
+P6e (judge): a rejection is evidence about a FAMILY, so a 'rejected' row names both families —
+the writer's and the reviewer's, computed here — and one that cannot name two different ones is
+neither written nor counted.
+
 Provenance note: this module authenticates rows only as far as the CLI
-writes them (timestamps are stamped here, never taken from the caller).
+writes them (timestamps and the two family fields are stamped here, never taken from the caller).
 Probe authenticity beyond the CLI -- someone hand-editing the JSONL file
 to plant or erase verdicts -- is out of scope: the ledger file's integrity
 is the filesystem's (ownership, permissions, backups). Anything needing
@@ -36,7 +40,7 @@ TASKS = ("ops", "code", "docs", "infra")
 RISKS = ("R0", "R1", "R2", "R3")
 KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_model_served",
         "task_type", "risk", "reviewer", "fixer_model", "probe", "ref",
-        "lane", "sha", "cost")
+        "lane", "sha", "cost", "writer_family", "reviewer_family")
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
 # P6: `ref` names the evidence a seat row came from (the lane sha, or the sha256 of
 # the seat's answer), so a re-run over the same answer dedupes and a changed
@@ -146,6 +150,70 @@ def _open_ledger_ro(resolved):
 def _now():
     """Current UTC time. Module-level hook so hermetic tests can pin time."""
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+# P6e (judge): the seat-pair rule — a reviewer of a DIFFERENT family from the writer — guarded only
+# a seat COUNTED for readiness, so a same-family rejection demoted its own family's model. Both
+# families ride in the row now: computed where it is WRITTEN, re-read where the clock READS it.
+_FAMILY_TOKEN = re.compile(r"[a-z0-9._-]{1,40}$")
+_registry_cache = None
+
+
+def _family_registry():
+    """The catalog the family reads are answered from (`AUTOOS_REGISTRY_PATH` overrides the
+    committed one), ONE read cached per process; an unreadable catalog answers None."""
+    global _registry_cache
+    path = os.environ.get("AUTOOS_REGISTRY_PATH") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "catalog",
+        "ai-registry.json")
+    if _registry_cache is None or _registry_cache[0] != path:
+        try:
+            with io.open(path, encoding="utf-8") as h:
+                reg = json.load(h)
+        except Exception:
+            reg = None
+        _registry_cache = (path, reg if type(reg) is dict else None)
+    return _registry_cache[1]
+
+
+def _family_of(spelling):
+    """The family the registry names for one writer-model or reviewer spelling, else None: the
+    resolver's ONE walk (`author_family`) that `review_status` uses; an unplaced name = nothing."""
+    text = spelling.strip() if type(spelling) is str else ""
+    if not text:
+        return None
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        import autoos_resolver  # lazy: `autoos-agent.py` imports THIS module
+        registry = _family_registry()
+        family = autoos_resolver.author_family(text, registry)[0] if registry else None
+    except Exception:
+        return None
+    return family if type(family) is str and _FAMILY_TOKEN.fullmatch(family) else None
+
+
+def _reject_counts(e):
+    """(P6e) Whether a 'rejected' row may move the demotion clock: both families present and
+    different. Re-read at QUERY time, so a family-less row — every row from before P6e — counts 0."""
+    w, r = e.get("writer_family"), e.get("reviewer_family")
+    return bool(w) and bool(r) and w != r
+
+
+def _stamp_families(o):
+    """(P6e) Compute both families from the row's own spellings; refuse a rejection whose two
+    families are not two different ones. A caller-passed family is dropped: the registry answers."""
+    o.pop("writer_family", None)
+    o.pop("reviewer_family", None)
+    writer, reviewer = _family_of(o.get("writer_model_served")), _family_of(o.get("reviewer"))
+    for k, v in (("writer_family", writer), ("reviewer_family", reviewer)):
+        if v:
+            o[k] = v
+    if o["verdict"] == "rejected" and not _reject_counts(o):
+        raise ValueError("a rejection counts only from a reviewer of another family: writer %s/%s, "
+                         "reviewer %s/%s" % (o.get("writer_model_served"), writer or "unresolved",
+                         o.get("reviewer"), reviewer or "unresolved"))
 
 
 def _canonical_model(model_id):
@@ -398,6 +466,14 @@ def validate(e, fill_ts=True):
         if e.get(k) is not None:
             o[k] = _str(k, e[k])
 
+    # P6e: optional, so a row written before it still loads; shape-checked, so no claim rides past.
+    for k in ("writer_family", "reviewer_family"):
+        v = e.get(k)
+        if v is not None:
+            if type(v) is not str or not _FAMILY_TOKEN.fullmatch(v):
+                raise ValueError("%s: 1..40-char lowercase family token, got %r" % (k, v))
+            o[k] = v
+
     if e.get("probe") is not None:
         if type(e["probe"]) is not bool:
             raise ValueError("probe: bool, got %r" % (e["probe"],))
@@ -485,6 +561,7 @@ def record_seat(e, path=None):
 
 def record(e, path=None):
     o = validate(e)
+    _stamp_families(o)  # P6e: before the file opens, so a refusal leaves no row behind
     t = path or default_path()
     d = os.path.dirname(os.path.abspath(t))
 
@@ -630,8 +707,8 @@ def demoted(model, task_type, now=None, window_days=7, threshold=2, path=None):
     probe = [s for s, e in rows if e.get("probe") is True and e.get("verdict") == "accepted"]
     cut = max(probe) if probe else None
 
-    return sum(1 for s, e in rows if e.get("verdict") == "rejected" and s >= start
-               and (cut is None or s > cut)) >= threshold
+    return sum(1 for s, e in rows if e.get("verdict") == "rejected" and _reject_counts(e)
+               and s >= start and (cut is None or s > cut)) >= threshold
 
 
 def probe_pass(model, task_type, path=None, writer_client=None, reviewer=None):
@@ -669,6 +746,9 @@ def rollup(path=None, now=None, window_days=None):
             continue
 
         if start is not None and s < start:
+            continue
+
+        if e["verdict"] == "rejected" and not _reject_counts(e):  # P6e: the demoted() gate again
             continue
 
         o.setdefault(_canonical_model(e["writer_model_served"]), {}).setdefault(
