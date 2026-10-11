@@ -5475,27 +5475,49 @@ def review_run_refusal(review: dict | None):
 # two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
 REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence",
-                       "run", "task", "failure", "risk")
+                       "run", "task", "failure", "risk",
+                       # P12 (AO-READY-FAMILY): the two fields that let a Claude-family
+                       # final say WHY it was paid for at all.
+                       "reason", "note")
+# One `key=value` at a time, a quoted value keeping its spaces: the free phrase the
+# final checker writes goes in quotes, and splitting the body on whitespace alone
+# would read `note="no free leg available"` as three tokens and keep none of them.
+REVIEW_ENTRY_FIELD_RE = re.compile(
+    r"([A-Za-z][A-Za-z0-9_-]*)=(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
                             # vocabulary's OPEN finding and stays refused.
                             "ship", seat_verdict.READY_TOKEN))  # AO-SEAT-VERDICT-GRAMMAR
-# The final check is the operator's unchanged decision (Q-003 2026-09-27): a
-# cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
-# registry route -- it is the orchestrator's own interactive model -- so this one
-# matches the NAME, while the cross-family half is decided by registry families.
+# The final check is the operator's unchanged decision (Q-003 2026-09-27) that SOME
+# independent family signs off — since P12 (AO-READY-FINAL-FAMILY, D-1061/D-1062) it is
+# no longer one NAME. Sonnet is not a registry route: it is the orchestrator's own
+# interactive model, so the Claude-family exception still matches the NAME, while every
+# other final is decided by registry families.
 FINAL_REVIEWER = "sonnet"
 # REVGATE2: the final checker is recognized by its NAME, never as a substring of
 # one -- "notsonnet" contains "sonnet" and is not a sign-off. The vendor's full
 # model id (claude-sonnet-5, claude-sonnet-4-6) is the same checker spelled by
 # the client, so it counts too; anything else does not.
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
+# P12: the family that used to be the ONLY sign-off now has to justify itself: free
+# legs come first (D-1061/D-1062), so a Claude-family final counts only when the
+# entry states that no free leg was available.
+CLAUDE_FAMILY = "anthropic"
+NO_FREE_LEG_PHRASE = "no free leg available"
+_NO_FREE_LEG_WORDS_RE = re.compile(r"[^a-z0-9]+")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
                      "[run=<writer-run-id> task=<ops|code|docs|infra> "
-                     "failure=<class> risk=<R0..R3>]")
+                     "failure=<class> risk=<R0..R3>] | final: EITHER "
+                     "AutoOS-Review: kind=final author=<model> "
+                     "reviewer=<3rd-family model> verdict=<...> evidence=<path> -- a "
+                     "Claude-family final counts only when it also says "
+                     "reason=no_free_leg_available or "
+                     "note=\"no free leg available...\" -- OR no kind=final line at all "
+                     "once two counted cross-family seats from two different "
+                     "non-Claude families each carry a valid evidence=<path>")
 
 
 def _family_of_one_spelling(name, registry):
@@ -5908,6 +5930,50 @@ def is_final_reviewer(spelling):
     return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
 
 
+def _is_claude_family(family):
+    """True when a resolved family is the Claude family (P12, shape (b)'s exclusion).
+
+    Said from the REGISTRY family, never from the spelling: `haiku`, `claude-haiku-4-5`
+    and `sonnet` are one family here, and an invented name is not.
+    """
+    return resolver.family_key(family) == CLAUDE_FAMILY
+
+
+def _no_free_leg_stated(entry):
+    """True when the entry says the free legs were unavailable, in either form.
+
+    The machine spelling `reason=no_free_leg_available` and the free phrase in a quoted
+    `note="no free leg available: ..."`. Punctuation and case are not part of the phrase,
+    but a word glued to it is: `note="no free leg availablex"` is not the statement.
+    """
+    for field in ("reason", "note"):
+        words = " %s " % _NO_FREE_LEG_WORDS_RE.sub(
+            " ", (entry.get(field) or "").lower()).strip()
+        if " %s " % NO_FREE_LEG_PHRASE in words:
+            return True
+    return False
+
+
+def _record_author_family(entries, registry):
+    """``(family, why_not)`` for the model the record says wrote the lane.
+
+    A final entry may name its own `author=`; when it does not, the author is the one the
+    cross-family seats were checked against, which is the record's own claim about who
+    wrote the diff. Unknown is None (REVFIX S2): an author nobody can place is not a
+    family, so it cannot be told apart from a reviewer's either.
+    """
+    why = "no entry names an author the registry can place"
+    for entry in entries:
+        raw = (entry.get("author") or "").strip()
+        if not raw:
+            continue
+        family, reason = resolver.author_family(raw, registry)
+        if family is not None:
+            return family, None
+        why = reason
+    return None, why
+
+
 # P2/G1a: `evidence=<path>` points at the seat's own answer, so a READY claim in the
 # record is checked against the file the reviewer wrote. No field, no change of behaviour.
 EVIDENCE_DIR = os.path.join("logs", "briefs", "evidence")
@@ -6144,7 +6210,11 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
-            "verdict": (entry.get("verdict") or "").strip()}, None
+            "verdict": (entry.get("verdict") or "").strip(),
+            # P12 shape (b) is carried by the seats, and only by the ones a file
+            # backs: an evidence-less seat is a claim, and the no-final shape is
+            # the one place the gate asks for proof of the reviews it never re-reads.
+            "evidence": bool((entry.get("evidence") or "").strip())}, None
 
 
 def _cross_family_review(entries, registry, root=None, write_ledger=True, lane_sha=None):
@@ -6189,25 +6259,105 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True, lane_s
             "seats": seats, "detail": detail}
 
 
-def _final_review(entries, root=None, write_ledger=True, lane_sha=None):
-    """The record's sign-off: a kind=final entry naming the final checker."""
+#: (P12) The accepted shapes of the sign-off, said out loud in the report: a reader of
+#: a ready line should know whether a human family signed the lane or two free seats
+#: carried it, and those are different things to audit.
+FINAL_SHAPE_LABELS = {"a": "(a): a kind=final entry from a 3rd family",
+                      "b": "(b): no kind=final entry, two evidenced non-Claude seats"}
+
+
+def _final_review(entries, cross, registry, author_family=None, root=None,
+                  write_ledger=True, lane_sha=None):
+    """The record's sign-off, FAMILY-AGNOSTIC (P12 AO-READY-FINAL-FAMILY).
+
+    Exactly one of three shapes has to hold, and the answer says which one it took:
+
+    (a) a `kind=final` entry from ANY countable family that is a THIRD family: the
+    registry places the reviewer (exact names, no substring or prefix matching,
+    R-orch-16), its family is not the author's and not the family of any counted
+    cross-family seat, and its verdict passes the seat grammar. A non-Claude final is a
+    seat like any other and needs a valid ``evidence=<path>``. The Claude family --
+    Sonnet, Haiku, the vendor's own ids -- counts ONLY when the entry states
+    ``no free leg available`` (`reason=no_free_leg_available`, or the phrase in a quoted
+    ``note="..."``): free legs come first (D-1061/D-1062), so a Claude sign-off has to
+    say why it was unavoidable.
+
+    (b) NO `kind=final` entry at all, once the record already holds >=2 counted
+    cross-family seats from two different NON-Claude families, each carrying a valid
+    countable evidence file. That is the free-first lane: nothing left to sign off.
+
+    (c) otherwise not ready, and the detail names the shape that is missing and why --
+    a family collision is named with both sides, a Claude final without the words is
+    told which words to write.
+    """
+    seats = list(cross.get("seats") or [])
     wanted = [e for e in entries if e.get("kind") == "final"]
     if not wanted:
-        return {"ok": False,
-                "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
-    named = [e for e in wanted if is_final_reviewer(e["reviewer"])]
-    if not named:
-        return {"ok": False,
-                "detail": "the final entries name %s, not %s"
-                          % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
+        free = [s for s in seats if not _is_claude_family(s["family"])]
+        counted = sorted({s["family"] for s in free if s.get("evidence")})
+        if len(counted) >= 2:
+            return {"ok": True, "shape": "b", "seats": free,
+                    "detail": "no final needed: %d non-Claude seats" % len(free)}
+        why = "have %s" % (", ".join(counted) or "no counted non-Claude seat with a "
+                           "valid evidence=<path>")
+        missing = [s["reviewer"] for s in free if not s.get("evidence")]
+        if missing:
+            why += "; the seat(s) %s carry no evidence=<path>" % ", ".join(missing)
+        claude = [s["reviewer"] for s in seats if _is_claude_family(s["family"])]
+        if claude:
+            why += ("; the Claude-family seat(s) %s do not count toward it"
+                    % ", ".join(claude))
+        return {"ok": False, "shape": "b",
+                "detail": "no AutoOS-Review: kind=final entry naming %s: shape (b) "
+                          "needs 2 counted cross-family seats from two different "
+                          "non-Claude families with valid evidence -- %s"
+                          % (FINAL_REVIEWER, why)}
     reasons = []
-    for entry in named:
+    for entry in wanted:
+        reviewer = (entry.get("reviewer") or "").strip()
+        family = reviewer_family(reviewer, registry)
+        if family is None:
+            if not is_final_reviewer(reviewer):
+                # REVGATE2 kept: a name that merely CONTAINS sonnet is not the checker,
+                # and a name the registry cannot place is no family at all.
+                reasons.append("the final entry names %s, which is not a known reviewer "
+                               "and is not %s" % (reviewer, FINAL_REVIEWER))
+                continue
+            family = CLAUDE_FAMILY  # the orchestrator's own model, matched by NAME
         ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha)
-        if ok:
-            return {"ok": True,
-                    "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
-        reasons.append("%s %s" % (entry["reviewer"], reason))
-    return {"ok": False, "detail": "; ".join(reasons)}
+        if not ok:
+            reasons.append("%s %s" % (reviewer, reason))
+            continue
+        if _is_claude_family(family):
+            if not _no_free_leg_stated(entry):
+                reasons.append("the final reviewer %s (%s) counts only when the entry "
+                               "says %s -- reason=no_free_leg_available or "
+                               "note=\"%s ...\""
+                               % (reviewer, family, NO_FREE_LEG_PHRASE,
+                                  NO_FREE_LEG_PHRASE))
+                continue
+        elif not (entry.get("evidence") or "").strip():
+            reasons.append("the final reviewer %s (%s) carries no evidence=<path> file "
+                           "to back its verdict" % (reviewer, family))
+            continue
+        if author_family is None:
+            reasons.append("the record names no author the registry can place, so the "
+                           "final cannot be checked against the author's family")
+            continue
+        if family == author_family:
+            reasons.append("the final reviewer %s is the same family (%s) as the author"
+                           % (reviewer, family))
+            continue
+        same = [s["reviewer"] for s in seats if s["family"] == family]
+        if same:
+            reasons.append("the final reviewer %s is the same family (%s) as "
+                           "cross-family seat %s" % (reviewer, family, same[0]))
+            continue
+        return {"ok": True, "shape": "a",
+                "detail": "%s verdict %s" % (reviewer, entry.get("verdict"))}
+    return {"ok": False, "shape": "a",
+            "detail": "shape (a) unsatisfied: %s -- shape (b) is not open while a "
+                      "kind=final entry is present" % "; ".join(reasons)}
 
 
 def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
@@ -6219,7 +6369,9 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
     that says FIX-FIRST all fail, and each says which, because "missing" would
     send someone to book a review that already happened and did not pass. The
     floor is two seats from distinct families (REVGATE2F): one entry is no
-    longer a review, and two spellings of one family are one seat.
+    longer a review, and two spellings of one family are one seat. The sign-off
+    is family-agnostic since P12 (see `_final_review`): a 3rd-family `kind=final`
+    entry, or no final at all once two evidenced non-Claude seats carry the lane.
 
     Each countable evidence-backed seat is written to the writer verdict ledger as
     it is read (AO-LEDGER-WRITE P6) -- but ONLY for a caller that asked for it: P6c
@@ -6236,16 +6388,21 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
         if not match:
             continue
         fields = {}
-        for token in match.group("body").split():
-            key, _sep, value = token.partition("=")
-            if value and key.lower() in REVIEW_ENTRY_FIELDS:
-                fields[key.lower()] = value
+        for field in REVIEW_ENTRY_FIELD_RE.finditer(match.group("body")):
+            key = field.group(1).lower()
+            if key not in REVIEW_ENTRY_FIELDS:
+                continue
+            value = next((group for group in field.group(2, 3, 4) if group), "")
+            if value:
+                fields[key] = value
         if fields.get("kind") and fields.get("reviewer"):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
     cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha)
-    final = _final_review(entries, root, write_ledger, lane_sha)
+    author_family, _author_why = _record_author_family(entries, registry)
+    final = _final_review(entries, cross, registry, author_family, root,
+                          write_ledger, lane_sha)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
             "ledger_notes": [n for e in entries for n in e.get("_ledger") or []],
@@ -6275,9 +6432,15 @@ def print_review_report(label, report):
     """
     print("review-status: %s -- %d review entr%s"
           % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
-    for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
+    for key, name in (("cross_family", "cross-family"),
+                      ("final", "final (any family)")):
         item = report[key]
         print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+        # P12: WHICH accepted shape the sign-off is. The ready line carries the detail
+        # only, so the report is where a reader learns whether a human signed the lane
+        # or two free seats carried it.
+        if key == "final" and FINAL_SHAPE_LABELS.get(item.get("shape")):
+            print("  %-16s %s" % ("", "shape " + FINAL_SHAPE_LABELS[item["shape"]]))
         # REVGATE2F: every counted seat prints as model (family) + verdict, so
         # "which reviews" is answerable from the output without re-reading the
         # record line by line.
