@@ -11611,6 +11611,7 @@ class LedgerReadyPathTests(ReadyCommandTests):
     """
 
     ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
 
     def setUp(self):
         super().setUp()
@@ -11624,14 +11625,19 @@ class LedgerReadyPathTests(ReadyCommandTests):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def seat(self, repo, name, reviewer, run, text=ACCEPT):
-        """One cross-family seat line whose evidence file backs its verdict."""
+    def seat(self, repo, name, reviewer="omniroute/muse", run="run-a", text=None,
+             verdict="PASS", fields="", no_ev=False):
+        """One cross-family seat line whose evidence file backs its verdict.
+
+        P6d: `verdict=` is the entry's own word, `fields=` the optional ledger fields and
+        `no_ev=` a seat with no evidence file at all."""
         rel = "logs/briefs/evidence/%s" % name
         os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
         with io.open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
-            fh.write(text)
+            fh.write(self.ACCEPT if text is None else text)
         return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash reviewer=%s "
-                "verdict=PASS run=%s evidence=%s" % (reviewer, run, rel))
+                "verdict=%s run=%s%s%s" % (reviewer, verdict, run, fields,
+                                           "" if no_ev else " evidence=" + rel))
 
     def seats(self, repo):
         return self.write_record(self.seat(repo, "a.md", "omniroute/muse", "run-a"),
@@ -11718,6 +11724,111 @@ class LedgerReadyPathTests(ReadyCommandTests):
         self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1, out + err)
         self.assertIn("ready lane/work", self.read_inbox(inbox))
 
+    # --- AO-LEDGER-REJECT-ROWS (P6d): the refusal is where the REJECT is measured --
+
+    def rejected_seat(self, repo, name, reviewer="omniroute/muse", run="run-r", **kw):
+        """A seat whose evidence REJECTs the lane and whose entry says the same word --
+        the P6 pair rule, so the refusal is a countable reject."""
+        kw.setdefault("text", self.REJECT)
+        return self.seat(repo, name, reviewer, run, verdict="REJECT", **kw)
+
+    def refuse(self, line, repo, sha, extra=()):
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.write_record(line), repo, sha, inbox, extra=extra)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.read_inbox(inbox), "", "the refusal appended a ready line")
+        return rc, out, err
+
+    def test_a_refused_ready_records_the_rejected_seat(self):
+        # P6c removed the noise a refusal wrote (verdicts of decisions never made); a
+        # seat's REJECT is the opposite -- the measurement `demoted()` counts.
+        repo, sha = self.make_repo()
+        _rc, out, err = self.refuse(
+            self.rejected_seat(repo, "r.md", fields=" task=docs risk=R2 failure=semantics"),
+            repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows or out + err)
+        self.assertEqual((rows[0]["verdict"], rows[0]["lane"], rows[0]["sha"],
+                          rows[0]["run_id"], rows[0]["reviewer"]),
+                         ("rejected", self.BRANCH, sha, "run-r", "omniroute/muse"))
+        self.assertEqual((rows[0]["task_type"], rows[0]["risk"], rows[0]["failure_class"]),
+                         ("docs", "R2", "semantics"))
+        self.assertEqual(len(rows[0]["ref"]), 64)
+
+    def test_two_rejected_seats_from_two_reviewers_record_two_rows(self):
+        repo, sha = self.make_repo()
+        line = (self.rejected_seat(repo, "r1.md", "omniroute/muse", "run-1") + "\n"
+                + self.rejected_seat(repo, "r2.md", "gem-flash", "run-2"))
+        self.refuse(line, repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2, rows)
+        self.assertEqual({(r["run_id"], r["reviewer"], r["verdict"]) for r in rows},
+                         {("run-1", "omniroute/muse", "rejected"),
+                          ("run-2", "gem-flash", "rejected")})
+
+    def test_re_running_the_refused_ready_writes_no_second_row(self):
+        # Same key as the accepted path: one seat, one answer, one pushed sha.
+        repo, sha = self.make_repo()
+        line = self.rejected_seat(repo, "r.md")
+        self.refuse(line, repo, sha)
+        self.refuse(line, repo, sha)
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
+    def test_a_refused_ready_records_the_reject_and_never_the_accept(self):
+        # An `accepted` row would credit the writer for the review that stopped it.
+        repo, sha = self.make_repo()
+        line = (self.seat(repo, "a.md", "omniroute/muse", "run-a") + "\n"
+                + self.rejected_seat(repo, "r.md", "gem-flash", "run-r"))
+        self.refuse(line, repo, sha)
+        rows = self.rows()
+        self.assertEqual([(r["reviewer"], r["verdict"]) for r in rows],
+                         [("gem-flash", "rejected")], rows)
+
+    def test_a_refused_dry_run_writes_no_row(self):
+        repo, sha = self.make_repo()
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, sha, extra=("--dry-run",))
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(os.path.exists(self.target), "the dry run created a ledger")
+
+    def test_a_refusal_that_is_not_a_reject_writes_no_row(self):
+        # A HOLD is a finding, not a verdict about the writer (countable=False).
+        repo, sha = self.make_repo()
+        self.refuse(self.seat(repo, "h.md", text="VERDICT: HOLD\n\nBlocked on the "
+                              "operator.\n", verdict="HOLD"), repo, sha)
+        self.assertEqual(self.rows(), [])
+
+    def test_a_reject_the_evidence_does_not_back_writes_no_row(self):
+        for name, kw in (("missing", {"no_ev": True}),
+                         ("blind", {"text": "looks fine to me\n"}),
+                         ("mismatched", {"text": self.ACCEPT})):
+            repo, sha = self.make_repo()
+            line = self.rejected_seat(repo, "%s.md" % name, run="run-" + name, **kw)
+            self.refuse(line, repo, sha)
+            self.assertEqual(self.rows(), [], "%s evidence wrote a row" % name)
+
+    def test_a_reject_with_a_sha_the_gate_cannot_name_writes_no_row(self):
+        # A row that cannot name its 40-hex commit is refused, and says so.
+        repo, _tip = self.make_repo()
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, "not-a-sha")
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "sha" in l]), 1, err)
+
+    def test_a_refused_ready_that_cannot_write_the_ledger_says_so_once(self):
+        repo, sha = self.make_repo()
+        os.makedirs(self.target)  # a directory where the ledger has to be: LedgerError
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(len([l for l in err.splitlines() if "ledger" in l]), 1, err)
+
+    def test_two_refused_readies_demote_the_writer(self):
+        # The point of the path: `demoted()` is what the judge reads.
+        for run in ("run-1", "run-2"):
+            repo, sha = self.make_repo()
+            self.refuse(self.rejected_seat(repo, "%s.md" % run, run=run), repo, sha)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code",
+                                              path=self.target),
+                        "the refusal feed never reached the demotion gate")
+
 
 class LedgerJsonlShapeTests(unittest.TestCase):
     """P6c (B) and (C): the ledger is strict JSONL and a production seat row names
@@ -11751,6 +11862,18 @@ class LedgerJsonlShapeTests(unittest.TestCase):
         with io.open(target, encoding="utf-8") as fh:
             self.assertEqual(len(fh.read().splitlines()), 2)
         self.assertEqual([r["run_id"] for r in writer_ledger.load(target)[0]], ["r1"])
+
+    def test_a_cost_beyond_float_range_is_a_refusal_not_a_crash(self):
+        # P6d (B): `math.isfinite(10**400)` raises OverflowError, which escapes every
+        # `except ValueError` in the gate as a traceback instead of a refusal.
+        for bad in (10 ** 400, -(10 ** 400), float("nan"), float("inf"), "3", True, -1):
+            with self.assertRaises(ValueError):
+                writer_ledger._cost(bad)
+        self.assertEqual((writer_ledger._cost(0), writer_ledger._cost(2.5)), (0, 2.5))
+        with self.assertRaises(ValueError) as ctx:
+            writer_ledger.record_seat(dict(self.row("r1"), lane="lane/work", sha="a" * 40,
+                                           ref="b" * 40, cost=10 ** 400), path=self.target())
+        self.assertIn("cost", str(ctx.exception))
 
     def test_the_seat_writer_demands_lane_and_sha(self):
         good = dict(self.row("r1"), lane="lane/work", sha="a" * 40, ref="b" * 40)
