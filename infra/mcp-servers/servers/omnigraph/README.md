@@ -70,7 +70,7 @@ data (the compose files and `cluster.yaml.example` already say so). The compose
 stack does this automatically via the `omnigraph-init` one-shot:
 
 ```bash
-omnigraph cluster import --config /cluster --yes   # bootstrap state.json
+omnigraph cluster import --config /cluster --yes   # 0.8.x-era command, gone on 0.13: bootstrap state.json
 omnigraph cluster apply  --config /cluster --yes   # create graphs + schema, write ledger
 # then omnigraph-server --cluster s3://omnigraph-013/cluster serves it
 ```
