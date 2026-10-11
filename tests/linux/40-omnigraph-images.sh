@@ -1857,6 +1857,108 @@ if it "omnigraph 0.13 client compose: the offline profile pins the digested imag
 fi
 
 
+# ─── D-1038 P7e2 (boot-proof A/B/C, client half): the offline stack mirrors MinIO too ──
+# The server file's three scratch patches, for the developer machine. The client's
+# throwaway MinIO is pulled from the internal mirror as a REQUIRED var (compose refuses
+# while it is unset, and mc has no image of its own — it ships inside that minio image,
+# which is why the service overrides the entrypoint instead of pulling a second image);
+# the four omnigraph container names take the prefix, whose EMPTY default keeps the names
+# byte-identical; and the three published host ports become knobs with the old value as
+# their default, so a second stack comes up beside a live one. The image vars live in
+# .env.shared, which the client loads first. Static — no docker, no network, no live
+# root; the boot itself is server-L1's proof.
+OG13_ENV_CLIENT="$ROOT/infra/mcp-servers/.env.client.example"
+OG13_CLIENT_CNAME_RE='^[[:space:]]*container_name:[[:space:]]*\$\{OMNIGRAPH_CONTAINER_PREFIX:-\}omnigraph-local[A-Za-z0-9_-]*$'
+# The names as they were before this lane — what the empty prefix must still render.
+OG13_OLD_CLIENT_NAMES=(omnigraph-local-minio omnigraph-local-mc omnigraph-local-init omnigraph-local)
+
+if it "omnigraph 0.13 client compose: the MinIO image is required by env, names and host ports overridable"; then
+    problems=""
+    [[ -f "$OG13_CLIENT" && -f "$OG13_ENV_CLIENT" ]] \
+        || problems+=" missing $OG13_CLIENT or $OG13_ENV_CLIENT;"
+
+    # Same parse guard as the server file: a refusal message with a colon in it is a YAML
+    # mapping error, and compose reads the file before it interpolates anything.
+    if [[ -f "$OG13_CLIENT" ]]; then
+        parsed=0
+        if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+            python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' \
+                "$OG13_CLIENT" 2>/dev/null || problems+=" $OG13_CLIENT no longer parses as YAML;"
+            parsed=1
+        elif has_cmd yamllint; then
+            yamllint -d '{extends: relaxed, rules: {line-length: disable}}' "$OG13_CLIENT" \
+                >/dev/null 2>&1 || problems+=" yamllint rejected $OG13_CLIENT;"
+            parsed=1
+        fi
+        [[ "$parsed" -eq 1 ]] || echo "    no PyYAML and no yamllint: the compose parse check did not run" >&2
+    fi
+
+    # (A) the MinIO image: a required variable, never a name pulled from a public registry.
+    if [[ -f "$OG13_CLIENT" ]]; then
+        if grep -qE '^[[:space:]]*image:[[:space:]]*minio/' "$OG13_CLIENT"; then
+            problems+=" a minio/* image is still pulled by name;"
+        fi
+        msvc="$(og13_client_svc omnigraph-local-minio)"
+        misvc="$(og13_client_svc omnigraph-local-mc)"
+        [[ "$(grep -cE '^[[:space:]]*image:' <<<"$msvc")" -eq 1 ]] \
+            || problems+=" the client minio service has other than one image line;"
+        grep -qxF -- "$OG13_MINIO_IMG" <<<"$msvc" \
+            || problems+=" the client minio image line is not the OMNIGRAPH_MINIO_IMAGE :? form;"
+        grep -qxF -- "$OG13_MC_IMG" <<<"$misvc" \
+            || problems+=" the client mc image line is not the OMNIGRAPH_MC_IMAGE :? form;"
+        # The entrypoint that proves there is no separate mc image — mc inside minio.
+        grep -qF 'mc alias set l http://omnigraph-local-minio:9000' <<<"$misvc" \
+            || problems+=" omnigraph-local-mc lost its mc alias entrypoint;"
+        grep -qF 'mc mb --ignore-existing' <<<"$misvc" \
+            || problems+=" omnigraph-local-mc lost its bucket-creation entrypoint;"
+
+        # (B) container names: the prefix expression on all four omnigraph services.
+        n_prefixed="$(grep -cE -- "$OG13_CLIENT_CNAME_RE" "$OG13_CLIENT")"
+        n_omni="$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*//p' "$OG13_CLIENT" | grep -c 'omnigraph-')"
+        [[ "$n_omni" -eq 4 ]] || problems+=" $n_omni container_name values name an omnigraph- container (want 4);"
+        [[ "$n_prefixed" -eq 4 ]] \
+            || problems+=" only $n_prefixed of them use the \${OMNIGRAPH_CONTAINER_PREFIX:-} form;"
+        for plain in serena-mcp sentry-mcp datadog-mcp; do
+            grep -qxF -- "    container_name: $plain" "$OG13_CLIENT" \
+                || problems+=" $plain's container_name changed (it is not an omnigraph container);"
+        done
+        # Unset prefix ⇒ the OLD names, byte for byte, in the same set.
+        rendered="$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*//p' "$OG13_CLIENT" \
+            | while IFS= read -r _v; do printf '%s\n' "${_v#"$OG13_PREFIX_EXPR"}"; done \
+            | grep 'omnigraph-' | sort)"
+        want="$(printf '%s\n' "${OG13_OLD_CLIENT_NAMES[@]}" | sort)"
+        [[ "$rendered" == "$want" ]] \
+            || problems+=" with the prefix unset the names render [$(printf '%s' "$rendered" | tr '\n' ' ')] (want [${OG13_OLD_CLIENT_NAMES[*]}]);"
+
+        # (C) the three host ports: a knob each, old value as default, still loopback.
+        lsrv="$(og13_client_svc omnigraph-local)"
+        grep -qxF -- '      - "127.0.0.1:${OMNIGRAPH_LOCAL_PORT:-8080}:8080"' <<<"$lsrv" \
+            || problems+=" omnigraph-local does not publish \${OMNIGRAPH_LOCAL_PORT:-8080} on 127.0.0.1:8080;"
+        grep -qxF -- '      - "127.0.0.1:${LOCAL_MINIO_API_PORT:-9000}:9000"' <<<"$msvc" \
+            || problems+=" the client MinIO API port does not publish \${LOCAL_MINIO_API_PORT:-9000} on 127.0.0.1:9000;"
+        grep -qxF -- '      - "127.0.0.1:${LOCAL_MINIO_CONSOLE_PORT:-9001}:9001"' <<<"$msvc" \
+            || problems+=" the client MinIO console port does not publish \${LOCAL_MINIO_CONSOLE_PORT:-9001} on 127.0.0.1:9001;"
+        for hard in '"127.0.0.1:8080:8080"' '"127.0.0.1:9000:9000"' '"127.0.0.1:9001:9001"'; do
+            if grep -qF -- "$hard" "$OG13_CLIENT"; then
+                problems+=" the host port $hard is still hard-coded;"
+            fi
+        done
+    fi
+
+    # (D) the client example documents the three knobs, commented out, so the defaults stand.
+    if [[ -f "$OG13_ENV_CLIENT" ]]; then
+        for cl in '# OMNIGRAPH_LOCAL_PORT=8080' '# LOCAL_MINIO_API_PORT=9000' '# LOCAL_MINIO_CONSOLE_PORT=9001'; do
+            grep -qxF -- "$cl" "$OG13_ENV_CLIENT" \
+                || problems+=" the client example does not document '$cl' commented out;"
+            vname="${cl#'# '}"; vname="${vname%%=*}"
+            if grep -qE "^${vname}=" "$OG13_ENV_CLIENT"; then
+                problems+=" the client example ships an ACTIVE $vname= line (it must stay commented out so the default applies);"
+            fi
+        done
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 # ─── D-1038 P7d: the shared env EXAMPLE must not ship the old bucket ───
 # Both compose files default S3_BUCKET to omnigraph-013, but the README and the
 # runbook tell the operator to `cp .env.shared.example .env.shared`. An example
