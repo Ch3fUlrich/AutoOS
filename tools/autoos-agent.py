@@ -326,40 +326,57 @@ TIERS = {1: "l1-orchestrator", 2: "l2-worker", 3: "t3-reviewer"}
 # `http://127.0.0.1:20128` is right on a host and refused inside the stack's
 # containers, where the gateway is a sibling container the compose network
 # reaches as `omniroute` (configuration/docker/ai-stack/compose.yml spells the
-# in-network address "http://omniroute:20128"). An override wins outright, the
-# docker DNS name is the container answer, loopback the host fallback.
-# Resolution is string-only and takes no I/O: importing this module must not
-# contact a gateway (the suite asserts it, and a health GET per import would
-# make every import depend on the host's stack). So the const is a guess, and
-# gateway_up() further down is the pre-check that confirms it and rebinds
-# GATEWAY to the candidate that actually answers.
+# in-network address "http://omniroute:20128"). An override wins outright; else
+# the machine decides (AO-SANDBOX-DNS, 2026-10-11): on a host the bare
+# `omniroute` is a word systemd-resolved completes with its search domains, so a
+# transient answer rebinds GATEWAY to a foreign LAN host - which then gets the
+# gateway key through the worker's stamped baseURL - and a cold one times the
+# worker out mid-run (`getaddrinfo ETIMEOUT omniroute`). The docker DNS name is
+# a container candidate only; a host starts and stays on loopback.
+# Import contacts no gateway - the only reading is in_container()'s two marker
+# stats (a health GET per import would make every import depend on the host's
+# stack). So the const is the address this machine can start from; gateway_up()
+# below is the pre-check that confirms it against the candidates that answer.
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 GATEWAY_DOCKER = "http://omniroute:20128"
 GATEWAY_FALLBACK = "http://127.0.0.1:20128"
 
 
-def gateway_candidates(env=None) -> list:
+def in_container(probe=None) -> bool:
+    """True inside a container, False on a host, from the two marker files.
+
+    docker creates /.dockerenv, Podman /run/.containerenv, and nothing else here
+    asks what machine this is. `probe` is injectable for the tests (a path ->
+    bool callable); production uses os.path.exists - two stats, no network.
+    """
+    exists = os.path.exists if probe is None else probe
+    return any(exists(marker) for marker in ("/.dockerenv", "/run/.containerenv"))
+
+
+def gateway_candidates(env=None, in_container_fn=None) -> list:
     """The gateway base URLs to try, in order.
 
     An `AUTOOS_OMNIROUTE_URL` override is the operator's deliberate answer -
     the shell suite sets one to a dead endpoint on purpose - so it is the ONLY
     candidate: a dead override must fail closed (cmd_run still refuses, rc 3)
-    instead of being rescued by a live gateway behind another name.
+    instead of being rescued by a live gateway behind another name. With no
+    override the list is the machine's, per the block above.
     """
     env = os.environ if env is None else env
     override = (env.get(GATEWAY_ENV_VAR) or "").strip().rstrip("/")
     if override:
         return [override]
-    return [GATEWAY_DOCKER, GATEWAY_FALLBACK]
+    if in_container(in_container_fn):
+        return [GATEWAY_DOCKER, GATEWAY_FALLBACK]
+    return [GATEWAY_FALLBACK]
 
 
-def resolve_gateway(env=None) -> str:
-    """The address to start from: the override, else the docker DNS name.
-
-    Pure selection - which candidate answers is gateway_up()'s job; loopback
-    is the last candidate that pre-check falls through to.
+def resolve_gateway(env=None, in_container_fn=None) -> str:
+    """The address to start from: the override, else docker DNS in a container,
+    else loopback on a host. Pure selection over gateway_candidates(); which
+    candidate answers is gateway_up()'s job.
     """
-    return gateway_candidates(env)[0]
+    return gateway_candidates(env, in_container_fn)[0]
 
 
 GATEWAY = resolve_gateway()
@@ -5023,12 +5040,11 @@ def gateway_up(url: str | None = None, timeout: int = 3) -> bool:
     """The gateway pre-check: is a gateway there, and at which address?
 
     With an explicit `url` it probes just that address. Otherwise it walks
-    gateway_candidates() in order - override alone, docker DNS, loopback - and
-    rebinds GATEWAY to the first candidate that answers, so the import-time
-    guess above becomes the address the rest of this process talks to (the
-    host case: `omniroute` does not resolve outside the compose network, and
-    the run must still find the gateway on loopback). False when nothing
-    answers; GATEWAY is then left as it was for the caller to report.
+    gateway_candidates() in order - override alone; in a container docker DNS
+    then loopback; on a host loopback only - and rebinds GATEWAY to the first
+    candidate that answers (a host never asks the bare `omniroute`,
+    AO-SANDBOX-DNS). False when nothing answers; GATEWAY is then left as it was
+    for the caller to report.
     """
     global GATEWAY
     if url is not None:
