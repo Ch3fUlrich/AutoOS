@@ -11820,14 +11820,104 @@ class LedgerReadyPathTests(ReadyCommandTests):
         self.assertEqual(len([l for l in err.splitlines() if "ledger" in l]), 1, err)
 
     def test_two_refused_readies_demote_the_writer(self):
-        # The point of the path: `demoted()` is what the judge reads.
+        # The point of the path: `demoted()` is what the judge reads. Two LANES, so two
+        # pieces of evidence — P6d-FIX F2 binds one evidence to one run, and one REJECT
+        # said under two run ids is one row, not the two this measurement needs.
         for run in ("run-1", "run-2"):
             repo, sha = self.make_repo()
-            self.refuse(self.rejected_seat(repo, "%s.md" % run, run=run), repo, sha)
+            self.refuse(self.rejected_seat(repo, "%s.md" % run, run=run,
+                                           text="VERDICT: REJECT\n\nRepro: %s.\n" % run),
+                        repo, sha)
         self.assertEqual(len(self.rows()), 2, self.rows())
         self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code",
                                               path=self.target),
                         "the refusal feed never reached the demotion gate")
+
+    # --- AO-LEDGER-REJECT-ROWS P6d-FIX: tip, notes, one evidence = one run ----
+
+    def stub_tip(self, value):
+        """Replace the origin read with a fixed answer (HERMETIC, D-852) and hand back
+        the Mock, so a test can assert the read never happened."""
+        tip = mock.Mock(return_value=value)
+        patch = mock.patch.object(self.agent, "remote_branch_tip", tip)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return tip
+
+    def test_a_reject_at_a_sha_that_is_not_the_pushed_tip_writes_no_row(self):
+        # F1: a typo'd --sha used to name whatever commit it held for the rejection the
+        # reviewer never looked at, poisoning the provenance feed the row exists to be.
+        repo, _tip = self.make_repo()
+        self.stub_tip(("b" * 40, None))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, "f" * 40)
+        self.assertEqual(self.rows(), [], "a row named a commit origin does not hold")
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+        self.assertIn("--sha is not origin/lane/work's tip", err)
+
+    def test_a_reject_at_the_tip_origin_reports_is_recorded(self):
+        repo, _tip = self.make_repo()
+        pushed = "b" * 40
+        self.stub_tip((pushed, None))
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, pushed)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual((rows[0]["verdict"], rows[0]["sha"]), ("rejected", pushed))
+
+    def test_a_reject_with_no_branch_on_origin_writes_no_row_and_says_once(self):
+        repo, sha = self.make_repo()
+        self.stub_tip((None, None))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+
+    def test_a_reject_with_an_unreadable_origin_writes_no_row_naming_the_error(self):
+        repo, sha = self.make_repo()
+        self.stub_tip((None, "git ls-remote exited 128"))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+        self.assertIn("cannot read origin/lane/work: git ls-remote exited 128", err)
+
+    def test_the_tip_is_not_read_for_a_refusal_that_carries_no_reject(self):
+        # F1 costs a `git ls-remote` only where it can stop a row: a HOLD refusal read
+        # nothing before, and still reads nothing now.
+        repo, sha = self.make_repo()
+        tip = self.stub_tip((sha, None))
+        self.refuse(self.seat(repo, "h.md", text="VERDICT: HOLD\n\nBlocked on the "
+                              "operator.\n", verdict="HOLD"), repo, sha)
+        self.assertEqual(tip.call_count, 0, tip.call_args_list)
+
+    def test_the_tip_is_not_read_for_a_refused_dry_run(self):
+        repo, sha = self.make_repo()
+        tip = self.stub_tip((sha, None))
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, sha, extra=("--dry-run",))
+        self.assertEqual(tip.call_count, 0, tip.call_args_list)
+
+    def test_a_reject_with_no_writer_record_says_so_on_the_refusal_path(self):
+        # F3: the note lived in `_ledger` and the refusal printed only `_ledger_failed`,
+        # so "no row appeared" was silent about the row the writer record was missing.
+        repo, sha = self.make_repo()
+        patch = mock.patch.object(writer_ledger, "writer_for_run", lambda run: (None, None))
+        patch.start()
+        self.addCleanup(patch.stop)
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "no writer record" in l]),
+                         1, err)
+
+    def test_the_same_evidence_under_two_run_ids_records_one_row(self):
+        # F2: one answer is one measurement. Two run ids claiming one REJECT used to
+        # write two rows and demote two writers on one review.
+        repo, sha = self.make_repo()
+        first = self.rejected_seat(repo, "r.md", "omniroute/muse", "run-1")
+        second = self.rejected_seat(repo, "r.md", "omniroute/muse", "run-2")
+        _rc, _out, err = self.refuse(first + "\n" + second, repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["run_id"], "run-1", rows)
+        self.assertEqual(len([l for l in err.splitlines()
+                              if "evidence already recorded" in l]), 1, err)
+        self.assertIn("run run-1", err)
 
 
 class LedgerJsonlShapeTests(unittest.TestCase):

@@ -6045,7 +6045,16 @@ def _ledger_append(row, writer=None):
     answer at a NEW pushed sha is new evidence and earns its row, while the same seat
     at the same sha is the same claim said twice. `writer` is the door the row goes
     through: a production seat row takes `record_seat`, which refuses one that cannot
-    name its lane and sha."""
+    name its lane and sha.
+
+    P6d-FIX F2: for a REJECT that key is not enough on its own — `run=` names who the
+    review condemns, and one piece of evidence typed under two run ids condemned two
+    writers. So a seat row (one that names its sha) whose (reviewer, ref, sha, verdict)
+    is already on the ledger under a DIFFERENT run is refused, and says which run owns
+    that evidence. A row that names no sha is not a lane's measurement and keeps its
+    old, looser key. Returns True when the row landed, False when this exact row was
+    already there (a re-run, said nothing about), and the reason string when a different
+    run already made this claim."""
     target = writer_ledger.default_path()
     folder = os.path.dirname(os.path.abspath(target))
     # The home is the MAIN checkout's logs/ (P6c), which a fresh clone has not
@@ -6058,11 +6067,16 @@ def _ledger_append(row, writer=None):
     try:
         if os.name != "nt":
             fcntl.flock(fd, fcntl.LOCK_EX)
+        claimed = None
         for seen in writer_ledger.load()[0]:
-            if (seen["run_id"], seen.get("reviewer"), seen["verdict"], seen.get("sha"),
-                    seen.get("ref")) == (row["run_id"], row["reviewer"], row["verdict"],
-                                         row.get("sha"), row["ref"]):
-                return False
+            key = (seen.get("reviewer"), seen["verdict"], seen.get("sha"), seen.get("ref"))
+            if key == (row["reviewer"], row["verdict"], row.get("sha"), row.get("ref")):
+                if seen["run_id"] == row["run_id"]:
+                    return False
+                if row["verdict"] == "rejected" and row.get("sha") and claimed is None:
+                    claimed = seen["run_id"]
+        if claimed is not None:
+            return "evidence already recorded for run %s" % claimed
         (writer or writer_ledger.record)(row)
         return True
     finally:
@@ -6107,7 +6121,7 @@ def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None, only_verdicts=
     if seat:
         row["lane"], row["sha"] = lane_sha
     try:
-        _ledger_append(row, writer_ledger.record_seat if seat else None)
+        outcome = _ledger_append(row, writer_ledger.record_seat if seat else None)
     except (writer_ledger.LedgerError, OSError) as exc:
         # Fail closed, as P3 defined it: a verdict that cannot be recorded does not
         # clear the gate, and it says so rather than raising a traceback. The ledger
@@ -6117,6 +6131,10 @@ def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None, only_verdicts=
         # A shape the schema refused names the field, which is what to show.
         reason = "ledger write refused: %s" % exc
     else:
+        if isinstance(outcome, str):
+            # F2: the claim is not this run's to make — the evidence already condemns
+            # another writer. A note, not a gate failure: the review still happened.
+            entry.setdefault("_ledger", []).append("ledger: %s, not recorded" % outcome)
         return None
     entry.setdefault("_ledger", []).append(reason)
     entry.setdefault("_ledger_failed", []).append(reason)
@@ -6953,6 +6971,28 @@ def read_guards_text(path):
         return None, "%s" % exc
 
 
+def _rejected_seat_present(text):
+    """Whether a refusal could write a rejected row at all: does one entry line carry a
+    `verdict=` that maps to the ledger's `rejected`.
+
+    A NECESSARY condition only — the write path still applies the pair rule and every
+    other seat check — and it exists so a refusal that can only ever write zero rows (a
+    HOLD, a finding) costs no `git ls-remote`. The verdict word and the ledger name are
+    read through their own owners (`seat_verdict`, `LEDGER_VERDICTS`), never restated."""
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        for field in REVIEW_ENTRY_FIELD_RE.finditer(match.group("body")):
+            if field.group(1).lower() != "verdict":
+                continue
+            value = next((group for group in field.group(2, 3, 4) if group), "")
+            word = (seat_verdict.verdict_word(value) or "").upper()
+            if LEDGER_VERDICTS.get(word) == "rejected":
+                return True
+    return False
+
+
 def _record_rejected_seats(args, text, registry):
     """The reject feed a refused `ready` earns (AO-LEDGER-REJECT-ROWS P6d).
 
@@ -6962,19 +7002,47 @@ def _record_rejected_seats(args, text, registry):
     removed -- a dry run or a stale sha records a decision nobody made, a seat's REJECT
     IS the measurement -- so this writes just the rejected rows, never an `accepted` one
     that would credit the writer for the review that stopped it. The caller still exits 1
-    either way; a row that cannot be written says so once."""
+    either way; a row that cannot be written says so once.
+
+    P6d-FIX F1: `--sha` is the lane's own claim, and this path runs BEFORE the pushed-sha
+    gate, so it used to record a rejection against any 40-hex the caller typed -- a typo
+    wrote a real row naming a commit that is not the lane's tip, which is exactly the
+    provenance these rows exist to carry. So the tip is read here, the same way the gate
+    below reads it, and anything that is not origin's current tip records nothing: the
+    refusal stands, only the measurement is withheld, said once.
+    """
     if not _FULL_SHA_RE.fullmatch(args.sha or ""):
         # Say it rather than let "no rows appeared" read as "there was no reject".
         print("ready: the refused lane records no verdict -- --sha %r is not a 40-hex "
               "commit, so no row can name the commit the rejection judged"
               % (args.sha,), file=sys.stderr)
         return
-    refused = review_status(text, registry, root=args.repo or os.getcwd(),
+    if not _rejected_seat_present(text):
+        return
+    root = args.repo or os.getcwd()
+    tip, git_error = remote_branch_tip(root, args.branch)
+    if git_error:
+        print("ready: reject rows not recorded: cannot read origin/%s: %s"
+              % (args.branch, git_error), file=sys.stderr)
+        return
+    if tip != args.sha:
+        print("ready: reject rows not recorded: --sha is not origin/%s's tip"
+              % args.branch, file=sys.stderr)
+        return
+    refused = review_status(text, registry, root=root,
                             write_ledger=True, lane_sha=(args.branch, args.sha),
                             only_verdicts=("rejected",))
-    for note in dict.fromkeys(refused["ledger_failures"]):
+    failures = refused["ledger_failures"]
+    for note in dict.fromkeys(failures):
         print("ready: %s -- the lane stays refused for the review it carries; only "
               "the measurement is missing" % note, file=sys.stderr)
+    # F3: the success path prints a row it never wrote because no writer record names
+    # the run (the seat still counted, the measurement just cannot name its subject).
+    # The refusal path dropped that note on the floor, so "no row appeared" read as
+    # "there was nothing to record".
+    for note in dict.fromkeys(refused["ledger_notes"]):
+        if note not in failures:
+            print("ready: %s" % note, file=sys.stderr)
 
 
 def cmd_ready(args) -> int:
