@@ -2794,6 +2794,427 @@ def prune_toolhome(sandbox_path: str) -> dict:
         return {"refused": "%s: %s" % (type(exc).__name__, exc)}
 
 
+# ---------------------------------------------------------------------------
+# AO-TOOLHOME-SIZE P8b: the `prune-sandboxes` subcommand (A) and the startup
+# cap (B). P8 prunes a run's own toolhome when its run ends; P8b reclaims whole
+# sandboxes of runs that ENDED long ago and caps the toolhomes before the next
+# --isolate run is provisioned. A sandbox and its `.toolhome` / `.opencode-data`
+# siblings can sit in THREE roots: the main checkout's `logs/sandboxes`, the same
+# dir inside each lane worktree of one `.git`, and `~/fleet/sandboxes/<repo>`.
+# Nothing here is decided from job.json — only the runner-private worker record and
+# kill store (R-orch-17), and every deletion is fd-relative from one pinned
+# descriptor per root (P8a2), never a re-resolved path.
+MIN_AGE_HOURS_DEFAULT = 6
+_RUN_ID_TAIL_RE = re.compile(r"\d{8}-\d{6}-[A-Za-z0-9_.-]+-[0-9a-f]{6}$")
+# How long the one lane-worktree git call may take before the answer is given up on.
+LANE_WORKTREE_GIT_TIMEOUT = 10.0
+
+
+def _run_id_from_entry(name: str):
+    """The run id a sandbox directory name carries, or None: the tail after the
+    timestamp with any `.toolhome` / `.opencode-data` suffix stripped. `<run id>` is
+    `YYYYMMDD-HHMMSS-<slug>-<hex6>`, so the id is the only thing in the name matching
+    that grammar; anything else is not a sandbox and is skipped."""
+    stem = name
+    for suf in SANDBOX_PRIVATE_SUFFIXES:
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]
+            break
+    m = _RUN_ID_TAIL_RE.search(stem)
+    return m.group(0) if m else None
+
+
+class LaneWorktreesUnknown(Exception):
+    """The lane-worktree enumeration could not answer, so which worktrees exist is
+    UNKNOWN. P8b-FIX (L1 decision): an unknown set is never read as "no lane
+    worktrees" — a pruner that cannot say what it must not touch keeps everything."""
+
+    def __init__(self, reason):
+        Exception.__init__(self, "could not list lane worktrees (%s)" % reason)
+        self.reason = reason
+
+
+def _lane_worktree_git_env():
+    """The env of the one lane-worktree git call, built FROM SCRATCH (P8b-FIX2, L1
+    decision: an allowlist, not a filter).
+
+    The filter named GIT_DIR and GIT_WORK_TREE and let the rest through —
+    GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+    GIT_INDEX_FILE, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES, GIT_CONFIG,
+    GIT_CONFIG_SYSTEM, GIT_QUARANTINE_PATH are git's own too, and each one steers or
+    spoofs what the listing says. So nothing of the caller's survives except PATH and
+    HOME; the locale is pinned and the repo's guards are stamped on top, the same keys
+    `worker_env` carries, so neither a caller's override nor an operator's repo, global
+    or system config can change what the listing says."""
+    env = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+           "HOME": os.environ.get("HOME") or "/",
+           "LANG": "C"}
+    for name, value in WORKER_GIT_GUARDS:
+        env[name] = value
+    return env
+
+
+def _worktree_path_undecodable(path: str) -> bool:
+    """True when a listed path is not a single unambiguous filesystem path: a NUL, a
+    DEL, or any other C0 control (tab excepted, which is legal in a name) cannot be
+    handed to os.path.isdir / os.path.join and be trusted to mean one directory."""
+    return any(ord(ch) < 0x20 and ch != "\t" or ch == "\x7f" for ch in path)
+
+
+def _lane_worktree_sandbox_dirs():
+    """(label, path) for `logs/sandboxes` inside every live lane worktree (root ii).
+
+    ONE audited subprocess: `git worktree list --porcelain` against the common
+    checkout, with an env built from scratch so it reads the real repo and not a
+    caller's override. A prunable entry (git's own "the worktree is gone") and a path
+    that is not there are skipped. A timeout, an OS error, a non-zero exit, output with
+    no `worktree` line, a record git did not finish, or bytes that are not a UTF-8 path
+    raises LaneWorktreesUnknown — the enumeration refuses to guess.
+
+    The capture is BYTES and the decode happens here, strict: git prints worktree paths
+    raw, so a path with a non-UTF-8 byte (a same-uid seat can create `wt-x\xffy` in the
+    shared repo) made `text=True` raise UnicodeDecodeError — neither an OSError nor a
+    SubprocessError — and the traceback escaped every handler.
+    """
+    # subprocess-audit: read-only git plumbing, literal argv; an env built from scratch
+    # (PATH, HOME, LANG=C, the repo's git guards — no caller GIT_* name), no shell, a
+    # timeout, bytes captured and decoded strictly here, and the output parsed for
+    # `worktree `/`prunable ` lines only.
+    try:
+        r = subprocess.run(["git", "-C", ROOT, "worktree", "list", "--porcelain"],
+                           capture_output=True, stdin=subprocess.DEVNULL,
+                           env=_lane_worktree_git_env(),
+                           timeout=LANE_WORKTREE_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LaneWorktreesUnknown(type(exc).__name__) from exc
+    if r.returncode != 0:
+        raise LaneWorktreesUnknown("git exit %d" % r.returncode)
+    try:
+        text = r.stdout.decode("utf-8")
+    except (UnicodeError, ValueError, AttributeError, TypeError):
+        raise LaneWorktreesUnknown("undecodable listing") from None
+    lines = text.splitlines()
+    if not any(line.startswith("worktree ") for line in lines):
+        raise LaneWorktreesUnknown("unparsable output")
+    out, path, prunable = [], None, False
+
+    def flush():
+        if path and not prunable and os.path.isdir(path):
+            out.append((os.path.basename(path.rstrip("/")) or "lane",
+                        os.path.join(path, "logs", "sandboxes")))
+
+    for index, line in enumerate(lines):
+        if line.startswith("worktree "):
+            # git always prints HEAD on the line right after the path. A path holding a
+            # newline (or a line someone injected) breaks that alignment, and a listing
+            # whose records cannot be told apart is a listing nothing gets deleted over.
+            nxt = lines[index + 1] if index + 1 < len(lines) else ""
+            if not nxt.startswith("HEAD "):
+                raise LaneWorktreesUnknown("unparsable output")
+            value = line[len("worktree "):]
+            if _worktree_path_undecodable(value.strip()):
+                raise LaneWorktreesUnknown("undecodable listing")
+            flush()
+            path, prunable = value.strip(), False
+        elif line.startswith("prunable"):
+            prunable = True
+    flush()
+    return out
+
+
+def _fleet_sandbox_roots():
+    """(label, path) for every `<repo>` dir under `~/fleet/sandboxes` (root iii)."""
+    base = os.path.join(os.path.expanduser("~"), "fleet", "sandboxes")
+    out = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(base, name)
+        try:
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                out.append((name, path))
+        except OSError:
+            continue
+    return out
+
+
+def _prune_sandbox_roots():
+    """The THREE roots a sandbox and its toolhome/opencode-data siblings can live in."""
+    return ([("main", os.path.join(clients.state_dir(), "sandboxes"))]
+            + _lane_worktree_sandbox_dirs() + _fleet_sandbox_roots())
+
+
+def _load_worker_record(workers, run_id):
+    """The runner-private worker record for `run_id`, and the reason it is unusable.
+
+    (record, None) on a good one; (None, <reason>) otherwise — `record absent`,
+    `corrupt record`, or `record id mismatch` (its own id must equal the directory
+    name). Never job.json."""
+    path = os.path.join(workers, run_id + ".json")
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, "record absent"
+    except (OSError, ValueError):
+        return None, "corrupt record"
+    if not isinstance(data, dict):
+        return None, "corrupt record"
+    if data.get("id") != run_id:
+        return None, "record id mismatch"
+    return data, None
+
+
+def _record_alive(run_id, record, state):
+    """True when a pid or a recorded process group of the run is still there.
+
+    The pid-reuse guard is `ps`'s own: a live pid whose start time disagrees with the
+    record is a recycled pid, so not this run. The group check reads the runner-private
+    kill store (never job.json, R-orch-17) and counts a group whose leader still
+    matches the recorded start as alive."""
+    pid = record.get("pid")
+    if pid is not None and _pid_alive(pid):
+        pid_start = record.get("pid_start")
+        current = _proc_starttime(pid) if pid_start is not None else None
+        if current is None or current == pid_start:
+            return True
+    kill = read_kill_record(run_id, state) or {}
+    pgid = kill.get("pgid")
+    if pgid is not None:
+        start = proc_start_time(pgid)
+        if start is not None and (kill.get("start") is None or start == kill.get("start")):
+            return True
+    return False
+
+
+def _ended_of(record):
+    ended = _parse_iso(record.get("ended"))
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=datetime.timezone.utc)
+    return ended
+
+
+def _sandbox_eligible(run_id, workers, state, now, min_age_hours, current_id):
+    """(ended_dt, None) when this run may be pruned, else (None, <reason>).
+
+    Fail-closed, and every "never" of the spec is one of these reasons: the record
+    must exist, be a valid object whose id matches the directory, say the run ENDED
+    with a computable age >= min_age_hours; the run must not be alive and must not be
+    the current run."""
+    if current_id and run_id == current_id:
+        return None, "current run"
+    record, err = _load_worker_record(workers, run_id)
+    if err is not None:
+        return None, err
+    if not record.get("ended"):
+        return None, "not ended"
+    if _record_alive(run_id, record, state):
+        return None, "alive"
+    ended = _ended_of(record)
+    if ended is None:
+        return None, "age uncomputable"
+    if (now - ended).total_seconds() < float(min_age_hours) * 3600.0:
+        return None, "younger than %dh" % int(min_age_hours)
+    return ended, None
+
+
+def _sandbox_dir_guard(root_path, root_fd, base):
+    """Why the sandbox dir `base` must NOT be deleted, or None. It must be a real
+    directory — not a symlink, not reached through one — whose realpath stays inside
+    the root, and it must open as the descriptor the fd-relative delete needs."""
+    full = os.path.join(root_path, base)
+    try:
+        rp, real_root = os.path.realpath(full), os.path.realpath(root_path)
+    except OSError:
+        return "unreadable dir"
+    if rp != real_root and not rp.startswith(real_root + os.sep):
+        return "realpath outside root"
+    try:
+        st = os.stat(base, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return "unreadable dir"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not a real directory"
+    if _child_dir_fd(root_fd, base) is None:
+        return "unreadable dir"
+    return None
+
+
+def _list_root(root_fd):
+    """The sandboxes of one pinned root as {run_id: {base, toolhome, data, dirs}}.
+
+    `dirs` is what the fd-relative delete removes (the clone dir and the opencode-data
+    sibling); `toolhome` is handled separately. A root that cannot be listed is None."""
+    try:
+        with os.scandir(root_fd) as entries:
+            names = [e.name for e in entries]
+    except OSError:
+        return None
+    found = {}
+    for name in names:
+        run_id = _run_id_from_entry(name)
+        if run_id is None:
+            continue
+        rec = found.setdefault(run_id, {"base": None, "toolhome": None, "data": None,
+                                        "dirs": []})
+        if name.endswith(TOOLHOME_SUFFIX):
+            rec["toolhome"] = name
+        elif name.endswith(OPENCODE_DATA_SUFFIX):
+            rec["data"] = name
+            rec["dirs"].append(name)
+        else:
+            rec["base"] = name
+            rec["dirs"].append(name)
+    return found
+
+
+def _child_mb(root_fd, name):
+    fd = _child_dir_fd(root_fd, name)
+    if fd is None:
+        return 0
+    try:
+        return _fd_bytes(fd) // _MIB
+    finally:
+        os.close(fd)
+
+
+def prune_sandboxes(apply=False, min_age_hours=MIN_AGE_HOURS_DEFAULT, roots=None,
+                    workers=None, state=None, now=None):
+    """(rc, results): reclaim the ended-and-aged sandboxes of the three roots.
+
+    DEFAULT DRY RUN — nothing is deleted unless `apply`. Each candidate is decided from
+    the runner-private record, age-gated, and deleted fd-relative from one pinned
+    descriptor per root (`delete_tree(name, root_fd)`). Prints one line per candidate
+    `<run id> <root> <MB> pruned|kept: <reason>` and a total; rc 1 when a whole root
+    cannot be listed, or when the lane worktrees are UNKNOWN (P8b-FIX: git could not
+    say which worktrees exist, so this invocation keeps everything in every root)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if roots is None:
+        try:
+            roots = _prune_sandbox_roots()
+        except LaneWorktreesUnknown as exc:
+            print("prune-sandboxes: refused: %s; nothing deleted" % exc, file=sys.stderr)
+            return 1, []
+    workers = workers or workers_dir()
+    current_id = os.environ.get("AUTOOS_AGENT_RUN_ID")
+    results, rc = [], 0
+    for _label, path in roots:
+        try:
+            root_fd = _pin_dir_fd(path)
+        except FileNotFoundError:
+            continue                                   # an absent root is not an error
+        except OSError:
+            print("%s %s kept: the root cannot be listed" % (_label, path), file=sys.stderr)
+            rc = 1
+            continue
+        try:
+            found = _list_root(root_fd)
+            if found is None:
+                print("%s %s kept: the root cannot be listed" % (_label, path),
+                      file=sys.stderr)
+                rc = 1
+                continue
+            for run_id in sorted(found):
+                rec = found[run_id]
+                _ended, why = _sandbox_eligible(run_id, workers, state, now,
+                                                min_age_hours, current_id)
+                mb = sum(_child_mb(root_fd, nm) for nm in rec["dirs"])
+                if why is not None:
+                    results.append((run_id, path, mb, "kept", why))
+                    continue
+                base = rec["base"]
+                guard = _sandbox_dir_guard(path, root_fd, base) if base else None
+                if guard is not None:
+                    results.append((run_id, path, mb, "kept", guard))
+                    continue
+                if not apply:
+                    results.append((run_id, path, mb, "kept", "dry run"))
+                    continue
+                freed = sum(delete_tree(nm, root_fd) for nm in rec["dirs"])
+                if rec["toolhome"]:
+                    freed += delete_tree(rec["toolhome"], root_fd)
+                results.append((run_id, path, freed // _MIB, "pruned", "ended and aged"))
+        finally:
+            os.close(root_fd)
+    for run_id, path, mb, action, reason in results:
+        print("%s %s %d %s: %s" % (run_id, path, mb, action, reason))
+    total = sum(r[2] for r in results if r[3] == "pruned")
+    print("total: %d MB pruned, %d kept" % (total, sum(1 for r in results if r[3] == "kept")))
+    return rc, results
+
+
+def cmd_prune_sandboxes(args) -> int:
+    rc, _ = prune_sandboxes(apply=args.apply, min_age_hours=args.min_age_hours)
+    return rc
+
+
+def _toolhome_cap_mb(cap_mb=None) -> int:
+    if cap_mb is not None:
+        return int(cap_mb)
+    try:
+        return int(os.environ.get(TOOLHOME_CAP_MB_ENV) or TOOLHOME_CAP_MB_DEFAULT)
+    except (TypeError, ValueError):
+        return TOOLHOME_CAP_MB_DEFAULT
+
+
+def cap_toolhomes(cap_mb=None, roots=None, workers=None, state=None, now=None,
+                  min_age_hours=MIN_AGE_HOURS_DEFAULT):
+    """(B): keep the sum of every `*.toolhome` under the three roots under `cap_mb`
+    (AUTOOS_TOOLHOME_CAP_MB, default 2048) before a new --isolate toolhome is
+    provisioned. Prune ONLY the oldest ENDED runs' toolhomes — same eligibility as the
+    subcommand — via `prune_toolhome`, so just the redirected cache dirs go and the
+    toolhome dir stays. Never raises, never blocks the run, prints one line."""
+    try:
+        cap_mb = _toolhome_cap_mb(cap_mb)
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        roots = roots if roots is not None else _prune_sandbox_roots()
+        workers = workers or workers_dir()
+        current_id = os.environ.get("AUTOOS_AGENT_RUN_ID")
+        total, ended_caches = 0, []
+        for _label, path in roots:
+            try:
+                root_fd = _pin_dir_fd(path)
+            except OSError:
+                continue
+            try:
+                for run_id, rec in (_list_root(root_fd) or {}).items():
+                    nm = rec["toolhome"]
+                    if not nm:
+                        continue
+                    mb = _child_mb(root_fd, nm)
+                    total += mb
+                    ended, why = _sandbox_eligible(run_id, workers, state, now,
+                                                   min_age_hours, current_id)
+                    if why is None:
+                        sandbox = os.path.join(path, nm[:-len(TOOLHOME_SUFFIX)])
+                        ended_caches.append((ended, sandbox, mb))
+            finally:
+                os.close(root_fd)
+        if total <= cap_mb or not ended_caches:
+            return 0
+        freed, count = 0, 0
+        for _ended, sandbox, _mb in sorted(ended_caches, key=lambda t: (t[0] is None, t[0])):
+            if total - freed <= cap_mb:
+                break
+            res = prune_toolhome(sandbox)
+            if res.get("refused"):
+                continue
+            freed += max(0, res["before"] - res["after"])
+            count += 1
+        print("toolhome cap: %d MB total over %d MB cap, pruned %d ended toolhome(s)"
+              % (total, cap_mb, count))
+        return freed
+    except LaneWorktreesUnknown as exc:                   # P8b-FIX: unknown → prune nothing
+        print("toolhome cap: %s; nothing pruned" % exc, file=sys.stderr)
+        return 0
+    except Exception as exc:                              # never blocks the run
+        print("toolhome cap: skipped (%s)" % type(exc).__name__, file=sys.stderr)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # SEAT-PYTEST (AO-L2-SEAT-INTEGRITY P4, measured): the redirect above moves
 # PYTHONUSERBASE into the toolhome and `site.getusersitepackages()` with it — in an
 # --isolate seat `python3 -m pytest` printed "No module named pytest" (it lives in
@@ -12856,6 +13277,10 @@ def cmd_run(args, cfg: dict) -> int:
         watch_before = tool_watch_snapshot(watch_paths)
         # I12: the plaintext-secret refusal runs BEFORE anything is created,
         # so a denied card leaves no ~/fleet directory in the operator's home.
+        # AO-TOOLHOME-SIZE P8b (B): before a new toolhome is provisioned, keep the
+        # sum of every existing *.toolhome under the three roots under the cap by
+        # pruning the oldest ENDED runs' cache dirs. Never raises, never blocks.
+        cap_toolhomes()
         try:
             sandbox_root_prepare(source, sb["path"])
             isolate_clone(source, sb["path"], sb["branch"], sb.get("review_base"))
@@ -13909,6 +14334,34 @@ def _parser_card(sub):
     check_p.add_argument("file", help="the card file, usually <RUN>/status/<name>.card.md")
 
 
+def _nonneg_hours(text):
+    """argparse type: `--min-age-hours` is a number of hours >= 0. A negative gate
+    would mean "prune runs that have not ended yet", so it is refused at the parser
+    (rc 2) before any root is walked."""
+    try:
+        val = float(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("expected a number of hours, got %r" % text)
+    if not val >= 0.0:                      # also refuses NaN, which no compare wins
+        raise argparse.ArgumentTypeError("expected a value >= 0, got %r" % text)
+    return val
+
+
+def _parser_prune_sandboxes(sub):
+    p = sub.add_parser(
+        "prune-sandboxes", help="reclaim ended-and-aged run sandboxes and their "
+                                ".toolhome/.opencode-data siblings across the three roots "
+                                "(main logs/sandboxes, each lane worktree, ~/fleet/sandboxes). "
+                                "DEFAULT DRY RUN — deleting needs --apply; each candidate is "
+                                "decided from the runner-private record only, never job.json")
+    p.add_argument("--apply", action="store_true",
+                   help="delete the eligible sandboxes (default: report only, delete nothing)")
+    p.add_argument("--min-age-hours", dest="min_age_hours", type=_nonneg_hours,
+                   metavar="N", default=MIN_AGE_HOURS_DEFAULT,
+                   help="prune only runs ended at least N hours ago, N >= 0 "
+                        "(default: %(default)s)")
+
+
 VERB_PARSERS = {
     "usage": _parser_usage,
     "token-rate": _parser_token_rate,
@@ -13924,6 +14377,7 @@ VERB_PARSERS = {
     "preflight": _parser_preflight,
     "inbox": _parser_inbox,
     "card": _parser_card,
+    "prune-sandboxes": _parser_prune_sandboxes,
 }
 
 # Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
@@ -13934,6 +14388,7 @@ VERB_PARSERS = {
 VERB_HANDLERS = {
     "context": lambda args, cfg: cmd_context(args),
     "card": lambda args, cfg: cmd_card(args),
+    "prune-sandboxes": lambda args, cfg: cmd_prune_sandboxes(args),
     "heartbeat": lambda args, cfg: cmd_heartbeat(args),
     "inbox": lambda args, cfg: cmd_inbox(args),
     "list": lambda args, cfg: cmd_list(cfg),
