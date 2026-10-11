@@ -34,7 +34,15 @@ from dataclasses import dataclass, field
 
 DEFAULT_MAX_DEPTH = 2  # = opencode.jsonc experimental.subagent_depth
 PROBE_STALE_DAYS = 7   # ADR 0006 Q1
-SIGNIN_TIMEOUT = 15    # seconds; `agy models` answers in < 1 s either way
+SIGNIN_TIMEOUT = 15    # seconds; `agy models` answers in < 1 s, `qodercli
+                       # --list-models` in 2.6 s, signed in or out (1.1.63)
+SIGNIN_REASON_CAP = 240  # chars; a probe's failure line is one human line
+# The marker for an account identity in a probe's failure line: the same text as
+# tools/autoos_redact.py's TEXT_MASK, pinned by a test, not imported - the
+# adapters stay stdlib-only so a lone copy of this file still imports.
+SIGNIN_MASK = "[autoos:redacted]"
+_LEAK_URL_RE = re.compile(r"(?i)\b(?:https?|ftp)://\S+")
+_LEAK_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+(?:\.[A-Za-z]{2,})?\b")
 
 
 @dataclass(frozen=True)
@@ -74,6 +82,12 @@ CLIENTS = {c.name: c for c in (
            signin_probe=("models",)),
     Client("qoder", "qodercli", True, False, True, "qodercli login (own account)",
            "own auth, not the gateway; promo - privacy=public only", promo=True,
+           # AO-QODER-ROUTE part 1 (measured 2026-10-11, qodercli 1.1.63, empty
+           # HOME so no real login was asked): `qodercli status` exits 0 even
+           # SIGNED OUT and prints the account's name, e-mail and avatar URL
+           # when in, so it is no probe; `--list-models` exits 1 in 2.6 s naming
+           # the login, and signed in prints only model names.
+           signin_probe=("--list-models",),
            # qodercli 1.1.63 modes are bypass_permissions|dont_ask|auto only; the
            # former "accept_edits" does not exist and refused every write (62 runs,
            # 2026-09-27). bypass_permissions is safe only because the spawner
@@ -502,6 +516,11 @@ def signin_state(client: Client, env: dict | None = None) -> tuple:
     in; only the CLI can. Measured 2026-09-25: signed out, `agy models` exits 1
     in 0.6 s with "Please sign in ...", while a headless `agy -p` prints an
     OAuth URL, waits 60 s for a code and only then fails.
+
+    The success path keeps no text, which is what stops a probe repeating what
+    the CLI printed about the account it just authenticated as (`qodercli status`
+    names the user, their e-mail, an avatar URL). The failure path keeps the
+    CLI's last line, minus any address or link, capped.
     """
     env = os.environ if env is None else env
     if not client.signin_probe:
@@ -515,15 +534,23 @@ def signin_state(client: Client, env: dict | None = None) -> tuple:
         r = subprocess.run(argv, capture_output=True, text=True, env=dict(env),
                            stdin=subprocess.DEVNULL, timeout=SIGNIN_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, "`%s %s` did not answer within %d s" % (
-            client.binary, " ".join(client.signin_probe), SIGNIN_TIMEOUT)
+        return _signin_fail("`%s %s` did not answer within %d s" % (
+            client.binary, " ".join(client.signin_probe), SIGNIN_TIMEOUT))
     except OSError as exc:
-        return False, str(exc)
+        return _signin_fail(str(exc))
     if r.returncode == 0:
         return True, ""
     lines = [ln.strip() for ln in (r.stdout + "\n" + r.stderr).splitlines() if ln.strip()]
-    return False, (lines[-1] if lines else "`%s %s` exited %d" % (
-        client.binary, " ".join(client.signin_probe), r.returncode))[:240]
+    return _signin_fail(lines[-1] if lines else "`%s %s` exited %d" % (
+        client.binary, " ".join(client.signin_probe), r.returncode))
+
+
+def _signin_fail(text: str) -> tuple:
+    """(False, one human line) - scrubbed, so an account identity stays out of
+    the spawner's log (AGENTS.md rule 1)."""
+    text = _LEAK_URL_RE.sub(SIGNIN_MASK, text)
+    text = _LEAK_EMAIL_RE.sub(SIGNIN_MASK, text)
+    return False, text[:SIGNIN_REASON_CAP]
 
 
 def signed_out(reason: str) -> bool:

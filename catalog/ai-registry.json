@@ -68,7 +68,7 @@
       "supports_effort": true
     },
     "qoder": {
-      "$comment": "Own-account auth (qodercli login) but tools/autoos_clients.py defines no signin_probe for it (only agy has one) - a real gap, not fixed by this migration. skills_dir unmeasured - see clients.qwen's comment.",
+      "$comment": "Own-account auth (qodercli login); signin_check is the command tools/autoos_clients.py probes with (measured 2026-10-11, qodercli 1.1.63, empty HOME: `qodercli --list-models` exits 1 in 2.6 s naming the login, while `qodercli status` exits 0 even signed out and prints account details when in - so status is not a probe). skills_dir unmeasured - see clients.qwen's comment.",
       "binary": "qodercli",
       "capabilities": {
         "$comment": "QOFIX 2026-09-27 (L0, operator-approved): headless shell + write work with --permission-mode bypass_permissions (measured: file written + ls run in a scratch repo, Qwen3.8-Flash, 25 s). The earlier false/false came from the spawner passing the non-existent mode accept_edits. The spawner forces an --isolate sandbox for every non-read qoder run; qodercli has no path fence of its own, so the containment prompt and the post-run leak check (tracked + untracked parent changes, refs) are the controls - writes outside the parent checkout (e.g. $HOME) are not detected.",
@@ -77,7 +77,7 @@
       },
       "gateway_mode": "none",
       "id": "qoder",
-      "signin_check": null,
+      "signin_check": "qodercli --list-models",
       "skills_dir": null,
       "supports_effort": false
     },
