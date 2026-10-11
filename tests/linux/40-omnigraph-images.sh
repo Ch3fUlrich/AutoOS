@@ -229,6 +229,12 @@ _head() { git -C "$ROOT" rev-parse HEAD; }
 # fails closed on (the store wipe it guards against is a 0.8-only procedure) — and
 # that abort happens before the gate. Every gate case names a 0.8 image explicitly.
 DEDUP_IMG08=(--image modernrelay/omnigraph-server:v0.8.1)
+# D-1038 P4c4: apply-cluster.sh and compact-graphs.ps1 default to the pinned 0.13
+# reference too, and their image guards fail closed on it — so every case that runs
+# either script past its guard (to test the D-825 gate or anything else) must name a
+# 0.8 image in OMNIGRAPH_IMAGE. This is the KEY=VAL form gate_stub_run takes, kept in
+# one shared variable for the same reason as DEDUP_IMG08 above.
+APC_IMG08="OMNIGRAPH_IMAGE=modernrelay/omnigraph-server:v0.8.1"
 
 if it "D-825: dedup-graph refuses a live dedup with no --go and touches nothing"; then
     d="$(mktemp -d)"
@@ -319,10 +325,12 @@ fi
 if it "D-825: compact-graphs.ps1 gate is present (refuses without -Go)"; then
     # The pwsh suite owns the full battery; the bash shard only proves the gate exists and
     # fires, so a Windows host that never runs pwsh still guards against the gate vanishing.
+    # D-1038 P4c4: the image guard now sits BEFORE this GO gate and aborts on the default
+    # 0.13 pin, so this case names a 0.8 image to keep testing the D-825 refusal itself.
     command -v pwsh >/dev/null || { skip "no pwsh on this host"; }
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- pwsh -NoProfile -NonInteractive -File "$OG_PY/compact-graphs.ps1" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" "$APC_IMG08" -- pwsh -NoProfile -NonInteractive -File "$OG_PY/compact-graphs.ps1" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a no-Go compact-graphs run exited 0" >&2; }
     [[ "$out" == *"refusing to compact the live omnigraph store without -Go"* ]] \
@@ -441,6 +449,77 @@ if it "D-825: apply-cluster refuses a --go that names no artefact, unknown flags
         || { ok=0; echo "a refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "apply-cluster.sh accepted an unverifiable --go"; fi
+fi
+
+# ─── D-1038 P4c4: apply-cluster.sh and compact-graphs.ps1 fail closed on >= 0.13 ────
+# Both are omnigraph-server 0.8.x procedures against the LIVE store: apply-cluster.sh
+# stops the server, runs `cluster apply` and starts it again (and on 0.13 the server
+# RETAINS its admission lock across shutdown, so the apply would hit state_lock_held),
+# compact-graphs.ps1 stops the stack for `omnigraph cleanup` + `optimize`. Nobody has
+# measured either sequence on 0.13, and their curls carry no omnigraph-http-api header.
+# The routing decision (D-1038) is: do NOT port now — pin the IMAGE defaults to the
+# 0.13 reference and refuse anything >= 0.13 (or unverifiable) before a single docker
+# or curl call, naming the production apply path and the port item AO-APPLY-CLUSTER-013.
+if it "D-1038 P4c4: apply-cluster fails closed on the default omnigraph 0.13 image and touches nothing"; then
+    # A GO that clears the D-825 gate (the fixture's D-825 + this checkout's HEAD, the
+    # same shape the dedup cleared-gate case above uses) — the run used to reach docker
+    # here; it must now abort at the image guard with nothing executed.
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- bash "$APC_SH" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 2 ]] || { ok=0; echo "the default-image run exited $rc: $out" >&2; }
+    [[ "$out" == *"ABORT: image "* && "$out" == *"AO-APPLY-CLUSTER-013"* ]] \
+        || { ok=0; echo "no image refusal: $out" >&2; }
+    [[ "$out" == *"omnigraph-cluster-dir.sh"* ]] \
+        || { ok=0; echo "the refusal does not name the 0.13 production apply path: $out" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "the refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-cluster ran its 0.8.x procedure on a >= 0.13 default image"; fi
+fi
+
+if it "D-1038 P4c4: apply-cluster refuses a 0.13, a latest and an untagged omnigraph OMNIGRAPH_IMAGE"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    ok=1
+    for img in "modernrelay/omnigraph-server:v0.13.0" \
+               "modernrelay/omnigraph-server:latest" \
+               "modernrelay/omnigraph-server"; do
+        out="$(gate_stub_run "$d" "OMNIGRAPH_IMAGE=$img" -- bash "$APC_SH" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+        [[ $rc -eq 2 ]] || { ok=0; echo "[$img] exited $rc: $out" >&2; }
+        [[ "$out" == *"ABORT: image $img "* ]] || { ok=0; echo "[$img] no refusal naming the image: $out" >&2; }
+        [[ "$out" == *"AO-APPLY-CLUSTER-013"* ]] || { ok=0; echo "[$img] refusal lost the port item: $out" >&2; }
+    done
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "a refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply-cluster accepted an unverifiable or >= 0.13 image"; fi
+fi
+
+if it "D-1038 P4c4: apply-cluster passes an explicit v0.8.1 omnigraph OMNIGRAPH_IMAGE without an ABORT"; then
+    # The 0.8 path stays open: the guard lets the tag through and the run goes on to
+    # its own later logic (the env files, then the stand-in stack) — this asserts only
+    # that the 0.8 image is not refused by its own guard.
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" "$APC_IMG08" -- bash "$APC_SH" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    [[ "$out" != *"ABORT: image "* ]] && pass \
+        || fail "the 0.8 image was refused by the 0.13 guard: $out"
+fi
+
+if it "D-1038 P4c4: the apply-cluster twin compact-graphs.ps1 pins the omnigraph 0.13 reference and names the port item"; then
+    # Static shard: PowerShell batteries belong to the pwsh suite; this host proves the
+    # Windows twin carries the same pin, the same fail-closed message targets and no
+    # leftover 0.8.1 image default.
+    ps1="$OG_PY/compact-graphs.ps1"
+    problems=""
+    grep -qF 'v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1' "$ps1" \
+        || problems+=" no 0.13 image reference;"
+    grep -qF 'AO-APPLY-CLUSTER-013' "$ps1" || problems+=" no AO-APPLY-CLUSTER-013 port marker;"
+    grep -qF 'omnigraph-cluster-dir.sh' "$ps1" || problems+=" the 0.13 production apply path is not named;"
+    if grep -qF "v0.8.1'" "$ps1"; then problems+=" a v0.8.1 image default is still assigned;"; fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
 # ─── Fleet rule D-852: the stand-in directory is what these cases really run on ──
