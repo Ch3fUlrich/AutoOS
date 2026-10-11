@@ -343,8 +343,17 @@ def _lane(v):
 def _cost(v):
     """A stated cost: a finite, non-negative number. Nothing else is a price —
     NaN, an infinity, a bool, a string or a negative all refuse the row rather
-    than roll up as a number no billing read ever reported."""
-    if isinstance(v, bool) or type(v) not in (int, float) or not math.isfinite(v) or v < 0:
+    than roll up as a number no billing read ever reported.
+    P6d: an int past the float range (`10**400`) does not answer `math.isfinite`, it
+    raises OverflowError, which sails past every `except ValueError` in the gate -- a
+    number too large to be a price is still just a bad price."""
+    if isinstance(v, bool) or type(v) not in (int, float):
+        raise ValueError("cost: a finite non-negative number, got %r" % (v,))
+    try:
+        priced = math.isfinite(v) and v >= 0
+    except (OverflowError, ValueError, TypeError):
+        priced = False
+    if not priced:
         raise ValueError("cost: a finite non-negative number, got %r" % (v,))
 
     return v

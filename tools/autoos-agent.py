@@ -6045,7 +6045,16 @@ def _ledger_append(row, writer=None):
     answer at a NEW pushed sha is new evidence and earns its row, while the same seat
     at the same sha is the same claim said twice. `writer` is the door the row goes
     through: a production seat row takes `record_seat`, which refuses one that cannot
-    name its lane and sha."""
+    name its lane and sha.
+
+    P6d-FIX F2: for a REJECT that key is not enough on its own — `run=` names who the
+    review condemns, and one piece of evidence typed under two run ids condemned two
+    writers. So a seat row (one that names its sha) whose (reviewer, ref, sha, verdict)
+    is already on the ledger under a DIFFERENT run is refused, and says which run owns
+    that evidence. A row that names no sha is not a lane's measurement and keeps its
+    old, looser key. Returns True when the row landed, False when this exact row was
+    already there (a re-run, said nothing about), and the reason string when a different
+    run already made this claim."""
     target = writer_ledger.default_path()
     folder = os.path.dirname(os.path.abspath(target))
     # The home is the MAIN checkout's logs/ (P6c), which a fresh clone has not
@@ -6058,18 +6067,23 @@ def _ledger_append(row, writer=None):
     try:
         if os.name != "nt":
             fcntl.flock(fd, fcntl.LOCK_EX)
+        claimed = None
         for seen in writer_ledger.load()[0]:
-            if (seen["run_id"], seen.get("reviewer"), seen["verdict"], seen.get("sha"),
-                    seen.get("ref")) == (row["run_id"], row["reviewer"], row["verdict"],
-                                         row.get("sha"), row["ref"]):
-                return False
+            key = (seen.get("reviewer"), seen["verdict"], seen.get("sha"), seen.get("ref"))
+            if key == (row["reviewer"], row["verdict"], row.get("sha"), row.get("ref")):
+                if seen["run_id"] == row["run_id"]:
+                    return False
+                if row["verdict"] == "rejected" and row.get("sha") and claimed is None:
+                    claimed = seen["run_id"]
+        if claimed is not None:
+            return "evidence already recorded for run %s" % claimed
         (writer or writer_ledger.record)(row)
         return True
     finally:
         os.close(fd)
 
 
-def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None):
+def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None, only_verdicts=None):
     """Append this seat's verdict to the writer ledger (AO-LEDGER-WRITE P6), and
     return the reason the seat must not pass the gate, or None. `ref` is the sha256
     of the evidence text, so re-running the gate over the same answer is a no-op and
@@ -6077,9 +6091,13 @@ def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None):
     called only for a PAIR that agrees, never for a mismatch the gate refused.
     `lane_sha` (P6c) is the (lane, pushed sha) the ready gate certified: naming them
     makes the row take `record_seat`, and the client, model and cost are copied from
-    the writer's own run record rather than invented here."""
+    the writer's own run record rather than invented here.
+    `only_verdicts` (P6d) restricts the feed to the named ledger verdicts -- the refused
+    `ready` passes ("rejected",): it owes the writer's clock the rejection only."""
     verdict = LEDGER_VERDICTS.get(parsed["verdict"]) if parsed["countable"] else None
     if verdict is None or not write:
+        return None
+    if only_verdicts is not None and verdict not in only_verdicts:
         return None
     run = (entry.get("run") or "").strip()
     writer = writer_ledger.writer_for_run(run) if run else None
@@ -6103,7 +6121,7 @@ def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None):
     if seat:
         row["lane"], row["sha"] = lane_sha
     try:
-        _ledger_append(row, writer_ledger.record_seat if seat else None)
+        outcome = _ledger_append(row, writer_ledger.record_seat if seat else None)
     except (writer_ledger.LedgerError, OSError) as exc:
         # Fail closed, as P3 defined it: a verdict that cannot be recorded does not
         # clear the gate, and it says so rather than raising a traceback. The ledger
@@ -6113,6 +6131,10 @@ def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None):
         # A shape the schema refused names the field, which is what to show.
         reason = "ledger write refused: %s" % exc
     else:
+        if isinstance(outcome, str):
+            # F2: the claim is not this run's to make — the evidence already condemns
+            # another writer. A note, not a gate failure: the review still happened.
+            entry.setdefault("_ledger", []).append("ledger: %s, not recorded" % outcome)
         return None
     entry.setdefault("_ledger", []).append(reason)
     entry.setdefault("_ledger_failed", []).append(reason)
@@ -6132,7 +6154,8 @@ def _ledger_field_refusal(entry):
     return None
 
 
-def _evidence_reason(entry, root, write_ledger=True, lane_sha=None):
+def _evidence_reason(entry, root, write_ledger=True, lane_sha=None,
+                     only_verdicts=None):
     """Why this entry's evidence file does not back its verdict, or None when it does:
     it must sit inside the repo, be readable, be a valid `parse_verdict` answer, say
     the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose —
@@ -6187,10 +6210,11 @@ def _evidence_reason(entry, root, write_ledger=True, lane_sha=None):
         return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
     return _ledger_record_seat(entry, parsed,
                                hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                               write_ledger, lane_sha)
+                               write_ledger, lane_sha, only_verdicts)
 
 
-def _review_entry_verdict(entry, root=None, write_ledger=True, lane_sha=None):
+def _review_entry_verdict(entry, root=None, write_ledger=True, lane_sha=None,
+                          only_verdicts=None):
     """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
     (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
     HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
@@ -6199,7 +6223,7 @@ def _review_entry_verdict(entry, root=None, write_ledger=True, lane_sha=None):
     paths — a finding is not ready, and its matching rejection is still data."""
     raw = (entry.get("verdict") or "").strip()
     refused = (_ledger_field_refusal(entry)
-                 or _evidence_reason(entry, root, write_ledger, lane_sha))
+                 or _evidence_reason(entry, root, write_ledger, lane_sha, only_verdicts))
     if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
         return False, "verdict %s" % (raw or "missing")
     if refused:
@@ -6220,7 +6244,8 @@ def _max_r_level(levels):
     return max(known, key=ready_guards.R_LEVELS.index) if known else None
 
 
-def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=None):
+def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=None,
+                       only_verdicts=None):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
@@ -6264,7 +6289,7 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
                       "reason=no_free_leg_available or "
                       "reason=\"%s\"; note= never counts"
                       % (reviewer, NO_FREE_LEG_PHRASE, NO_FREE_LEG_PHRASE))
-    ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha)
+    ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha, only_verdicts)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
@@ -6278,7 +6303,7 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
 
 
 def _cross_family_review(entries, registry, root=None, write_ledger=True,
-                         lane_sha=None, r_level=None):
+                         lane_sha=None, r_level=None, only_verdicts=None):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -6303,7 +6328,8 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True,
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
     reasons, seats = [], []
     for entry in wanted:
-        seat, reason = _cross_family_seat(entry, registry, root, write_ledger, lane_sha)
+        seat, reason = _cross_family_seat(entry, registry, root, write_ledger,
+                                          lane_sha, only_verdicts)
         if reason is not None:
             reasons.append(reason)
             continue
@@ -6338,7 +6364,7 @@ FINAL_SHAPE_LABELS = {"a": "(a): a kind=final entry from a 3rd family",
 
 
 def _final_review(entries, cross, registry, author_family=None, root=None,
-                  write_ledger=True, lane_sha=None):
+                  write_ledger=True, lane_sha=None, only_verdicts=None):
     """The record's sign-off, FAMILY-AGNOSTIC (P12 AO-READY-FINAL-FAMILY).
 
     Exactly one of three shapes has to hold, and the answer says which one it took:
@@ -6395,7 +6421,8 @@ def _final_review(entries, cross, registry, author_family=None, root=None,
                                "and is not %s" % (reviewer, FINAL_REVIEWER))
                 continue
             family = CLAUDE_FAMILY  # the orchestrator's own model, matched by NAME
-        ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha)
+        ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha,
+                                           only_verdicts)
         if not ok:
             reasons.append("%s %s" % (reviewer, reason))
             continue
@@ -6433,7 +6460,7 @@ def _final_review(entries, cross, registry, author_family=None, root=None,
 
 
 def review_status(text, registry, root=None, write_ledger=True, lane_sha=None,
-                  r_level=None):
+                  r_level=None, only_verdicts=None):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -6488,10 +6515,11 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None,
         else:
             malformed.append(match.group("body").strip())
     level = _max_r_level([r_level] + [e.get("risk") for e in entries])
-    cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha, level)
+    cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha,
+                                 level, only_verdicts)
     author_family, _author_why = _record_author_family(entries, registry)
     final = _final_review(entries, cross, registry, author_family, root,
-                          write_ledger, lane_sha)
+                          write_ledger, lane_sha, only_verdicts)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
             "ledger_notes": [n for e in entries for n in e.get("_ledger") or []],
@@ -6943,6 +6971,80 @@ def read_guards_text(path):
         return None, "%s" % exc
 
 
+def _rejected_seat_present(text):
+    """Whether a refusal could write a rejected row at all: does one entry line carry a
+    `verdict=` that maps to the ledger's `rejected`.
+
+    A NECESSARY condition only — the write path still applies the pair rule and every
+    other seat check — and it exists so a refusal that can only ever write zero rows (a
+    HOLD, a finding) costs no `git ls-remote`. The verdict word and the ledger name are
+    read through their own owners (`seat_verdict`, `LEDGER_VERDICTS`), never restated."""
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        for field in REVIEW_ENTRY_FIELD_RE.finditer(match.group("body")):
+            if field.group(1).lower() != "verdict":
+                continue
+            value = next((group for group in field.group(2, 3, 4) if group), "")
+            word = (seat_verdict.verdict_word(value) or "").upper()
+            if LEDGER_VERDICTS.get(word) == "rejected":
+                return True
+    return False
+
+
+def _record_rejected_seats(args, text, registry):
+    """The reject feed a refused `ready` earns (AO-LEDGER-REJECT-ROWS P6d).
+
+    P6c moved the rows to after the appended line, which had a consequence nobody meant:
+    a countable REJECT refuses the gate first, so `ready` could only ever write
+    `accepted` rows and `demoted()` never saw a rejection. A refusal is not the noise P6c
+    removed -- a dry run or a stale sha records a decision nobody made, a seat's REJECT
+    IS the measurement -- so this writes just the rejected rows, never an `accepted` one
+    that would credit the writer for the review that stopped it. The caller still exits 1
+    either way; a row that cannot be written says so once.
+
+    P6d-FIX F1: `--sha` is the lane's own claim, and this path runs BEFORE the pushed-sha
+    gate, so it used to record a rejection against any 40-hex the caller typed -- a typo
+    wrote a real row naming a commit that is not the lane's tip, which is exactly the
+    provenance these rows exist to carry. So the tip is read here, the same way the gate
+    below reads it, and anything that is not origin's current tip records nothing: the
+    refusal stands, only the measurement is withheld, said once.
+    """
+    if not _FULL_SHA_RE.fullmatch(args.sha or ""):
+        # Say it rather than let "no rows appeared" read as "there was no reject".
+        print("ready: the refused lane records no verdict -- --sha %r is not a 40-hex "
+              "commit, so no row can name the commit the rejection judged"
+              % (args.sha,), file=sys.stderr)
+        return
+    if not _rejected_seat_present(text):
+        return
+    root = args.repo or os.getcwd()
+    tip, git_error = remote_branch_tip(root, args.branch)
+    if git_error:
+        print("ready: reject rows not recorded: cannot read origin/%s: %s"
+              % (args.branch, git_error), file=sys.stderr)
+        return
+    if tip != args.sha:
+        print("ready: reject rows not recorded: --sha is not origin/%s's tip"
+              % args.branch, file=sys.stderr)
+        return
+    refused = review_status(text, registry, root=root,
+                            write_ledger=True, lane_sha=(args.branch, args.sha),
+                            only_verdicts=("rejected",))
+    failures = refused["ledger_failures"]
+    for note in dict.fromkeys(failures):
+        print("ready: %s -- the lane stays refused for the review it carries; only "
+              "the measurement is missing" % note, file=sys.stderr)
+    # F3: the success path prints a row it never wrote because no writer record names
+    # the run (the seat still counted, the measurement just cannot name its subject).
+    # The refusal path dropped that note on the floor, so "no row appeared" read as
+    # "there was nothing to record".
+    for note in dict.fromkeys(refused["ledger_notes"]):
+        if note not in failures:
+            print("ready: %s" % note, file=sys.stderr)
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
@@ -6980,9 +7082,11 @@ def cmd_ready(args) -> int:
     met, 2 a gate could not be read (unreadable record, git or gh failure,
     unwritable inbox). The seat verdicts land on the writer ledger only after the
     line landed, carrying this lane's `--branch` and `--sha` (AO-LEDGER-DRYRUN P6c):
-    a --dry-run, a refusal, and a read of the record all write nothing, and a row
-    that cannot be written afterwards is reported on stderr with exit 1 while the
-    line stays where it is.
+    a --dry-run and a read of the record write nothing, and a row that cannot be
+    written afterwards is reported on stderr with exit 1 while the line stays where it
+    is. The review gate's refusal is the exception (AO-LEDGER-REJECT-ROWS P6d): a
+    countable, evidence-backed REJECT is a measurement of the writer that no other
+    caller takes, so a refused lane writes just those rows and never an `accepted` one.
 
     WRITER-GUARDS (AO-WRITER-GUARDS P4b) sits between the pushed-sha gate and the
     CI gate and reads the lane's own diff (`lane_diff_paths`, injected from
@@ -7048,6 +7152,11 @@ def cmd_ready(args) -> int:
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")
+        # AO-LEDGER-REJECT-ROWS (P6d): the rejection the lane was refused for is the
+        # one row this refusal owes the writer's measurement. --dry-run still writes
+        # nothing -- a dry run is a decision nobody made yet.
+        if not args.dry_run:
+            _record_rejected_seats(args, text, registry)
         return 1
     tip, git_error = remote_branch_tip(args.repo or os.getcwd(), args.branch)
     if git_error:
