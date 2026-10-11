@@ -10229,6 +10229,11 @@ class LedgerWriteTests(unittest.TestCase):
                                        lambda run: self.WRITER)
         self._stub.start()
         self.addCleanup(self._stub.stop)
+        # P6c: the row also carries the cost the run record states; the store is not
+        # read here either (the same reason writer_for_run is stubbed above).
+        self._cost = mock.patch.object(writer_ledger, "run_cost", lambda run: None)
+        self._cost.start()
+        self.addCleanup(self._cost.stop)
 
     def tearDown(self):
         if self._old_env is None:
@@ -10261,8 +10266,11 @@ class LedgerWriteTests(unittest.TestCase):
         return self.agent.review_status(self.record_text(text, extra, final, verdict),
                                         self.registry, root=self.root, **kw)
 
-    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False):
-        """The same record through the real `review-status` command line."""
+    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False, write=False):
+        """The same record through the real `review-status` command line.
+
+        P6c: the command is a READER by default; `--write-ledger` is what asks for
+        the rows, and `--no-ledger` stays an accepted no-op."""
         fd, rec = tempfile.mkstemp(suffix=".md")
         os.close(fd)
         self.addCleanup(os.unlink, rec)
@@ -10271,6 +10279,8 @@ class LedgerWriteTests(unittest.TestCase):
         argv = ["review-status", rec, "--registry", self.registry_path]
         if no_ledger:
             argv.append("--no-ledger")
+        if write:
+            argv.append("--write-ledger")
         out = io.StringIO()
         with mock.patch.object(os, "getcwd", return_value=self.root), \
                 contextlib.redirect_stdout(out):
@@ -10299,10 +10309,10 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 1)
 
     def test_the_command_appends_the_row_and_a_rerun_does_not(self):
-        rc, out = self.cmd()
+        rc, out = self.cmd(write=True)
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.rows()), 1)
-        rc, out = self.cmd()
+        rc, out = self.cmd(write=True)
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.rows()), 1)
 
@@ -10340,6 +10350,7 @@ class LedgerWriteTests(unittest.TestCase):
         src = ("import importlib.util, os, sys, time\n"
                "sys.path.insert(0, os.path.dirname(os.environ['GATE_AGENT']))\n"
                "import autoos_writer_ledger as wl; wl.writer_for_run = lambda run: @W@\n"
+               "wl.run_cost = lambda run: None\n"
                "real, delay = wl.load, float(os.environ['GATE_DELAY']); "
                "wl.load = lambda *a, **k: (time.sleep(delay), real(*a, **k))[1]\n"
                "spec = importlib.util.spec_from_file_location('a', os.environ['GATE_AGENT'])\n"
@@ -10353,7 +10364,8 @@ class LedgerWriteTests(unittest.TestCase):
         Path(child := os.path.join(self.folder, "gate-child.py")).write_text(src)
         Path(rec := os.path.join(self.root, "rec.md")).write_text(self.record_text())
         kids = [subprocess.Popen([sys.executable, child, os.path.join(self.folder, "b%d" % i),
-                                  "review-status", rec, "--registry", self.registry_path],
+                                  "review-status", rec, "--registry", self.registry_path,
+                                  "--write-ledger"],
                                  env=dict(os.environ, GATE_AGENT=str(AGENT), GATE_DELAY="0.3"),
                                  cwd=self.root, stdout=subprocess.DEVNULL) for i in (0, 1)]
         self.assertEqual([k.wait(90) for k in kids], [0, 0])
@@ -10416,9 +10428,11 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertTrue(report["ready"], report)
         self.assertEqual(self.rows(), [])
         self.assertEqual(os.listdir(self.folder), [])
-        rc, out = self.cmd(no_ledger=True)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(os.listdir(self.folder), [])
+        # P6c: the reader is the DEFAULT, and --no-ledger stays an accepted no-op.
+        for argv in ({}, {"no_ledger": True}):
+            rc, out = self.cmd(**argv)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(os.listdir(self.folder), [], out)
 
     def test_a_present_but_unknown_ledger_field_refuses_the_seat(self):
         # F3 (FAIL-CLOSED, no defaulting): a typo'd task would be ledgered under the wrong
@@ -10457,7 +10471,7 @@ class LedgerWriteTests(unittest.TestCase):
                 report = self.status()
                 self.assertFalse(report["ready"], report)
                 self.assertIn("ledger write failed", report["cross_family"]["detail"])
-                rc, out = self.cmd()
+                rc, out = self.cmd(write=True)
                 self.assertEqual(rc, 1, out)
                 self.assertIn("ledger write failed", out)
 
@@ -11099,6 +11113,311 @@ LANE_MARKER_BODY = (
     "+--- \n"
     "+@@ -1 +1 \n"
     "+diff --git a/forged b/forged\n")
+
+
+def restore_ledger_path(value):
+    """Put `AUTOOS_LEDGER_PATH` back the way the ambient environment had it."""
+    if value is None:
+        os.environ.pop("AUTOOS_LEDGER_PATH", None)
+    else:
+        os.environ["AUTOOS_LEDGER_PATH"] = value
+
+
+class LedgerReadyPathTests(ReadyCommandTests):
+    """AO-LEDGER-DRYRUN (P6c): `ready` earns its ledger rows, nothing else does.
+
+    Measured: P6 ran the review gate with `write_ledger=True` BEFORE the pushed-sha
+    gate and before the ready line, so a --dry-run (3 rows at 15:12:51Z) and every
+    refused `ready` wrote rows, and the accepted path wrote them with lane=null and
+    sha=null — a row that cannot name the lane and the pushed sha it judged is no
+    evidence for the writer-demotion gate. Now the gate is evaluated read-only and
+    the rows are written once, after the ready line was really appended, carrying
+    `lane` and `sha`. The gates are stubbed exactly as the ready tests above do.
+    """
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
+
+    def setUp(self):
+        super().setUp()
+        # setUp moved AUTOOS_STATE_DIR to a temp store, and the fleet resolver reads
+        # that env first — so the rows land in the temp store, never in logs/.
+        self.target = os.path.join(self.store_dir, "writer-ledger.jsonl")
+        for name, value in (("writer_for_run", lambda run: ("opencode",
+                                                            "vertex/gemini-3.8-flash")),
+                            ("run_cost", lambda run: None)):
+            patch = mock.patch.object(writer_ledger, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def seat(self, repo, name, reviewer, run, text=ACCEPT):
+        """One cross-family seat line whose evidence file backs its verdict."""
+        rel = "logs/briefs/evidence/%s" % name
+        os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
+        with io.open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash reviewer=%s "
+                "verdict=PASS run=%s evidence=%s" % (reviewer, run, rel))
+
+    def seats(self, repo):
+        return self.write_record(self.seat(repo, "a.md", "omniroute/muse", "run-a"),
+                                 self.seat(repo, "b.md", "gem-flash", "run-b"),
+                                 FINAL_LINE)
+
+    def rows(self):
+        return writer_ledger.load(self.target)[0]
+
+    def test_an_appended_ready_writes_one_row_per_countable_seat(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 0, out + err)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2, rows)
+        self.assertEqual({(r["lane"], r["sha"], r["run_id"], r["reviewer"]) for r in rows},
+                         {("lane/work", sha, "run-a", "omniroute/muse"),
+                          ("lane/work", sha, "run-b", "gem-flash")})
+        self.assertEqual({r["verdict"] for r in rows}, {"accepted"})
+
+    def test_the_row_carries_client_model_and_the_cost_the_run_states(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        with mock.patch.object(writer_ledger, "run_cost", lambda run: 0.25):
+            rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual({(r["writer_client"], r["writer_model_served"], r["cost"])
+                          for r in self.rows()},
+                         {("opencode", "vertex/gemini-3.8-flash", 0.25)})
+        os.remove(self.target)
+        repo, sha = self.make_repo()
+        rc, out, err = self.ready(self.seats(repo), repo, sha, self.make_inbox(""))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+        self.assertNotIn("cost", self.rows()[0], "a cost nobody stated was invented")
+
+    def test_dry_run_writes_no_row(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox, extra=("--dry-run",))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(os.path.exists(self.target), "the dry run created a ledger")
+
+    def test_a_stale_sha_refuses_and_writes_no_row(self):
+        repo, tip = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, "0" * 40, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.rows(), [], out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_an_unreviewed_record_refuses_and_writes_no_row(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.write_record("# lane", "STATUS: DONE. Shipped."),
+                                  repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.rows(), [], out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_ledger_home_that_does_not_exist_yet_is_created(self):
+        # A fresh clone has no logs/ yet, and the lock file needs a folder to sit in:
+        # the first verdict of a whole fleet must not fail on a missing directory.
+        repo, sha = self.make_repo()
+        self.target = os.path.join(self.store_dir, "sub", "writer-ledger.jsonl")
+        self.addCleanup(restore_ledger_path, os.environ.get("AUTOOS_LEDGER_PATH"))
+        os.environ["AUTOOS_LEDGER_PATH"] = self.target
+        rc, out, err = self.ready(self.seats(repo), repo, sha, self.make_inbox(""))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+
+    def test_a_ledger_write_failure_after_the_append_is_loud_and_keeps_the_line(self):
+        # The line is the record of the DECISION; deleting it over a measurement
+        # failure would turn "the ledger could not be written" into "the lane was
+        # never readied" — a false claim about a review that did happen.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        os.makedirs(self.target)  # a directory where the ledger has to be: LedgerError
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ledger", err)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1, out + err)
+        self.assertIn("ready lane/work", self.read_inbox(inbox))
+
+
+class LedgerJsonlShapeTests(unittest.TestCase):
+    """P6c (B) and (C): the ledger is strict JSONL and a production seat row names
+    its lane and sha. `record()` used to write `b"\\n"+json+b"\\n"`, so every file it
+    touched carried a blank line between rows (the measured 15:12:51Z dump did) —
+    not JSONL, and every other reader of the file chokes on it."""
+
+    def row(self, run_id):
+        return {"run_id": run_id, "verdict": "rejected", "failure_class": "syntax",
+                "writer_client": "opencode", "writer_model_served": "vertex/gemini-3.8-flash",
+                "task_type": "code", "reviewer": "t3"}
+
+    def target(self):
+        return os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
+
+    def test_two_appends_are_two_lines_with_no_blank_line(self):
+        target = self.target()
+        writer_ledger.record(self.row("r1"), path=target)
+        writer_ledger.record(self.row("r2"), path=target)
+        with io.open(target, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(len(text.splitlines()), 2, repr(text))
+        self.assertNotIn("\n\n", text)
+        self.assertTrue(all(json.loads(line) for line in text.splitlines()))
+
+    def test_a_torn_tail_gets_one_separator(self):
+        target = self.target()
+        with io.open(target, "w", encoding="utf-8") as fh:
+            fh.write('{"run_id":"torn-fragment')
+        writer_ledger.record(self.row("r1"), path=target)
+        with io.open(target, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.read().splitlines()), 2)
+        self.assertEqual([r["run_id"] for r in writer_ledger.load(target)[0]], ["r1"])
+
+    def test_the_seat_writer_demands_lane_and_sha(self):
+        good = dict(self.row("r1"), lane="lane/work", sha="a" * 40, ref="b" * 40)
+        self.assertEqual(writer_ledger.record_seat(good, path=self.target())["lane"],
+                         "lane/work")
+        no_lane = dict(good)
+        no_lane.pop("lane")
+        no_sha = dict(good)
+        no_sha.pop("sha")
+        for bad in (no_lane, no_sha):
+            with self.subTest(missing=str(sorted(set(good) - set(bad)))):
+                with self.assertRaises(ValueError) as ctx:
+                    writer_ledger.record_seat(bad, path=self.target())
+                self.assertIn("lane and sha required", str(ctx.exception))
+        # A lane or sha that is PRESENT but not a lane or a sha is refused too, and
+        # says which shape it could not read.
+        for bad in (dict(good, sha="abc"), dict(good, sha="A" * 40),
+                    dict(good, lane="lane work"), dict(good, lane="lane//work")):
+            with self.subTest(lane=bad["lane"], sha=bad["sha"]):
+                with self.assertRaises(ValueError) as ctx:
+                    writer_ledger.record_seat(bad, path=self.target())
+                self.assertTrue("lane" in str(ctx.exception) or "sha" in str(ctx.exception),
+                                str(ctx.exception))
+
+    def test_a_nan_or_negative_cost_is_refused(self):
+        for bad in (float("nan"), float("-inf"), -1, -0.5, "0.25", True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                writer_ledger.record(dict(self.row("r1"), cost=bad), path=self.target())
+        self.assertEqual(writer_ledger.record(dict(self.row("r2"), cost=0),
+                                              path=self.target())["cost"], 0)
+
+    def test_old_rows_without_lane_and_sha_still_load_and_demote(self):
+        target = self.target()
+        writer_ledger.record(self.row("r1"), path=target)
+        writer_ledger.record(self.row("r2"), path=target)
+        self.assertEqual(len(writer_ledger.load(target)[0]), 2)
+        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target))
+        self.assertEqual(writer_ledger.rollup(path=target)
+                         ["gemini-3.8-flash"]["code"]["rejected"], 2)
+
+
+class FleetLedgerPathTests(unittest.TestCase):
+    """P6c (D): ONE ledger home for the fleet. `default_path()` was
+    `clients.state_dir()/writer-ledger.jsonl` = `<this checkout>/logs`, so a `ready`
+    run inside a lane worktree wrote into that worktree's discarded logs/ while the
+    spawner read whichever checkout it happened to live in: the rows fragmented and
+    the demotion gate read an empty ledger. The home is now the MAIN checkout's
+    logs/, resolved with ONE audited `git rev-parse --git-common-dir`."""
+
+    SCRIPT = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.join(sys.argv[1], 'tools'))\n"
+        "import autoos_writer_ledger as wl\n"
+        "what = sys.argv[2]\n"
+        "if what == 'record':\n"
+        "    wl.record_seat({'run_id': 'fr-1', 'verdict': 'rejected',\n"
+        "                    'failure_class': 'tests-missing', 'writer_client': 'opencode',\n"
+        "                    'writer_model_served': 'vertex/gemini-3.8-flash',\n"
+        "                    'task_type': 'code', 'reviewer': 't3', 'ref': 'b' * 40,\n"
+        "                    'lane': sys.argv[3], 'sha': 'a' * 40})\n"
+        "    print(wl.default_path())\n"
+        "elif what == 'demoted':\n"
+        "    print(wl.default_path())\n"
+        "    print(wl.demoted('vertex/gemini-3.8-flash', 'code', threshold=1))\n"
+        "else:\n"
+        "    print(wl.fleet_state_dir())\n")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def caller_env(self):
+        """The caller's env with the two ledger overrides removed — the case the fleet
+        resolver is asked about is the one where neither is set."""
+        return {k: v for k, v in os.environ.items()
+                if k not in ("AUTOOS_LEDGER_PATH", "AUTOOS_STATE_DIR")}
+
+    def checkout(self):
+        """A real repo whose `tools/` carries the modules under test, plus a worktree."""
+        repo = os.path.join(self.base, "main")
+        subprocess.run(self.git + ["init", "-q", repo], check=True)
+        os.makedirs(os.path.join(repo, "tools"))
+        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+            shutil.copyfile(str(TOOLS / name), os.path.join(repo, "tools", name))
+        subprocess.run(self.git + ["-C", repo, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", repo, "commit", "-q", "-m", "tools"], check=True)
+        subprocess.run(self.git + ["-C", repo, "worktree", "add", "-q",
+                                   os.path.join(self.base, "wt"), "-b", "lane/x"], check=True)
+        return repo
+
+    def run_module(self, home, what, extra=(), env=None):
+        proc = subprocess.run([sys.executable, "-c", self.SCRIPT, home, what, *extra],
+                              capture_output=True, text=True, env=env or self.caller_env(),
+                              cwd=home, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout.strip().splitlines()
+
+    def test_a_run_from_a_worktree_lands_in_the_main_checkout(self):
+        repo = self.checkout()
+        main = os.path.join(repo, "logs", "writer-ledger.jsonl")
+        self.assertEqual(self.run_module(os.path.join(self.base, "wt"), "record",
+                                         ["lane/x"]), [main])
+        self.assertTrue(os.path.exists(main))
+        self.assertFalse(os.path.exists(os.path.join(self.base, "wt", "logs")),
+                         "the worktree still got its own ledger")
+
+    def test_the_demotion_read_from_the_worktree_sees_the_row(self):
+        repo = self.checkout()
+        self.run_module(os.path.join(self.base, "wt"), "record", ["lane/x"])
+        out = self.run_module(os.path.join(self.base, "wt"), "demoted")
+        self.assertEqual(out[0], os.path.join(repo, "logs", "writer-ledger.jsonl"))
+        self.assertEqual(out[1], "True")
+
+    def test_a_hostile_git_dir_in_the_caller_env_changes_nothing(self):
+        repo = self.checkout()
+        hostile = dict(self.caller_env(), GIT_DIR=os.path.join(self.base, "evil.git"),
+                       GIT_WORK_TREE=os.path.join(self.base, "evil"),
+                       GIT_COMMON_DIR=os.path.join(self.base, "evil.git"))
+        got = self.run_module(os.path.join(self.base, "wt"), "record", ["lane/x"], env=hostile)
+        self.assertEqual(got, [os.path.join(repo, "logs", "writer-ledger.jsonl")])
+
+    def test_the_env_still_wins_over_the_git_resolver(self):
+        self.checkout()
+        wt = os.path.join(self.base, "wt")
+        pointed = os.path.join(self.base, "pointed.jsonl")
+        self.assertEqual(self.run_module(wt, "home",
+                                         env=dict(self.caller_env(),
+                                                  AUTOOS_LEDGER_PATH=pointed)),
+                         [os.path.dirname(pointed)])
+        state = os.path.join(self.base, "state")
+        self.assertEqual(self.run_module(wt, "home",
+                                         env=dict(self.caller_env(), AUTOOS_STATE_DIR=state)),
+                         [state])
+
+    def test_a_non_git_dir_falls_back_to_its_own_logs(self):
+        plain = os.path.join(self.base, "plain")
+        os.makedirs(os.path.join(plain, "tools"))
+        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+            shutil.copyfile(str(TOOLS / name), os.path.join(plain, "tools", name))
+        self.assertEqual(self.run_module(plain, "home"), [os.path.join(plain, "logs")])
 
 
 class ReadyWriterGuardsTests(unittest.TestCase):
