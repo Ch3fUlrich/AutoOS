@@ -35,29 +35,44 @@ curl -fsS http://localhost:8080/healthz     # server up (bypasses auth)
 curl -fsS -H "Authorization: Bearer $OMNIGRAPH_TOKEN" http://localhost:8080/graphs
 ```
 
-Key facts (from Omnigraph `docs/user/deployment.md`, v0.8.1):
+Key facts (from Omnigraph `docs/user/deployment.md`, v0.13.0):
 
 | Setting | Value |
 |---|---|
-| Image | `modernrelay/omnigraph-server:v0.8.1` (Docker Hub; the GHCR mirror is not public) |
+| Image | `modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1` (Docker Hub; the GHCR mirror is not public) |
 | Bind | `OMNIGRAPH_BIND` (default `0.0.0.0:8080`) |
 | Cluster source | `OMNIGRAPH_CLUSTER` — here `s3://$S3_BUCKET/cluster` |
 | Auth | `OMNIGRAPH_SERVER_BEARER_TOKEN` (implicit `default` actor) |
 | Storage | `AWS_*` contract → MinIO (`AWS_ENDPOINT_URL_S3=http://minio:9000`, `AWS_ALLOW_HTTP=true`, `AWS_S3_FORCE_PATH_STYLE=true`) |
 | Health | `GET /healthz` (unauthenticated) |
 
+### Compose knobs
+
+| Knob | Default | Notes |
+|---|---|---|
+| `OMNIGRAPH_MINIO_IMAGE` | required | the internally mirrored MinIO image reference |
+| `OMNIGRAPH_MC_IMAGE` | required | the same mirrored minio image — `mc` ships inside it |
+| `OMNIGRAPH_CONTAINER_PREFIX` | empty | prepended to every container name |
+| `OMNIGRAPH_PORT` | `8080` | server stack: host publish of the API |
+| `OMNIGRAPH_VIEWER_PORT` | `8090` | server stack: host publish of the viewer |
+| `OMNIGRAPH_LOCAL_PORT` | `8080` | client stack: host publish of the API |
+| `LOCAL_MINIO_API_PORT` | `9000` | client stack: host publish of MinIO API |
+| `LOCAL_MINIO_CONSOLE_PORT` | `9001` | client stack: host publish of the MinIO console |
+
 ## Cluster bootstrap & policy (important)
 
 Omnigraph is **cluster-only boot**: the server serves a storage root only after a
 cluster has been converged into it. The declared config lives in git at
 [`../../cluster/`](../../cluster/) (`cluster.yaml` + `memory.pg`); the state
-ledger lives in MinIO (the Terraform split). The compose stack does this
-automatically via the `omnigraph-init` one-shot:
+ledger lives in MinIO (the Terraform split). The 0.13 default root is
+`s3://omnigraph-013/cluster` — bucket `omnigraph-013`, never shared with 0.8.x
+data (the compose files and `cluster.yaml.example` already say so). The compose
+stack does this automatically via the `omnigraph-init` one-shot:
 
 ```bash
-omnigraph cluster import --config /cluster --yes   # bootstrap state.json
+omnigraph cluster import --config /cluster --yes   # 0.8.x-era command, gone on 0.13: bootstrap state.json
 omnigraph cluster apply  --config /cluster --yes   # create graphs + schema, write ledger
-# then omnigraph-server --cluster s3://omnigraph/cluster serves it
+# then omnigraph-server --cluster s3://omnigraph-013/cluster serves it
 ```
 
 `/healthz` is open; **all server-scoped/management and data-plane actions are
@@ -67,7 +82,7 @@ policy bundle (granting the `default` actor access to the `memory` graph) and
 expanding `memory.pg` to the full structured-memory schema is the next step; see
 `skills/structured-memory/references/schema.md`. Until then the graph exists and
 is reachable by direct store access
-(`--store s3://omnigraph/cluster/graphs/memory.omni`) but not through the server
+(`--store s3://omnigraph-013/cluster/graphs/memory.omni`) but not through the server
 API.
 
 ## Embeddings (vector search)
@@ -86,8 +101,9 @@ For a **fully self-contained local stack**, run a local Ollama container with
   endpoint (non-vector queries always work if `ollama.example.internal` is down).
 - **Stored vectors are populated by supplying them in load data**, but on v0.8.1
   `load --mode merge` of hand-supplied vectors hits a Lance batch error and the
-  `omnigraph embed` CLI can't target a local endpoint — so the verified path is
-  to compute embeddings against the (local) Ollama and **`load --mode overwrite`**.
+  `omnigraph embed` CLI can't target a local endpoint (measured on v0.8.1; not
+  re-measured on 0.13) — so the verified path is to compute embeddings against the
+  (local) Ollama and **`load --mode overwrite`**.
   Automated by [`../../scripts/populate-embeddings.py`](../../scripts/populate-embeddings.py)
   (detail in [`../../docs/OMNIGRAPH-LOCAL-RUNBOOK.md`](../../docs/OMNIGRAPH-LOCAL-RUNBOOK.md) §4).
   After populating, `search_decisions("why did we replace the memory system")`
@@ -106,8 +122,11 @@ curl -s -X POST -H "Authorization: Bearer $OMNIGRAPH_TOKEN" -H 'Content-Type: ap
 ## Register the MCP bridge
 
 [`@modernrelay/omnigraph-mcp`](https://www.npmjs.com/package/@modernrelay/omnigraph-mcp)
-runs over stdio and exposes the graph's tools (`query`, `mutate`, `load`,
-`schema_get`, `branches_*`, `snapshot`, `commits_*`) + resources. Required env:
+**0.13.0** (declares node >= 22) runs over stdio and exposes the graph's 15 tools
+(`query`, `mutate` — with an optional `ifGraphCommit` parameter — `load`,
+`schema_get`, `branches_*`, `snapshot`, `commits_*`, `graphs_list`, `health`) +
+resources. The bridge sends the required `omnigraph-http-api: 0.13` header itself.
+Required env:
 
 | Var | Value |
 |---|---|
