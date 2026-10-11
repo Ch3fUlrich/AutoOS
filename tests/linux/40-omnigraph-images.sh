@@ -1466,3 +1466,53 @@ if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+# ─── D-1038 A1/A6 (P7c): the client's OFFLINE profile boots 0.13 the same way ───
+# docker-compose.client.yml is the same stack shrunk to a developer machine, so it
+# carries the same three measured facts: no `cluster import` in 0.13 (apply-fresh-013.sh
+# decides fresh vs existing), a retained admission lock on every shutdown (so the server
+# entrypoint must be start-server-013.sh or `restart: unless-stopped` crash-loops), and a
+# 0.13 root that never shares a bucket with 0.8.1 data. Static again — no docker, no
+# network, no live root.
+OG13_CLIENT="$ROOT/infra/mcp-servers/docker-compose.client.yml"
+
+# og13_client_svc <service> — the service block, same shape as og13_svc.
+og13_client_svc() {
+    awk -v want="  $1:" '
+        /^  [A-Za-z0-9_-]+:/ { inb = ($0 == want) }
+        inb { print }' "$OG13_CLIENT"
+}
+
+if it "omnigraph 0.13 client compose: the offline profile pins the digested image and boots it through the wrappers"; then
+    problems=""
+    [[ -f "$OG13_CLIENT" ]] || problems+=" missing $OG13_CLIENT;"
+    if [[ -z "$problems" ]]; then
+        # Exactly two omnigraph-server images — init and the local server — both the
+        # digest server-L1 measured for v0.13.0.
+        got="$(grep -cE '^[[:space:]]*image:[[:space:]]*modernrelay/omnigraph-server:' "$OG13_CLIENT")"
+        [[ "$got" -eq 2 ]] || problems+=" $got omnigraph-server image lines (want 2);"
+        pinned="$(grep -cF "image: $OMNI13_IMAGE" "$OG13_CLIENT")"
+        [[ "$pinned" -eq 2 ]] || problems+=" $pinned lines carry the v0.13.0 digest (want 2);"
+        grep -qF 'v0.8.1' "$OG13_CLIENT" && problems+=" a v0.8.1 reference remains;"
+
+        srv="$(og13_client_svc omnigraph-local)"
+        grep -qF 'entrypoint: ["sh", "/cluster/start-server-013.sh"]' <<<"$srv" \
+            || problems+=" omnigraph-local has no start-server-013.sh entrypoint;"
+        grep -qE '^[[:space:]]*stop_grace_period:[[:space:]]*35s[[:space:]]*$' <<<"$srv" \
+            || problems+=" omnigraph-local has no stop_grace_period: 35s;"
+        grep -qF './cluster:/cluster:ro' <<<"$srv" \
+            || problems+=" omnigraph-local cannot read /cluster/start-server-013.sh (no mount);"
+        grep -qE '^[[:space:]]*restart:[[:space:]]*unless-stopped[[:space:]]*$' <<<"$srv" \
+            || problems+=" omnigraph-local lost its restart policy;"
+
+        init="$(og13_client_svc omnigraph-local-init)"
+        grep -qF 'apply-fresh-013.sh' <<<"$init" \
+            || problems+=" omnigraph-local-init does not run apply-fresh-013.sh;"
+        grep -qF 'cluster import' <<<"$init" \
+            && problems+=" omnigraph-local-init still calls the removed cluster import;"
+
+        bad="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OG13_CLIENT" | grep -v '^S3_BUCKET:-omnigraph-013$' | sort -u)"
+        [[ -z "$bad" ]] || problems+=" a non-0.13 bucket default: $(printf '%s' "$bad" | tr '\n' ' ');"
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
