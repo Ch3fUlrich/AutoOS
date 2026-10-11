@@ -9582,7 +9582,10 @@ CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
 # (google) and is not the qwen author.
 CROSS_FAMILY_LINE_2 = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                        "reviewer=gem-flash verdict=PASS")
-FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+# P12 (AO-READY-FINAL-FAMILY): the Claude-family final is not the sign-off any more,
+# it is the exception, and the entry has to SAY it was unavoidable.
+FINAL_LINE = ("AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+              "reason=no_free_leg_available")
 
 
 class ReviewStatusTests(unittest.TestCase):
@@ -9591,9 +9594,10 @@ class ReviewStatusTests(unittest.TestCase):
     A lane record must carry its reviews before it can be called ready -- at
     least two cross-family seats from DISTINCT families (each a reviewer whose
     model FAMILY differs from the author's, the rule items 1-2 made data;
-    REVGATE2F raised the floor) and the Sonnet final check (the operator's
-    unchanged decision). This reads the record, not a person's summary of it,
-    and says which requirement is missing and why.
+    REVGATE2F raised the floor) and the sign-off, which since P12 is
+    family-agnostic: a 3rd-family `kind=final` entry, or no final at all once two
+    counted non-Claude seats carry valid evidence. This reads the record, not a
+    person's summary of it, and says which requirement is missing and why.
     """
 
     def setUp(self):
@@ -9606,9 +9610,22 @@ class ReviewStatusTests(unittest.TestCase):
         self.addCleanup(os.unlink, self.registry_path)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self.registry, fh)
+        # P12: shape (b) is carried by SEATS, and a seat counts there only with an
+        # evidence file the gate can read — so the class owns a repo-shaped root.
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
 
     def status(self, text):
         return self.agent.review_status(text, self.registry)
+
+    def evidence(self, name, text="VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"):
+        """Write one evidence file under the fixture root and return its rel path."""
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return rel
 
     def cmd(self, path):
         out, err = io.StringIO(), io.StringIO()
@@ -9686,16 +9703,18 @@ class ReviewStatusTests(unittest.TestCase):
         # The operator's guidance is 2-3 seats; the gate enforces the floor of
         # two and prints a non-blocking note past three -- never a refusal.
         # D657-D2: the meta seat here is the free Muse reviewer, not the paid
-        # contributor combo (`omniroute/spark-1.3-contributor` renders nothing).
+        # Muse contributor combo (`omniroute/spark-1.3-contributor` renders nothing).
+        # P12: the author is Zhipu, not an orchestrator Claude — an anthropic author
+        # would put the sonnet final in the author's OWN family, which shape (a) refuses.
         real = self.real_registry()
         report = self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=opencode/muse-spark-1.3-contributor-free verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=qwen3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=opencode/longcat-2.5-preview-free verdict=PASS\n"
             + FINAL_LINE, real)
         self.assertTrue(report["ready"], report)
@@ -9704,12 +9723,15 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertIn("no cap", report["cross_family"]["detail"])
 
     def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
-        # Both seats present (the REVGATE2F floor), the final missing.
+        # Both seats present (the REVGATE2F floor), the final missing. P12: the one
+        # shape that needs no final at all is the one this record does not reach —
+        # its seats carry no evidence file, so shape (b) refuses and says so.
         report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2)
         self.assertFalse(report["ready"])
         self.assertTrue(report["cross_family"]["ok"])
         self.assertFalse(report["final"]["ok"])
         self.assertIn("sonnet", report["final"]["detail"].lower())
+        self.assertIn("evidence", report["final"]["detail"])
 
     def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
         # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
@@ -9723,22 +9745,28 @@ class ReviewStatusTests(unittest.TestCase):
 
     def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
         # The NAME, case-insensitive, or the vendor's full model id — not a
-        # substring of either.
+        # substring of either. P12: a Claude-family final is the exception, so it
+        # also has to say the free legs were unavailable.
         for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
             with self.subTest(reviewer=spelling):
                 report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2
-                                     + "\nAutoOS-Review: "
-                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                                     + "\nAutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY reason=no_free_leg_available" % spelling)
                 self.assertTrue(report["ready"], report)
 
     def test_the_final_match_ignores_surrounding_space(self):
         # A record written by hand can pad the value; padding is not a
         # different model. Fed straight to _final_review because the line
         # parser splits on whitespace and can never carry it.
+        cross = {"seats": [{"reviewer": "omniroute/muse", "family": "meta",
+                            "verdict": "PASS", "evidence": False}],
+                 "families": ["meta"]}
         for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
             with self.subTest(reviewer=spelling):
-                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
-                self.assertTrue(self.agent._final_review([entry])["ok"])
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY",
+                         "reason": "no_free_leg_available"}
+                report = self.agent._final_review([entry], cross, self.registry, "qwen")
+                self.assertTrue(report["ok"], report)
 
     def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
         report = self.status(FINAL_LINE)
@@ -9843,12 +9871,14 @@ class ReviewStatusTests(unittest.TestCase):
                     "reviewer=omniroute/muse verdict=%s\n"
                     "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                     "reviewer=gem-flash verdict=%s\n"
-                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
+                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s "
+                    "reason=no_free_leg_available"
                     % (verdict, verdict, verdict))
                 self.assertTrue(report["ready"], report)
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=SHIP\n"
-                             "AutoOS-Review: kind=final reviewer=sonnet verdict=fix-first")
+                             "AutoOS-Review: kind=final reviewer=sonnet "
+                             "verdict=fix-first reason=no_free_leg_available")
         self.assertFalse(report["ready"], report)
 
     def test_a_claude_model_id_is_the_policy_reviewers_reviewer_it_spells(self):
@@ -9859,10 +9889,19 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
                          "anthropic")
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                             "reviewer=claude-haiku-4-5 verdict=ship\n"
+                             "reviewer=claude-haiku-4-5 verdict=ship "
+                             "reason=no_free_leg_available\n"
                              "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=ship\n" + FINAL_LINE)
-        self.assertTrue(report["ready"], report)
+        # P12 (AO-READY-FINAL-FAMILY): the anthropic seat is counted, and the SAME
+        # family may not also sign the final — the sonnet entry now collides with its
+        # own seat, which is the whole point of a family-agnostic final.
+        # P12b (D-1116): the seat is counted only now that it says no free leg was
+        # available; without those words a Claude seat buys nothing at all.
+        self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
+        self.assertTrue(report["cross_family"]["ok"], report["cross_family"]["detail"])
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family", report["final"]["detail"])
         # An id whose name the list does not carry stays unknown: a reviewer
         # nobody can place is not an independent review (fail closed).
         self.assertIsNone(self.agent.reviewer_family("claude-kimi-9-1", self.registry))
@@ -9915,28 +9954,32 @@ class ReviewStatusTests(unittest.TestCase):
         # D657-D2: the paid seat is opencode-zen's deepseek grant. The paid Muse
         # contributor left policy.reviewers with the route it named (§8 keeps the
         # paid Meta leg out of everything a probe-d657 gateway never acked).
+        # P12: the author is qwen, not an orchestrator Claude — a Claude-family
+        # final may not sign a lane its own family wrote.
         real = self.real_registry()
         report = self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=opencode/deepseek-v4.1-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=opencode/nemotron-3-ultra-free verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)
         self.assertTrue(report["ready"], report)
         self.assertEqual(report["cross_family"]["families"], ["deepseek", "nvidia"])
         # Haiku is the fallback first pass: it counts as a cross-family reviewer
-        # for a non-anthropic author, and the same anthropic family as Sonnet's
-        # final check — which is why the two entries are different requirements.
+        # for a non-anthropic author, and it is the SAME family as Sonnet's final
+        # check — which is why a lane Haiku reviewed cannot also be Sonnet-signed.
         self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
         # ... and the real catalog carries the client's own id for it, which is
         # what a finished cheap pass actually writes (SPAWNFIX3 item 5).
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", real), "anthropic")
         self.assertTrue(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-            "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "reviewer=opencode/muse-spark-1.3-contributor-free verdict=ship\n"
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=gemini-3.8-flash verdict=ship\n"
-            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP "
+            "reason=no_free_leg_available", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
         # REVFIX S2 measured against the real catalog, not a fixture: the
@@ -9954,18 +9997,21 @@ class ReviewStatusTests(unittest.TestCase):
             "reviewer=gemini-3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=qwen3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)
         self.assertTrue(report["ready"], report)
         # The self-review that used to pass: Zhipu's own model, Zhipu's reviewer.
         self.assertFalse(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=omniroute/l2-worker verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)["ready"])
         # An author the registry cannot place is not an independent review.
         self.assertFalse(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/l2-worker verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)["ready"])
 
     def test_the_real_registry_resolves_the_free_zen_reviewers(self):
         # REVFREE, source: L2-general 2026-09-28T08:12:44Z. The free opencode Zen
@@ -10009,23 +10055,30 @@ class ReviewStatusTests(unittest.TestCase):
                 family, why_not = self.agent.resolver.author_family(author, real)
                 self.assertEqual(family, "anthropic", why_not)
 
-    def test_an_orchestrator_author_reviewed_by_the_meta_reviewer_is_cross_family(self):
+    def test_an_orchestrator_author_is_ready_on_two_evidenced_non_claude_seats(self):
         # The point of the four ids above: a lane an Opus 5.5 session wrote is
-        # reviewable by Muse without anyone editing the author field to a lie.
-        # D657-D2: the meta seat is the free Muse reviewer -- §8 keeps the paid
-        # contributor leg, which no probe-d657 gateway acked, out of the registry.
+        # reviewable without anyone editing the author field to a lie. D657-D2: the
+        # meta seat is the free Muse reviewer -- §8 keeps the paid contributor leg,
+        # which no probe-d657 gateway acked, out of the registry. P12: such a lane
+        # can NO LONGER be Sonnet-finalled — anthropic would be the author's own
+        # family — so the Claude-authored record earns shape (b): two counted
+        # non-Claude seats, two different families, each with a valid evidence file.
         real = self.real_registry()
         for author in self.ORCHESTRATOR_AUTHORS:
             with self.subTest(author=author):
-                report = self.agent.review_status(
-                    ("AutoOS-Review: kind=cross-family author=%s "
-                     "reviewer=opencode/muse-spark-1.3-contributor-free "
-                     "verdict=ship\n" % author)
-                    + "AutoOS-Review: kind=cross-family author=%s "
-                      "reviewer=gemini-3.8-flash verdict=ship\n" % author
-                    + FINAL_LINE, real)
-                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                record = ("AutoOS-Review: kind=cross-family author=%s "
+                          "reviewer=opencode/muse-spark-1.3-contributor-free "
+                          "verdict=ship evidence=%s\n"
+                          "AutoOS-Review: kind=cross-family author=%s "
+                          "reviewer=gemini-3.8-flash verdict=ship evidence=%s\n"
+                          % (author, self.evidence("%s-a.md" % author),
+                             author, self.evidence("%s-b.md" % author)))
+                report = self.agent.review_status(record, real, root=self.root,
+                                                  write_ledger=False)
+                self.assertTrue(report["ready"], report["final"]["detail"])
                 self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
+                self.assertEqual(report["final"]["detail"],
+                                 "no final needed: 2 non-Claude seats")
 
     def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
         # Known is not routable, and this pins the difference: a route leg whose
@@ -10054,6 +10107,310 @@ class ReviewStatusTests(unittest.TestCase):
                      "reviewer=%s verdict=ship\n" % reviewer) + FINAL_LINE, real)
                 self.assertFalse(report["ready"], report)
                 self.assertIn("same family", report["cross_family"]["detail"])
+
+
+class FinalReviewFamilyTests(unittest.TestCase):
+    """P12 (AO-READY-FINAL-FAMILY, D-1061/D-1062): the `ready` final is family-agnostic.
+
+    The sign-off used to be one name — Sonnet — which read as "the expensive family
+    signs it off" and put a Claude leg in every lane, including the lanes a free
+    non-Claude reviewer had already covered. Three shapes now, exactly one of which
+    has to hold, and the report says which one it took: (a) a kind=final entry from a
+    3rd family (registry-exact, not the author's, not any counted seat's), a
+    Claude-family final only when the entry says no free leg was available; (b) no
+    final entry at all once two counted cross-family seats from two different
+    non-Claude families each carry valid evidence; (c) otherwise refused, naming the
+    shape that is missing and why.
+    """
+
+    AUTHOR = "qwen3.8-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # A fourth family the fixture's own reviewers do not cover, for shape (a).
+        self.registry["models"]["nvidia-nemotron"] = {"id": "nvidia-nemotron",
+                                                     "family": "nvidia"}
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def evidence(self, name, text="VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"):
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return rel
+
+    def seat(self, reviewer, evidence=True, author=AUTHOR, name=None):
+        rel = self.evidence(name or ("seat-%s.md" % reviewer)) if evidence else None
+        return ("AutoOS-Review: kind=cross-family author=%s reviewer=%s verdict=PASS%s"
+                % (author, reviewer, " evidence=%s" % rel if rel else ""))
+
+    def final(self, reviewer, evidence=True, author=AUTHOR, extra=""):
+        rel = self.evidence("final-%s.md" % reviewer) if evidence else None
+        return ("AutoOS-Review: kind=final author=%s reviewer=%s verdict=READY%s%s"
+                % (author, reviewer, " evidence=%s" % rel if rel else "", extra))
+
+    def status(self, *lines):
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False)
+
+    # --- shape (a): a kind=final entry from a 3rd family ---------------------
+
+    def test_a_third_family_final_entry_is_the_signoff(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("nvidia-nemotron"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "a")
+        self.assertEqual(report["final"]["detail"], "nvidia-nemotron verdict READY")
+
+    def test_a_third_family_final_without_evidence_is_refused(self):
+        # A non-Claude final is a seat like any other: its claim needs the file.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("nvidia-nemotron", evidence=False))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence", report["final"]["detail"])
+
+    def test_a_final_from_the_authors_own_family_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final(self.AUTHOR))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (qwen) as the author", report["final"]["detail"])
+
+    def test_a_final_from_a_counted_seat_family_is_refused(self):
+        # The 3rd family is the whole point: Muse over Muse, even signed twice.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("gem-flash"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (google) as cross-family seat gem-flash",
+                      report["final"]["detail"])
+
+    def test_a_sonnet_final_without_the_free_leg_words_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("no free leg available", report["final"]["detail"])
+
+    def test_a_sonnet_final_with_the_machine_reason_is_ready(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet", extra=" reason=no_free_leg_available"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+
+    def test_a_sonnet_final_with_the_phrase_in_a_quoted_note_is_ready(self):
+        # The judge reads the words, not one field: a free-text note carries them too,
+        # which is what the record's line parser has to survive with spaces in it.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet",
+                                        extra=' note="no free leg available: '
+                                              'both free legs were down"'))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+
+    def test_a_claude_final_on_a_claude_authored_lane_is_refused(self):
+        # The words are necessary, never sufficient: anthropic is still the author's
+        # family here, so the sign-off is the author signing its own work.
+        report = self.status(self.seat("omniroute/muse", author="haiku"),
+                             self.seat("gem-flash", author="haiku"),
+                             self.final("claude-sonnet-5", author="haiku",
+                                        extra=" reason=no_free_leg_available"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (anthropic) as the author", report["final"]["detail"])
+
+    def test_a_final_reviewer_is_named_exactly_and_not_as_a_substring(self):
+        # R-orch-16: exact registry names. A prefix of a known reviewer, or a
+        # Claude-ish spelling, is not a sign-off from any family at all.
+        for spelling in ("notsonnet", "sonnet-x", "sonnet-ish", "claude-sonnet-x",
+                         "nvidia-nemotronx"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final(spelling,
+                                                extra=" reason=no_free_leg_available"))
+                self.assertFalse(report["ready"], report)
+                self.assertIn(spelling, report["final"]["detail"])
+
+    # --- shape (b): no final at all, on two evidenced non-Claude seats -------
+
+    def test_two_evidenced_non_claude_seats_need_no_final(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "b")
+        self.assertEqual(report["final"]["detail"], "no final needed: 2 non-Claude seats")
+
+    def test_a_claude_seat_does_not_make_up_the_non_claude_pair(self):
+        report = self.status(self.seat("haiku", name="seat-haiku.md"),
+                             self.seat("omniroute/muse"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("non-Claude", report["final"]["detail"])
+
+    def test_two_seats_of_one_family_are_not_the_non_claude_pair(self):
+        report = self.status(self.seat("omniroute/muse"),
+                             self.seat("muse-contrib", name="seat-muse2.md"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("shape (b)", report["final"]["detail"])
+
+    def test_seats_without_evidence_do_not_carry_the_non_claude_pair(self):
+        report = self.status(self.seat("omniroute/muse", evidence=False),
+                             self.seat("gem-flash", evidence=False))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence", report["final"]["detail"])
+
+    # --- shape (c): the refusal says which shape is missing ------------------
+
+    def test_a_refused_record_names_the_shape_it_is_missing(self):
+        # (b) is the shape a record with no final can still reach; a record whose
+        # seats carry no evidence has to be told that, not left guessing.
+        no_final = self.status(self.seat("omniroute/muse"))
+        self.assertIn("shape (b)", no_final["final"]["detail"])
+        bad_final = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                self.final("sonnet"))
+        self.assertIn("shape (a)", bad_final["final"]["detail"])
+
+    def test_the_hint_and_the_report_say_both_shapes_are_accepted(self):
+        # The gate's own text is the documentation a person reads when it refuses;
+        # a hint that still names only Sonnet sends them to book a Claude review.
+        report = self.status(self.final("sonnet"))
+        self.assertIn("kind=final", report["hint"])
+        self.assertIn("no free leg available", report["hint"])
+        path = os.path.join(self.root, "rec.md")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((self.seat("omniroute/muse"), self.seat("gem-flash")))
+                     + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(os, "getcwd", return_value=self.root), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_review_status(argparse.Namespace(
+                record=path, registry=self.registry_path, write_ledger=False))
+        self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("no final needed: 2 non-Claude seats", out.getvalue())
+
+
+class FinalRanSeatTests(unittest.TestCase):
+    """P12b (D-1116): a HIGH (R3) lane needs a seat that RAN something.
+
+    P12 shape (b) made two evidenced non-Claude seats enough for any lane. For the
+    HIGH classes — privileged, installer, state-mutating, auth/access/secrets —
+    reading the diff is not running it, so at least ONE counted seat must carry
+    `ran=tests` or `ran=live`. The class is
+    `tools/autoos_writer_rule.required_r_level` (the diff `ready` already reads)
+    raised by the highest declared `risk=` of the record's entries; no level
+    (`r_level=None`, the library callers) asks for nothing, as before.
+    """
+
+    AUTHOR = "qwen3.8-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # A fourth family, for the shape (a) final a counted Claude seat needs.
+        self.registry["models"]["nvidia-nemotron"] = {"id": "nvidia-nemotron",
+                                                     "family": "nvidia"}
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def evidence(self, name):
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: ACCEPT\n\nMinor: nothing blocking.\n")
+        return rel
+
+    def seat(self, reviewer, extra=""):
+        return ("AutoOS-Review: kind=cross-family author=%s reviewer=%s verdict=PASS"
+                " evidence=%s%s" % (self.AUTHOR, reviewer,
+                                    self.evidence("seat-%s.md" % reviewer), extra))
+
+    def status(self, *lines, **kwargs):
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False, **kwargs)
+
+    # --- the R3 floor: one seat that ran something -------------------------
+
+    def test_an_r3_lane_whose_seats_never_ran_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             r_level="R3")
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_tests_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_live_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse"),
+                             self.seat("gem-flash", " ran=live"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_unknown_ran_value_is_refused_as_malformed(self):
+        # A typo is never guessed at: `ran=yesterday` would read as a seat that ran.
+        report = self.status(self.seat("omniroute/muse", " ran=yesterday"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=yesterday", report["cross_family"]["detail"])
+        self.assertIn("tests, live", report["cross_family"]["detail"])
+
+    def test_a_lane_below_R3_needs_no_ran_seat(self):
+        for level in ("R0", "R1", "R2"):
+            with self.subTest(r_level=level):
+                report = self.status(self.seat("omniroute/muse"),
+                                     self.seat("gem-flash"), r_level=level)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_no_level_asks_for_nothing_as_before(self):
+        # Back-compat: a library caller that never judged the diff (r_level=None)
+        # keeps the P12 answer it had.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "b")
+
+    def test_a_declared_risk_R3_raises_the_requirement_without_a_level(self):
+        # The class is the MAX of the diff-derived level and what the record itself
+        # says, so seats signed risk=R3 open the door they then have to close.
+        report = self.status(self.seat("omniroute/muse", " risk=R3"),
+                             self.seat("gem-flash", " risk=R3"))
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+        ready = self.status(self.seat("omniroute/muse", " risk=R3 ran=tests"),
+                            self.seat("gem-flash", " risk=R3"))
+        self.assertTrue(ready["ready"], ready["cross_family"]["detail"])
+
+    def test_the_hint_and_the_report_name_the_ran_field(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertIn("ran=tests|live", report["hint"])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.print_review_report("record.md", report)
+        self.assertIn("ran=tests", out.getvalue())
+
+    # --- D-1116 item 3: the same free-leg words now gate a SEAT, not only a final
+
+    def test_a_claude_seat_without_the_free_leg_words_is_not_counted(self):
+        report = self.status(self.seat("haiku"), self.seat("omniroute/muse"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("haiku", report["cross_family"]["detail"])
+        self.assertIn("no free leg available", report["cross_family"]["detail"])
+
+    def test_a_claude_seat_with_the_free_leg_words_is_a_counted_seat(self):
+        report = self.status(self.seat("haiku", " reason=no_free_leg_available"),
+                             self.seat("omniroute/muse"),
+                             "AutoOS-Review: kind=final author=%s "
+                             "reviewer=nvidia-nemotron verdict=READY evidence=%s"
+                             % (self.AUTHOR, self.evidence("final-nvidia.md")))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
 
 
 class EvidenceGateTests(unittest.TestCase):
@@ -10297,6 +10654,29 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(rows[0]["task_type"], "code")
         self.assertEqual(len(rows[0]["ref"]), 64)
         self.assertNotIn("failure_class", rows[0])
+
+    def test_a_counted_final_records_its_row_through_the_same_door_as_a_seat(self):
+        # P12 (AO-READY-FINAL-FAMILY): a kind=final entry is a seat for the ledger
+        # too — same `record_seat` path, same lane and pushed sha, its reviewer
+        # spelled as the record named it, so the family the row is read off is the
+        # reviewer the sign-off actually was.
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"),
+                    exist_ok=True)
+        with io.open(os.path.join(ev, "final.md"), "w", encoding="utf-8") as fh:
+            fh.write(self.ACCEPT)
+        final = ("AutoOS-Review: kind=final author=qwen3.8-flash "
+                 "reviewer=nvidia-nemotron verdict=ACCEPT "
+                 "evidence=logs/briefs/evidence/final.md run=%s" % self.RUNS)
+        report = self.agent.review_status(
+            "\n".join((self.seat_line(), CROSS_FAMILY_LINE_2, final)) + "\n",
+            self.registry, root=self.root, write_ledger=True,
+            lane_sha=("lane/work", "0" * 40))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual([r["reviewer"] for r in self.rows()],
+                         ["omniroute/muse", "nvidia-nemotron"])
 
     def test_the_fields_come_from_the_record_entry(self):
         self.status(extra=" run=%s task=docs risk=R2" % self.RUNS)
@@ -10759,7 +11139,8 @@ class ReadyCommandTests(unittest.TestCase):
                 rc, out, _ = self.ready(
                     self.write_record(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
                                       "AutoOS-Review: kind=final reviewer=%s "
-                                      "verdict=READY" % spelling),
+                                      "verdict=READY reason=no_free_leg_available"
+                                      % spelling),
                     repo, sha, inbox)
                 self.assertEqual(rc, 0, out)
                 self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
@@ -11575,11 +11956,52 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # A path that names nothing ops (and a `code` label) still reaches the
         # guards through the diff BODY: `requires_ops_guards` is handed the added
         # lines too, so a lane that wrote a password line is an ops lane.
+        # P12b (D-1116): that same body reads R3, so the seat that RAN the tests is
+        # what lets the run reach the ops guard this test is about.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "code"),
             diff_raw="+password: rotate-it-by-hand\n")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("ops lane without --brief", out + err)
+
+    # --- P12b (D-1116): the class the diff decides also gates the REVIEW -------
+
+    R3_BRIEF = ("TASK: rotate the token store\n"
+                "FILES (only these; <= 3 files, <= 200 lines changed):"
+                " auth/tokens.yml. Do not touch other lines/files.\n")
+
+    def record_with_ran(self, ran="tests"):
+        with io.open(self.record, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE + " ran=" + ran,
+                                CROSS_FAMILY_LINE_2, FINAL_LINE)) + "\n")
+
+    def test_ready_refuses_an_r3_diff_lane_whose_seats_never_ran(self):
+        # The diff `ready` already reads for the writer-guards decides the HIGH class,
+        # so an auth-path lane cannot clear its review on two seats that only read it.
+        # The refusal is the review gate's, and it comes before the ops guard asks
+        # for the brief; the diff is still read exactly once.
+        rc, out, err, inbox, calls = self.ready(diff_paths=["auth/tokens.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_ready_writes_the_line_for_an_r3_diff_lane_with_a_seat_that_ran(self):
+        self.record_with_ran()
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], brief=self.R3_BRIEF,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("ready: yes", out)
+        self.assertIn("ran=tests", out)
+
+    def test_ready_dry_run_still_refuses_an_r3_lane_without_a_ran_seat(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], extra=("--dry-run",))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
 
     # --- the body the judge reads is the RAW diff (P4b-fixes D1) -------------
 
@@ -11597,6 +12019,9 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # the risk scan, the lane read R1, and `ready` exited 0 with no ops guard.
         # Measured on the pre-fix reader: `_added` [] and level R1. The composition
         # of that reader with that judge is pinned in LaneDiffPathsTests below.
+        # P12b (D-1116): the body now reads R3, so a seat that ran the tests is what
+        # carries the run past the review gate to the ops guard pinned here.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY)
@@ -11607,6 +12032,7 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # The other half: ops_required True is not just the missing-brief
         # refusal — notes.txt is inside the brief, so the only ops signal in the
         # run is the diff body, and a cleared ops lane says so on the line.
+        self.record_with_ran()
         rc, out, err, inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY, brief=self.NOTES_BRIEF,
