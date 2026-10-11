@@ -2457,6 +2457,123 @@ def redirect_tool_caches(env: dict, toolhome: str) -> None:
         env[name] = os.path.join(toolhome, name.lower())
 
 
+# TOOLHOME-SIZE (AO-TOOLHOME-SIZE P8, measured): every --isolate run left a
+# ~540 MB `<sandbox>.toolhome` behind (uv_cache_dir 341 MB, npm_config_cache
+# 199 MB) and 26 of them filled ~8 GB of an 85%-full disk. The caches inside it
+# are the run's own and are worthless the moment the run has reported, so they
+# are pruned at the end of the run (below) and capped before the next one starts
+# (`cap_toolhomes`). The toolhome DIRECTORY always stays — the `discard:` line
+# still names it. The shared read-only base caches (the operator's real
+# ~/.cache/uv, ~/.npm) are OUT of scope: P8b, they are not per-run.
+TOOLHOME_CAP_MB_DEFAULT = 2048
+TOOLHOME_CAP_MB_ENV = "AUTOOS_TOOLHOME_CAP_MB"
+_MIB = 1024 * 1024
+
+
+def _open_for_delete(path: str) -> None:
+    """One attempt to make a directory readable/writable by us, so a cache tree
+    that arrived with odd mode bits can still be walked. Never raises."""
+    try:
+        os.chmod(path, os.lstat(path).st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    except OSError:
+        pass
+
+
+def tree_bytes(path: str) -> int:
+    """Bytes below `path`, read with lstat/scandir only: a symlink counts as the
+    link, never as whatever it points at, so this can not measure the operator's
+    home through a link the worker planted inside its own toolhome."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_size
+    total = st.st_size
+    try:
+        names = [entry.path for entry in os.scandir(path)]
+    except OSError:
+        return total
+    for child in names:
+        total += tree_bytes(child)
+    return total
+
+
+def delete_tree(path: str) -> int:
+    """Remove `path` — a file, a symlink (as the link) or a tree — and return the
+    bytes released. ENOENT and EACCES are tolerated: one chmod u+rwx retry on the
+    directory that refused, then that entry is given up on; nothing here raises,
+    because a run's rc must never be moved by cleanup that failed."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return 0
+    if not stat.S_ISDIR(st.st_mode):
+        try:
+            os.unlink(path)
+        except OSError:
+            return 0
+        return st.st_size
+    for attempt in (0, 1):
+        try:
+            names = [entry.path for entry in os.scandir(path)]
+            break
+        except OSError:
+            if attempt:
+                return 0
+            _open_for_delete(path)
+    freed = st.st_size
+    for child in names:
+        freed += delete_tree(child)
+    for attempt in (0, 1):
+        try:
+            os.rmdir(path)
+            return freed
+        except OSError:
+            if attempt:
+                return 0
+            _open_for_delete(path)
+    return 0
+
+
+def toolhome_refusal(toolhome: str, sandbox_path: str) -> str | None:
+    """Why `toolhome` must not be touched, or None when it is safe to. Two
+    mistakes are fatal: pruning a directory the run does not own, and following a
+    link out of the seat into the operator's home. So the path must be EXACTLY
+    `toolhome_dir(sandbox_path)`, a real directory, and not a symlink itself."""
+    if toolhome != toolhome_dir(sandbox_path):
+        return "it is not this run's toolhome"
+    if os.path.islink(toolhome):
+        return "it is a symlink"
+    try:
+        st = os.lstat(toolhome)
+    except OSError:
+        return "it is not there"
+    if not stat.S_ISDIR(st.st_mode):
+        return "it is not a directory"
+    if os.path.realpath(toolhome) != toolhome:
+        return "it is reached through a symlink"
+    return None
+
+
+def prune_toolhome(sandbox_path: str) -> dict:
+    """Delete the redirected cache subdirectories of this run's toolhome, leaving
+    the toolhome itself. `{"before", "after"}`, or `{"refused": <why>}` when the
+    path is not exactly this run's own real directory. It never raises: a cleanup
+    that fails is one line of output, not a different exit code for the run."""
+    toolhome = toolhome_dir(sandbox_path)
+    try:
+        why = toolhome_refusal(toolhome, sandbox_path)
+        if why is not None:
+            return {"refused": why}
+        before = tree_bytes(toolhome)
+        for name in TOOL_HOME_REDIRECTS:
+            delete_tree(os.path.join(toolhome, name.lower()))
+        return {"before": before, "after": tree_bytes(toolhome)}
+    except Exception as exc:                              # never past the run's rc
+        return {"refused": "%s: %s" % (type(exc).__name__, exc)}
+
+
 # SEAT-PYTEST (AO-L2-SEAT-INTEGRITY P4, measured): the redirect above moves
 # PYTHONUSERBASE into the toolhome and `site.getusersitepackages()` with it — in an
 # --isolate seat `python3 -m pytest` printed "No module named pytest" (it lives in
@@ -10206,7 +10323,8 @@ def write_kill_record(run_id: str, record: dict) -> bool:
         merged.setdefault("run_id", run_id)
         merged.setdefault("created_at", _iso_zulu(datetime.datetime.now(
             datetime.timezone.utc)))
-        for key in ("pgid", "start", "writer", "attempt", "outside_writes"):
+        for key in ("pgid", "start", "writer", "attempt", "outside_writes",
+                    "toolhome_bytes_before", "toolhome_bytes_after"):
             if record.get(key) is not None:
                 merged[key] = record[key]
         for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
@@ -13105,6 +13223,19 @@ def cmd_run(args, cfg: dict) -> int:
             record_run(TRACK_RECORD, tracked)
             propose_reprobe(tracked, REGISTRY_PATH, MEASURED_OVERLAY_PATH,
                             PROBE_PROPOSALS_LOG, sb["path"], LEGACY_OVERLAY_PATH)
+        # TOOLHOME-SIZE (P8): last, because nothing above reads the toolhome —
+        # the leak check reads the parent checkout and the outside-write watch
+        # reads the REAL home dirs. The run's own caches go; the toolhome dir and
+        # the sandbox stay for the `discard:` line above.
+        pruned = prune_toolhome(sb["path"])
+        if pruned.get("refused"):
+            print("toolhome: kept (%s)" % pruned["refused"], file=sys.stderr)
+        else:
+            print("toolhome: pruned %d MB"
+                  % ((pruned["before"] - pruned["after"]) // _MIB))
+            write_kill_record(plan.get("run_id"), {
+                "toolhome_bytes_before": pruned["before"],
+                "toolhome_bytes_after": pruned["after"]})
     # SPAWNREDACT item 2: tell the caller its worker's output was altered,
     # once, after every stream of this run has been written.
     report_redactions()

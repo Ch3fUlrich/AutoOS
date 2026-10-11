@@ -24981,5 +24981,147 @@ class SeatPythonProbeTests(unittest.TestCase):
         self.skipTest("no python3 here imports pytest only through its user site")
 
 
+class ToolHomePruneTests(unittest.TestCase):
+    """AO-TOOLHOME-SIZE P8 (1): measured — every --isolate run left a ~540 MB
+    `<sandbox>.toolhome` (uv 341 MB, npm 199 MB) and 26 of them filled ~8 GB.
+    The run's own caches are pruned at the end of the run, the toolhome dir
+    stays, and nothing about the cleanup may move the run's rc."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sandbox = os.path.join(self.tmp, "AutoOS-run-9")
+        os.makedirs(self.sandbox)
+        self.toolhome = self.agent.toolhome_dir(self.sandbox)
+
+    def make_toolhome(self, spec=(("uv_cache_dir", 18), ("npm_config_cache", 10),
+                                  ("xdg_cache_home", 2), ("pip_cache_dir", 1))):
+        """A fake seat toolhome: >= 30 MB of cache blobs, plus one small file
+        that is NOT a redirected cache root and must survive the prune."""
+        os.makedirs(self.toolhome)
+        for name, mb in spec:
+            d = os.path.join(self.toolhome, name)
+            os.makedirs(d, exist_ok=True)
+            for i in range(mb):
+                with open(os.path.join(d, "blob-%d" % i), "wb") as fh:
+                    fh.truncate(1024 * 1024)
+        keep = os.path.join(self.toolhome, "not-a-cache.txt")
+        with open(keep, "w", encoding="utf-8") as fh:
+            fh.write("keep me\n")
+        return keep
+
+    def test_a_pruned_toolhome_is_under_the_target_size(self):
+        keep = self.make_toolhome()
+        self.assertGreaterEqual(self.agent.tree_bytes(self.toolhome), 30 * 1024 * 1024)
+        got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertLess(got["after"], 1024 * 1024, "the caches are still in there")
+        self.assertLess(got["after"], 20 * 1024 * 1024, "target: a run's toolhome < 20 MB")
+        self.assertTrue(os.path.isdir(self.toolhome), "the dir stays for the discard: line")
+        self.assertTrue(os.path.isfile(keep), "only the cache subdirs are the run's to lose")
+
+    def test_a_symlinked_cache_root_goes_as_a_link_not_as_what_it_points_at(self):
+        self.make_toolhome()
+        outside = os.path.join(self.tmp, "operator-home")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "canary"), "w", encoding="utf-8") as fh:
+            fh.write("real home\n")
+        shutil.rmtree(os.path.join(self.toolhome, "uv_cache_dir"))
+        os.symlink(outside, os.path.join(self.toolhome, "uv_cache_dir"))
+        nested = os.path.join(self.toolhome, "npm_config_cache", "escape")
+        os.symlink(outside, nested)
+        self.agent.prune_toolhome(self.sandbox)
+        self.assertFalse(os.path.lexists(os.path.join(self.toolhome, "uv_cache_dir")))
+        self.assertFalse(os.path.lexists(nested))
+        self.assertTrue(os.path.isfile(os.path.join(outside, "canary")),
+                        "the prune followed a link out of the seat")
+
+    def test_a_toolhome_that_is_a_symlink_is_refused(self):
+        real = os.path.join(self.tmp, "somewhere-else")
+        os.makedirs(os.path.join(real, "uv_cache_dir"))
+        with open(os.path.join(real, "uv_cache_dir", "blob"), "wb") as fh:
+            fh.truncate(1024 * 1024)
+        os.symlink(real, self.toolhome)
+        got = self.agent.prune_toolhome(self.sandbox)
+        self.assertEqual("it is a symlink", got.get("refused"), got)
+        self.assertTrue(os.path.isdir(os.path.join(real, "uv_cache_dir")),
+                        "a link in the seat's place was walked into")
+
+    def test_only_the_exactly_derived_toolhome_path_is_prunable(self):
+        self.make_toolhome()
+        other = os.path.join(self.tmp, "AutoOS-run-10")
+        for bad in (self.toolhome, os.path.join(self.tmp, "AutoOS-run-9.toolhome-evil")):
+            self.assertEqual("it is not this run's toolhome",
+                             self.agent.toolhome_refusal(bad, other))
+        self.assertIsNone(self.agent.toolhome_refusal(self.toolhome, self.sandbox))
+        self.assertEqual("it is not there",
+                         self.agent.toolhome_refusal(os.path.join(self.tmp, "gone.toolhome"),
+                                                     os.path.join(self.tmp, "gone")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_an_unreadable_cache_directory_is_handled_not_raised(self):
+        self.make_toolhome()
+        blocked = os.path.join(self.toolhome, "xdg_cache_home", "locked")
+        os.makedirs(os.path.join(blocked, "inner"))
+        os.chmod(blocked, 0o000)
+        # The prune's one chmod retry is what removes it, so the cleanup has to
+        # tolerate the directory already being gone.
+        self.addCleanup(lambda: os.chmod(blocked, 0o755) if os.path.isdir(blocked) else None)
+        got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertFalse(os.path.lexists(blocked), "the one chmod retry did not run")
+
+    def test_a_directory_that_refuses_forever_is_given_up_on(self):
+        self.make_toolhome()
+        stubborn = os.path.join(self.toolhome, "uv_cache_dir")
+        real_scandir = os.scandir
+
+        def refuse(path):
+            if os.path.abspath(path) == stubborn:
+                raise PermissionError(13, "Permission denied", path)
+            return real_scandir(path)
+
+        with mock.patch("os.scandir", side_effect=refuse):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertTrue(os.path.isdir(stubborn), "the entry it could not read is kept")
+        self.assertFalse(os.path.isdir(os.path.join(self.toolhome, "npm_config_cache")))
+
+    def test_a_failing_prune_never_reaches_the_runs_rc(self):
+        self.make_toolhome()
+        with mock.patch.object(self.agent, "delete_tree", side_effect=OSError("boom")):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertIn("OSError", got.get("refused", ""), got)
+        self.assertTrue(os.path.isdir(os.path.join(self.toolhome, "uv_cache_dir")))
+
+    def test_the_prune_is_the_last_thing_the_isolate_run_does(self):
+        src = io.open(AGENT, encoding="utf-8").read()
+        end = src[src.index("def cmd_run("):]
+        at = end.index("prune_toolhome(sb[")
+        for earlier in ('parent_leak(parent_snap', "tool_watch_snapshot(watch_paths)",
+                        'write_kill_record(plan.get("run_id"), {"outside_writes"',
+                        'print("discard: rm -rf'):
+            self.assertLess(end.index(earlier), at,
+                            "the prune must come after: %s" % earlier)
+
+    def test_the_bytes_pruned_are_recorded_in_the_runners_own_record(self):
+        if os.name == "nt":
+            self.skipTest("the kill store is POSIX-only")
+        state = os.path.join(self.tmp, "state")
+        os.makedirs(state)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
+            self.agent.write_kill_record("run-9", {"pgid": 4242, "start": 1})
+            self.agent.write_kill_record("run-9", {"toolhome_bytes_before": 540 << 20,
+                                                   "toolhome_bytes_after": 4096})
+            got = self.agent.read_kill_record("run-9", state)
+        self.assertEqual(540 << 20, got["toolhome_bytes_before"])
+        self.assertEqual(4096, got["toolhome_bytes_after"])
+        self.assertEqual(4242, got["pgid"], "the group record must survive the merge")
+
+
 if __name__ == "__main__":
     unittest.main()
