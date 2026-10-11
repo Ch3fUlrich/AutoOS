@@ -6,9 +6,10 @@
 # Run:    docker run -i --rm --network mcp-servers_default \
 #           -e OMNIGRAPH_BASE_URL=http://omnigraph-server:8080 \
 #           -e OMNIGRAPH_GRAPH_ID=memory -e OMNIGRAPH_TOKEN=<token> omnigraph-mcp:latest
-FROM node:20-slim
-# 0.8.0 = newest bridge verified against omnigraph-server v0.8.1
-# (0.8.1 never published; 0.9+ untested).
-RUN npm install -g @modernrelay/omnigraph-mcp@0.8.0 \
+FROM node:22-slim
+# 0.13.0 = the bridge verified against omnigraph-server v0.13.0 (D-1038
+# rehearsal 2026-10-10: 15 tools, same names, sends the omnigraph-http-api: 0.13
+# header itself); it declares node >= 22.
+RUN npm install -g @modernrelay/omnigraph-mcp@0.13.0 \
     && npm cache clean --force
 ENTRYPOINT ["omnigraph-mcp"]

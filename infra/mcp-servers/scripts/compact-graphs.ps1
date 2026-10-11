@@ -72,7 +72,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Image = 'modernrelay/omnigraph-server:v0.8.1'
+# D-1038 P4c4: this is an omnigraph-server 0.8.x procedure — stop the stack, `omnigraph
+# cleanup` + `optimize` against the datasets, restart — and nobody has measured it on
+# 0.13, where the server keeps its admission lock across shutdown and the calls below
+# carry no omnigraph-http-api header. The default therefore pins the 0.13 reference
+# and the guard refuses every image >= 0.13 (or unverifiable), -DryRun included, before
+# the GO gate and before any docker call. Compacting a 0.8 stack still works with an
+# explicit OMNIGRAPH_IMAGE=v0.8.x. Same rule as dedup-graph.py refuse_unsupported_image.
+$Image = if ($env:OMNIGRAPH_IMAGE) { $env:OMNIGRAPH_IMAGE } else { 'modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1' }
+$ref = $Image.Split('@')[0]              # an @sha256:… digest says nothing about version
+$tag = if ($ref.Contains(':')) { $ref.Substring($ref.LastIndexOf(':') + 1) } else { '' }
+$supported = $false
+if ($tag -and -not $tag.Contains('/') -and $tag -match '^v?(\d+)\.(\d+)(?:\.\d+)?$') {
+  if (([int]$Matches[1] -eq 0) -and ([int]$Matches[2] -lt 13)) { $supported = $true }
+}
+if (-not $supported) {
+  [Console]::Error.WriteLine("compact-graphs.ps1: ABORT: image $Image is Omnigraph >= 0.13 (or unverifiable). This script is a 0.8.x procedure (stop the stack, omnigraph cleanup + optimize, restart): on 0.13 the server retains its admission lock on shutdown and the cleanup, the optimize and the dataset calls (no omnigraph-http-api header) are unported. For 0.13 use Server's scripts/omnigraph-cluster-dir.sh (the production apply path) and cluster/apply-fresh-013.sh. Port tracked as AO-APPLY-CLUSTER-013.")
+  exit 2
+}
 $Stopped = @()
 
 # --- Fleet rule D-825: compaction converges the live store only on an explicit GO ---
