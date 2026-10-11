@@ -161,6 +161,61 @@ if it "omnigraph images: the bridge Dockerfile pins the 0.13.0 bridge on node >=
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+# ─── D-1038 A2: the viewer speaks the 0.13 HTTP contract ────────────────────
+# omnigraph-server 0.13.0 answers HTTP 400 {"code":"api_contract_mismatch"} to
+# every request except /healthz that lacks the header `omnigraph-http-api: 0.13`,
+# so the committed viewer (which holds the bearer token and makes five calls to
+# the server) shows nothing against 0.13. Static case — flask is not installed,
+# so app.py is never imported; the contract lives in one shared `_headers` dict
+# and every call site must pass it. Also asserts the viewer reads nothing whose
+# shape changed in 0.13 (it never touches /snapshot).
+OMNI_VIEWER_APP="$ROOT/infra/mcp-servers/servers/omnigraph-viewer/app.py"
+
+if it "D-1038 A2: omnigraph-viewer sends the omnigraph-http-api: 0.13 header on every Omnigraph call"; then
+    problems=""
+    if [[ ! -f "$OMNI_VIEWER_APP" ]]; then
+        problems+=" missing $OMNI_VIEWER_APP;"
+    else
+        # (a) the contract is a module constant folded into the single `_headers`
+        # definition, so all five call sites carry it.
+        grep -qE '^CONTRACT_HEADER = "omnigraph-http-api"' "$OMNI_VIEWER_APP" \
+            || problems+=' app.py does not define CONTRACT_HEADER = "omnigraph-http-api";'
+        grep -qE '^CONTRACT_VERSION = "0\.13"' "$OMNI_VIEWER_APP" \
+            || problems+=' app.py does not define CONTRACT_VERSION = "0.13";'
+        omni_hdr_ln="$(grep -nE '^_headers = \{' "$OMNI_VIEWER_APP" | head -1 | cut -d: -f1 || true)"
+        if [[ -z "$omni_hdr_ln" ]]; then
+            problems+=" app.py has no module-level _headers = { definition;"
+        else
+            omni_hdr="$(sed -n "${omni_hdr_ln},$((omni_hdr_ln+1))p" "$OMNI_VIEWER_APP")"
+            grep -qE 'CONTRACT_HEADER|"omnigraph-http-api"' <<<"$omni_hdr" \
+                || problems+=" the _headers dict does not carry the contract header;"
+        fi
+        # (b) every requests.get/post/request call passes headers=_headers. A call
+        # may wrap onto continuation lines, so read up to 2 lines past the match;
+        # the five sites are far more than 3 lines apart, so the window cannot
+        # bleed into the next call. >= 5 so an empty match cannot pass.
+        omni_n=0
+        while IFS=: read -r omni_ln omni_rest; do
+            [[ -n "$omni_ln" ]] || continue
+            omni_n=$((omni_n+1))
+            seg="$(sed -n "${omni_ln},$((omni_ln+2))p" "$OMNI_VIEWER_APP")"
+            grep -q 'headers=_headers' <<<"$seg" \
+                || problems+=" app.py:${omni_ln} requests call without headers=_headers;"
+        done < <(grep -nE 'requests\.(get|post|request)\(' "$OMNI_VIEWER_APP")
+        (( omni_n >= 5 )) || problems+=" only $omni_n requests calls found, expected at least 5;"
+        # (c) the 0.13 snapshot re-shape cannot hit it: no /snapshot call, and no
+        # reading of row_count/tables (the "tables" check is the quoted JSON key —
+        # the HTML placeholder prose is not one).
+        if grep -qF '/snapshot' "$OMNI_VIEWER_APP"; then
+            problems+=" app.py calls /snapshot;"
+        fi
+        if grep -qE 'row_count|"tables"' "$OMNI_VIEWER_APP"; then
+            problems+=" app.py reads a re-shaped snapshot field (row_count/tables);"
+        fi
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 # ─── Omnigraph cluster declaration (SPEC-OMNI A6) ───────────────────────────
 # The graph list names repositories, so the live cluster.yaml must never be
 # tracked; the example and its schema must be, or the shape is undocumented.
