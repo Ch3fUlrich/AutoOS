@@ -234,6 +234,74 @@ def test_main_dry_run_is_intercepted_by_the_spawn_stub(monkeypatch):
     assert any("docker inspect omnigraph-server" in c for c in SPAWN_CALLS)
 
 
+# ── D-1038 P4c1 (A1): the --image DEFAULT is the pinned 0.13 reference ──────────
+# The guard only reads the image STRING, never the server. With the old v0.8.1
+# default an operator running this against a 0.13 stack without --image PASSED the
+# guard and wiped the store; defaulting to the 0.13 reference makes the
+# no-argument run fail closed, and a 0.8 stack now needs an explicit --image.
+IMAGE_013 = ("modernrelay/omnigraph-server:v0.13.0"
+             "@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1")
+IMAGE_081 = "modernrelay/omnigraph-server:v0.8.1"
+
+
+def _parsed_image_default(monkeypatch):
+    """The --image value main() holds after argparse defaults, with no spawn.
+
+    Read through main() itself — that is the parser the script actually runs, so
+    the test cannot drift from it. `refuse_unsupported_image` is replaced by a
+    recorder that stops main() at the guard, before any docker call.
+    """
+    seen = []
+
+    def capture(image):
+        seen.append(image)
+        raise SystemExit("[dedup] ABORT: recorder stop")
+
+    monkeypatch.delenv("OMNI_NET", raising=False)
+    monkeypatch.setattr(dedup_graph, "refuse_unsupported_image", capture)
+    monkeypatch.setattr(sys, "argv", [script_path, "--dry-run"])
+    with pytest.raises(SystemExit, match="recorder stop"):
+        dedup_graph.main()
+    assert len(seen) == 1, seen
+    return seen[0]
+
+
+def test_image_default_is_the_pinned_v0130_reference(monkeypatch):
+    assert _parsed_image_default(monkeypatch) == IMAGE_013
+
+
+def test_default_image_aborts_through_the_guard_without_a_spawn(monkeypatch):
+    # The no-argument run fails closed: SystemExit from refuse_unsupported_image,
+    # and never a process spawn (the store is untouched).
+    monkeypatch.delenv("OMNI_NET", raising=False)
+    monkeypatch.setattr(sys, "argv", [script_path, "--dry-run"])
+    with pytest.raises(SystemExit) as exc_info:
+        dedup_graph.main()
+    msg = str(exc_info.value)
+    assert msg.startswith("[dedup] ABORT:"), msg
+    assert IMAGE_013 in msg, msg
+    assert SPAWN_CALLS == [], SPAWN_CALLS
+
+
+def test_explicit_v081_image_still_passes_the_guard(monkeypatch):
+    # Running this on a 0.8 stack stays supported — but only explicitly. The guard
+    # passes, so main() reaches its first docker call, which the stub intercepts.
+    calls = []
+    real_guard = dedup_graph.refuse_unsupported_image
+
+    def spy(image):
+        calls.append(image)
+        real_guard(image)
+
+    monkeypatch.delenv("OMNI_NET", raising=False)
+    monkeypatch.setattr(dedup_graph, "refuse_unsupported_image", spy)
+    monkeypatch.setattr(sys, "argv", [script_path, "--image", IMAGE_081, "--dry-run"])
+    with pytest.raises(AssertionError, match=SPAWN_STUB_MSG):
+        dedup_graph.main()
+    assert calls == [IMAGE_081], "the guard ran and did not abort on the explicit 0.8.1 tag"
+    assert SPAWN_CALLS, "main() should have reached the stub, not run silently"
+
+
 def test_every_spawning_function_raises_under_the_fixture():
     a = types.SimpleNamespace(network="mcp-server_mcp-net", server="http://omnigraph-server:8080",
                               image="modernrelay/omnigraph-server:v0.8.1")

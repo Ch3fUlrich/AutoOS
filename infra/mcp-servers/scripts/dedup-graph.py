@@ -236,7 +236,19 @@ def main():
     ap.add_argument("--network", default=os.environ.get("OMNI_NET"),
                     help=f"docker network of the CLI container (default: auto-detected from the "
                          f"running omnigraph-server, else {LOCAL_NET})")
-    ap.add_argument("--image", default="modernrelay/omnigraph-server:v0.8.1")
+    # D-1038 A1: the default is the 0.13.0 pin ON PURPOSE — refuse_unsupported_image
+    # judges the image string, never the running server, so the old v0.8.1 default let
+    # a no-argument run against a 0.13 stack pass the guard and wipe the store. Omitting
+    # --image now fails closed; deduping a 0.8 stack takes an explicit --image v0.8.x.
+    ap.add_argument("--image",
+                    default="modernrelay/omnigraph-server:v0.13.0@sha256:"
+                            "f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1",
+                    help="omnigraph-server image the throwaway CLI container runs. Default is "
+                         "the pinned v0.13.0 reference, which this script REFUSES (its rebuild "
+                         "wipes the whole MinIO store — a 0.8-only procedure), so running "
+                         "without --image fails closed rather than destroying a 0.13 stack. "
+                         "To dedup a 0.8 stack name it explicitly, e.g. --image "
+                         "modernrelay/omnigraph-server:v0.8.1")
     # CENTRAL's compose dir lives in the operator's private site repo: OMNIGRAPH_SITE_DIR,
     # resolved from the environment, then ~/.config/autoos/site.env, then the placeholder
     # default (see infra/mcp-servers/site.env.example).
