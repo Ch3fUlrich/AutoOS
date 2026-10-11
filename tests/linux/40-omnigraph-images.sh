@@ -490,32 +490,145 @@ if it "D-825: guard (D-852) pwsh resolves the stand-in dir first too (when pwsh 
     [[ -z "$problems" ]] && pass || fail "PowerShell resolved outside the stand-in dir: $problems"
 fi
 
-# ─── D-1038 A6 (P7a): the Omnigraph 0.13 compose-wrapper scripts ─────────────
-# Measured (server-L1 rehearsal 2026-10-10): 0.13 retains its cluster admission
-# lock on EVERY shutdown, clean `docker stop` included, and the next boot dies
-# with state_lock_held — so `restart: unless-stopped` crash-loops. start-server-013.sh
-# and apply-fresh-013.sh release that exact id. They talk to the storage root on
-# every path, so every case runs against a recording stand-in `omnigraph` that
-# gate_stub_run puts first on PATH (<dir>/bin), never against a live root.
-describe "omnigraph 0.13 compose wrappers"
+# ─── D-1038 A6 (P7a2): start-server-013.sh against the REAL 0.13.0 status shapes ─
+# Measured (server-L1 rehearsal 2026-10-10, seats 2cf013 / 38b65c): 0.13 retains
+# its cluster admission lock on EVERY shutdown, clean `docker stop` included, and
+# the next boot dies with state_lock_held — so `restart: unless-stopped`
+# crash-loops. start-server-013.sh releases that exact id, but only once it can
+# PROVE the holder is dead, and it refuses on any status it does not fully
+# understand. It talks to the storage root on every path, so each case runs against
+# a recording stand-in `omnigraph` that gate_stub_run puts first on PATH
+# (<dir>/bin) — never a live root, never docker, never the network.
+#
+# P7a mirrored an EARLIER Server version of this wrapper and the judge held it: its
+# harness asserted a release from `{"lock_id": "01ABC", "phase": "retained"}`, a
+# shape the real CLI never prints, so the battery proved fail-open logic instead of
+# the guard. Every case below starts from a byte-for-byte sample of real
+# `omnigraph cluster status` output; the only deviations are the ones a case names
+# (a lock id created seconds ago, an injected field, a duplicated key).
+# AWS_ENDPOINT_URL_S3 is unset in all of them, which skips the heartbeat-lease
+# branch entirely — the lease cases and the apply-fresh cases are P7a2 part 2.
+describe "omnigraph 0.13 start-server-013 (real status shapes)"
 
 OG13_START="$ROOT/infra/mcp-servers/cluster/start-server-013.sh"
-OG13_APPLY="$ROOT/infra/mcp-servers/cluster/apply-fresh-013.sh"
-OG13_ROOT="s3://omnigraph-013/cluster"
+OG13_ROOT="s3://b/cluster"
+OG13_HELD_ID="01M4M8T9PDJ9NFYFVWAC6KAMPC"
+OG13_STATUS_CALL="omnigraph cluster status --cluster $OG13_ROOT"
+OG13_ENTRY_CALL="ENTRY serve --config /srv/c.yaml"
 
-# og13_stub <dir> — stand-ins for `omnigraph` and the server entrypoint. Each call
-# is appended to $STUB_LOG; behaviour comes from the env: STUB_STATUS_{OUT,RC},
-# STUB_APPLY_{OUT,RC}, STUB_UNLOCK_RC (every rc defaults to 0).
+# The measured samples: each is the Server's own fixture file reproduced byte for
+# byte, with its path and sha256 above it — "what this wrapper was proven against"
+# is precisely what these cases are about.
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-held.json @ d37fe8504 sha256 f2aaab21140acb115f4a436a6ee079761e070a015e6b0144af5e57f189abf8af
+fx_held() { cat <<'FX'
+{
+  "canonical_root": "s3://omnigraph-013/cluster",
+  "ledger_id": "01M4M8RTG6W31TG0MDA1QEVP3Y",
+  "state_revision": 23,
+  "result_revision": 1,
+  "next_sequence": 2,
+  "lock_id": "01M4M8T9PDJ9NFYFVWAC6KAMPC",
+  "outstanding_id": null,
+  "lookup": null
+}
+FX
+}
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-retained-clean-stop.json @ d37fe8504 sha256 f2aaab21140acb115f4a436a6ee079761e070a015e6b0144af5e57f189abf8af
+# What a clean `docker stop` leaves behind is byte-identical to the held sample
+# above — same sha256, and that is the measured point: a graceful stop and a
+# retained lock are indistinguishable in the status, only the id's age says more.
+fx_retained_clean_stop() { fx_held; }
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-no-lock.json @ d37fe8504 sha256 309394731af650d81d7503343fb47ead119a8c58af4dc67d5cc98fc2c24fcaff
+fx_no_lock() { cat <<'FX'
+{
+  "canonical_root": "s3://omnigraph-013/cluster",
+  "ledger_id": "01M4M8RTG6W31TG0MDA1QEVP3Y",
+  "state_revision": 23,
+  "result_revision": 1,
+  "next_sequence": 2,
+  "lock_id": null,
+  "outstanding_id": null,
+  "lookup": null
+}
+FX
+}
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-after-crash.json @ d37fe8504 sha256 86498ed658bc83a25dea86ad112abc5ee18bdaec0a7a8747c9730a9a4b3a39bb
+fx_after_crash() { cat <<'FX'
+{
+  "canonical_root": "s3://omnigraph-013/cluster",
+  "ledger_id": "01M4M8RTG6W31TG0MDA1QEVP3Y",
+  "state_revision": 23,
+  "result_revision": 1,
+  "next_sequence": 2,
+  "lock_id": "01M4M8XK9BF3KEETG8SJYE6G7A",
+  "outstanding_id": null,
+  "lookup": null
+}
+FX
+}
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-after-reconcile.json @ d37fe8504 sha256 55b32d04f907180aa3f31f1cc0f85f4efeb4a7c0808096f5b7b0d8044ce15411
+fx_after_reconcile() { cat <<'FX'
+{
+  "canonical_root": "s3://omnigraph-013/cluster",
+  "ledger_id": "01M4M8RTG6W31TG0MDA1QEVP3Y",
+  "state_revision": 30,
+  "result_revision": 1,
+  "next_sequence": 3,
+  "lock_id": "01M4M9181N80TT2GSJ8M09ABPP",
+  "outstanding_id": null,
+  "lookup": null
+}
+FX
+}
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-outstanding.json @ d37fe8504 sha256 00e3412ffe0e68663392e6a86da032c24a2f8c1982ed579e2b8f56a2f6cbca45
+fx_outstanding() { cat <<'FX'
+{
+  "canonical_root": "s3://omnigraph-013/cluster",
+  "ledger_id": "01M4M8RTG6W31TG0MDA1QEVP3Y",
+  "state_revision": 25,
+  "result_revision": 1,
+  "next_sequence": 3,
+  "lock_id": "01M4M90RJ8YR1HD7BXXGQD7DDV",
+  "outstanding_id": "01M4M8RTG6W31TG0MDA1QEVP3Y:2:01M4M90RMDTSTSXGS0WCFTRM5T",
+  "lookup": null
+}
+FX
+}
+
+# The fresh-root answer: `cluster status` exits non-zero and names state_missing.
+# The start wrapper has no use for it — a status it cannot read is a refusal — and
+# the apply-fresh cases that consume both streams are P7a2 part 2.
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-fresh.stderr.txt @ d37fe8504 sha256 014b8472ecfdd47bcae7224489912015759adcdcf9fc4d3ab0864ab0b61bac6b
+fx_fresh_stderr() { cat <<'FX'
+Error: 
+   0: state_missing __cluster/state.json: cluster ledger is missing
+FX
+}
+
+# Server tests/scripts/fixtures/omnigraph013/samples/cluster-status-fresh.stdout.txt @ d37fe8504 sha256 7f9ab2bf932578e19282b1fd34536dd1817d06748847a14d35470fb631cf9e58
+fx_fresh_stdout() { cat <<'FX'
+ERROR state_missing __cluster/state.json: cluster ledger is missing
+FX
+}
+
+# og13_stub <dir> — stand-ins for `omnigraph` and for the server entrypoint. Every
+# call is appended to $STUB_LOG in order; the case picks the status bytes with
+# STUB_STATUS_FILE (and STUB_STATUS_RC) and the unlock verdict with STUB_UNLOCK_RC.
 og13_stub() {
     local _d="$1"
-    mkdir -p "$_d/bin" "$_d/cluster"
+    mkdir -p "$_d/bin"
     : >"$_d/calls.log"
     cat >"$_d/bin/omnigraph" <<'OG13'
 #!/bin/sh
 printf 'omnigraph %s\n' "$*" >>"$STUB_LOG"
 case "$1 $2" in
-    "cluster status")       printf '%s\n' "${STUB_STATUS_OUT:-}"; exit "${STUB_STATUS_RC:-0}" ;;
-    "cluster apply")        printf '%s\n' "${STUB_APPLY_OUT:-}";  exit "${STUB_APPLY_RC:-0}" ;;
+    "cluster status")       cat "$STUB_STATUS_FILE"; exit "${STUB_STATUS_RC:-0}" ;;
     "cluster force-unlock") exit "${STUB_UNLOCK_RC:-0}" ;;
 esac
 exit 0
@@ -528,124 +641,268 @@ OG13
     chmod +x "$_d/bin/omnigraph" "$_d/bin/omnigraph-entrypoint"
 }
 
+# og13_start <dir> — run the wrapper the way the container does, with the lease
+# guard off (AWS_ENDPOINT_URL_S3 unset; part 2 stands a fake S3 up for the
+# heartbeat branch) and one argument pair that must survive to the entrypoint.
+# The record is reset first, so the sequence a case asserts is this run's alone —
+# a case that runs the wrapper over a fixture pair would otherwise read one log
+# holding both runs.
 og13_start() {
-    local _d="$1"; shift
-    gate_stub_run "$_d" "OMNIGRAPH_CLUSTER=$OG13_ROOT" "OMNIGRAPH_ENTRYPOINT=$_d/bin/omnigraph-entrypoint" \
-        "STUB_LOG=$_d/calls.log" -- sh "$OG13_START" "$@"
+    local _d="$1"
+    : >"$_d/calls.log"
+    gate_stub_run "$_d" -u AWS_ENDPOINT_URL_S3 "OMNIGRAPH_CLUSTER=$OG13_ROOT" \
+        "OMNIGRAPH_ENTRYPOINT=$_d/bin/omnigraph-entrypoint" "STUB_LOG=$_d/calls.log" \
+        -- sh "$OG13_START" serve --config /srv/c.yaml
 }
 
-og13_apply() {
-    gate_stub_run "$1" "STUB_LOG=$1/calls.log" -- sh "$OG13_APPLY" "$1/cluster" "$OG13_ROOT"
+# og13_fx <dir> <fixture-fn> <name> [extra-field] — write a measured sample to
+# <dir>/status-<name>. With an extra field (e.g. '"surprise": 1') it is injected
+# straight after the opening brace, so a mutated case still carries every real
+# field of the sample it grew out of.
+og13_fx() {
+    local _d="$1" _w="$2" _n="$3" _x="${4:-}"
+    if [[ -z "$_x" ]]; then "$_w" >"$_d/status-$_n"; return; fi
+    "$_w" | awk -v x="$_x" '{ print } /^\{/ { print "  " x "," }' >"$_d/status-$_n"
 }
 
-# og13_seq <log> — the unlock/exec sequence reduced to "FU" / "EN" tokens, so a
-# wrapper that unlocked AFTER execing is caught by the same assertion.
-og13_seq() {
-    sed -n 's/^omnigraph cluster force-unlock.*/FU/p; s/^ENTRY.*/EN/p' "$1" | tr '\n' ' ' | sed 's/ *$//'
+# og13_young_id — a lock id created five seconds ago. The first ten characters of a
+# ULID are its creation time in milliseconds (Crockford base32), so this is a real
+# id whose age the guard must read as fresh; the tail is fixed valid-alphabet filler.
+og13_young_id() {
+    python3 -c 'import time
+A = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+ms = int((time.time() - 5) * 1000); t = ""
+for _ in range(10):
+    t = A[ms % 32] + t; ms //= 32
+print(t + "A1CDEFGHJKMNPQRS")'
 }
 
-if it "omnigraph 0.13 start: releases the retained lock id, then execs the entrypoint"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": "01ABC", "phase": "retained"}' \
-        og13_start "$d" serve --config /srv/c.yaml 2>&1)"; rc=$?
-    ok=1
-    [[ $rc -eq 0 ]] || { ok=0; echo "the wrapper exited $rc: $out" >&2; }
-    [[ "$(og13_seq "$d/calls.log")" == "FU EN" ]] \
-        || { ok=0; echo "wrong sequence: [$(og13_seq "$d/calls.log")] $out" >&2; }
-    grep -qF "omnigraph cluster force-unlock 01ABC --cluster $OG13_ROOT" "$d/calls.log" \
-        || { ok=0; echo "no exact-id unlock against this root: $(cat "$d/calls.log")" >&2; }
-    grep -qF 'ENTRY serve --config /srv/c.yaml' "$d/calls.log" \
-        || { ok=0; echo "the entrypoint lost the passthrough args: $(cat "$d/calls.log")" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "start-server-013.sh did not release-then-exec"; fi
-fi
+# og13_calls [line ...] / og13_unlock <id> — the record a case expects, built from
+# the same strings the stand-in writes, so an assertion cannot drift from the stub.
+og13_calls() { printf '%s\n' "$@"; }
+og13_unlock() { printf 'omnigraph cluster force-unlock %s --cluster %s' "$1" "$OG13_ROOT"; }
 
-if it "omnigraph 0.13 start: a status with no lock id means no force-unlock"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": null, "phase": "fresh"}' og13_start "$d" serve 2>&1)"; rc=$?
-    [[ $rc -eq 0 && "$(og13_seq "$d/calls.log")" == "EN" ]] \
-        && pass || fail "a fresh root was unlocked anyway or the server never started: rc=$rc [$(og13_seq "$d/calls.log")] $out"
-    rm -rf "$d"
-fi
+# og13_problems <dir> <rc> <want-rc> <want-log> <out> [needle ...] — the three
+# things every case owes: the exit code, the WHOLE recorded call sequence (which is
+# what pins an unlock ahead of the entrypoint, and pins its absence when the wrapper
+# should not have called it), and the words the wrapper owes the operator. A needle
+# prefixed "!" must NOT appear. Prints the failures and nothing when clean, which is
+# what lets the cases that run a fixture pair accumulate over both runs.
+og13_problems() {
+    local _d="$1" _rc="$2" _wrc="$3" _wlog="$4" _out="$5" _bad="" _n _got
+    shift 5
+    [[ "$_rc" -eq "$_wrc" ]] || _bad+="exited $_rc, wanted $_wrc; "
+    _got="$(cat "$_d/calls.log")"
+    if [[ "$_got" != "$_wlog" ]]; then
+        _bad+="calls [$(printf '%s' "$_got" | tr '\n' '|')], wanted [$(printf '%s' "$_wlog" | tr '\n' '|')]; "
+    fi
+    for _n in "$@"; do
+        if [[ "${_n:0:1}" == "!" ]]; then
+            [[ "$_out" != *"${_n:1}"* ]] || _bad+="said [${_n:1}]: ${_out//$'\n'/ }; "
+        else
+            [[ "$_out" == *"$_n"* ]] || _bad+="no [$_n] in: ${_out//$'\n'/ }; "
+        fi
+    done
+    printf '%s' "$_bad"
+}
 
-if it "omnigraph 0.13 start: an unreadable cluster status refuses to start"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_OUT='{"error": "storage unavailable"}' STUB_STATUS_RC=1 og13_start "$d" serve 2>&1)"; rc=$?
-    ok=1
-    [[ $rc -eq 1 ]] || { ok=0; echo "status rc 1 became exit $rc: $out" >&2; }
-    [[ "$out" == *"refusing to start"* ]] || { ok=0; echo "no refusal message: $out" >&2; }
-    [[ "$(og13_seq "$d/calls.log")" == "" && "$out" == *"storage unavailable"* ]] \
-        || { ok=0; echo "the wrapper neither stopped at status nor showed its output: [$(cat "$d/calls.log")] $out" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "start-server-013.sh started on an unreadable status"; fi
-fi
+og13_expect() {
+    local _p; _p="$(og13_problems "$@")"
+    [[ -z "$_p" ]] && pass || fail "$_p"
+}
 
-if it "omnigraph 0.13 start: a failed force-unlock never execs the entrypoint"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_OUT='{"ok": true, "lock_id": "01ABC"}' STUB_UNLOCK_RC=1 og13_start "$d" serve 2>&1)"; rc=$?
-    [[ $rc -eq 1 && "$(og13_seq "$d/calls.log")" == "FU" && "$out" == *"FAILED"* ]] \
-        && pass || fail "the server booted on a lock that is still held: rc=$rc [$(og13_seq "$d/calls.log")] $out"
-    rm -rf "$d"
-fi
-
-if it "omnigraph 0.13 start: no OMNIGRAPH_CLUSTER means no start at all"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(gate_stub_run "$d" "OMNIGRAPH_ENTRYPOINT=$d/bin/omnigraph-entrypoint" "STUB_LOG=$d/calls.log" \
-        -- env -u OMNIGRAPH_CLUSTER sh "$OG13_START" serve 2>&1)"; rc=$?
-    [[ $rc -ne 0 && "$out" == *OMNIGRAPH_CLUSTER* && ! -s "$d/calls.log" ]] \
-        && pass || fail "an unset root reached the stack: rc=$rc $out [$(cat "$d/calls.log")]"
+if it "omnigraph 0.13 start-server-013: a retained lock past its grace is released by its exact id, before the entrypoint"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
+    out="$(STUB_STATUS_FILE="$d/status-held" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 \
+        "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+        "$out" "releasing retained admission lock" "01M4M8T9PDJ9NFYFVWAC6KAMPC" "!REFUSING TO START"
     rm -rf "$d"
 fi
 
-if it "omnigraph 0.13 apply: an existing store is left alone, apply never called"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_RC=0 og13_apply "$d" 2>&1)"; rc=$?
-    ok=1
-    [[ $rc -eq 0 ]] || { ok=0; echo "a skipped re-apply exited $rc: $out" >&2; }
-    [[ "$out" == *"existing store"* ]] || { ok=0; echo "no skip line: $out" >&2; }
-    grep -q "cluster apply" "$d/calls.log" && { ok=0; echo "apply ran on an existing store: $(cat "$d/calls.log")" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "apply-fresh-013.sh is not non-destructive"; fi
+if it "omnigraph 0.13 start-server-013: a lock younger than the grace is a refusal, with no unlock and no boot"; then
+    if ! command -v python3 >/dev/null 2>&1; then
+        skip "no python3 to mint a fresh lock id"
+    else
+        d="$(mktemp -d)"; og13_stub "$d"
+        og13_fx "$d" fx_held held
+        sed "s/\"lock_id\": \"[^\"]*\"/\"lock_id\": \"$(og13_young_id)\"/" \
+            "$d/status-held" >"$d/status-young"
+        out="$(STUB_STATUS_FILE="$d/status-young" og13_start "$d" 2>&1)"; rc=$?
+        og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+            "$out" "REFUSING TO START" "is only" "old" "(< 60s grace)"
+        rm -rf "$d"
+    fi
 fi
 
-if it "omnigraph 0.13 apply: releases the admission lock id that apply printed"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT=$'applied cluster default\nAdmission lock: 01XYZ; retain until prior work is quiescent, then exact-ID force-unlock' \
-        og13_apply "$d" 2>&1)"; rc=$?
-    ok=1
-    [[ $rc -eq 0 ]] || { ok=0; echo "a fresh apply exited $rc: $out" >&2; }
-    [[ "$out" == *"released admission lock 01XYZ"* ]] || { ok=0; echo "no release line: $out" >&2; }
-    grep -qF "omnigraph cluster force-unlock 01XYZ --config $d/cluster" "$d/calls.log" \
-        || { ok=0; echo "no exact-id unlock on the config dir: $(cat "$d/calls.log")" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "apply-fresh-013.sh left the fresh root locked"; fi
-fi
-
-if it "omnigraph 0.13 apply: a failed apply exits non-zero with no unlock"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='{"error": "schema rejected"}' STUB_APPLY_RC=1 og13_apply "$d" 2>&1)"; rc=$?
-    ok=1
-    [[ $rc -eq 1 ]] || { ok=0; echo "a failed apply exited $rc: $out" >&2; }
-    [[ "$out" == *"apply FAILED"* && "$out" == *"schema rejected"* ]] \
-        || { ok=0; echo "the apply failure was swallowed: $out" >&2; }
-    grep -q "force-unlock" "$d/calls.log" && { ok=0; echo "unlocked after a failed apply: $(cat "$d/calls.log")" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "apply-fresh-013.sh reported success on a failed apply"; fi
-fi
-
-if it "omnigraph 0.13 apply: an apply that printed no admission lock succeeds quietly"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='applied cluster default' og13_apply "$d" 2>&1)"; rc=$?
-    [[ $rc -eq 0 && "$(og13_seq "$d/calls.log")" == "" && "$out" == *"no admission lock"* ]] \
-        && pass || fail "rc=$rc seq=[$(og13_seq "$d/calls.log")] out=$out"
+if it "omnigraph 0.13 start-server-013: the lock a clean docker stop left behind releases like any other old lock"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_retained_clean_stop retained-clean-stop
+    out="$(STUB_STATUS_FILE="$d/status-retained-clean-stop" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 \
+        "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+        "$out" "releasing retained admission lock" "!REFUSING TO START"
     rm -rf "$d"
 fi
 
-if it "omnigraph 0.13 apply: an empty lock id is a failure, never a guessed unlock"; then
-    d="$(mktemp -d)"; og13_stub "$d"
-    out="$(STUB_STATUS_RC=1 STUB_APPLY_OUT='Admission lock: ; retain until prior work is quiescent' og13_apply "$d" 2>&1)"; rc=$?
-    [[ $rc -eq 1 && "$(og13_seq "$d/calls.log")" != *FU* ]] \
-        && pass || fail "an unparsed lock id still unlocked: rc=$rc [$(og13_seq "$d/calls.log")] $out"
+if it "omnigraph 0.13 start-server-013: a status with a null lock id boots without touching the lock API"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_no_lock no-lock
+    out="$(STUB_STATUS_FILE="$d/status-no-lock" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 "$(og13_calls "$OG13_STATUS_CALL" "$OG13_ENTRY_CALL")" \
+        "$out" "!REFUSING TO START" "!releasing"
     rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: the crash and post-reconcile locks release, because their ULIDs are past the grace"; then
+    # Derived from the wrapper, then measured — not guessed. Both samples carry a
+    # non-null lock_id, a null outstanding_id, no phase field, and nothing but the
+    # eight field names in the script's `known` set, so every guard short of the age
+    # check passes and the age check is the whole decision. Decoding the first ten
+    # characters puts both ids at the rehearsal on 2026-10-11 (…XK9B at 01:23:29,
+    # …9181N at 01:25:29), thousands of seconds before any run of this suite, and
+    # with AWS_ENDPOINT_URL_S3 unset the lease guard only reports that it was
+    # skipped. So the outcome is: exit 0, force-unlock of that exact id, then the
+    # entrypoint. The age only ever grows, so this holds for as long as the samples do.
+    d="$(mktemp -d)"; og13_stub "$d"; problems=""
+    for pair in "after_crash:01M4M8XK9BF3KEETG8SJYE6G7A" "after_reconcile:01M4M9181N80TT2GSJ8M09ABPP"; do
+        fx="fx_${pair%%:*}"; id="${pair##*:}"
+        og13_fx "$d" "$fx" "${fx#fx_}"
+        out="$(STUB_STATUS_FILE="$d/status-${fx#fx_}" og13_start "$d" 2>&1)"; rc=$?
+        problems+="$(og13_problems "$d" "$rc" 0 \
+            "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$id")" "$OG13_ENTRY_CALL")" \
+            "$out" "releasing retained admission lock $id" "!REFUSING TO START")"
+    done
+    rm -rf "$d"
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
+if it "omnigraph 0.13 start-server-013: an outstanding deployment is refused with the ordered remedy, never unlocked away"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_outstanding outstanding
+    out="$(STUB_STATUS_FILE="$d/status-outstanding" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "is outstanding on" "1) omnigraph cluster force-unlock" \
+        "2) omnigraph cluster apply" "--writers-stopped" "3) release the new lock"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: an unknown field with a lock held refuses the unlock; the same field with no lock only logs"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    og13_fx "$d" fx_held held-surprise '"surprise": 1'
+    og13_fx "$d" fx_no_lock no-lock-surprise '"surprise": 1'
+    out="$(STUB_STATUS_FILE="$d/status-held-surprise" og13_start "$d" 2>&1)"; rc=$?
+    held="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "unknown field(s)" "surprise" "will not force-unlock")"
+    out="$(STUB_STATUS_FILE="$d/status-no-lock-surprise" og13_start "$d" 2>&1)"; rc=$?
+    clean="$(og13_problems "$d" "$rc" 0 "$(og13_calls "$OG13_STATUS_CALL" "$OG13_ENTRY_CALL")" \
+        "$out" "note: cluster status carries field(s) outside the measured 0.13.0 set: surprise" \
+        "!REFUSING TO START")"
+    rm -rf "$d"
+    [[ -z "$held$clean" ]] && pass || fail "with a lock held: $held | with no lock: $clean"
+fi
+
+if it "omnigraph 0.13 start-server-013: a phase field is refused on both values, because the measured 0.13.0 status has none"; then
+    # P7a's harness took `"phase": "retained"` as the shape that proved a release was
+    # safe. The real CLI prints no phase field at all, so the hardened wrapper reads
+    # one as a status from a CLI it was never proven against: an "active" phase stops
+    # at the phase check itself, and a "retained" phase passes that check only to
+    # stop at the unknown-field check. Neither value unlocks and neither boots.
+    d="$(mktemp -d)"; og13_stub "$d"
+    og13_fx "$d" fx_held phase-active '"phase": "active"'
+    og13_fx "$d" fx_held phase-retained '"phase": "retained"'
+    out="$(STUB_STATUS_FILE="$d/status-phase-active" og13_start "$d" 2>&1)"; rc=$?
+    active="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "has phase \"active\"" "must be \"retained\" to unlock")"
+    out="$(STUB_STATUS_FILE="$d/status-phase-retained" og13_start "$d" 2>&1)"; rc=$?
+    retained="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "unknown field(s)" "phase" "will not force-unlock")"
+    rm -rf "$d"
+    [[ -z "$active$retained" ]] && pass || fail "phase active: $active | phase retained: $retained"
+fi
+
+if it "omnigraph 0.13 start-server-013: two lock_id fields in one status are an unparseable status, never a guessed unlock"; then
+    # The duplicate carries a DIFFERENT id on purpose: a wrapper that read the first
+    # or the last lock_id rather than refusing would unlock a lock nobody named.
+    d="$(mktemp -d)"; og13_stub "$d"
+    og13_fx "$d" fx_held dup-lock '"lock_id": "01M4M8XK9BF3KEETG8SJYE6G7A"'
+    out="$(STUB_STATUS_FILE="$d/status-dup-lock" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "expected exactly one lock_id field, found 2"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: a status command that fails refuses to start and boots nothing"; then
+    d="$(mktemp -d)"; og13_stub "$d"
+    printf '%s\n' '{"error": "storage unavailable"}' >"$d/status-garbage"
+    out="$(STUB_STATUS_FILE="$d/status-garbage" STUB_STATUS_RC=1 og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "cannot read cluster status" "REFUSING TO START" "storage unavailable"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: a lock id that is not a ULID has an unknown age and counts as fresh"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
+    sed 's/"lock_id": "[^"]*"/"lock_id": "NOT-A-ULID"/' "$d/status-held" >"$d/status-nonulid"
+    out="$(STUB_STATUS_FILE="$d/status-nonulid" og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+        "$out" "is not a ULID" "its age is unknown"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: a failed force-unlock never boots the server on a lock still held"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
+    out="$(STUB_STATUS_FILE="$d/status-held" STUB_UNLOCK_RC=1 og13_start "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 \
+        "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")")" \
+        "$out" "force-unlock $OG13_HELD_ID FAILED"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 start-server-013: a mistyped grace and an unset root both stop before the first call"; then
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
+    out="$(OG_LOCK_GRACE_SECONDS=abc STUB_STATUS_FILE="$d/status-held" og13_start "$d" 2>&1)"; rc=$?
+    knob="$(og13_problems "$d" "$rc" 1 "" "$out" "whole number of seconds" "'grace'")"
+    # No root to look at: the wrapper dies on the parameter expansion itself, and the
+    # code is the shell's (POSIX: > 0), not one the script chooses — so this asserts
+    # non-zero rather than a number that would pin dash or bash rather than the guard.
+    out="$(gate_stub_run "$d" -u AWS_ENDPOINT_URL_S3 -u OMNIGRAPH_CLUSTER \
+        "OMNIGRAPH_ENTRYPOINT=$d/bin/omnigraph-entrypoint" "STUB_LOG=$d/calls.log" \
+        -- sh "$OG13_START" serve 2>&1)"; rc=$?
+    [[ $rc -ne 0 ]] || knob+="an unset OMNIGRAPH_CLUSTER exited $rc; "
+    [[ "$(cat "$d/calls.log")" == "" ]] || knob+="an unset root still reached the stack; "
+    [[ "$out" == *"OMNIGRAPH_CLUSTER not set"* ]] || knob+="no parameter-expansion error: $out"
+    rm -rf "$d"
+    [[ -z "$knob" ]] && pass || fail "$knob"
+fi
+
+if it "omnigraph 0.13 start-server-013: the age guard decodes the same under mawk and under gawk"; then
+    # The 0.13 image ships mawk 1.3.4 (2020), which has no {n} regex intervals and
+    # once rejected every valid lock id — so the release shape and the fresh-lock
+    # shape each run again with awk resolved to every awk this host offers.
+    variants=()
+    for cand in mawk gawk; do
+        [[ -x "/usr/bin/$cand" ]] && variants+=("$cand")
+    done
+    if [[ ${#variants[@]} -eq 0 ]] || ! command -v python3 >/dev/null 2>&1; then
+        skip "needs at least one of /usr/bin/mawk, /usr/bin/gawk, and python3 to mint a fresh lock id"
+    else
+        echo "    awk variants run: ${variants[*]}" >&2
+        problems=""; p=""
+        for cand in "${variants[@]}"; do
+            d="$(mktemp -d)"; og13_stub "$d"; ln -sf "/usr/bin/$cand" "$d/bin/awk"
+            og13_fx "$d" fx_held held
+            out="$(STUB_STATUS_FILE="$d/status-held" og13_start "$d" 2>&1)"; rc=$?
+            p="$(og13_problems "$d" "$rc" 0 \
+                "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+                "$out" "releasing retained admission lock")"
+            [[ -n "$p" ]] && problems+="[$cand ]$p"
+            sed "s/\"lock_id\": \"[^\"]*\"/\"lock_id\": \"$(og13_young_id)\"/" \
+                "$d/status-held" >"$d/status-young"
+            out="$(STUB_STATUS_FILE="$d/status-young" og13_start "$d" 2>&1)"; rc=$?
+            p="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" \
+                "$out" "REFUSING TO START" "is only" "old")"
+            [[ -n "$p" ]] && problems+="[$cand young]$p"
+            rm -rf "$d"
+        done
+        [[ -z "$problems" ]] && pass || fail "$problems"
+    fi
 fi
 
