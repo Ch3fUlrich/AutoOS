@@ -5478,7 +5478,10 @@ REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evide
                        "run", "task", "failure", "risk",
                        # P12 (AO-READY-FAMILY): the two fields that let a Claude-family
                        # final say WHY it was paid for at all.
-                       "reason", "note")
+                       "reason", "note",
+                       # P12b (D-1116): what a seat actually RAN, required of one seat
+                       # in a HIGH (R3) lane.
+                       "ran")
 # One `key=value` at a time, a quoted value keeping its spaces: the free phrase the
 # final checker writes goes in quotes, and splitting the body on whitespace alone
 # would read `note="no free leg available"` as three tokens and keep none of them.
@@ -5506,11 +5509,16 @@ FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 CLAUDE_FAMILY = "anthropic"
 NO_FREE_LEG_PHRASE = "no free leg available"
 _NO_FREE_LEG_WORDS_RE = re.compile(r"[^a-z0-9]+")
+# P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
+# lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
+# would otherwise read as the evidence the gate exists to demand.
+SEAT_RAN_VALUES = ("tests", "live")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
                      "[run=<writer-run-id> task=<ops|code|docs|infra> "
-                     "failure=<class> risk=<R0..R3>] | final: EITHER "
+                     "failure=<class> risk=<R0..R3> ran=<tests|live>] -- a HIGH (R3) "
+                     "lane needs ran=tests|live on at least one counted seat | final: EITHER "
                      "AutoOS-Review: kind=final author=<model> "
                      "reviewer=<3rd-family model> verdict=<...> evidence=<path> -- a "
                      "Claude-family final counts only when it also says "
@@ -6177,14 +6185,29 @@ def _review_entry_verdict(entry, root=None, write_ledger=True, lane_sha=None):
     return True, None
 
 
+def _max_r_level(levels):
+    """The highest of a lane's risk levels, or None when none is known (P12b).
+
+    The class of a lane is the diff's judgement and whatever the record itself
+    declares, whichever is higher; anything the R-scale does not know -- an absent
+    field, a value that belongs to a seat the seat-check already refused -- is no
+    level at all. One source of the R-scale rules: `tools/autoos_writer_rule`, never
+    restated here.
+    """
+    known = [l for l in levels if l in ready_guards.R_LEVELS]
+    return max(known, key=ready_guards.R_LEVELS.index) if known else None
+
+
 def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=None):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
     the registry places, two different families, a declared ``family=`` that
-    agrees with the registry, and a READY verdict. Anything else is a reason the
-    entry does not count, said out loud -- an unplaced name is never evidence of
-    independence (REVFIX S2), and a non-READY verdict is a finding, not a seat.
+    agrees with the registry, a READY verdict, and -- for the Claude family -- the
+    words that say no free leg was available (D-1116, the same rule P12 put on the
+    sign-off). Anything else is a reason the entry does not count, said out loud --
+    an unplaced name is never evidence of independence (REVFIX S2), and a non-READY
+    verdict is a finding, not a seat.
     """
     reviewer = entry["reviewer"]
     family = reviewer_family(reviewer, registry)
@@ -6206,18 +6229,32 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
         # seat is refused and the mismatch names both sides.
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
+    ran = (entry.get("ran") or "").strip()
+    if ran and ran not in SEAT_RAN_VALUES:
+        return None, "%s ran=%s is not one of %s" % (
+            reviewer, ran, ", ".join(SEAT_RAN_VALUES))
+    if _is_claude_family(family) and not _no_free_leg_stated(entry):
+        # D-1116 (3): the free-first rule P12 put on the sign-off is a rule about
+        # Claude LEGS, so it gates a Claude SEAT the same way — an unproved
+        # "no free leg available" buys the seat no counting.
+        return None, ("the Claude-family seat %s counts only when the entry says %s "
+                      "-- reason=no_free_leg_available or note=\"%s ...\""
+                      % (reviewer, NO_FREE_LEG_PHRASE, NO_FREE_LEG_PHRASE))
     ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
             "verdict": (entry.get("verdict") or "").strip(),
+            # P12b: what this seat ran, if it said. A HIGH lane needs one that did.
+            "ran": ran,
             # P12 shape (b) is carried by the seats, and only by the ones a file
             # backs: an evidence-less seat is a claim, and the no-final shape is
             # the one place the gate asks for proof of the reviews it never re-reads.
             "evidence": bool((entry.get("evidence") or "").strip())}, None
 
 
-def _cross_family_review(entries, registry, root=None, write_ledger=True, lane_sha=None):
+def _cross_family_review(entries, registry, root=None, write_ledger=True,
+                         lane_sha=None, r_level=None):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -6228,6 +6265,13 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True, lane_s
     refusal. Missing and duplicated seats are both named in the detail, because
     "try again" without names sends someone to book a review that already
     happened.
+
+    P12b (D-1116): `r_level` is the lane's risk class, and an R3 (HIGH: privileged,
+    installer, state-mutating, auth/access/secrets) lane pays one more seat-floor --
+    at least ONE counted seat has to say it RAN the tests or a live check
+    (`ran=tests|live`), because reading a secrets diff is not the same evidence as
+    running it. None means the caller never judged the class (the library callers,
+    `review-status`), and asks for nothing, exactly as before.
     """
     wanted = [e for e in entries if e.get("kind") == "cross-family"]
     if not wanted:
@@ -6247,6 +6291,9 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True, lane_s
         seats.append(seat)
     if len(seats) < 2:
         reasons.append("2 cross-family seats required; have %d" % len(seats))
+    if r_level == "R3" and not any(s.get("ran") for s in seats):
+        reasons.append("R3 (HIGH) lane: at least one counted seat must have run the "
+                       "tests or a live check -- add ran=tests|live to its entry")
     if reasons:
         return {"ok": False, "families": [s["family"] for s in seats],
                 "seats": seats, "detail": "; ".join(reasons)}
@@ -6360,7 +6407,8 @@ def _final_review(entries, cross, registry, author_family=None, root=None,
                       "kind=final entry is present" % "; ".join(reasons)}
 
 
-def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
+def review_status(text, registry, root=None, write_ledger=True, lane_sha=None,
+                  r_level=None):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -6381,6 +6429,13 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
     `lane_sha=(lane, pushed sha)` (what `ready` passes after its line landed) for rows
     that must name both. A seat whose row cannot be written is refused with the reason
     -- an unrecorded verdict ticks none of the clocks the ledger feeds.
+
+    P12b (D-1116): `r_level` is the lane's risk class -- what
+    `tools/autoos_writer_rule.required_r_level` says of its diff, which `ready` passes
+    in -- and a class of R3 (HIGH) raises the seat floor: one counted seat has to have
+    RAN something (`ran=tests|live`). The class is the higher of that and the
+    record's own declared `risk=`. None means nobody judged the diff, and the gate
+    asks for nothing, as it always did.
     """
     entries, malformed = [], []
     for line in (text or "").splitlines():
@@ -6399,7 +6454,8 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
-    cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha)
+    level = _max_r_level([r_level] + [e.get("risk") for e in entries])
+    cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha, level)
     author_family, _author_why = _record_author_family(entries, registry)
     final = _final_review(entries, cross, registry, author_family, root,
                           write_ledger, lane_sha)
@@ -6445,8 +6501,11 @@ def print_review_report(label, report):
         # "which reviews" is answerable from the output without re-reading the
         # record line by line.
         for number, seat in enumerate(item.get("seats") or [], 1):
-            print("  seat %d: %s (%s) verdict=%s"
-                  % (number, seat["reviewer"], seat["family"], seat["verdict"]))
+            # P12b: a HIGH lane's reader needs to see WHICH seat ran something, not
+            # just that the lane cleared.
+            print("  seat %d: %s (%s) verdict=%s%s"
+                  % (number, seat["reviewer"], seat["family"], seat["verdict"],
+                     " ran=%s" % seat["ran"] if seat.get("ran") else ""))
     for line in report["malformed"]:
         print("  note: entry without a kind= or reviewer= ignored: %s" % line)
     # AO-LEDGER-WRITE P6: a verdict the ledger could not name a writer for, or could
@@ -6916,18 +6975,43 @@ def cmd_ready(args) -> int:
     to judge` — is exit 2. A lane that clears the guards appends ` guards=ok` to
     the ready line (` ops=1` too for an ops lane); a lane that triggers nothing
     appends no new field, and `preflight` (the same module's tool check, exit 3 on
-    input_required) tells the operator whether the guard tools exist at all."""
+    input_required) tells the operator whether the guard tools exist at all.
+
+    P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
+    `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
+    privileged, installer, state-mutating, auth/access/secrets) lane is refused unless
+    one counted seat says it RAN the tests or a live check (`ran=tests|live`).
+    `--dry-run` changes nothing there: it refuses the same way and writes nothing."""
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
         print("ready: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
+    base = getattr(args, "base", None) or "origin/main"
+    task_type = getattr(args, "task_type", None) or "code"
+    # P12b (D-1116): the HIGH-class review floor reads the SAME diff the writer-guards
+    # below read, so the diff is taken up here and ONCE. Its own refusals stay where
+    # they were reported — after the push check — because "which review is missing" is
+    # the nearer answer than "which commit the base is", and a diff this gate cannot
+    # read has no judged class at all: it asks for no ran= seat here, then exits on its
+    # own gate below rather than failing open on an unknown one.
+    try:
+        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
+                                                           base, args.sha)
+        diff_refusal = None
+    except LaneDiffRefusal as exc:
+        diff_paths, diff_raw, diff_error = [], "", None
+        diff_refusal = exc
+    try:
+        lane_level = ready_guards.required_r_level(task_type, diff_paths, diff_raw)
+    except (ready_guards.GuardError, ValueError):
+        lane_level = None
     # AO-LEDGER-DRYRUN (P6c): the gate is a READ here. It used to record as it
     # checked, so a --dry-run and every refused lane left rows on the ledger —
     # measurements of decisions that were never made.
     report = review_status(text, registry, root=args.repo or os.getcwd(),
-                           write_ledger=False)
+                           write_ledger=False, r_level=lane_level)
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")
@@ -6957,13 +7041,8 @@ def cmd_ready(args) -> int:
     guards_fields = ""
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
-    base = getattr(args, "base", None) or "origin/main"
-    task_type = getattr(args, "task_type", None) or "code"
-    try:
-        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
-                                                           base, args.sha)
-    except LaneDiffRefusal as exc:
-        print("ready: not appended -- %s" % exc, file=sys.stderr)
+    if diff_refusal is not None:
+        print("ready: not appended -- %s" % diff_refusal, file=sys.stderr)
         return 1
     if diff_error:
         print("ready: cannot read diff: %s" % diff_error, file=sys.stderr)

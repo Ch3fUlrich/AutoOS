@@ -9889,12 +9889,15 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
                          "anthropic")
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                             "reviewer=claude-haiku-4-5 verdict=ship\n"
+                             "reviewer=claude-haiku-4-5 verdict=ship "
+                             "reason=no_free_leg_available\n"
                              "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=ship\n" + FINAL_LINE)
         # P12 (AO-READY-FINAL-FAMILY): the anthropic seat is counted, and the SAME
         # family may not also sign the final — the sonnet entry now collides with its
         # own seat, which is the whole point of a family-agnostic final.
+        # P12b (D-1116): the seat is counted only now that it says no free leg was
+        # available; without those words a Claude seat buys nothing at all.
         self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
         self.assertTrue(report["cross_family"]["ok"], report["cross_family"]["detail"])
         self.assertFalse(report["ready"], report)
@@ -10286,6 +10289,128 @@ class FinalReviewFamilyTests(unittest.TestCase):
                 record=path, registry=self.registry_path, write_ledger=False))
         self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
         self.assertIn("no final needed: 2 non-Claude seats", out.getvalue())
+
+
+class FinalRanSeatTests(unittest.TestCase):
+    """P12b (D-1116): a HIGH (R3) lane needs a seat that RAN something.
+
+    P12 shape (b) made two evidenced non-Claude seats enough for any lane. For the
+    HIGH classes — privileged, installer, state-mutating, auth/access/secrets —
+    reading the diff is not running it, so at least ONE counted seat must carry
+    `ran=tests` or `ran=live`. The class is
+    `tools/autoos_writer_rule.required_r_level` (the diff `ready` already reads)
+    raised by the highest declared `risk=` of the record's entries; no level
+    (`r_level=None`, the library callers) asks for nothing, as before.
+    """
+
+    AUTHOR = "qwen3.8-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # A fourth family, for the shape (a) final a counted Claude seat needs.
+        self.registry["models"]["nvidia-nemotron"] = {"id": "nvidia-nemotron",
+                                                     "family": "nvidia"}
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def evidence(self, name):
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: ACCEPT\n\nMinor: nothing blocking.\n")
+        return rel
+
+    def seat(self, reviewer, extra=""):
+        return ("AutoOS-Review: kind=cross-family author=%s reviewer=%s verdict=PASS"
+                " evidence=%s%s" % (self.AUTHOR, reviewer,
+                                    self.evidence("seat-%s.md" % reviewer), extra))
+
+    def status(self, *lines, **kwargs):
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False, **kwargs)
+
+    # --- the R3 floor: one seat that ran something -------------------------
+
+    def test_an_r3_lane_whose_seats_never_ran_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             r_level="R3")
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_tests_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_live_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse"),
+                             self.seat("gem-flash", " ran=live"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_unknown_ran_value_is_refused_as_malformed(self):
+        # A typo is never guessed at: `ran=yesterday` would read as a seat that ran.
+        report = self.status(self.seat("omniroute/muse", " ran=yesterday"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=yesterday", report["cross_family"]["detail"])
+        self.assertIn("tests, live", report["cross_family"]["detail"])
+
+    def test_a_lane_below_R3_needs_no_ran_seat(self):
+        for level in ("R0", "R1", "R2"):
+            with self.subTest(r_level=level):
+                report = self.status(self.seat("omniroute/muse"),
+                                     self.seat("gem-flash"), r_level=level)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_no_level_asks_for_nothing_as_before(self):
+        # Back-compat: a library caller that never judged the diff (r_level=None)
+        # keeps the P12 answer it had.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "b")
+
+    def test_a_declared_risk_R3_raises_the_requirement_without_a_level(self):
+        # The class is the MAX of the diff-derived level and what the record itself
+        # says, so seats signed risk=R3 open the door they then have to close.
+        report = self.status(self.seat("omniroute/muse", " risk=R3"),
+                             self.seat("gem-flash", " risk=R3"))
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+        ready = self.status(self.seat("omniroute/muse", " risk=R3 ran=tests"),
+                            self.seat("gem-flash", " risk=R3"))
+        self.assertTrue(ready["ready"], ready["cross_family"]["detail"])
+
+    def test_the_hint_and_the_report_name_the_ran_field(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertIn("ran=tests|live", report["hint"])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.print_review_report("record.md", report)
+        self.assertIn("ran=tests", out.getvalue())
+
+    # --- D-1116 item 3: the same free-leg words now gate a SEAT, not only a final
+
+    def test_a_claude_seat_without_the_free_leg_words_is_not_counted(self):
+        report = self.status(self.seat("haiku"), self.seat("omniroute/muse"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("haiku", report["cross_family"]["detail"])
+        self.assertIn("no free leg available", report["cross_family"]["detail"])
+
+    def test_a_claude_seat_with_the_free_leg_words_is_a_counted_seat(self):
+        report = self.status(self.seat("haiku", " reason=no_free_leg_available"),
+                             self.seat("omniroute/muse"),
+                             "AutoOS-Review: kind=final author=%s "
+                             "reviewer=nvidia-nemotron verdict=READY evidence=%s"
+                             % (self.AUTHOR, self.evidence("final-nvidia.md")))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
 
 
 class EvidenceGateTests(unittest.TestCase):
@@ -11831,11 +11956,52 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # A path that names nothing ops (and a `code` label) still reaches the
         # guards through the diff BODY: `requires_ops_guards` is handed the added
         # lines too, so a lane that wrote a password line is an ops lane.
+        # P12b (D-1116): that same body reads R3, so the seat that RAN the tests is
+        # what lets the run reach the ops guard this test is about.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "code"),
             diff_raw="+password: rotate-it-by-hand\n")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("ops lane without --brief", out + err)
+
+    # --- P12b (D-1116): the class the diff decides also gates the REVIEW -------
+
+    R3_BRIEF = ("TASK: rotate the token store\n"
+                "FILES (only these; <= 3 files, <= 200 lines changed):"
+                " auth/tokens.yml. Do not touch other lines/files.\n")
+
+    def record_with_ran(self, ran="tests"):
+        with io.open(self.record, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE + " ran=" + ran,
+                                CROSS_FAMILY_LINE_2, FINAL_LINE)) + "\n")
+
+    def test_ready_refuses_an_r3_diff_lane_whose_seats_never_ran(self):
+        # The diff `ready` already reads for the writer-guards decides the HIGH class,
+        # so an auth-path lane cannot clear its review on two seats that only read it.
+        # The refusal is the review gate's, and it comes before the ops guard asks
+        # for the brief; the diff is still read exactly once.
+        rc, out, err, inbox, calls = self.ready(diff_paths=["auth/tokens.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_ready_writes_the_line_for_an_r3_diff_lane_with_a_seat_that_ran(self):
+        self.record_with_ran()
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], brief=self.R3_BRIEF,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("ready: yes", out)
+        self.assertIn("ran=tests", out)
+
+    def test_ready_dry_run_still_refuses_an_r3_lane_without_a_ran_seat(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], extra=("--dry-run",))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
 
     # --- the body the judge reads is the RAW diff (P4b-fixes D1) -------------
 
@@ -11853,6 +12019,9 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # the risk scan, the lane read R1, and `ready` exited 0 with no ops guard.
         # Measured on the pre-fix reader: `_added` [] and level R1. The composition
         # of that reader with that judge is pinned in LaneDiffPathsTests below.
+        # P12b (D-1116): the body now reads R3, so a seat that ran the tests is what
+        # carries the run past the review gate to the ops guard pinned here.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY)
@@ -11863,6 +12032,7 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # The other half: ops_required True is not just the missing-brief
         # refusal — notes.txt is inside the brief, so the only ops signal in the
         # run is the diff body, and a cleared ops lane says so on the line.
+        self.record_with_ran()
         rc, out, err, inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY, brief=self.NOTES_BRIEF,
