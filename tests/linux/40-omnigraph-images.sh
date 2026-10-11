@@ -1155,8 +1155,8 @@ fi
 
 if it "omnigraph 0.13 start-server-013: AWS_ENDPOINT_URL_S3 without credentials refuses before the first call, so no unauthenticated curl is ever tried"; then
     # 60, ahead of the 0600 curl-config write (61) and of the status call (81). The
-    # endpoint is overridden to the discard port here, so a leak of a run could not
-    # reach a bucket even if the credential check were the thing that moved.
+    # endpoint is overridden to the discard port here, so even a run that got past the
+    # check could not reach a bucket.
     d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
     out="$(og13_start_s3 "$d" AWS_ENDPOINT_URL_S3=http://127.0.0.1:9 AWS_ACCESS_KEY_ID= 2>&1)"; rc=$?
     og13_expect "$d" "$rc" 1 "" "$out" "REFUSING TO START" \
