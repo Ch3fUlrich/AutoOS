@@ -82,11 +82,13 @@ $LOCAL_API_URL = if ($env:LOCAL_URL) { $env:LOCAL_URL } else { 'http://127.0.0.1
 $DEVICE     = if ($env:DEVICE) { $env:DEVICE } else { $env:COMPUTERNAME }
 # Optional: central viewer, for source-IP sync attribution (see the header).
 $VIEWER_URL = $env:VIEWER_URL
-$IMAGE      = if ($env:OMNIGRAPH_IMAGE) { $env:OMNIGRAPH_IMAGE } else { 'modernrelay/omnigraph-server:v0.8.1' }
+$IMAGE      = if ($env:OMNIGRAPH_IMAGE) { $env:OMNIGRAPH_IMAGE } else { 'modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1' }
 $NET        = if ($env:DOCKER_NET) { $env:DOCKER_NET } else { 'mcp-server_mcp-net' }
 $BACKUP_DIR = if ($env:BACKUP_DIR) { $env:BACKUP_DIR } else { Join-Path $here 'backups' }
 $PY         = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
 $BRANCH     = "device/$DEVICE"
+# 0.13 answers 400 api_contract_mismatch to every HTTP request but /healthz without this header (D-1038 A3).
+$CONTRACT_HEADERS = @{ 'omnigraph-http-api' = '0.13' }
 $JQ         = Join-Path $here 'omnigraph_jsonl.py'
 # switches OR env vars (any non-empty env value counts, like bash's `[ -n ... ]`)
 $DryRunEff     = [bool]$DryRun          -or [bool]$env:DRY_RUN
@@ -145,9 +147,10 @@ function Get-GraphList {
     return @($env:GRAPH)
   }
   try {
+    $h = @{ Authorization = "Bearer $CENTRAL_TOKEN" } + $CONTRACT_HEADERS
     $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 8 `
       -Uri "$($CENTRAL_URL.TrimEnd('/'))/graphs" `
-      -Headers @{ Authorization = "Bearer $CENTRAL_TOKEN" }
+      -Headers $h
     return @([regex]::Matches($resp.Content, '"graph_id":"([^"]*)"') | ForEach-Object { $_.Groups[1].Value })
   } catch {
     return @()
@@ -212,7 +215,7 @@ function Sync-Graph([string]$Graph) {
   # Push the delta STRAIGHT to central main — no device branch.
   #
   # The old branch dance (create -> load -> merge -> delete) exists for "review before
-  # merge", which buys nothing on an unattended 5-minute timer, and on omnigraph v0.8.1 it
+  # merge", which buys nothing on an unattended 5-minute timer, and on the 0.8 server it
   # walks into three separate defects (all reproduced 2026-07-17):
   #   * `branch create`  -> Lance internal: "Clone operation should not enter build_manifest"
   #   * `branch merge`   -> "Concurrent modification: table version N already exists for
@@ -239,7 +242,7 @@ function Sync-Graph([string]$Graph) {
   # 5. pull central -> local (local := clean central).
   #
   # Delegated to pull_graph.py, which purges local and merge-loads into the EMPTY graph.
-  # `load --mode overwrite` into a POPULATED graph trips a Lance bug on v0.8.1
+  # `load --mode overwrite` into a POPULATED graph trips a Lance bug on the 0.8 server
   # (`stage_create_btree_index … all columns in a record batch must have the same length`)
   # — and worse, it sometimes lands anyway while exiting 1, so you cannot even trust its
   # failure. Loading into an empty graph is the one reliable path (it is how central was

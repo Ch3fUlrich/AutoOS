@@ -6,9 +6,36 @@ which holds only global-scope `Preference`s. Following these avoids the failure 
 already debugged (duplicate edges, corrupted merges, un-rankable search, silently-rejected
 edges, a broken `main`). Read this before querying, mutating, loading, or syncing.
 
-Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
+Server: `omnigraph-server` v0.13.0 (migrated from v0.8.1, D-1038) · MCP bridge
+`@modernrelay/omnigraph-mcp` 0.13.0
 (tools `schema_get`, `query`, `mutate`, `load`, `branches_*`, `commits_list`,
 `snapshot`, `health`, `graphs_list`). Central: `https://omnigraph.example.org` (bearer).
+
+## 0.13 differences (measured on the 2026-10-10 rehearsal)
+
+- **Contract header.** Every HTTP request except `/healthz` must send
+  `omnigraph-http-api: 0.13` or the server answers `400
+  {"code":"api_contract_mismatch"}`; `/healthz` reports
+  `{"status":"ok","version":"0.13.0","internal_schema_version":14}`. The stdio
+  bridge (`@modernrelay/omnigraph-mcp` 0.13.0, node >= 22, 15 tools — the 0.8.0
+  names plus `commits_changes` and `changes_poll`, and `mutate` gained an optional
+  `ifGraphCommit`) sends the header itself.
+- **Identity is `@id`.** `$x.@id` is the system identity; `$x.id` and `$x.__id` are
+  type errors. `insert E { from: $a, to: $b }` still works, `@src:` is a parse error.
+- **NULLs disappear from results.** A null column or property is omitted from query
+  rows and from exports (the `columns` list still names it) — a missing key is null.
+- **NDJSON ids are top-level.** Nodes are `{"type":"T","id":"<id>","data":{...}}`
+  (id derived from the `@key` slug when omitted) and `data.id` is refused on load;
+  edges may carry a top-level id that is kept. `load --mode merge` still upserts
+  nodes by `@key` and still does **not** dedupe edges (79 → 158 on a re-run).
+- **Cluster and store.** `cluster import --config` is gone; a fresh root is applied
+  with `apply-fresh-013.sh` (`infra/mcp-servers/cluster/`). `cluster apply` and every
+  server shutdown — a clean stop included — retain an admission lock that blocks the
+  next boot (`state_lock_held`) until force-unlocked; `start-server-013.sh` (same
+  dir) releases it only when it can prove the holder dead. One server container per
+  data root, and a 0.13 root never shares a bucket with 0.8.x data (default bucket
+  `omnigraph-013`). Image:
+  `modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1`.
 
 ## The rules
 
@@ -153,13 +180,19 @@ Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
    - **Server-side (bulk):** `infra/mcp-servers/scripts/dedup-graph.py`
      (edge-aware — triggers on node OR edge dups; export → dedup by
      `(type,from,to)` → reset store → overwrite-load). Needs docker on the server
-     host; runs hourly by timer on coding.example.internal.
+     host; runs hourly by timer on coding.example.internal. Its store wipe is a
+     **0.8.x-only** procedure: on a 0.8.x stack run it with
+     `--image modernrelay/omnigraph-server:v0.8.<patch>` given explicitly (the
+     default is the 0.13 image and a no-argument run aborts by design); on a 0.13
+     stack do **not** use it — the wipe would destroy the `omnigraph-013` bucket and
+     the 0.8.1 rollback bucket — take the export/import path instead
+     (Server repo `scripts/omnigraph-migrate-013.py`).
    - **Prevent it:** prefer native `branches_merge` (edge-de-duplicating) over raw
      `load --merge` for cross-store reconciliation.
 
 8. **Never `overwrite` a shared `main`.** It clobbers other projects' data, and
-   overwrite-on-a-populated graph hits a Lance index bug on v0.8.1. Use
-   `merge` / `branches_merge` on `main`; `overwrite` is only safe on a fresh store
+   overwrite-on-a-populated graph hits a Lance index bug (measured on v0.8.1; not
+   re-measured on 0.13). Use `merge` / `branches_merge` on `main`; `overwrite` is only safe on a fresh store
    or a throwaway branch you own.
 
 9. **Replace one project's subgraph on a shared `main` cleanly** (the proven
@@ -171,8 +204,8 @@ Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
 
 10. **Slugs: lowercase kebab-case, stable.** Auto-merge keys on `slug`; a case
    variant (`Finance-Repo` vs `finance-repo`) or drift creates a **duplicate node** it can't
-   collapse on its own (then needs `dedup-graph.py`). Reuse the same slug to make
-   re-writes idempotent.
+   collapse on its own (then needs `dedup-graph.py` — 0.8.x only, see rule 7). Reuse
+   the same slug to make re-writes idempotent.
 
 11. **`load --mode merge` does NOT (re)compute embeddings — merged Decisions go
     INVISIBLE to vector search.** This is Omnigraph's documented behaviour
@@ -199,23 +232,27 @@ Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
     Decision's rationale silently un-indexes it.
 
     **On v0.8.1 there is currently NO working way to (re)embed on a populated
-    graph.** Both documented paths hit the same Lance bug (verified 2026-07-16,
-    both failed *staged*, leaving the graph intact):
+    graph** (measured on v0.8.1; not re-measured on 0.13). Both documented paths hit
+    the same Lance bug (verified 2026-07-16, both failed *staged*, leaving the graph
+    intact):
 
     | attempt | result |
     |---|---|
-    | `load --mode overwrite` (populated graph) | `stage_create_btree_index on node:Rule(["id"]) … all columns in a record batch must have the same length` |
+    | `load --mode overwrite` (populated graph) | `stage_create_btree_index on node:Rule(["id"]) … all columns in a record batch must have the same length` — that error names an `id` column; on 0.13 ids are top-level / `@id` |
     | `load --mode merge` carrying hand-supplied vectors | `LanceError(Arrow): … all columns in a record batch must have the same length` |
-    | `omnigraph embed --reembed_all` | can't target a local endpoint on v0.8.1 |
+    | `omnigraph embed --reembed_all` | can't target a local endpoint (measured on v0.8.1; not re-measured on 0.13) |
 
     `scripts/populate-embeddings.py` therefore only works against a **fresh/empty**
     graph — which is why it succeeded at first seed and fails now. Until this is
     fixed (server upgrade, or a supported re-embed path), the options are:
     - **Accept it.** New/edited Decisions are findable by traversal and full-text,
       just not by `nearest()`. Given a graph this small, that is usually fine.
-    - **Rebuild** via `scripts/dedup-graph.py`, which resets the store and reloads
+    - **Rebuild** via `scripts/dedup-graph.py --image
+      modernrelay/omnigraph-server:v0.8.<patch>`, which resets the store and reloads
       each graph into an *empty* store — the one load path that works — feeding it
-      embedded data.
+      embedded data. That wipe is a 0.8.x-only procedure: never run it against a 0.13
+      stack (a no-argument run aborts by design), where the path is the export/import
+      migration (Server repo `scripts/omnigraph-migrate-013.py`).
 
     Whichever you pick: **don't claim semantic search covers a Decision you merged
     without checking.** Confirm with a `nearest()` query that the slug comes back.
@@ -250,7 +287,7 @@ Server: `omnigraph-server` v0.8.1 · MCP bridge `@modernrelay/omnigraph-mcp`
 | Change a Decision | new `Decision` + `insert Supersedes {from:new,to:old}`; set old `status: superseded` |
 | Remove a node's dup edges | `delete <Type> where slug=$s` → `load --merge` node + correct edges |
 | Push a repo's memory to central | delete its child nodes on `main` → `load --merge` its fresh subset |
-| Bulk clean dups | run `scripts/dedup-graph.py` on the server host |
+| Bulk clean dups | 0.8.x only: `scripts/dedup-graph.py --image modernrelay/omnigraph-server:v0.8.<patch>` on the server host; on 0.13 use the export/import migration (Server repo `scripts/omnigraph-migrate-013.py`) |
 
 See also: [schema.md](schema.md), `infra/mcp-servers/omnigraph-setup/README.md`,
 `docs/REMOTE-SYNC-TEST-PLAN.md`.

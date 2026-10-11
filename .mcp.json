@@ -4,7 +4,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@modernrelay/omnigraph-mcp@0.8.0"
+        "@modernrelay/omnigraph-mcp@0.13.0"
       ],
       "env": {
         "OMNIGRAPH_BASE_URL": "${OMNIGRAPH_BASE_URL:-http://localhost:8080}",
