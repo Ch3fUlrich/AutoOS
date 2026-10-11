@@ -25075,17 +25075,23 @@ class ToolHomePruneTests(unittest.TestCase):
         self.assertNotIn("refused", got, got)
         self.assertFalse(os.path.lexists(blocked), "the one chmod retry did not run")
 
+    @unittest.skipIf(os.name == "nt", "the fd-relative open the refusal is patched "
+                                      "into does not happen on the nt path walk")
     def test_a_directory_that_refuses_forever_is_given_up_on(self):
+        """P8a2 moved the seam: the walk now reaches a directory through the pinned
+        parent's descriptor, so the refusal that used to land on `scandir(path)`
+        lands on the `open(name, dir_fd=parent)` before it. Same outcome — the entry
+        it could not read is kept and everything else is still pruned."""
         self.make_toolhome()
         stubborn = os.path.join(self.toolhome, "uv_cache_dir")
-        real_scandir = os.scandir
+        real_open = os.open
 
-        def refuse(path):
-            if os.path.abspath(path) == stubborn:
+        def refuse(path, flags, *args, **kw):
+            if kw.get("dir_fd") is not None and path == "uv_cache_dir":
                 raise PermissionError(13, "Permission denied", path)
-            return real_scandir(path)
+            return real_open(path, flags, *args, **kw)
 
-        with mock.patch("os.scandir", side_effect=refuse):
+        with mock.patch("os.open", side_effect=refuse):
             got = self.agent.prune_toolhome(self.sandbox)
         self.assertNotIn("refused", got, got)
         self.assertTrue(os.path.isdir(stubborn), "the entry it could not read is kept")
@@ -25121,6 +25127,232 @@ class ToolHomePruneTests(unittest.TestCase):
         self.assertEqual(540 << 20, got["toolhome_bytes_before"])
         self.assertEqual(4096, got["toolhome_bytes_after"])
         self.assertEqual(4242, got["pgid"], "the group record must survive the merge")
+
+
+class ToolHomeFdWalkTests(unittest.TestCase):
+    """AO-TOOLHOME-SIZE P8a2 (judge HOLD on P8): the prune walked the toolhome by
+    PATH — lstat(path), then scandir/rmdir/unlink(path) — and the seat's own code
+    runs at the SAME uid as this cleanup, so it could swap a cache subdirectory for
+    a symlink to the operator's home in the window between the check and the use,
+    and the delete landed outside the sandbox. Every walk here is fd-relative from
+    one pinned root descriptor."""
+
+    MARKER = "p8a2-marker"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sandbox = os.path.join(self.tmp, "AutoOS-run-9")
+        os.makedirs(self.sandbox)
+        self.toolhome = self.agent.toolhome_dir(self.sandbox)
+        self.cache = os.path.join(self.toolhome, "uv_cache_dir")
+
+    def make_seat(self):
+        """A run's toolhome with its own caches; `uv_cache_dir` carries MARKER, so a
+        test can tell the walk's read of that one directory from any other read."""
+        os.makedirs(self.cache)
+        keep = os.path.join(self.toolhome, "not-a-cache.txt")
+        for path, size in ((keep, 8), (os.path.join(self.cache, self.MARKER), 8),
+                           (os.path.join(self.cache, "blob"), 4096),
+                           (os.path.join(self.toolhome, "npm_config_cache", "blob"), 4096)):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.truncate(size)
+        return keep
+
+    def outside(self):
+        """A directory that is not the seat's, holding a canary — what a swapped
+        symlink aims the walk at."""
+        where = os.path.join(self.tmp, "operator-home")
+        os.makedirs(where, exist_ok=True)
+        with open(os.path.join(where, "canary"), "w", encoding="utf-8") as fh:
+            fh.write("real home\n")
+        return where
+
+    def holds(self, marker, where):
+        """Does the directory `scandir` was just handed hold `marker`? The path walk
+        gives it a path and the fd-relative walk a descriptor, so both shapes ask."""
+        try:
+            if isinstance(where, int):
+                os.stat(marker, dir_fd=where, follow_symlinks=False)
+            else:
+                os.stat(os.path.join(where, marker), follow_symlinks=False)
+        except OSError:
+            return False
+        return True
+
+    def swap_on_read(self, marker, nth, action):
+        """Run `action` the `nth` time the walk reads a directory holding `marker`:
+        the check has landed, the use has not. Reads of the same directory before it
+        are the size pass. Works against either walk — the path one hands `scandir`
+        a path, the fd-relative one an fd."""
+        real, seen, fired = os.scandir, [], []
+
+        def wrapped(path, *args, **kw):
+            if not fired and self.holds(marker, path):
+                seen.append(1)
+                if len(seen) == nth:
+                    fired.append(1)
+                    action()
+            return real(path, *args, **kw)
+
+        return mock.patch("os.scandir", side_effect=wrapped)
+
+    def swap_root_on_open(self, action):
+        """Run `action` in the window of the root pin: after the pre-check lstat,
+        before the one `os.open` of the toolhome path itself."""
+        real, done = os.open, []
+
+        def wrapped(path, flags, *args, **kw):
+            if path == self.toolhome and kw.get("dir_fd") is None and not done:
+                done.append(1)
+                action()
+            return real(path, flags, *args, **kw)
+
+        return mock.patch("os.open", side_effect=wrapped)
+
+    def test_a_cache_dir_swapped_for_a_link_mid_walk_does_not_escape(self):
+        """THE ESCAPE (fails on b29e40b0: the canary is gone). The seat swaps its own
+        cache directory for a link to the operator's home while the walk holds it."""
+        keep = self.make_seat()
+        outside = self.outside()
+        canary = os.path.join(outside, "canary")
+
+        def escape():
+            shutil.rmtree(self.cache)
+            os.symlink(outside, self.cache)
+
+        with self.swap_on_read(self.MARKER, 2, escape):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertTrue(os.path.isdir(outside), "the walk deleted the operator's directory")
+        self.assertTrue(os.path.isfile(canary), "the walk deleted a file outside the seat")
+        self.assertTrue(os.path.isfile(keep), "the walk went past the caches")
+
+    def test_a_root_swapped_for_a_link_under_the_pin_is_refused(self):
+        """The toolhome itself swapped for a link after the pre-check: the pin opened
+        a directory, got a link, and refused — nothing below it is touched."""
+        self.make_seat()
+        moved = os.path.join(self.tmp, "moved-aside")
+
+        def swap():
+            os.rename(self.toolhome, moved)
+            os.symlink(moved, self.toolhome)
+
+        with self.swap_root_on_open(swap):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertIn("refused", got, got)
+        self.assertTrue(os.path.isfile(os.path.join(moved, "uv_cache_dir", "blob")),
+                        "a directory swapped into the seat's place was walked into")
+
+    def test_a_root_swapped_for_another_directory_under_the_pin_is_refused(self):
+        """The inode check: the (st_dev, st_ino) of the lstat taken just before the
+        open must be the fd that came back, or the walk does not start."""
+        self.make_seat()
+        moved = os.path.join(self.tmp, "moved-aside")
+
+        def swap():
+            os.rename(self.toolhome, moved)
+            os.makedirs(os.path.join(self.toolhome, "uv_cache_dir"))
+            with open(os.path.join(self.toolhome, "uv_cache_dir", "blob"), "wb") as fh:
+                fh.truncate(4096)
+
+        with self.swap_root_on_open(swap):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertIn("refused", got, got)
+        self.assertTrue(os.path.isfile(os.path.join(moved, "uv_cache_dir", "blob")))
+        self.assertTrue(os.path.isfile(os.path.join(self.toolhome, "uv_cache_dir", "blob")),
+                        "the prune deleted a directory it never pinned")
+
+    def test_a_symlink_child_is_unlinked_as_the_link_and_its_target_survives(self):
+        self.make_seat()
+        outside = self.outside()
+        deep = os.path.join(self.cache, "sub", "dir")
+        os.makedirs(deep)
+        os.symlink(outside, os.path.join(deep, "escape"))
+        got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertTrue(os.path.isdir(outside), "the walk deleted through a link child")
+        self.assertTrue(os.path.isfile(os.path.join(outside, "canary")))
+        self.assertFalse(os.path.lexists(os.path.join(deep, "escape")))
+        self.assertFalse(os.path.lexists(self.cache))
+
+    def test_a_tree_deeper_than_the_recursion_limit_is_pruned(self):
+        """1500 levels: the walk keeps an explicit stack, so cleanup is not a
+        RecursionError the run has to swallow."""
+        self.make_seat()
+        deep = self.cache
+        for _ in range(1500):
+            deep = os.path.join(deep, "d")
+            os.mkdir(deep)                         # makedirs recurses; mkdir does not
+        with open(os.path.join(deep, "leaf"), "wb") as fh:
+            fh.truncate(4096)
+        got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertFalse(os.path.lexists(self.cache), "the deep tail survived the prune")
+        self.assertTrue(os.path.isdir(self.toolhome), "the dir stays for the discard: line")
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_the_chmod_retry_is_dir_fd_relative_and_never_goes_through_a_path(self):
+        """The odd-mode retry is what lets an unreadable cache dir still be walked;
+        it must be done against the pinned parent, because a chmod by PATH follows a
+        link the seat planted and lands on the operator's home."""
+        self.make_seat()
+        blocked = os.path.join(self.cache, "locked")
+        os.makedirs(blocked)
+        os.chmod(blocked, 0o000)
+        # A directory the prune leaves unreadable would outlive the tmp dir it is in.
+        self.addCleanup(lambda: os.chmod(blocked, 0o755) if os.path.isdir(blocked) else None)
+        outside = self.outside()
+        os.chmod(outside, 0o700)
+        os.symlink(outside, os.path.join(self.cache, "link"))
+        real_chmod, through_path = os.chmod, []
+
+        def record(path, mode, *args, **kw):
+            if kw.get("dir_fd") is None:
+                through_path.append(path)
+            return real_chmod(path, mode, *args, **kw)
+
+        with mock.patch("os.chmod", side_effect=record):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertEqual([], through_path, "a chmod went through a path a link can redirect")
+        self.assertEqual(0o700, os.stat(outside).st_mode & 0o777,
+                         "the chmod followed a link out of the seat")
+        self.assertFalse(os.path.lexists(blocked), "the dir_fd chmod retry did not run")
+        self.assertTrue(os.path.isfile(os.path.join(outside, "canary")))
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits")
+    def test_a_platform_without_dir_fd_chmod_skips_the_retry(self):
+        """Where os.chmod cannot be done without a path, the retry is SKIPPED: a
+        skipped retry leaves an entry, a path-based one leaves the operator's home
+        chmod'ed."""
+        self.make_seat()
+        blocked = os.path.join(self.cache, "locked")
+        os.makedirs(blocked)
+        os.chmod(blocked, 0o000)
+        self.addCleanup(lambda: os.chmod(blocked, 0o755) if os.path.isdir(blocked) else None)
+        calls = []
+        with mock.patch.object(self.agent, "_FD_CHMOD", False), \
+                mock.patch("os.chmod", side_effect=lambda *a, **kw: calls.append(a[0])):
+            got = self.agent.prune_toolhome(self.sandbox)
+        self.assertNotIn("refused", got, got)
+        self.assertEqual([], calls, "the prune chmod'ed anyway, and only by path")
+        self.assertTrue(os.path.isdir(blocked), "the entry it could not open is kept")
+
+    def test_tree_bytes_does_not_follow_a_link_out_of_the_seat(self):
+        self.make_seat()
+        outside = os.path.join(self.tmp, "big-home")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "blob"), "wb") as fh:
+            fh.truncate(8 << 20)
+        os.symlink(outside, os.path.join(self.cache, "escape"))
+        self.assertLess(self.agent.tree_bytes(self.toolhome), 1 << 20,
+                        "tree_bytes measured through a link out of the seat")
 
 
 if __name__ == "__main__":

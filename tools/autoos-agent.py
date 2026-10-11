@@ -2472,23 +2472,216 @@ _MIB = 1024 * 1024
 
 def _open_for_delete(path: str) -> None:
     """One attempt to make a directory readable/writable by us, so a cache tree
-    that arrived with odd mode bits can still be walked. Never raises."""
+    that arrived with odd mode bits can still be walked. Never raises.
+
+    P8a2: only the Windows branch of `delete_tree` reaches it now — it follows a
+    symlink, which is what the fd-relative walk below replaced everywhere else."""
     try:
         os.chmod(path, os.lstat(path).st_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     except OSError:
         pass
 
 
+# P8a2 (the judge HOLD on AO-TOOLHOME-SIZE P8): P8 read every directory by PATH —
+# lstat(path), then scandir/rmdir/unlink(path) — and the seat's own code runs at the
+# SAME uid as this cleanup, so it could swap a toolhome entry for a symlink to ~ or the
+# parent checkout between the check and the use, and the delete landed OUTSIDE the
+# sandbox. Here the toolhome root is opened ONCE and pinned to the (st_dev, st_ino)
+# lstat'ed just before, and nothing past it re-resolves a path: an entry is opened,
+# listed, unlinked and rmdir'ed relative to a descriptor, so a swap aims the delete at
+# a NAME inside the pinned directory. Windows has no no-follow directory descriptor to
+# hold, so the path walk stays there, at the bottom of `tree_bytes`/`delete_tree`:
+# documented best effort.
+_FD_WALK = (os.name != "nt" and hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW")
+            and os.stat in os.supports_dir_fd and os.unlink in os.supports_dir_fd
+            and os.rmdir in os.supports_dir_fd)
+# The odd-mode retry must not go back through a path either. Measured here (CPython
+# 3.13/Linux): os.chmod(name, mode, dir_fd=fd, follow_symlinks=False) changes a
+# directory and, on a link, raises ValueError instead of following it — the refusal is
+# the safety. `os.chmod` is not in `os.supports_follow_symlinks` even so, so that
+# membership is not the gate; a platform with no dir_fd chmod gets no retry at all.
+_FD_CHMOD = os.chmod in os.supports_dir_fd
+_O_RDONLY_DIR = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _pin_dir_fd(path: str) -> int:
+    """A descriptor for `path`, pinned: opened as a directory that is not itself a
+    symlink and re-checked against the lstat taken just before, so a directory that
+    arrived in its place is refused rather than walked into. Raises OSError."""
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode):
+        raise NotADirectoryError(errno.ENOTDIR, "not a directory", path)
+    fd = os.open(path, _O_RDONLY_DIR)
+    try:
+        fst = os.fstat(fd)
+        if (fst.st_dev, fst.st_ino) != (st.st_dev, st.st_ino):
+            raise PermissionError(errno.ELOOP, "the directory was swapped under us", path)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _fd_open_for_delete(parent_fd: int, name: str) -> None:
+    """One attempt to make `name`, seen from the pinned `parent_fd`, readable and
+    writable by us, so a cache tree that arrived with odd mode bits can still be
+    walked. Never raises; a no-op where chmod needs a path, and a no-op on a link."""
+    if not _FD_CHMOD:
+        return
+    try:
+        mode = os.stat(name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+        os.chmod(name, mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR,
+                 dir_fd=parent_fd, follow_symlinks=False)
+    except (OSError, ValueError):
+        pass
+
+
+def _child_dir_fd(parent_fd: int, name: str) -> int | None:
+    """A descriptor for the directory `name` inside the pinned `parent_fd`, or None:
+    no-follow, so a symlink the seat planted is never opened as what it points at."""
+    for attempt in (0, 1):
+        try:
+            return os.open(name, _O_RDONLY_DIR, dir_fd=parent_fd)
+        except OSError:
+            if attempt:
+                return None
+            _fd_open_for_delete(parent_fd, name)
+    return None
+
+
+def _fd_names(fd: int) -> list:
+    """The names directly inside the open directory `fd`: no path is rebuilt, so a swap
+    under us cannot aim the listing somewhere else. An unreadable one reads empty."""
+    try:
+        with os.scandir(fd) as entries:
+            return [entry.name for entry in entries]
+    except OSError:
+        return []
+
+
+def _fd_unlink(name: str, parent_fd: int) -> bool:
+    """Remove `name` inside `parent_fd` — a file, or a symlink as the LINK, never as
+    whatever it points at."""
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+        return True
+    except OSError:
+        return False
+
+
+def _fd_rmdir(name: str, parent_fd: int) -> bool:
+    """Remove the emptied directory `name` inside `parent_fd`, after one dir_fd chmod
+    retry. A name the seat swapped for a link gives ENOTDIR here and is given up on:
+    `rmdir` does not follow it, which is the whole point."""
+    for attempt in (0, 1):
+        try:
+            os.rmdir(name, dir_fd=parent_fd)
+            return True
+        except OSError:
+            if attempt:
+                return False
+            _fd_open_for_delete(parent_fd, name)
+    return False
+
+
+def _fd_empty(fd: int) -> int:
+    """Delete everything INSIDE the pinned directory `fd` (`fd` itself stays with the
+    caller) bottom-up with fd-relative calls only, and return the bytes released.
+
+    An explicit stack, so a cache tree deeper than the recursion limit is pruned and
+    not a RecursionError the run has to swallow; one descriptor per level, so a tree
+    deeper than the descriptor budget gives up the rest of it the way an unreadable
+    entry is given up. Nothing raises."""
+    freed = 0
+    stack = [[fd, None, None, None]]                  # fd, parent_fd, name, pending
+    while stack:
+        frame = stack[-1]
+        cur_fd, parent_fd, name, pending = frame
+        if pending is None:
+            frame[3] = _fd_names(cur_fd)
+        elif not pending:
+            stack.pop()
+            if parent_fd is not None:                 # the root stays with the caller
+                os.close(cur_fd)
+                _fd_rmdir(name, parent_fd)
+        else:
+            child = pending.pop()
+            try:
+                st = os.stat(child, dir_fd=cur_fd, follow_symlinks=False)
+            except OSError:
+                continue                              # vanished between the two
+            if stat.S_ISDIR(st.st_mode):
+                child_fd = _child_dir_fd(cur_fd, child)
+                if child_fd is not None:
+                    freed += st.st_size
+                    stack.append([child_fd, cur_fd, child, None])
+            elif _fd_unlink(child, cur_fd):
+                freed += st.st_size
+    return freed
+
+
+def _fd_bytes(fd: int) -> int:
+    """Sizes below the pinned directory `fd`, from fstatat that never follows a link:
+    a symlink counts as the link, never as the operator's home it points at."""
+    total = 0
+    stack = [fd]
+    while stack:
+        cur = stack.pop()
+        for name in _fd_names(cur):
+            try:
+                st = os.stat(name, dir_fd=cur, follow_symlinks=False)
+            except OSError:
+                continue
+            total += st.st_size
+            if stat.S_ISDIR(st.st_mode):
+                child = _child_dir_fd(cur, name)
+                if child is not None:
+                    stack.append(child)
+        if cur != fd:                                 # the root stays with the caller
+            os.close(cur)
+    return total
+
+
+def _fd_delete_child(parent_fd: int, name: str) -> int:
+    """Remove the entry `name` inside the pinned `parent_fd`: a file or a link goes as
+    itself, a directory is emptied fd-relative first. Bytes released."""
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return 0                                      # gone: nothing to free
+    if not stat.S_ISDIR(st.st_mode):
+        return st.st_size if _fd_unlink(name, parent_fd) else 0
+    fd = _child_dir_fd(parent_fd, name)
+    if fd is None:
+        return 0                                      # unreadable: given up on
+    try:
+        freed = st.st_size + _fd_empty(fd)
+    finally:
+        os.close(fd)
+    _fd_rmdir(name, parent_fd)
+    return freed
+
+
 def tree_bytes(path: str) -> int:
-    """Bytes below `path`, read with lstat/scandir only: a symlink counts as the
-    link, never as whatever it points at, so this can not measure the operator's
-    home through a link the worker planted inside its own toolhome."""
+    """Bytes below `path`, read with lstat/fstatat only: a symlink counts as the link,
+    never as whatever it points at, so this can not measure the operator's home through
+    a link the worker planted inside its own toolhome. Below a pinned descriptor for
+    `path` (P8a2); the walk at the bottom of this function is the Windows fallback."""
     try:
         st = os.lstat(path)
     except OSError:
         return 0
     if not stat.S_ISDIR(st.st_mode):
         return st.st_size
+    if _FD_WALK:
+        try:
+            fd = _pin_dir_fd(path)
+        except OSError:
+            return st.st_size
+        try:
+            return st.st_size + _fd_bytes(fd)
+        finally:
+            os.close(fd)
     total = st.st_size
     try:
         names = [entry.path for entry in os.scandir(path)]
@@ -2499,11 +2692,24 @@ def tree_bytes(path: str) -> int:
     return total
 
 
-def delete_tree(path: str) -> int:
-    """Remove `path` — a file, a symlink (as the link) or a tree — and return the
-    bytes released. ENOENT and EACCES are tolerated: one chmod u+rwx retry on the
-    directory that refused, then that entry is given up on; nothing here raises,
-    because a run's rc must never be moved by cleanup that failed."""
+def delete_tree(path: str, parent_fd: int | None = None) -> int:
+    """Remove `path` — a file, a symlink (as the link) or a tree — and return the bytes
+    released. With `parent_fd`, `path` is a NAME inside that already-pinned directory
+    and no path is resolved at all; without one, the directory holding it is pinned
+    first and the same walk runs. ENOENT and EACCES are tolerated: one dir_fd chmod
+    u+rwx retry on the entry that refused, then that entry is given up on; nothing here
+    raises, because a run's rc must never be moved by cleanup that failed."""
+    if parent_fd is not None:
+        return _fd_delete_child(parent_fd, path)
+    if _FD_WALK:
+        try:
+            pinned = _pin_dir_fd(os.path.dirname(path) or os.curdir)
+        except OSError:
+            return 0                                  # the dir holding it is not ours
+        try:
+            return _fd_delete_child(pinned, os.path.basename(path))
+        finally:
+            os.close(pinned)
     try:
         st = os.lstat(path)
     except OSError:
@@ -2559,17 +2765,31 @@ def toolhome_refusal(toolhome: str, sandbox_path: str) -> str | None:
 def prune_toolhome(sandbox_path: str) -> dict:
     """Delete the redirected cache subdirectories of this run's toolhome, leaving
     the toolhome itself. `{"before", "after"}`, or `{"refused": <why>}` when the
-    path is not exactly this run's own real directory. It never raises: a cleanup
-    that fails is one line of output, not a different exit code for the run."""
+    path is not exactly this run's own real directory, or when it moved under the
+    pin (P8a2: the seat runs as the same uid and can rename or relink at any moment).
+    It never raises: a cleanup that fails is one line of output, not a different
+    exit code for the run."""
     toolhome = toolhome_dir(sandbox_path)
     try:
         why = toolhome_refusal(toolhome, sandbox_path)
         if why is not None:
             return {"refused": why}
-        before = tree_bytes(toolhome)
-        for name in TOOL_HOME_REDIRECTS:
-            delete_tree(os.path.join(toolhome, name.lower()))
-        return {"before": before, "after": tree_bytes(toolhome)}
+        if not _FD_WALK:                             # nt: the path walk, best effort
+            before = tree_bytes(toolhome)
+            for name in TOOL_HOME_REDIRECTS:
+                delete_tree(os.path.join(toolhome, name.lower()))
+            return {"before": before, "after": tree_bytes(toolhome)}
+        try:
+            root_fd = _pin_dir_fd(toolhome)
+        except OSError as exc:
+            return {"refused": "it moved under the pin (%s)" % type(exc).__name__}
+        try:
+            before = _fd_bytes(root_fd)
+            for name in TOOL_HOME_REDIRECTS:
+                delete_tree(name.lower(), root_fd)
+            return {"before": before, "after": _fd_bytes(root_fd)}
+        finally:
+            os.close(root_fd)
     except Exception as exc:                              # never past the run's rc
         return {"refused": "%s: %s" % (type(exc).__name__, exc)}
 
