@@ -45,7 +45,10 @@ CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                      "reviewer=omniroute/muse verdict=PASS")
 CROSS_FAMILY_LINE_2 = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                        "reviewer=gem-flash verdict=PASS")
-FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+# P12 (AO-READY-FINAL-FAMILY): a Claude-family final counts only when the entry says
+# the free legs were unavailable, so the fixture states it.
+FINAL_LINE = ("AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+              "reason=no_free_leg_available")
 
 
 def _freeze_registry():
@@ -183,6 +186,23 @@ class MainCiFreezeTests(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     READY_RECORD = (CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE)
+
+    def test_the_fixture_record_is_the_shape_the_review_gate_accepts(self):
+        # The review half only has to be green here (see _freeze_registry), so this
+        # pins WHY it is green: FINAL_LINE is the legal Claude-final shape (a) -- the
+        # words present -- and the same record with the pre-P12 bare final is refused
+        # with the hint naming those words, not silently passed.
+        record = "\n".join(self.READY_RECORD) + "\n"
+        report = self.agent.review_status(record, self.registry, write_ledger=False)
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "a")
+
+        bare = self.agent.review_status(
+            record.replace(FINAL_LINE, "AutoOS-Review: kind=final reviewer=sonnet "
+                                       "verdict=READY"), self.registry,
+            write_ledger=False)
+        self.assertFalse(bare["ready"], bare["final"]["detail"])
+        self.assertIn("no free leg available", bare["final"]["detail"])
 
     def run_ready_with_main(self, conclusion, run_id="777", error=None, extra=(),
                             declare_waiver=False):

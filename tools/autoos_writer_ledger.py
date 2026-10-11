@@ -19,9 +19,11 @@ import datetime
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import stat
+import subprocess
 import sys
 import unicodedata
 
@@ -33,18 +35,34 @@ FAILURES = ("syntax", "semantics", "secret", "scope", "tests-missing", "alert-po
 TASKS = ("ops", "code", "docs", "infra")
 RISKS = ("R0", "R1", "R2", "R3")
 KEYS = ("ts", "run_id", "verdict", "failure_class", "writer_client", "writer_model_served",
-        "task_type", "risk", "reviewer", "fixer_model", "probe", "ref")
+        "task_type", "risk", "reviewer", "fixer_model", "probe", "ref",
+        "lane", "sha", "cost")
 _RUNID = re.compile(r"[A-Za-z0-9._-]+$")
 # P6: `ref` names the evidence a seat row came from (the lane sha, or the sha256 of
 # the seat's answer), so a re-run over the same answer dedupes and a changed
 # answer is a new row. Optional, so every row written before P6 still loads.
 _REF = re.compile(r"[0-9a-f]{7,64}$")
+# P6c: a production seat row names the lane it judged (`lane`, a git branch name) and
+# the pushed sha it judged at (`sha`, one 40-hex commit). Both optional in the schema
+# -- every row written before P6c still loads -- and required by `record_seat`.
+_SHA = re.compile(r"[0-9a-f]{40}$")
+_LANE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@/+-]*$")
 _FUTURE_SKEW = datetime.timedelta(minutes=5)
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 # A valid row is a handful of <=200-char fields; anything past this is garbage
 # (an unbounded append of junk bytes) and is skipped unread rather than
 # allocating a whole line's worth of text.
 _MAX_LINE_BYTES = 65536
+# The one git call that resolves the fleet's ledger home, and the env it runs with:
+# built FROM SCRATCH so no caller `GIT_*` can steer it (the same allowlist discipline
+# as autoos-agent's `_lane_worktree_git_env`), and with the config files shut off
+# because a user or system `gitconfig` is not part of what names the main checkout.
+_GIT_TIMEOUT = 10
+_GIT_GUARDS = (("GIT_TERMINAL_PROMPT", "0"),
+               ("GIT_CONFIG_PARAMETERS", ""),
+               ("GIT_CONFIG_GLOBAL", os.devnull),
+               ("GIT_CONFIG_SYSTEM", os.devnull))
+_fleet_home = None
 
 
 class LedgerError(ValueError):
@@ -161,11 +179,74 @@ def _model_match(a, b):
     return len(short) >= 6 and long.startswith(short) and long[len(short)] == "-"
 
 
+def _main_checkout_logs_dir():
+    """The MAIN checkout's `logs/` through ONE audited git call, or None.
+
+    A lane worktree's own `logs/` is discarded with the worktree, so a row written
+    there is a verdict nobody will ever read: `git rev-parse --git-common-dir` names
+    the shared `.git` from anywhere inside the checkout, and the parent of that is
+    the main working tree. Refuses to guess: a failing, hanging, empty, doubled or
+    undecodable answer, and a bare repo (whose common dir IS the tree it was asked
+    about), all answer None and leave the caller to the fallback.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+           "HOME": os.environ.get("HOME") or "/", "LANG": "C"}
+    for name, value in _GIT_GUARDS:
+        env[name] = value
+    try:
+        out = subprocess.run(["git", "-C", root, "rev-parse", "--git-common-dir"],
+                             capture_output=True, env=env, timeout=_GIT_TIMEOUT,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        common = out.stdout.decode("utf-8").strip()
+    except UnicodeError:
+        return None
+    if not common or "\n" in common or "\x00" in common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.normpath(os.path.join(root, common))
+    if common == root:
+        return None
+    return os.path.join(os.path.dirname(common), "logs")
+
+
+def fleet_state_dir(cache=True):
+    """ONE ledger home for the whole fleet (P6c) — the directory `default_path()`
+    lives in.
+
+    `AUTOOS_LEDGER_PATH` wins outright (its own directory), then `AUTOOS_STATE_DIR`
+    (the redirect every hermetic test already uses), then the main checkout's `logs/`.
+    NEVER raises: what cannot be resolved falls back to this checkout's state dir,
+    because a ledger written to the wrong place is a defect while no ledger at all,
+    over an unreadable repo, is the same defect the old resolver had. The git answer
+    is cached per process (`cache=False` re-resolves it, which is what a test of the
+    resolver itself needs).
+    """
+    led = os.environ.get("AUTOOS_LEDGER_PATH")
+    if led:
+        return os.path.dirname(os.path.abspath(led))
+    state = os.environ.get("AUTOOS_STATE_DIR")
+    if state:
+        return state
+    global _fleet_home
+    if cache and _fleet_home:
+        return _fleet_home
+    home = _main_checkout_logs_dir() or clients.state_dir()
+    if cache:
+        _fleet_home = home
+    return home
+
+
 def default_path():
     """The ledger's home: `AUTOOS_LEDGER_PATH` wins outright (P6: tests point it
     at a temp file and never touch the real logs/writer-ledger.jsonl), else the
-    runner-private state dir."""
-    return os.environ.get("AUTOOS_LEDGER_PATH") or os.path.join(clients.state_dir(),
+    FLEET's state dir (P6c) — the main checkout's, not this worktree's."""
+    return os.environ.get("AUTOOS_LEDGER_PATH") or os.path.join(fleet_state_dir(),
                                                                 "writer-ledger.jsonl")
 
 
@@ -247,6 +328,37 @@ def _en(n, v, ok):
     return v
 
 
+def _lane(v):
+    """A lane name is a git branch name: _str's printable <=200 chars, and none of
+    the shapes git itself refuses (a path separator at either end, `..`, `//`, a
+    trailing `.` or the reserved `refs/` prefix)."""
+    s = _str("lane", v)
+
+    if not _LANE.fullmatch(s) or ".." in s or "//" in s or s[-1] in "/." or s.startswith("refs/"):
+        raise ValueError("lane shape %r" % (s,))
+
+    return s
+
+
+def _cost(v):
+    """A stated cost: a finite, non-negative number. Nothing else is a price —
+    NaN, an infinity, a bool, a string or a negative all refuse the row rather
+    than roll up as a number no billing read ever reported.
+    P6d: an int past the float range (`10**400`) does not answer `math.isfinite`, it
+    raises OverflowError, which sails past every `except ValueError` in the gate -- a
+    number too large to be a price is still just a bad price."""
+    if isinstance(v, bool) or type(v) not in (int, float):
+        raise ValueError("cost: a finite non-negative number, got %r" % (v,))
+    try:
+        priced = math.isfinite(v) and v >= 0
+    except (OverflowError, ValueError, TypeError):
+        priced = False
+    if not priced:
+        raise ValueError("cost: a finite non-negative number, got %r" % (v,))
+
+    return v
+
+
 def validate(e, fill_ts=True):
     """Strict entry check (the record path).
 
@@ -300,6 +412,20 @@ def validate(e, fill_ts=True):
 
         o["ref"] = r
 
+    if e.get("lane") is not None:
+        o["lane"] = _lane(e["lane"])
+
+    if e.get("sha") is not None:
+        s = e["sha"]
+
+        if type(s) is not str or not _SHA.fullmatch(s):
+            raise ValueError("sha: 40 lowercase hex, got %r" % (s,))
+
+        o["sha"] = s
+
+    if e.get("cost") is not None:
+        o["cost"] = _cost(e["cost"])
+
     t = e.get("ts")
 
     if t is None and not fill_ts:
@@ -308,6 +434,53 @@ def validate(e, fill_ts=True):
     o["ts"] = _ts_iso(t if t is not None else _now(), check_future=fill_ts)
 
     return o
+
+
+def _torn_tail(resolved):
+    """`b"\\n"` when the ledger ends mid-record, else `b""` (P6c: strict JSONL).
+
+    The old write prefixed every row with a newline, which made the file littered
+    with blank lines and is not JSONL. A separator is only owed where a previous
+    writer never finished its line. A tail that cannot be read (a raced rename, a
+    share deny on Windows, a symlink a moment after the write handle was validated)
+    is answered with no separator and NO row lost: `load` skips a torn line and keeps
+    reading, while a stray blank line is skipped as nothing.
+    """
+    try:
+        h = _open_ledger_ro(resolved)
+
+        if h is None:
+            return b""
+
+        with h:
+            size = os.fstat(h.fileno()).st_size
+
+            if not size:
+                return b""
+
+            h.seek(size - 1)
+
+            return b"" if h.read(1) == b"\n" else b"\n"
+    except (OSError, ValueError):
+        return b""
+
+
+def record_seat(e, path=None):
+    """One seat row from the PRODUCTION path: `record()`, and a row that cannot name
+    both the lane it judged and the 40-hex sha it judged at is refused before the
+    file is opened.
+
+    WHY this is a separate door and not a default: a row with `lane=null sha=null` (the
+    shape `ready` wrote before P6c) says nothing about which verdict applies to which
+    pushed commit, so the demotion gate reads a pile of unattributed rows and can only
+    guess. Refusing is cheaper than guessing.
+    """
+    lane, sha = e.get("lane"), e.get("sha")
+
+    if type(lane) is not str or not lane or type(sha) is not str or not _SHA.fullmatch(sha):
+        raise ValueError("lane and sha required")
+
+    return record(e, path=path)
 
 
 def record(e, path=None):
@@ -353,7 +526,7 @@ def record(e, path=None):
             if stat.S_ISLNK(lst.st_mode) or (lst.st_ino, lst.st_dev) != (st.st_ino, st.st_dev):
                 raise LedgerError("ledger %r is a symlink" % (t,))
 
-        buf = b"\n" + json.dumps(o, sort_keys=True).encode("utf-8") + b"\n"
+        buf = _torn_tail(t) + json.dumps(o, sort_keys=True).encode("utf-8") + b"\n"
 
         try:
             n = os.write(fd, buf)
@@ -504,18 +677,59 @@ def rollup(path=None, now=None, window_days=None):
     return o
 
 
+def _agent_module():
+    """The runner's own module, loaded from this file's sibling."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "autoos_agent_mod", os.path.join(here, "autoos-agent.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_record(run_id):
+    """The runner's `workers/<run_id>.json` as a dict, or None — never raised on.
+
+    This is the one reader of what the run said about itself, so the fields a seat
+    row copies (the client, the cost) all come from here rather than from a second
+    walk over the store.
+    """
+    try:
+        if type(run_id) is not str or not _RUNID.fullmatch(run_id):
+            return None
+
+        with io.open(os.path.join(_agent_module().workers_dir(), run_id + ".json"),
+                     encoding="utf-8") as h:
+            f = json.load(h)
+    except Exception:
+        return None
+
+    return f if type(f) is dict else None
+
+
+def run_cost(run_id):
+    """The cost the writer's run record states, or None when it states no number.
+
+    Never invented: a row that guesses a price makes every later billing read of
+    that model look paid for, and a run that recorded nothing costs nothing to say.
+    """
+    return _cost_or_none((run_record(run_id) or {}).get("cost"))
+
+
+def _cost_or_none(v):
+    try:
+        return _cost(v)
+    except ValueError:
+        return None
+
+
 def writer_for_run(run_id):
     """(writer_client, writer_model_served) from the runner-private record, else None."""
     try:
         if type(run_id) is not str or not _RUNID.fullmatch(run_id):
             return None
 
-        here = os.path.dirname(os.path.abspath(__file__))
-        spec = importlib.util.spec_from_file_location(
-            "autoos_agent_mod", os.path.join(here, "autoos-agent.py"))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        w = mod.worker_writer(run_id)
+        w = _agent_module().worker_writer(run_id)
     except Exception:
         return None
 
@@ -529,13 +743,8 @@ def writer_for_run(run_id):
 
     p = w.get("provider")
     ok = type(p) is str and p.strip() and p.strip() != "unresolved"
-
-    try:
-        with io.open(os.path.join(mod.workers_dir(), run_id + ".json"), encoding="utf-8") as h:
-            f = json.load(h).get("client")
-        c = f.strip() if type(f) is str and f.strip() else None
-    except Exception:
-        c = None
+    f = (run_record(run_id) or {}).get("client")
+    c = f.strip() if type(f) is str and f.strip() else None
 
     return c, ("%s/%s" % (p.strip(), m.strip()) if ok else m.strip())
 

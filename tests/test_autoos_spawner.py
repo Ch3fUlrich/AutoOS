@@ -9582,7 +9582,10 @@ CROSS_FAMILY_LINE = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
 # (google) and is not the qwen author.
 CROSS_FAMILY_LINE_2 = ("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                        "reviewer=gem-flash verdict=PASS")
-FINAL_LINE = "AutoOS-Review: kind=final reviewer=sonnet verdict=READY"
+# P12 (AO-READY-FINAL-FAMILY): the Claude-family final is not the sign-off any more,
+# it is the exception, and the entry has to SAY it was unavoidable.
+FINAL_LINE = ("AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+              "reason=no_free_leg_available")
 
 
 class ReviewStatusTests(unittest.TestCase):
@@ -9591,9 +9594,10 @@ class ReviewStatusTests(unittest.TestCase):
     A lane record must carry its reviews before it can be called ready -- at
     least two cross-family seats from DISTINCT families (each a reviewer whose
     model FAMILY differs from the author's, the rule items 1-2 made data;
-    REVGATE2F raised the floor) and the Sonnet final check (the operator's
-    unchanged decision). This reads the record, not a person's summary of it,
-    and says which requirement is missing and why.
+    REVGATE2F raised the floor) and the sign-off, which since P12 is
+    family-agnostic: a 3rd-family `kind=final` entry, or no final at all once two
+    counted non-Claude seats carry valid evidence. This reads the record, not a
+    person's summary of it, and says which requirement is missing and why.
     """
 
     def setUp(self):
@@ -9606,9 +9610,22 @@ class ReviewStatusTests(unittest.TestCase):
         self.addCleanup(os.unlink, self.registry_path)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self.registry, fh)
+        # P12: shape (b) is carried by SEATS, and a seat counts there only with an
+        # evidence file the gate can read — so the class owns a repo-shaped root.
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
 
     def status(self, text):
         return self.agent.review_status(text, self.registry)
+
+    def evidence(self, name, text="VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"):
+        """Write one evidence file under the fixture root and return its rel path."""
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return rel
 
     def cmd(self, path):
         out, err = io.StringIO(), io.StringIO()
@@ -9686,16 +9703,18 @@ class ReviewStatusTests(unittest.TestCase):
         # The operator's guidance is 2-3 seats; the gate enforces the floor of
         # two and prints a non-blocking note past three -- never a refusal.
         # D657-D2: the meta seat here is the free Muse reviewer, not the paid
-        # contributor combo (`omniroute/spark-1.3-contributor` renders nothing).
+        # Muse contributor combo (`omniroute/spark-1.3-contributor` renders nothing).
+        # P12: the author is Zhipu, not an orchestrator Claude — an anthropic author
+        # would put the sonnet final in the author's OWN family, which shape (a) refuses.
         real = self.real_registry()
         report = self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=opencode/muse-spark-1.3-contributor-free verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=gemini-3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=qwen3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-5-5 "
+            "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=opencode/longcat-2.5-preview-free verdict=PASS\n"
             + FINAL_LINE, real)
         self.assertTrue(report["ready"], report)
@@ -9704,12 +9723,15 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertIn("no cap", report["cross_family"]["detail"])
 
     def test_a_missing_final_entry_is_reported_and_blocks_ready(self):
-        # Both seats present (the REVGATE2F floor), the final missing.
+        # Both seats present (the REVGATE2F floor), the final missing. P12: the one
+        # shape that needs no final at all is the one this record does not reach —
+        # its seats carry no evidence file, so shape (b) refuses and says so.
         report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2)
         self.assertFalse(report["ready"])
         self.assertTrue(report["cross_family"]["ok"])
         self.assertFalse(report["final"]["ok"])
         self.assertIn("sonnet", report["final"]["detail"].lower())
+        self.assertIn("evidence", report["final"]["detail"])
 
     def test_a_final_entry_that_merely_contains_sonnet_is_not_a_signoff(self):
         # REVGATE2 (HIGH): the match was a substring, so reviewer=notsonnet — a
@@ -9723,22 +9745,28 @@ class ReviewStatusTests(unittest.TestCase):
 
     def test_a_final_entry_naming_sonnet_or_a_sonnet_model_is_a_signoff(self):
         # The NAME, case-insensitive, or the vendor's full model id — not a
-        # substring of either.
+        # substring of either. P12: a Claude-family final is the exception, so it
+        # also has to say the free legs were unavailable.
         for spelling in ("Sonnet", "sonnet", "claude-sonnet-5", "claude-sonnet-4-6"):
             with self.subTest(reviewer=spelling):
                 report = self.status(CROSS_FAMILY_LINE + "\n" + CROSS_FAMILY_LINE_2
-                                     + "\nAutoOS-Review: "
-                                     "kind=final reviewer=%s verdict=READY" % spelling)
+                                     + "\nAutoOS-Review: kind=final reviewer=%s "
+                                     "verdict=READY reason=no_free_leg_available" % spelling)
                 self.assertTrue(report["ready"], report)
 
     def test_the_final_match_ignores_surrounding_space(self):
         # A record written by hand can pad the value; padding is not a
         # different model. Fed straight to _final_review because the line
         # parser splits on whitespace and can never carry it.
+        cross = {"seats": [{"reviewer": "omniroute/muse", "family": "meta",
+                            "verdict": "PASS", "evidence": False}],
+                 "families": ["meta"]}
         for spelling in (" Sonnet", "sonnet ", "\tCLAUDE-SONNET-5\t"):
             with self.subTest(reviewer=spelling):
-                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY"}
-                self.assertTrue(self.agent._final_review([entry])["ok"])
+                entry = {"kind": "final", "reviewer": spelling, "verdict": "READY",
+                         "reason": "no_free_leg_available"}
+                report = self.agent._final_review([entry], cross, self.registry, "qwen")
+                self.assertTrue(report["ok"], report)
 
     def test_a_missing_cross_family_entry_is_reported_and_blocks_ready(self):
         report = self.status(FINAL_LINE)
@@ -9843,12 +9871,14 @@ class ReviewStatusTests(unittest.TestCase):
                     "reviewer=omniroute/muse verdict=%s\n"
                     "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                     "reviewer=gem-flash verdict=%s\n"
-                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s"
+                    "AutoOS-Review: kind=final reviewer=sonnet verdict=%s "
+                    "reason=no_free_leg_available"
                     % (verdict, verdict, verdict))
                 self.assertTrue(report["ready"], report)
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=SHIP\n"
-                             "AutoOS-Review: kind=final reviewer=sonnet verdict=fix-first")
+                             "AutoOS-Review: kind=final reviewer=sonnet "
+                             "verdict=fix-first reason=no_free_leg_available")
         self.assertFalse(report["ready"], report)
 
     def test_a_claude_model_id_is_the_policy_reviewers_reviewer_it_spells(self):
@@ -9859,10 +9889,19 @@ class ReviewStatusTests(unittest.TestCase):
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", self.registry),
                          "anthropic")
         report = self.status("AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-                             "reviewer=claude-haiku-4-5 verdict=ship\n"
+                             "reviewer=claude-haiku-4-5 verdict=ship "
+                             "reason=no_free_leg_available\n"
                              "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
                              "reviewer=omniroute/muse verdict=ship\n" + FINAL_LINE)
-        self.assertTrue(report["ready"], report)
+        # P12 (AO-READY-FINAL-FAMILY): the anthropic seat is counted, and the SAME
+        # family may not also sign the final — the sonnet entry now collides with its
+        # own seat, which is the whole point of a family-agnostic final.
+        # P12b (D-1116): the seat is counted only now that it says no free leg was
+        # available; without those words a Claude seat buys nothing at all.
+        self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
+        self.assertTrue(report["cross_family"]["ok"], report["cross_family"]["detail"])
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family", report["final"]["detail"])
         # An id whose name the list does not carry stays unknown: a reviewer
         # nobody can place is not an independent review (fail closed).
         self.assertIsNone(self.agent.reviewer_family("claude-kimi-9-1", self.registry))
@@ -9915,28 +9954,32 @@ class ReviewStatusTests(unittest.TestCase):
         # D657-D2: the paid seat is opencode-zen's deepseek grant. The paid Muse
         # contributor left policy.reviewers with the route it named (§8 keeps the
         # paid Meta leg out of everything a probe-d657 gateway never acked).
+        # P12: the author is qwen, not an orchestrator Claude — a Claude-family
+        # final may not sign a lane its own family wrote.
         real = self.real_registry()
         report = self.agent.review_status(
-            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=opencode/deepseek-v4.1-flash verdict=PASS\n"
-            "AutoOS-Review: kind=cross-family author=claude-opus-4-6 "
+            "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=opencode/nemotron-3-ultra-free verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)
         self.assertTrue(report["ready"], report)
         self.assertEqual(report["cross_family"]["families"], ["deepseek", "nvidia"])
         # Haiku is the fallback first pass: it counts as a cross-family reviewer
-        # for a non-anthropic author, and the same anthropic family as Sonnet's
-        # final check — which is why the two entries are different requirements.
+        # for a non-anthropic author, and it is the SAME family as Sonnet's final
+        # check — which is why a lane Haiku reviewed cannot also be Sonnet-signed.
         self.assertEqual(self.agent.reviewer_family("haiku", real), "anthropic")
         # ... and the real catalog carries the client's own id for it, which is
         # what a finished cheap pass actually writes (SPAWNFIX3 item 5).
         self.assertEqual(self.agent.reviewer_family("claude-haiku-4-5", real), "anthropic")
         self.assertTrue(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
-            "reviewer=claude-haiku-4-5 verdict=ship\n"
+            "reviewer=opencode/muse-spark-1.3-contributor-free verdict=ship\n"
             "AutoOS-Review: kind=cross-family author=qwen3.8-flash "
             "reviewer=gemini-3.8-flash verdict=ship\n"
-            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=claude-sonnet-4-6 verdict=SHIP "
+            "reason=no_free_leg_available", real)["ready"])
 
     def test_the_real_registry_resolves_a_gateway_spelling_and_a_vendors_case(self):
         # REVFIX S2 measured against the real catalog, not a fixture: the
@@ -9954,18 +9997,21 @@ class ReviewStatusTests(unittest.TestCase):
             "reviewer=gemini-3.8-flash verdict=PASS\n"
             "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=qwen3.8-flash verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)
         self.assertTrue(report["ready"], report)
         # The self-review that used to pass: Zhipu's own model, Zhipu's reviewer.
         self.assertFalse(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=Zhipu "
             "reviewer=omniroute/l2-worker verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)["ready"])
         # An author the registry cannot place is not an independent review.
         self.assertFalse(self.agent.review_status(
             "AutoOS-Review: kind=cross-family author=gpt-next-week "
             "reviewer=omniroute/l2-worker verdict=PASS\n"
-            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY", real)["ready"])
+            "AutoOS-Review: kind=final reviewer=sonnet verdict=READY "
+            "reason=no_free_leg_available", real)["ready"])
 
     def test_the_real_registry_resolves_the_free_zen_reviewers(self):
         # REVFREE, source: L2-general 2026-09-28T08:12:44Z. The free opencode Zen
@@ -10009,23 +10055,30 @@ class ReviewStatusTests(unittest.TestCase):
                 family, why_not = self.agent.resolver.author_family(author, real)
                 self.assertEqual(family, "anthropic", why_not)
 
-    def test_an_orchestrator_author_reviewed_by_the_meta_reviewer_is_cross_family(self):
+    def test_an_orchestrator_author_is_ready_on_two_evidenced_non_claude_seats(self):
         # The point of the four ids above: a lane an Opus 5.5 session wrote is
-        # reviewable by Muse without anyone editing the author field to a lie.
-        # D657-D2: the meta seat is the free Muse reviewer -- §8 keeps the paid
-        # contributor leg, which no probe-d657 gateway acked, out of the registry.
+        # reviewable without anyone editing the author field to a lie. D657-D2: the
+        # meta seat is the free Muse reviewer -- §8 keeps the paid contributor leg,
+        # which no probe-d657 gateway acked, out of the registry. P12: such a lane
+        # can NO LONGER be Sonnet-finalled — anthropic would be the author's own
+        # family — so the Claude-authored record earns shape (b): two counted
+        # non-Claude seats, two different families, each with a valid evidence file.
         real = self.real_registry()
         for author in self.ORCHESTRATOR_AUTHORS:
             with self.subTest(author=author):
-                report = self.agent.review_status(
-                    ("AutoOS-Review: kind=cross-family author=%s "
-                     "reviewer=opencode/muse-spark-1.3-contributor-free "
-                     "verdict=ship\n" % author)
-                    + "AutoOS-Review: kind=cross-family author=%s "
-                      "reviewer=gemini-3.8-flash verdict=ship\n" % author
-                    + FINAL_LINE, real)
-                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+                record = ("AutoOS-Review: kind=cross-family author=%s "
+                          "reviewer=opencode/muse-spark-1.3-contributor-free "
+                          "verdict=ship evidence=%s\n"
+                          "AutoOS-Review: kind=cross-family author=%s "
+                          "reviewer=gemini-3.8-flash verdict=ship evidence=%s\n"
+                          % (author, self.evidence("%s-a.md" % author),
+                             author, self.evidence("%s-b.md" % author)))
+                report = self.agent.review_status(record, real, root=self.root,
+                                                  write_ledger=False)
+                self.assertTrue(report["ready"], report["final"]["detail"])
                 self.assertEqual(report["cross_family"]["families"], ["meta", "google"])
+                self.assertEqual(report["final"]["detail"],
+                                 "no final needed: 2 non-Claude seats")
 
     def test_an_orchestrator_author_is_not_a_leg_of_any_route(self):
         # Known is not routable, and this pins the difference: a route leg whose
@@ -10054,6 +10107,404 @@ class ReviewStatusTests(unittest.TestCase):
                      "reviewer=%s verdict=ship\n" % reviewer) + FINAL_LINE, real)
                 self.assertFalse(report["ready"], report)
                 self.assertIn("same family", report["cross_family"]["detail"])
+
+
+# P12c (D-1062 exact): the free-leg statement is the WHOLE `reason=` field and nothing
+# else. Accepted: the machine spelling, the phrase in quotes in any case, and fullwidth
+# letters NFKC folds to ASCII. Refused: a negation, punctuation, a longer sentence, a
+# padded or lookalike value, a disagreeing duplicate field, and anything in `note=` —
+# free text that no longer counts.
+D1062_ACCEPTED = (
+    "reason=no_free_leg_available",
+    'reason="no free leg available"',
+    'reason="No Free Leg Available"',
+    'reason="NO_FREE_LEG_AVAILABLE"',
+    'reason="\uff4e\uff4f \uff46\uff52\uff45\uff45 \uff4c\uff45\uff47 '
+    '\uff41\uff56\uff41\uff49\uff4c\uff41\uff42\uff4c\uff45"',
+)
+# The line orchestrators wrote through the D-1062 transition: the phrase in a
+# comment-like note and nowhere else. P12c refuses it, naming the field to write.
+D1062_NOTE_ONLY = ('note="no free leg available: gate requires Sonnet final '
+                   '(D-1062 transition, promo legs ended)"')
+D1062_REFUSED = (
+    'reason="not no free leg available"',
+    'reason="no free leg available."',
+    'reason="no free leg available because the qoder promo ended"',
+    'reason="no free leg availablex"',
+    'reason="no\u200bfree leg available"',
+    'reason="\u00a0no free leg available\u00a0"',
+    'reason="n\u043e free leg available"',
+    "reason=no_free_leg_available reason=paid_leg_used_instead",
+    'reason=""',
+    'note="no free leg available: both free legs were down"',
+    'note="the gate wants no free leg available written somewhere in the prose"',
+    D1062_NOTE_ONLY,
+)
+
+
+class FinalReviewFamilyTests(unittest.TestCase):
+    """P12 (AO-READY-FINAL-FAMILY, D-1061/D-1062): the `ready` final is family-agnostic.
+
+    The sign-off used to be one name — Sonnet — which read as "the expensive family
+    signs it off" and put a Claude leg in every lane, including the lanes a free
+    non-Claude reviewer had already covered. Three shapes now, exactly one of which
+    has to hold, and the report says which one it took: (a) a kind=final entry from a
+    3rd family (registry-exact, not the author's, not any counted seat's), a
+    Claude-family final only when the entry says no free leg was available; (b) no
+    final entry at all once two counted cross-family seats from two different
+    non-Claude families each carry valid evidence; (c) otherwise refused, naming the
+    shape that is missing and why.
+    """
+
+    AUTHOR = "qwen3.8-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # A fourth family the fixture's own reviewers do not cover, for shape (a).
+        self.registry["models"]["nvidia-nemotron"] = {"id": "nvidia-nemotron",
+                                                     "family": "nvidia"}
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        fd, self.registry_path = tempfile.mkstemp(suffix=".json")
+        self.addCleanup(os.unlink, self.registry_path)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(self.registry, fh)
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def evidence(self, name, text="VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"):
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return rel
+
+    def seat(self, reviewer, evidence=True, author=AUTHOR, name=None):
+        rel = self.evidence(name or ("seat-%s.md" % reviewer)) if evidence else None
+        return ("AutoOS-Review: kind=cross-family author=%s reviewer=%s verdict=PASS%s"
+                % (author, reviewer, " evidence=%s" % rel if rel else ""))
+
+    def final(self, reviewer, evidence=True, author=AUTHOR, extra=""):
+        rel = self.evidence("final-%s.md" % reviewer) if evidence else None
+        return ("AutoOS-Review: kind=final author=%s reviewer=%s verdict=READY%s%s"
+                % (author, reviewer, " evidence=%s" % rel if rel else "", extra))
+
+    def status(self, *lines):
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False)
+
+    # --- shape (a): a kind=final entry from a 3rd family ---------------------
+
+    def test_a_third_family_final_entry_is_the_signoff(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("nvidia-nemotron"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "a")
+        self.assertEqual(report["final"]["detail"], "nvidia-nemotron verdict READY")
+
+    def test_a_third_family_final_without_evidence_is_refused(self):
+        # A non-Claude final is a seat like any other: its claim needs the file.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("nvidia-nemotron", evidence=False))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence", report["final"]["detail"])
+
+    def test_a_final_from_the_authors_own_family_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final(self.AUTHOR))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (qwen) as the author", report["final"]["detail"])
+
+    def test_a_final_from_a_counted_seat_family_is_refused(self):
+        # The 3rd family is the whole point: Muse over Muse, even signed twice.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("gem-flash"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (google) as cross-family seat gem-flash",
+                      report["final"]["detail"])
+
+    def test_a_sonnet_final_without_the_free_leg_words_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("no free leg available", report["final"]["detail"])
+
+    def test_a_sonnet_final_with_the_machine_reason_is_ready(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet", extra=" reason=no_free_leg_available"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+
+    # --- P12c: the statement is the whole reason= field, for the sign-off --------
+    # (A quoted `note=` alone, which P12 accepted, is a refused-table row now.)
+
+    def test_each_accepted_reason_spelling_states_the_free_leg_statement(self):
+        for case in D1062_ACCEPTED:
+            with self.subTest(case=case):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final("sonnet", extra=" " + case))
+                self.assertTrue(report["ready"], report["final"]["detail"])
+
+    def test_a_final_reason_that_is_not_the_plain_statement_is_refused(self):
+        for case in D1062_REFUSED:
+            with self.subTest(case=case):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final("sonnet", extra=" " + case))
+                self.assertFalse(report["ready"], report)
+                self.assertIn("reason=no_free_leg_available", report["final"]["detail"])
+
+    def test_the_current_note_only_d_1062_line_is_refused_with_the_field_to_write(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             self.final("sonnet", extra=" " + D1062_NOTE_ONLY))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("reason=no_free_leg_available", report["final"]["detail"])
+
+    def test_kind_and_verdict_are_read_case_insensitively(self):
+        # P12c: the parser stores the lower-cased kind, so a hand-written `kind=Final`
+        # is the sign-off it means; verdict= is read through the seat grammar, which
+        # folds case too. Both were matched case-sensitively by at least one caller.
+        final = ("AutoOS-Review: kind=Final author=%s reviewer=nvidia-nemotron "
+                 "verdict=Ready evidence=%s" % (self.AUTHOR, self.evidence("final-n.md")))
+        report = self.status("AutoOS-Review: Kind=CROSS-FAMILY author=%s "
+                             "reviewer=omniroute/muse verdict=Pass evidence=%s"
+                             % (self.AUTHOR, self.evidence("seat-m.md")),
+                             self.seat("gem-flash"), final)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["final"]["shape"], "a")
+
+    def test_a_claude_final_on_a_claude_authored_lane_is_refused(self):
+        # The words are necessary, never sufficient: anthropic is still the author's
+        # family here, so the sign-off is the author signing its own work.
+        report = self.status(self.seat("omniroute/muse", author="haiku"),
+                             self.seat("gem-flash", author="haiku"),
+                             self.final("claude-sonnet-5", author="haiku",
+                                        extra=" reason=no_free_leg_available"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("same family (anthropic) as the author", report["final"]["detail"])
+
+    def test_a_final_reviewer_is_named_exactly_and_not_as_a_substring(self):
+        # R-orch-16: exact registry names. A prefix of a known reviewer, or a
+        # Claude-ish spelling, is not a sign-off from any family at all.
+        for spelling in ("notsonnet", "sonnet-x", "sonnet-ish", "claude-sonnet-x",
+                         "nvidia-nemotronx"):
+            with self.subTest(reviewer=spelling):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final(spelling,
+                                                extra=" reason=no_free_leg_available"))
+                self.assertFalse(report["ready"], report)
+                self.assertIn(spelling, report["final"]["detail"])
+
+    # --- shape (b): no final at all, on two evidenced non-Claude seats -------
+
+    def test_two_evidenced_non_claude_seats_need_no_final(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "b")
+        self.assertEqual(report["final"]["detail"], "no final needed: 2 non-Claude seats")
+
+    def test_a_claude_seat_does_not_make_up_the_non_claude_pair(self):
+        report = self.status(self.seat("haiku", name="seat-haiku.md"),
+                             self.seat("omniroute/muse"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("non-Claude", report["final"]["detail"])
+
+    def test_two_seats_of_one_family_are_not_the_non_claude_pair(self):
+        report = self.status(self.seat("omniroute/muse"),
+                             self.seat("muse-contrib", name="seat-muse2.md"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("shape (b)", report["final"]["detail"])
+
+    def test_seats_without_evidence_do_not_carry_the_non_claude_pair(self):
+        report = self.status(self.seat("omniroute/muse", evidence=False),
+                             self.seat("gem-flash", evidence=False))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("evidence", report["final"]["detail"])
+
+    # --- shape (c): the refusal says which shape is missing ------------------
+
+    def test_a_refused_record_names_the_shape_it_is_missing(self):
+        # (b) is the shape a record with no final can still reach; a record whose
+        # seats carry no evidence has to be told that, not left guessing.
+        no_final = self.status(self.seat("omniroute/muse"))
+        self.assertIn("shape (b)", no_final["final"]["detail"])
+        bad_final = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                self.final("sonnet"))
+        self.assertIn("shape (a)", bad_final["final"]["detail"])
+
+    def test_the_hint_and_the_report_say_both_shapes_are_accepted(self):
+        # The gate's own text is the documentation a person reads when it refuses;
+        # a hint that still names only Sonnet sends them to book a Claude review.
+        report = self.status(self.final("sonnet"))
+        self.assertIn("kind=final", report["hint"])
+        self.assertIn("no free leg available", report["hint"])
+        path = os.path.join(self.root, "rec.md")
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((self.seat("omniroute/muse"), self.seat("gem-flash")))
+                     + "\n")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(os, "getcwd", return_value=self.root), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.cmd_review_status(argparse.Namespace(
+                record=path, registry=self.registry_path, write_ledger=False))
+        self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("no final needed: 2 non-Claude seats", out.getvalue())
+
+
+class FinalRanSeatTests(unittest.TestCase):
+    """P12b (D-1116): a HIGH (R3) lane needs a seat that RAN something.
+
+    P12 shape (b) made two evidenced non-Claude seats enough for any lane. For the
+    HIGH classes — privileged, installer, state-mutating, auth/access/secrets —
+    reading the diff is not running it, so at least ONE counted seat must carry
+    `ran=tests` or `ran=live`. The class is
+    `tools/autoos_writer_rule.required_r_level` (the diff `ready` already reads)
+    raised by the highest declared `risk=` of the record's entries; no level
+    (`r_level=None`, the library callers) asks for nothing, as before.
+    """
+
+    AUTHOR = "qwen3.8-flash"
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        # A fourth family, for the shape (a) final a counted Claude seat needs.
+        self.registry["models"]["nvidia-nemotron"] = {"id": "nvidia-nemotron",
+                                                     "family": "nvidia"}
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def evidence(self, name):
+        rel = "logs/briefs/evidence/%s" % name
+        path = os.path.join(self.root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("VERDICT: ACCEPT\n\nMinor: nothing blocking.\n")
+        return rel
+
+    def seat(self, reviewer, extra=""):
+        return ("AutoOS-Review: kind=cross-family author=%s reviewer=%s verdict=PASS"
+                " evidence=%s%s" % (self.AUTHOR, reviewer,
+                                    self.evidence("seat-%s.md" % reviewer), extra))
+
+    def status(self, *lines, **kwargs):
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False, **kwargs)
+
+    # --- the R3 floor: one seat that ran something -------------------------
+
+    def test_an_r3_lane_whose_seats_never_ran_is_refused(self):
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                             r_level="R3")
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertFalse(report["cross_family"]["ok"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_tests_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_r3_lane_with_one_ran_live_seat_is_ready(self):
+        report = self.status(self.seat("omniroute/muse"),
+                             self.seat("gem-flash", " ran=live"), r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_an_unknown_ran_value_is_refused_as_malformed(self):
+        # A typo is never guessed at: `ran=yesterday` would read as a seat that ran.
+        report = self.status(self.seat("omniroute/muse", " ran=yesterday"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=yesterday", report["cross_family"]["detail"])
+        self.assertIn("tests, live", report["cross_family"]["detail"])
+
+    def test_a_lane_below_R3_needs_no_ran_seat(self):
+        for level in ("R0", "R1", "R2"):
+            with self.subTest(r_level=level):
+                report = self.status(self.seat("omniroute/muse"),
+                                     self.seat("gem-flash"), r_level=level)
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_no_level_asks_for_nothing_as_before(self):
+        # Back-compat: a library caller that never judged the diff (r_level=None)
+        # keeps the P12 answer it had.
+        report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["final"]["shape"], "b")
+
+    def test_a_declared_risk_R3_raises_the_requirement_without_a_level(self):
+        # The class is the MAX of the diff-derived level and what the record itself
+        # says, so seats signed risk=R3 open the door they then have to close.
+        report = self.status(self.seat("omniroute/muse", " risk=R3"),
+                             self.seat("gem-flash", " risk=R3"))
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+        ready = self.status(self.seat("omniroute/muse", " risk=R3 ran=tests"),
+                            self.seat("gem-flash", " risk=R3"))
+        self.assertTrue(ready["ready"], ready["cross_family"]["detail"])
+
+    def test_the_hint_and_the_report_name_the_ran_field(self):
+        report = self.status(self.seat("omniroute/muse", " ran=tests"),
+                             self.seat("gem-flash"), r_level="R3")
+        self.assertIn("ran=tests|live", report["hint"])
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.print_review_report("record.md", report)
+        self.assertIn("ran=tests", out.getvalue())
+
+    # --- D-1116 item 3: the same free-leg words now gate a SEAT, not only a final
+
+    def test_a_claude_seat_without_the_free_leg_words_is_not_counted(self):
+        report = self.status(self.seat("haiku"), self.seat("omniroute/muse"))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("haiku", report["cross_family"]["detail"])
+        self.assertIn("no free leg available", report["cross_family"]["detail"])
+
+    def test_a_claude_seat_with_the_free_leg_words_is_a_counted_seat(self):
+        report = self.status(self.seat("haiku", " reason=no_free_leg_available"),
+                             self.seat("omniroute/muse"),
+                             "AutoOS-Review: kind=final author=%s "
+                             "reviewer=nvidia-nemotron verdict=READY evidence=%s"
+                             % (self.AUTHOR, self.evidence("final-nvidia.md")))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
+
+    # --- P12c: the same exact-field rule gates the SEAT, read by the same helper --
+
+    def claude_seat_lane(self, case):
+        return (self.seat("haiku", " " + case), self.seat("omniroute/muse"),
+                "AutoOS-Review: kind=final author=%s reviewer=nvidia-nemotron "
+                "verdict=READY evidence=%s" % (self.AUTHOR,
+                                               self.evidence("final-nvidia.md")))
+
+    def test_each_accepted_reason_spelling_counts_the_claude_seat(self):
+        for case in D1062_ACCEPTED:
+            with self.subTest(case=case):
+                report = self.status(*self.claude_seat_lane(case))
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_a_seat_reason_that_is_not_the_plain_statement_is_not_counted(self):
+        # One row is the note-only D-1062 transition line: the same helper gates a seat,
+        # so it refuses there too and names the field to write.
+        for case in D1062_REFUSED:
+            with self.subTest(case=case):
+                report = self.status(*self.claude_seat_lane(case))
+                self.assertFalse(report["ready"], report)
+                self.assertIn("haiku", report["cross_family"]["detail"])
+                self.assertIn("reason=no_free_leg_available",
+                              report["cross_family"]["detail"])
+
+    def test_a_seat_refused_for_ran_is_case_sensitive_as_p12b_decided(self):
+        # P12b kept `ran=` case-sensitive on purpose: `ran=Tests refused` is prose,
+        # not the tests the HIGH lane has to show it ran.
+        report = self.status(self.seat("omniroute/muse", ' ran="Tests refused"'),
+                             self.seat("gem-flash", " ran=tests"), r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=Tests refused", report["cross_family"]["detail"])
 
 
 class EvidenceGateTests(unittest.TestCase):
@@ -10229,6 +10680,11 @@ class LedgerWriteTests(unittest.TestCase):
                                        lambda run: self.WRITER)
         self._stub.start()
         self.addCleanup(self._stub.stop)
+        # P6c: the row also carries the cost the run record states; the store is not
+        # read here either (the same reason writer_for_run is stubbed above).
+        self._cost = mock.patch.object(writer_ledger, "run_cost", lambda run: None)
+        self._cost.start()
+        self.addCleanup(self._cost.stop)
 
     def tearDown(self):
         if self._old_env is None:
@@ -10261,8 +10717,11 @@ class LedgerWriteTests(unittest.TestCase):
         return self.agent.review_status(self.record_text(text, extra, final, verdict),
                                         self.registry, root=self.root, **kw)
 
-    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False):
-        """The same record through the real `review-status` command line."""
+    def cmd(self, text=ACCEPT, extra=" run=" + RUNS, no_ledger=False, write=False):
+        """The same record through the real `review-status` command line.
+
+        P6c: the command is a READER by default; `--write-ledger` is what asks for
+        the rows, and `--no-ledger` stays an accepted no-op."""
         fd, rec = tempfile.mkstemp(suffix=".md")
         os.close(fd)
         self.addCleanup(os.unlink, rec)
@@ -10271,6 +10730,8 @@ class LedgerWriteTests(unittest.TestCase):
         argv = ["review-status", rec, "--registry", self.registry_path]
         if no_ledger:
             argv.append("--no-ledger")
+        if write:
+            argv.append("--write-ledger")
         out = io.StringIO()
         with mock.patch.object(os, "getcwd", return_value=self.root), \
                 contextlib.redirect_stdout(out):
@@ -10288,6 +10749,29 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(len(rows[0]["ref"]), 64)
         self.assertNotIn("failure_class", rows[0])
 
+    def test_a_counted_final_records_its_row_through_the_same_door_as_a_seat(self):
+        # P12 (AO-READY-FINAL-FAMILY): a kind=final entry is a seat for the ledger
+        # too — same `record_seat` path, same lane and pushed sha, its reviewer
+        # spelled as the record named it, so the family the row is read off is the
+        # reviewer the sign-off actually was.
+        self.registry["policy"]["reviewers"].append(
+            {"client": "qoder", "model": "nvidia-nemotron", "family": "nvidia",
+             "paid": False, "source": "test"})
+        os.makedirs(ev := os.path.join(self.root, "logs", "briefs", "evidence"),
+                    exist_ok=True)
+        with io.open(os.path.join(ev, "final.md"), "w", encoding="utf-8") as fh:
+            fh.write(self.ACCEPT)
+        final = ("AutoOS-Review: kind=final author=qwen3.8-flash "
+                 "reviewer=nvidia-nemotron verdict=ACCEPT "
+                 "evidence=logs/briefs/evidence/final.md run=%s" % self.RUNS)
+        report = self.agent.review_status(
+            "\n".join((self.seat_line(), CROSS_FAMILY_LINE_2, final)) + "\n",
+            self.registry, root=self.root, write_ledger=True,
+            lane_sha=("lane/work", "0" * 40))
+        self.assertTrue(report["ready"], report["final"]["detail"])
+        self.assertEqual([r["reviewer"] for r in self.rows()],
+                         ["omniroute/muse", "nvidia-nemotron"])
+
     def test_the_fields_come_from_the_record_entry(self):
         self.status(extra=" run=%s task=docs risk=R2" % self.RUNS)
         self.assertEqual([(r["task_type"], r["risk"]) for r in self.rows()],
@@ -10299,10 +10783,10 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 1)
 
     def test_the_command_appends_the_row_and_a_rerun_does_not(self):
-        rc, out = self.cmd()
+        rc, out = self.cmd(write=True)
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.rows()), 1)
-        rc, out = self.cmd()
+        rc, out = self.cmd(write=True)
         self.assertEqual(rc, 0, out)
         self.assertEqual(len(self.rows()), 1)
 
@@ -10340,6 +10824,7 @@ class LedgerWriteTests(unittest.TestCase):
         src = ("import importlib.util, os, sys, time\n"
                "sys.path.insert(0, os.path.dirname(os.environ['GATE_AGENT']))\n"
                "import autoos_writer_ledger as wl; wl.writer_for_run = lambda run: @W@\n"
+               "wl.run_cost = lambda run: None\n"
                "real, delay = wl.load, float(os.environ['GATE_DELAY']); "
                "wl.load = lambda *a, **k: (time.sleep(delay), real(*a, **k))[1]\n"
                "spec = importlib.util.spec_from_file_location('a', os.environ['GATE_AGENT'])\n"
@@ -10353,7 +10838,8 @@ class LedgerWriteTests(unittest.TestCase):
         Path(child := os.path.join(self.folder, "gate-child.py")).write_text(src)
         Path(rec := os.path.join(self.root, "rec.md")).write_text(self.record_text())
         kids = [subprocess.Popen([sys.executable, child, os.path.join(self.folder, "b%d" % i),
-                                  "review-status", rec, "--registry", self.registry_path],
+                                  "review-status", rec, "--registry", self.registry_path,
+                                  "--write-ledger"],
                                  env=dict(os.environ, GATE_AGENT=str(AGENT), GATE_DELAY="0.3"),
                                  cwd=self.root, stdout=subprocess.DEVNULL) for i in (0, 1)]
         self.assertEqual([k.wait(90) for k in kids], [0, 0])
@@ -10416,9 +10902,11 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertTrue(report["ready"], report)
         self.assertEqual(self.rows(), [])
         self.assertEqual(os.listdir(self.folder), [])
-        rc, out = self.cmd(no_ledger=True)
-        self.assertEqual(rc, 0, out)
-        self.assertEqual(os.listdir(self.folder), [])
+        # P6c: the reader is the DEFAULT, and --no-ledger stays an accepted no-op.
+        for argv in ({}, {"no_ledger": True}):
+            rc, out = self.cmd(**argv)
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(os.listdir(self.folder), [], out)
 
     def test_a_present_but_unknown_ledger_field_refuses_the_seat(self):
         # F3 (FAIL-CLOSED, no defaulting): a typo'd task would be ledgered under the wrong
@@ -10457,7 +10945,7 @@ class LedgerWriteTests(unittest.TestCase):
                 report = self.status()
                 self.assertFalse(report["ready"], report)
                 self.assertIn("ledger write failed", report["cross_family"]["detail"])
-                rc, out = self.cmd()
+                rc, out = self.cmd(write=True)
                 self.assertEqual(rc, 1, out)
                 self.assertIn("ledger write failed", out)
 
@@ -10745,7 +11233,8 @@ class ReadyCommandTests(unittest.TestCase):
                 rc, out, _ = self.ready(
                     self.write_record(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2,
                                       "AutoOS-Review: kind=final reviewer=%s "
-                                      "verdict=READY" % spelling),
+                                      "verdict=READY reason=no_free_leg_available"
+                                      % spelling),
                     repo, sha, inbox)
                 self.assertEqual(rc, 0, out)
                 self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1)
@@ -11101,6 +11590,524 @@ LANE_MARKER_BODY = (
     "+diff --git a/forged b/forged\n")
 
 
+def restore_ledger_path(value):
+    """Put `AUTOOS_LEDGER_PATH` back the way the ambient environment had it."""
+    if value is None:
+        os.environ.pop("AUTOOS_LEDGER_PATH", None)
+    else:
+        os.environ["AUTOOS_LEDGER_PATH"] = value
+
+
+class LedgerReadyPathTests(ReadyCommandTests):
+    """AO-LEDGER-DRYRUN (P6c): `ready` earns its ledger rows, nothing else does.
+
+    Measured: P6 ran the review gate with `write_ledger=True` BEFORE the pushed-sha
+    gate and before the ready line, so a --dry-run (3 rows at 15:12:51Z) and every
+    refused `ready` wrote rows, and the accepted path wrote them with lane=null and
+    sha=null — a row that cannot name the lane and the pushed sha it judged is no
+    evidence for the writer-demotion gate. Now the gate is evaluated read-only and
+    the rows are written once, after the ready line was really appended, carrying
+    `lane` and `sha`. The gates are stubbed exactly as the ready tests above do.
+    """
+
+    ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
+    REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
+
+    def setUp(self):
+        super().setUp()
+        # setUp moved AUTOOS_STATE_DIR to a temp store, and the fleet resolver reads
+        # that env first — so the rows land in the temp store, never in logs/.
+        self.target = os.path.join(self.store_dir, "writer-ledger.jsonl")
+        for name, value in (("writer_for_run", lambda run: ("opencode",
+                                                            "vertex/gemini-3.8-flash")),
+                            ("run_cost", lambda run: None)):
+            patch = mock.patch.object(writer_ledger, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def seat(self, repo, name, reviewer="omniroute/muse", run="run-a", text=None,
+             verdict="PASS", fields="", no_ev=False):
+        """One cross-family seat line whose evidence file backs its verdict.
+
+        P6d: `verdict=` is the entry's own word, `fields=` the optional ledger fields and
+        `no_ev=` a seat with no evidence file at all."""
+        rel = "logs/briefs/evidence/%s" % name
+        os.makedirs(os.path.dirname(os.path.join(repo, rel)), exist_ok=True)
+        with io.open(os.path.join(repo, rel), "w", encoding="utf-8") as fh:
+            fh.write(self.ACCEPT if text is None else text)
+        return ("AutoOS-Review: kind=cross-family author=qwen3.8-flash reviewer=%s "
+                "verdict=%s run=%s%s%s" % (reviewer, verdict, run, fields,
+                                           "" if no_ev else " evidence=" + rel))
+
+    def seats(self, repo):
+        return self.write_record(self.seat(repo, "a.md", "omniroute/muse", "run-a"),
+                                 self.seat(repo, "b.md", "gem-flash", "run-b"),
+                                 FINAL_LINE)
+
+    def rows(self):
+        return writer_ledger.load(self.target)[0]
+
+    def test_an_appended_ready_writes_one_row_per_countable_seat(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 0, out + err)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2, rows)
+        self.assertEqual({(r["lane"], r["sha"], r["run_id"], r["reviewer"]) for r in rows},
+                         {("lane/work", sha, "run-a", "omniroute/muse"),
+                          ("lane/work", sha, "run-b", "gem-flash")})
+        self.assertEqual({r["verdict"] for r in rows}, {"accepted"})
+
+    def test_the_row_carries_client_model_and_the_cost_the_run_states(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        with mock.patch.object(writer_ledger, "run_cost", lambda run: 0.25):
+            rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual({(r["writer_client"], r["writer_model_served"], r["cost"])
+                          for r in self.rows()},
+                         {("opencode", "vertex/gemini-3.8-flash", 0.25)})
+        os.remove(self.target)
+        repo, sha = self.make_repo()
+        rc, out, err = self.ready(self.seats(repo), repo, sha, self.make_inbox(""))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+        self.assertNotIn("cost", self.rows()[0], "a cost nobody stated was invented")
+
+    def test_dry_run_writes_no_row(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox, extra=("--dry-run",))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(os.path.exists(self.target), "the dry run created a ledger")
+
+    def test_a_stale_sha_refuses_and_writes_no_row(self):
+        repo, tip = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.seats(repo), repo, "0" * 40, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.rows(), [], out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_an_unreviewed_record_refuses_and_writes_no_row(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.write_record("# lane", "STATUS: DONE. Shipped."),
+                                  repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.rows(), [], out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
+
+    def test_a_ledger_home_that_does_not_exist_yet_is_created(self):
+        # A fresh clone has no logs/ yet, and the lock file needs a folder to sit in:
+        # the first verdict of a whole fleet must not fail on a missing directory.
+        repo, sha = self.make_repo()
+        self.target = os.path.join(self.store_dir, "sub", "writer-ledger.jsonl")
+        self.addCleanup(restore_ledger_path, os.environ.get("AUTOOS_LEDGER_PATH"))
+        os.environ["AUTOOS_LEDGER_PATH"] = self.target
+        rc, out, err = self.ready(self.seats(repo), repo, sha, self.make_inbox(""))
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+
+    def test_a_ledger_write_failure_after_the_append_is_loud_and_keeps_the_line(self):
+        # The line is the record of the DECISION; deleting it over a measurement
+        # failure would turn "the ledger could not be written" into "the lane was
+        # never readied" — a false claim about a review that did happen.
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        os.makedirs(self.target)  # a directory where the ledger has to be: LedgerError
+        rc, out, err = self.ready(self.seats(repo), repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ledger", err)
+        self.assertEqual(len(self.read_inbox(inbox).splitlines()), 1, out + err)
+        self.assertIn("ready lane/work", self.read_inbox(inbox))
+
+    # --- AO-LEDGER-REJECT-ROWS (P6d): the refusal is where the REJECT is measured --
+
+    def rejected_seat(self, repo, name, reviewer="omniroute/muse", run="run-r", **kw):
+        """A seat whose evidence REJECTs the lane and whose entry says the same word --
+        the P6 pair rule, so the refusal is a countable reject."""
+        kw.setdefault("text", self.REJECT)
+        return self.seat(repo, name, reviewer, run, verdict="REJECT", **kw)
+
+    def refuse(self, line, repo, sha, extra=()):
+        inbox = self.make_inbox("")
+        rc, out, err = self.ready(self.write_record(line), repo, sha, inbox, extra=extra)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.read_inbox(inbox), "", "the refusal appended a ready line")
+        return rc, out, err
+
+    def test_a_refused_ready_records_the_rejected_seat(self):
+        # P6c removed the noise a refusal wrote (verdicts of decisions never made); a
+        # seat's REJECT is the opposite -- the measurement `demoted()` counts.
+        repo, sha = self.make_repo()
+        _rc, out, err = self.refuse(
+            self.rejected_seat(repo, "r.md", fields=" task=docs risk=R2 failure=semantics"),
+            repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows or out + err)
+        self.assertEqual((rows[0]["verdict"], rows[0]["lane"], rows[0]["sha"],
+                          rows[0]["run_id"], rows[0]["reviewer"]),
+                         ("rejected", self.BRANCH, sha, "run-r", "omniroute/muse"))
+        self.assertEqual((rows[0]["task_type"], rows[0]["risk"], rows[0]["failure_class"]),
+                         ("docs", "R2", "semantics"))
+        self.assertEqual(len(rows[0]["ref"]), 64)
+
+    def test_two_rejected_seats_from_two_reviewers_record_two_rows(self):
+        repo, sha = self.make_repo()
+        line = (self.rejected_seat(repo, "r1.md", "omniroute/muse", "run-1") + "\n"
+                + self.rejected_seat(repo, "r2.md", "gem-flash", "run-2"))
+        self.refuse(line, repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 2, rows)
+        self.assertEqual({(r["run_id"], r["reviewer"], r["verdict"]) for r in rows},
+                         {("run-1", "omniroute/muse", "rejected"),
+                          ("run-2", "gem-flash", "rejected")})
+
+    def test_re_running_the_refused_ready_writes_no_second_row(self):
+        # Same key as the accepted path: one seat, one answer, one pushed sha.
+        repo, sha = self.make_repo()
+        line = self.rejected_seat(repo, "r.md")
+        self.refuse(line, repo, sha)
+        self.refuse(line, repo, sha)
+        self.assertEqual(len(self.rows()), 1, self.rows())
+
+    def test_a_refused_ready_records_the_reject_and_never_the_accept(self):
+        # An `accepted` row would credit the writer for the review that stopped it.
+        repo, sha = self.make_repo()
+        line = (self.seat(repo, "a.md", "omniroute/muse", "run-a") + "\n"
+                + self.rejected_seat(repo, "r.md", "gem-flash", "run-r"))
+        self.refuse(line, repo, sha)
+        rows = self.rows()
+        self.assertEqual([(r["reviewer"], r["verdict"]) for r in rows],
+                         [("gem-flash", "rejected")], rows)
+
+    def test_a_refused_dry_run_writes_no_row(self):
+        repo, sha = self.make_repo()
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, sha, extra=("--dry-run",))
+        self.assertEqual(self.rows(), [])
+        self.assertFalse(os.path.exists(self.target), "the dry run created a ledger")
+
+    def test_a_refusal_that_is_not_a_reject_writes_no_row(self):
+        # A HOLD is a finding, not a verdict about the writer (countable=False).
+        repo, sha = self.make_repo()
+        self.refuse(self.seat(repo, "h.md", text="VERDICT: HOLD\n\nBlocked on the "
+                              "operator.\n", verdict="HOLD"), repo, sha)
+        self.assertEqual(self.rows(), [])
+
+    def test_a_reject_the_evidence_does_not_back_writes_no_row(self):
+        for name, kw in (("missing", {"no_ev": True}),
+                         ("blind", {"text": "looks fine to me\n"}),
+                         ("mismatched", {"text": self.ACCEPT})):
+            repo, sha = self.make_repo()
+            line = self.rejected_seat(repo, "%s.md" % name, run="run-" + name, **kw)
+            self.refuse(line, repo, sha)
+            self.assertEqual(self.rows(), [], "%s evidence wrote a row" % name)
+
+    def test_a_reject_with_a_sha_the_gate_cannot_name_writes_no_row(self):
+        # A row that cannot name its 40-hex commit is refused, and says so.
+        repo, _tip = self.make_repo()
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, "not-a-sha")
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "sha" in l]), 1, err)
+
+    def test_a_refused_ready_that_cannot_write_the_ledger_says_so_once(self):
+        repo, sha = self.make_repo()
+        os.makedirs(self.target)  # a directory where the ledger has to be: LedgerError
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(len([l for l in err.splitlines() if "ledger" in l]), 1, err)
+
+    def test_two_refused_readies_demote_the_writer(self):
+        # The point of the path: `demoted()` is what the judge reads. Two LANES, so two
+        # pieces of evidence — P6d-FIX F2 binds one evidence to one run, and one REJECT
+        # said under two run ids is one row, not the two this measurement needs.
+        for run in ("run-1", "run-2"):
+            repo, sha = self.make_repo()
+            self.refuse(self.rejected_seat(repo, "%s.md" % run, run=run,
+                                           text="VERDICT: REJECT\n\nRepro: %s.\n" % run),
+                        repo, sha)
+        self.assertEqual(len(self.rows()), 2, self.rows())
+        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code",
+                                              path=self.target),
+                        "the refusal feed never reached the demotion gate")
+
+    # --- AO-LEDGER-REJECT-ROWS P6d-FIX: tip, notes, one evidence = one run ----
+
+    def stub_tip(self, value):
+        """Replace the origin read with a fixed answer (HERMETIC, D-852) and hand back
+        the Mock, so a test can assert the read never happened."""
+        tip = mock.Mock(return_value=value)
+        patch = mock.patch.object(self.agent, "remote_branch_tip", tip)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return tip
+
+    def test_a_reject_at_a_sha_that_is_not_the_pushed_tip_writes_no_row(self):
+        # F1: a typo'd --sha used to name whatever commit it held for the rejection the
+        # reviewer never looked at, poisoning the provenance feed the row exists to be.
+        repo, _tip = self.make_repo()
+        self.stub_tip(("b" * 40, None))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, "f" * 40)
+        self.assertEqual(self.rows(), [], "a row named a commit origin does not hold")
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+        self.assertIn("--sha is not origin/lane/work's tip", err)
+
+    def test_a_reject_at_the_tip_origin_reports_is_recorded(self):
+        repo, _tip = self.make_repo()
+        pushed = "b" * 40
+        self.stub_tip((pushed, None))
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, pushed)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual((rows[0]["verdict"], rows[0]["sha"]), ("rejected", pushed))
+
+    def test_a_reject_with_no_branch_on_origin_writes_no_row_and_says_once(self):
+        repo, sha = self.make_repo()
+        self.stub_tip((None, None))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+
+    def test_a_reject_with_an_unreadable_origin_writes_no_row_naming_the_error(self):
+        repo, sha = self.make_repo()
+        self.stub_tip((None, "git ls-remote exited 128"))
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "reject rows" in l]), 1, err)
+        self.assertIn("cannot read origin/lane/work: git ls-remote exited 128", err)
+
+    def test_the_tip_is_not_read_for_a_refusal_that_carries_no_reject(self):
+        # F1 costs a `git ls-remote` only where it can stop a row: a HOLD refusal read
+        # nothing before, and still reads nothing now.
+        repo, sha = self.make_repo()
+        tip = self.stub_tip((sha, None))
+        self.refuse(self.seat(repo, "h.md", text="VERDICT: HOLD\n\nBlocked on the "
+                              "operator.\n", verdict="HOLD"), repo, sha)
+        self.assertEqual(tip.call_count, 0, tip.call_args_list)
+
+    def test_the_tip_is_not_read_for_a_refused_dry_run(self):
+        repo, sha = self.make_repo()
+        tip = self.stub_tip((sha, None))
+        self.refuse(self.rejected_seat(repo, "r.md"), repo, sha, extra=("--dry-run",))
+        self.assertEqual(tip.call_count, 0, tip.call_args_list)
+
+    def test_a_reject_with_no_writer_record_says_so_on_the_refusal_path(self):
+        # F3: the note lived in `_ledger` and the refusal printed only `_ledger_failed`,
+        # so "no row appeared" was silent about the row the writer record was missing.
+        repo, sha = self.make_repo()
+        patch = mock.patch.object(writer_ledger, "writer_for_run", lambda run: (None, None))
+        patch.start()
+        self.addCleanup(patch.stop)
+        _rc, _out, err = self.refuse(self.rejected_seat(repo, "r.md"), repo, sha)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(len([l for l in err.splitlines() if "no writer record" in l]),
+                         1, err)
+
+    def test_the_same_evidence_under_two_run_ids_records_one_row(self):
+        # F2: one answer is one measurement. Two run ids claiming one REJECT used to
+        # write two rows and demote two writers on one review.
+        repo, sha = self.make_repo()
+        first = self.rejected_seat(repo, "r.md", "omniroute/muse", "run-1")
+        second = self.rejected_seat(repo, "r.md", "omniroute/muse", "run-2")
+        _rc, _out, err = self.refuse(first + "\n" + second, repo, sha)
+        rows = self.rows()
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["run_id"], "run-1", rows)
+        self.assertEqual(len([l for l in err.splitlines()
+                              if "evidence already recorded" in l]), 1, err)
+        self.assertIn("run run-1", err)
+
+
+class LedgerJsonlShapeTests(unittest.TestCase):
+    """P6c (B) and (C): the ledger is strict JSONL and a production seat row names
+    its lane and sha. `record()` used to write `b"\\n"+json+b"\\n"`, so every file it
+    touched carried a blank line between rows (the measured 15:12:51Z dump did) —
+    not JSONL, and every other reader of the file chokes on it."""
+
+    def row(self, run_id):
+        return {"run_id": run_id, "verdict": "rejected", "failure_class": "syntax",
+                "writer_client": "opencode", "writer_model_served": "vertex/gemini-3.8-flash",
+                "task_type": "code", "reviewer": "t3"}
+
+    def target(self):
+        return os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
+
+    def test_two_appends_are_two_lines_with_no_blank_line(self):
+        target = self.target()
+        writer_ledger.record(self.row("r1"), path=target)
+        writer_ledger.record(self.row("r2"), path=target)
+        with io.open(target, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(len(text.splitlines()), 2, repr(text))
+        self.assertNotIn("\n\n", text)
+        self.assertTrue(all(json.loads(line) for line in text.splitlines()))
+
+    def test_a_torn_tail_gets_one_separator(self):
+        target = self.target()
+        with io.open(target, "w", encoding="utf-8") as fh:
+            fh.write('{"run_id":"torn-fragment')
+        writer_ledger.record(self.row("r1"), path=target)
+        with io.open(target, encoding="utf-8") as fh:
+            self.assertEqual(len(fh.read().splitlines()), 2)
+        self.assertEqual([r["run_id"] for r in writer_ledger.load(target)[0]], ["r1"])
+
+    def test_a_cost_beyond_float_range_is_a_refusal_not_a_crash(self):
+        # P6d (B): `math.isfinite(10**400)` raises OverflowError, which escapes every
+        # `except ValueError` in the gate as a traceback instead of a refusal.
+        for bad in (10 ** 400, -(10 ** 400), float("nan"), float("inf"), "3", True, -1):
+            with self.assertRaises(ValueError):
+                writer_ledger._cost(bad)
+        self.assertEqual((writer_ledger._cost(0), writer_ledger._cost(2.5)), (0, 2.5))
+        with self.assertRaises(ValueError) as ctx:
+            writer_ledger.record_seat(dict(self.row("r1"), lane="lane/work", sha="a" * 40,
+                                           ref="b" * 40, cost=10 ** 400), path=self.target())
+        self.assertIn("cost", str(ctx.exception))
+
+    def test_the_seat_writer_demands_lane_and_sha(self):
+        good = dict(self.row("r1"), lane="lane/work", sha="a" * 40, ref="b" * 40)
+        self.assertEqual(writer_ledger.record_seat(good, path=self.target())["lane"],
+                         "lane/work")
+        no_lane = dict(good)
+        no_lane.pop("lane")
+        no_sha = dict(good)
+        no_sha.pop("sha")
+        for bad in (no_lane, no_sha):
+            with self.subTest(missing=str(sorted(set(good) - set(bad)))):
+                with self.assertRaises(ValueError) as ctx:
+                    writer_ledger.record_seat(bad, path=self.target())
+                self.assertIn("lane and sha required", str(ctx.exception))
+        # A lane or sha that is PRESENT but not a lane or a sha is refused too, and
+        # says which shape it could not read.
+        for bad in (dict(good, sha="abc"), dict(good, sha="A" * 40),
+                    dict(good, lane="lane work"), dict(good, lane="lane//work")):
+            with self.subTest(lane=bad["lane"], sha=bad["sha"]):
+                with self.assertRaises(ValueError) as ctx:
+                    writer_ledger.record_seat(bad, path=self.target())
+                self.assertTrue("lane" in str(ctx.exception) or "sha" in str(ctx.exception),
+                                str(ctx.exception))
+
+    def test_a_nan_or_negative_cost_is_refused(self):
+        for bad in (float("nan"), float("-inf"), -1, -0.5, "0.25", True):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                writer_ledger.record(dict(self.row("r1"), cost=bad), path=self.target())
+        self.assertEqual(writer_ledger.record(dict(self.row("r2"), cost=0),
+                                              path=self.target())["cost"], 0)
+
+    def test_old_rows_without_lane_and_sha_still_load_and_demote(self):
+        target = self.target()
+        writer_ledger.record(self.row("r1"), path=target)
+        writer_ledger.record(self.row("r2"), path=target)
+        self.assertEqual(len(writer_ledger.load(target)[0]), 2)
+        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target))
+        self.assertEqual(writer_ledger.rollup(path=target)
+                         ["gemini-3.8-flash"]["code"]["rejected"], 2)
+
+
+class FleetLedgerPathTests(unittest.TestCase):
+    """P6c (D): ONE ledger home for the fleet. `default_path()` was
+    `clients.state_dir()/writer-ledger.jsonl` = `<this checkout>/logs`, so a `ready`
+    run inside a lane worktree wrote into that worktree's discarded logs/ while the
+    spawner read whichever checkout it happened to live in: the rows fragmented and
+    the demotion gate read an empty ledger. The home is now the MAIN checkout's
+    logs/, resolved with ONE audited `git rev-parse --git-common-dir`."""
+
+    SCRIPT = (
+        "import os, sys\n"
+        "sys.path.insert(0, os.path.join(sys.argv[1], 'tools'))\n"
+        "import autoos_writer_ledger as wl\n"
+        "what = sys.argv[2]\n"
+        "if what == 'record':\n"
+        "    wl.record_seat({'run_id': 'fr-1', 'verdict': 'rejected',\n"
+        "                    'failure_class': 'tests-missing', 'writer_client': 'opencode',\n"
+        "                    'writer_model_served': 'vertex/gemini-3.8-flash',\n"
+        "                    'task_type': 'code', 'reviewer': 't3', 'ref': 'b' * 40,\n"
+        "                    'lane': sys.argv[3], 'sha': 'a' * 40})\n"
+        "    print(wl.default_path())\n"
+        "elif what == 'demoted':\n"
+        "    print(wl.default_path())\n"
+        "    print(wl.demoted('vertex/gemini-3.8-flash', 'code', threshold=1))\n"
+        "else:\n"
+        "    print(wl.fleet_state_dir())\n")
+
+    def setUp(self):
+        self.base = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "-c", "init.defaultBranch=master"]
+
+    def caller_env(self):
+        """The caller's env with the two ledger overrides removed — the case the fleet
+        resolver is asked about is the one where neither is set."""
+        return {k: v for k, v in os.environ.items()
+                if k not in ("AUTOOS_LEDGER_PATH", "AUTOOS_STATE_DIR")}
+
+    def checkout(self):
+        """A real repo whose `tools/` carries the modules under test, plus a worktree."""
+        repo = os.path.join(self.base, "main")
+        subprocess.run(self.git + ["init", "-q", repo], check=True)
+        os.makedirs(os.path.join(repo, "tools"))
+        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+            shutil.copyfile(str(TOOLS / name), os.path.join(repo, "tools", name))
+        subprocess.run(self.git + ["-C", repo, "add", "-A"], check=True)
+        subprocess.run(self.git + ["-C", repo, "commit", "-q", "-m", "tools"], check=True)
+        subprocess.run(self.git + ["-C", repo, "worktree", "add", "-q",
+                                   os.path.join(self.base, "wt"), "-b", "lane/x"], check=True)
+        return repo
+
+    def run_module(self, home, what, extra=(), env=None):
+        proc = subprocess.run([sys.executable, "-c", self.SCRIPT, home, what, *extra],
+                              capture_output=True, text=True, env=env or self.caller_env(),
+                              cwd=home, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout.strip().splitlines()
+
+    def test_a_run_from_a_worktree_lands_in_the_main_checkout(self):
+        repo = self.checkout()
+        main = os.path.join(repo, "logs", "writer-ledger.jsonl")
+        self.assertEqual(self.run_module(os.path.join(self.base, "wt"), "record",
+                                         ["lane/x"]), [main])
+        self.assertTrue(os.path.exists(main))
+        self.assertFalse(os.path.exists(os.path.join(self.base, "wt", "logs")),
+                         "the worktree still got its own ledger")
+
+    def test_the_demotion_read_from_the_worktree_sees_the_row(self):
+        repo = self.checkout()
+        self.run_module(os.path.join(self.base, "wt"), "record", ["lane/x"])
+        out = self.run_module(os.path.join(self.base, "wt"), "demoted")
+        self.assertEqual(out[0], os.path.join(repo, "logs", "writer-ledger.jsonl"))
+        self.assertEqual(out[1], "True")
+
+    def test_a_hostile_git_dir_in_the_caller_env_changes_nothing(self):
+        repo = self.checkout()
+        hostile = dict(self.caller_env(), GIT_DIR=os.path.join(self.base, "evil.git"),
+                       GIT_WORK_TREE=os.path.join(self.base, "evil"),
+                       GIT_COMMON_DIR=os.path.join(self.base, "evil.git"))
+        got = self.run_module(os.path.join(self.base, "wt"), "record", ["lane/x"], env=hostile)
+        self.assertEqual(got, [os.path.join(repo, "logs", "writer-ledger.jsonl")])
+
+    def test_the_env_still_wins_over_the_git_resolver(self):
+        self.checkout()
+        wt = os.path.join(self.base, "wt")
+        pointed = os.path.join(self.base, "pointed.jsonl")
+        self.assertEqual(self.run_module(wt, "home",
+                                         env=dict(self.caller_env(),
+                                                  AUTOOS_LEDGER_PATH=pointed)),
+                         [os.path.dirname(pointed)])
+        state = os.path.join(self.base, "state")
+        self.assertEqual(self.run_module(wt, "home",
+                                         env=dict(self.caller_env(), AUTOOS_STATE_DIR=state)),
+                         [state])
+
+    def test_a_non_git_dir_falls_back_to_its_own_logs(self):
+        plain = os.path.join(self.base, "plain")
+        os.makedirs(os.path.join(plain, "tools"))
+        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+            shutil.copyfile(str(TOOLS / name), os.path.join(plain, "tools", name))
+        self.assertEqual(self.run_module(plain, "home"), [os.path.join(plain, "logs")])
+
+
 class ReadyWriterGuardsTests(unittest.TestCase):
     """AO-WRITER-GUARDS P4b: the `writer-guards` gate inside `ready` (P4a helpers
     in tools/autoos_ready_guards.py, wired at the pushed-sha/CI seam).
@@ -11256,11 +12263,52 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # A path that names nothing ops (and a `code` label) still reaches the
         # guards through the diff BODY: `requires_ops_guards` is handed the added
         # lines too, so a lane that wrote a password line is an ops lane.
+        # P12b (D-1116): that same body reads R3, so the seat that RAN the tests is
+        # what lets the run reach the ops guard this test is about.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "code"),
             diff_raw="+password: rotate-it-by-hand\n")
         self.assertEqual(rc, 1, out + err)
         self.assertIn("ops lane without --brief", out + err)
+
+    # --- P12b (D-1116): the class the diff decides also gates the REVIEW -------
+
+    R3_BRIEF = ("TASK: rotate the token store\n"
+                "FILES (only these; <= 3 files, <= 200 lines changed):"
+                " auth/tokens.yml. Do not touch other lines/files.\n")
+
+    def record_with_ran(self, ran="tests"):
+        with io.open(self.record, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE + " ran=" + ran,
+                                CROSS_FAMILY_LINE_2, FINAL_LINE)) + "\n")
+
+    def test_ready_refuses_an_r3_diff_lane_whose_seats_never_ran(self):
+        # The diff `ready` already reads for the writer-guards decides the HIGH class,
+        # so an auth-path lane cannot clear its review on two seats that only read it.
+        # The refusal is the review gate's, and it comes before the ops guard asks
+        # for the brief; the diff is still read exactly once.
+        rc, out, err, inbox, calls = self.ready(diff_paths=["auth/tokens.yml"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_ready_writes_the_line_for_an_r3_diff_lane_with_a_seat_that_ran(self):
+        self.record_with_ran()
+        rc, out, err, _inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], brief=self.R3_BRIEF,
+            report=self.report_text())
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("ready: yes", out)
+        self.assertIn("ran=tests", out)
+
+    def test_ready_dry_run_still_refuses_an_r3_lane_without_a_ran_seat(self):
+        rc, out, err, inbox, _calls = self.ready(
+            diff_paths=["auth/tokens.yml"], extra=("--dry-run",))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=tests|live", out + err)
+        self.assertEqual(inbox, "")
 
     # --- the body the judge reads is the RAW diff (P4b-fixes D1) -------------
 
@@ -11278,6 +12326,9 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # the risk scan, the lane read R1, and `ready` exited 0 with no ops guard.
         # Measured on the pre-fix reader: `_added` [] and level R1. The composition
         # of that reader with that judge is pinned in LaneDiffPathsTests below.
+        # P12b (D-1116): the body now reads R3, so a seat that ran the tests is what
+        # carries the run past the review gate to the ops guard pinned here.
+        self.record_with_ran()
         rc, out, err, _inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY)
@@ -11288,6 +12339,7 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         # The other half: ops_required True is not just the missing-brief
         # refusal — notes.txt is inside the brief, so the only ops signal in the
         # run is the diff body, and a cleared ops lane says so on the line.
+        self.record_with_ran()
         rc, out, err, inbox, _calls = self.ready(
             diff_paths=["notes.txt"], extra=("--task-type", "docs"),
             diff_raw=LANE_MARKER_BODY, brief=self.NOTES_BRIEF,
@@ -25446,6 +26498,632 @@ class ToolHomeFdWalkTests(unittest.TestCase):
         os.symlink(outside, os.path.join(self.cache, "escape"))
         self.assertLess(self.agent.tree_bytes(self.toolhome), 1 << 20,
                         "tree_bytes measured through a link out of the seat")
+
+
+class _PruneSandboxBase(unittest.TestCase):
+    """AO-TOOLHOME-SIZE P8b shared fixtures: three fake roots, a workers dir and a
+    kill store, a frozen `now`, and a liveness stub so a planted pid is never alive
+    unless a test says it is."""
+
+    RID = "20261010-120000-oldrun-abc123"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("prune-sandboxes uses the fd-relative POSIX walk")
+        self.agent = load_agent()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.main = os.path.join(self.tmp, "main", "sandboxes")
+        self.wt = os.path.join(self.tmp, "wt", "sandboxes")
+        self.fleet = os.path.join(self.tmp, "fleet", "AutoOS")
+        for d in (self.main, self.wt, self.fleet):
+            os.makedirs(d)
+        self.roots = [("main", self.main), ("worktree", self.wt), ("fleet", self.fleet)]
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers, mode=0o700)
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(os.path.join(self.state, "kill"), mode=0o700)
+        self.now = datetime.datetime(2026, 10, 11, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        # A planted pid is dead unless a test patches this back to True.
+        p = mock.patch.object(self.agent, "_pid_alive", return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def iso(self, hours_before):
+        return (self.now - datetime.timedelta(hours=hours_before)).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
+    def write_record(self, run_id, **over):
+        rec = {"id": run_id, "pid": 424242, "pid_start": 999,
+               "started": self.iso(12), "ended": self.iso(10)}
+        rec.update(over)
+        with io.open(os.path.join(self.workers, run_id + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def write_kill(self, run_id, **over):
+        rec = {"run_id": run_id, "created_at": self.iso(12)}
+        rec.update(over)
+        with io.open(os.path.join(self.state, "kill", run_id + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def make_sandbox(self, root, run_id=RID, mb=1, *, sibling_only=False):
+        """A seat clone dir + its .toolhome (with a redirected cache blob) + sibling,
+        all under `root`. Returns (base_path, toolhome_path)."""
+        base = os.path.join(root, "AutoOS-" + run_id)
+        toolhome = base + ".toolhome"
+        cache = os.path.join(toolhome, "uv_cache_dir")
+        os.makedirs(cache)
+        with open(os.path.join(cache, "blob"), "wb") as fh:
+            fh.truncate(mb * 1024 * 1024)
+        if not sibling_only:
+            os.makedirs(base)
+        opend = base + ".opencode-data"
+        os.makedirs(opend)
+        return base, toolhome
+
+    def run_prune(self, apply=False, min_age_hours=6):
+        rc, results = self.agent.prune_sandboxes(
+            apply=apply, min_age_hours=min_age_hours, roots=self.roots,
+            workers=self.workers, state=self.state, now=self.now)
+        return rc, results
+
+    def reason_for(self, results, run_id):
+        for rid, _root, _mb, action, reason in results:
+            if rid == run_id:
+                return action, reason
+        raise AssertionError("no result line for %s in %r" % (run_id, results))
+
+
+class PruneSandboxTests(_PruneSandboxBase):
+    """P8b (A): the subcommand walks the three roots, deletes only ended-and-aged
+    sandboxes decided from the runner-private record (never job.json), fd-relative,
+    and keeps every fail-closed case with a printed reason."""
+
+    def test_dry_run_deletes_nothing(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        rc, results = self.run_prune(apply=False)
+        self.assertEqual(rc, 0)
+        action, reason = self.reason_for(results, self.RID)
+        self.assertEqual("kept", action, reason)
+        self.assertIn("dry run", reason)
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID + ".toolhome")))
+
+    def test_apply_deletes_only_ended_and_aged(self):
+        old = "20261001-010000-old-aabbcc"
+        young = "20261011-110000-young-ddEEff".replace("EE", "ee")  # hex6 lowercase
+        obase, _ = self.make_sandbox(self.main, old)
+        self.make_sandbox(self.main, young)
+        self.write_record(old, ended=self.iso(10))
+        self.write_record(young, ended=self.iso(1))
+        rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.lexists(obase), "the aged sandbox was not deleted")
+        self.assertFalse(os.path.lexists(obase + ".toolhome"), "the .toolhome sibling was left")
+        self.assertFalse(os.path.lexists(obase + ".opencode-data"), "the sibling was left")
+        self.assertEqual("pruned", self.reason_for(results, old)[0])
+        action, reason = self.reason_for(results, young)
+        self.assertEqual("kept", action)
+        self.assertIn("younger than 6h", reason)
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + young)),
+                        "a too-young sandbox was deleted")
+
+    def test_every_fail_closed_case_keeps_with_a_reason(self):
+        cases = {
+            "20261001-010101-absent-aaaaaa": "record absent",     # no workers record
+            "20261001-010102-corrupt-bbbbbb": "corrupt record",
+            "20261001-010103-mismatch-cccccc": "record id mismatch",
+            "20261001-010104-notended-dddddd": "not ended",
+            "20261001-010105-agecomp-eeeeee": "age uncomputable",
+            "20261001-010106-alive-ffffff": "alive",
+        }
+        for rid, _ in cases.items():
+            self.make_sandbox(self.main, rid)
+        # corrupt: not a dict
+        with io.open(os.path.join(self.workers, "20261001-010102-corrupt-bbbbbb.json"),
+                     "w", encoding="utf-8") as fh:
+            json.dump(["not", "a", "record"], fh)
+        self.write_record("20261001-010103-mismatch-cccccc", id="20261001-010103-other-999999")
+        self.write_record("20261001-010104-notended-dddddd", ended=None)
+        self.write_record("20261001-010105-agecomp-eeeeee", ended="not-a-real-timestamp")
+        self.write_record("20261001-010106-alive-ffffff")
+        # Detect the "alive" case through the runner-private kill store, not a live
+        # pid: setUp pins _pid_alive False for the whole suite, and a pid-start stub
+        # that also matched agecomp would misroute it. A recorded group whose leader
+        # still matches the stored start is the other half of _record_alive.
+        self.write_kill("20261001-010106-alive-ffffff", pgid=777, start=555)
+        with mock.patch.object(self.agent, "proc_start_time", return_value=555):
+            rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        for rid, want in cases.items():
+            action, reason = self.reason_for(results, rid)
+            self.assertEqual("kept", action, "%s: %s" % (rid, reason))
+            self.assertIn(want, reason, "%s gave %r" % (rid, reason))
+            self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + rid)),
+                            "fail-closed case %s deleted the sandbox" % want)
+
+    def test_a_live_pid_keeps(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.object(self.agent, "_pid_alive", return_value=True):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("alive", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_a_live_scope_keeps(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        self.write_kill(self.RID, pgid=424242, start=555)
+        with mock.patch.object(self.agent, "proc_start_time", return_value=555):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("alive", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_the_current_run_never_prunes(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": self.RID}):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("current run", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_an_unreadable_sandbox_dir_keeps(self):
+        base, _ = self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        # Deterministic regardless of who runs the suite: the pinned child open the
+        # shape guard relies on is what refuses, so stub exactly that.
+        with mock.patch.object(self.agent, "_child_dir_fd", return_value=None):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("unreadable", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(base))
+
+    def test_a_symlinked_sandbox_dir_keeps(self):
+        target = os.path.join(self.main, "AutoOS-20260101-000000-real-abcdef")
+        os.makedirs(target)
+        link = os.path.join(self.main, "AutoOS-" + self.RID)
+        os.symlink(target, link)
+        self.write_record(self.RID)
+        _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("not a real directory", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.islink(link), "the symlink was followed and removed")
+
+    def test_a_sandbox_whose_realpath_escapes_the_root_keeps(self):
+        outside = os.path.join(self.tmp, "operator-home")
+        os.makedirs(outside)
+        link = os.path.join(self.main, "AutoOS-" + self.RID)
+        os.symlink(outside, link)
+        self.write_record(self.RID)
+        _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("realpath outside root", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(outside), "the delete landed outside the root")
+        self.assertTrue(os.path.islink(link))
+
+    def test_all_three_roots_are_walked(self):
+        bases = []
+        for i, (_label, root) in enumerate(self.roots):
+            rid = "20260901-0%d0000-runroot-%06x" % (i, i)
+            b, _t = self.make_sandbox(root, rid)
+            self.write_record(rid)
+            bases.append(os.path.join(root, "AutoOS-" + rid))
+        rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len([r for r in results if r[3] == "pruned"]), 3)
+        for b in bases:
+            self.assertFalse(os.path.lexists(b), "a root's sandbox was not pruned: %s" % b)
+
+    def test_a_root_that_cannot_be_listed_moves_rc(self):
+        missing = os.path.join(self.tmp, "nope", "sandboxes")
+        # A root that exists but cannot be opened is the one rc-mover; a missing
+        # root is skipped silently, so this pins a root and refuses to open it.
+        os.makedirs(missing)
+        with mock.patch.object(self.agent, "_pin_dir_fd",
+                               side_effect=PermissionError(13, "denied", missing)):
+            rc, _r = self.agent.prune_sandboxes(apply=True, roots=[("blocked", missing)],
+                                                workers=self.workers, state=self.state, now=self.now)
+        self.assertEqual(1, rc)
+
+    def test_a_missing_root_is_skipped_not_an_error(self):
+        rc, _r = self.agent.prune_sandboxes(apply=True,
+                                            roots=[("gone", os.path.join(self.tmp, "gone"))],
+                                            workers=self.workers, state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+
+    def test_one_line_per_candidate_and_a_total(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_prune(apply=True)
+        lines = buf.getvalue().splitlines()
+        self.assertIn(self.RID, lines[0])
+        self.assertTrue(lines[-1].startswith("total:"), lines[-1])
+
+    def test_the_run_id_is_extracted_from_the_directory_name(self):
+        name = "AutoOS-20261011-132636-p8b-prune-sandboxes-and-e44559"
+        self.assertEqual("20261011-132636-p8b-prune-sandboxes-and-e44559",
+                         self.agent._run_id_from_entry(name))
+        self.assertEqual("20261010-120000-oldrun-abc123",
+                         self.agent._run_id_from_entry("AutoOS-20261010-120000-oldrun-abc123.toolhome"))
+        self.assertIsNone(self.agent._run_id_from_entry("not-a-sandbox"))
+
+    def test_the_default_roots_are_main_worktrees_and_fleet(self):
+        lane = os.path.join(self.tmp, "lane-wt")
+        os.makedirs(lane)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": os.path.join(self.tmp, "state")}), \
+                mock.patch.object(self.agent, "_lane_worktree_sandbox_dirs",
+                                  return_value=[("lane-wt", os.path.join(lane, "logs", "sandboxes"))]), \
+                mock.patch.object(self.agent, "_fleet_sandbox_roots",
+                                  return_value=[("AutoOS", self.fleet)]):
+            labels = {r[0]: r[1] for r in self.agent._prune_sandbox_roots()}
+        self.assertEqual(os.path.join(self.tmp, "state", "sandboxes"), labels["main"])
+        self.assertEqual(os.path.join(lane, "logs", "sandboxes"), labels["lane-wt"])
+        self.assertEqual(self.fleet, labels["AutoOS"])
+
+    def test_worktree_list_scrubs_git_env_and_skips_prunable_and_missing(self):
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        gone = os.path.join(self.tmp, "gone-wt")  # never created -> missing
+        # `git worktree list --porcelain` prints paths RAW, so the capture is bytes.
+        out = mock.Mock(returncode=0, stdout=(
+            b"worktree " + os.fsencode(self.tmp) + b"\nHEAD aaa\nbranch refs/heads/main\n\n"
+            + b"worktree " + os.fsencode(live) + b"\nHEAD bbb\nbranch refs/heads/live\n\n"
+            + b"worktree " + os.fsencode(gone) + b"\nHEAD ccc\nprunable locked\n\n"))
+        seen_env = {}
+
+        def fake_run(argv, **kw):
+            seen_env.update(kw.get("env") or {})
+            return out
+
+        # Seed the very vars the scrub must drop, so the assertion is not vacuous.
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/tmp/not-the-repo",
+                                          "GIT_WORK_TREE": "/tmp/not-the-tree"}), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            dirs = dict(self.agent._lane_worktree_sandbox_dirs())
+        self.assertNotIn("GIT_DIR", seen_env, "GIT_DIR was not scrubbed from the git env")
+        self.assertNotIn("GIT_WORK_TREE", seen_env, "GIT_WORK_TREE was not scrubbed")
+        self.assertIn(os.path.join(live, "logs", "sandboxes"), dirs.values())
+        self.assertNotIn(os.path.join(gone, "logs", "sandboxes"), dirs.values(),
+                        "a missing worktree was walked")
+
+    # --- P8b-FIX: an unknown lane-worktree enumeration refuses the whole prune ---
+
+    @contextlib.contextmanager
+    def discovered_roots(self):
+        """One ended-and-aged, eligible sandbox in every root `prune_sandboxes` finds
+        for itself when handed no `roots` — main under AUTOOS_STATE_DIR, a fleet repo
+        under a fake HOME — yielding {label: sandbox base}; the lane roots are whatever
+        the test's git stub says. Fresh dirs per call, so one subTest's deletion cannot
+        hide another's."""
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="discovered-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        home, state = os.path.join(tmp, "home"), os.path.join(tmp, "state")
+        bases = {}
+        for label, root in (("main", os.path.join(state, "sandboxes")),
+                            ("fleet", os.path.join(home, "fleet", "sandboxes", "AutoOS"))):
+            os.makedirs(root)
+            bases[label] = self.make_sandbox(root, self.RID)[0]
+            self.write_record(self.RID)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state, "HOME": home}):
+            yield bases
+
+    def assert_prune_refused(self, patchers, reason, apply_flag):
+        """The prune over the discovered roots with git failing this way: rc 1, that
+        one refusal line, no results walked, and nothing gone from any root."""
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers:
+                stack.enter_context(patcher)
+            with self.discovered_roots() as bases:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc, results = self.agent.prune_sandboxes(
+                        apply=apply_flag, workers=self.workers, state=self.state,
+                        now=self.now)
+        self.assertEqual(1, rc, err.getvalue())
+        self.assertIn("prune-sandboxes: refused: could not list lane worktrees (%s); "
+                      "nothing deleted" % reason, err.getvalue())
+        self.assertEqual([], results, "a refusal still walked a root")
+        for label, base in bases.items():
+            for path in (base, base + ".toolhome", base + ".opencode-data"):
+                self.assertTrue(os.path.isdir(path), "%s root lost %s" % (label, path))
+
+    def test_an_unknown_lane_enumeration_refuses_the_whole_prune(self):
+        # P8b-FIX (L1 decision): git could not say which lane worktrees exist, so the
+        # set is UNKNOWN and the invocation keeps everything, in every root, with or
+        # without --apply — it never degrades to "no worktrees found, prune the rest".
+        # The timeout is exercised for real: the stubbed git is a child that outlives a
+        # 1 s budget, so TimeoutExpired comes from subprocess, not from a mock.
+        real_run, ag = subprocess.run, self.agent
+
+        def slow_git(argv, **kw):
+            return real_run([sys.executable, "-c", "import time; time.sleep(30)"], **kw)
+
+        cases = (
+            ("timeout", lambda: [mock.patch.object(ag, "LANE_WORKTREE_GIT_TIMEOUT", 1.0),
+                                 mock.patch.object(ag.subprocess, "run",
+                                                   side_effect=slow_git)],
+             "TimeoutExpired"),
+            ("git exit 1", lambda: [mock.patch.object(
+                ag.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=b""))],
+             "git exit 1"),
+            ("garbage output", lambda: [mock.patch.object(
+                ag.subprocess, "run",
+                return_value=mock.Mock(returncode=0, stdout=b"not porcelain"))],
+             "unparsable output"),
+            ("OSError", lambda: [mock.patch.object(ag.subprocess, "run",
+                                                   side_effect=OSError(5, "denied"))],
+             "OSError"),
+        )
+        for case, make_patchers, reason in cases:
+            for apply_flag in (True, False):
+                with self.subTest(case=case, apply=apply_flag):
+                    self.assert_prune_refused(make_patchers(), reason, apply_flag)
+
+    def test_the_worktree_git_env_carries_the_repo_git_guards(self):
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        out = mock.Mock(returncode=0,
+                        stdout=b"worktree " + os.fsencode(live) + b"\nHEAD aaa\n\n")
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen.update(kw)
+            return out
+
+        guards = self.agent.WORKER_GIT_GUARDS
+        with mock.patch.dict(os.environ, {
+                "GIT_DIR": "/tmp/not-the-repo", "GIT_WORK_TREE": "/tmp/not-the-tree",
+                "GIT_CONFIG_GLOBAL": os.path.expanduser("~/.gitconfig"),
+                "GIT_CONFIG_SYSTEM": "/tmp/not-the-system",
+                "GIT_SSH_COMMAND": "ssh -i /tmp/not-the-key",
+                # a parent's `git -c` leftover: read by index, past the guard count
+                "GIT_CONFIG_KEY_3": "url.insteadOf", "GIT_CONFIG_VALUE_3": "x"}), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            self.agent._lane_worktree_sandbox_dirs()
+        env = seen.get("env") or {}
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_SSH_COMMAND"):
+            self.assertNotIn(name, env, "%s was not scrubbed from the git env" % name)
+        self.assertNotIn("GIT_CONFIG_KEY_3", env, "a leftover config channel survived")
+        self.assertEqual(self.agent.LANE_WORKTREE_GIT_TIMEOUT, seen.get("timeout"),
+                         "the git call has no timeout, or not the module's")
+        self.assertEqual(os.devnull, env.get("GIT_CONFIG_GLOBAL"))
+        self.assertEqual("1", env.get("GIT_CONFIG_NOSYSTEM"))
+        self.assertEqual("0", env.get("GIT_TERMINAL_PROMPT"))
+        self.assertEqual(str(len(self.agent._GIT_GUARD_CONFIG)), env.get("GIT_CONFIG_COUNT"))
+        for name, value in guards:
+            self.assertEqual(value, env.get(name), "guard %s is missing" % name)
+
+    # --- P8b-FIX2: a non-UTF-8 worktree path crashed the enumeration; a caller's
+    # --- GIT_* names survived the filter and steered it.
+
+    def test_an_undecodable_or_ambiguous_listing_refuses_the_whole_prune(self):
+        # `git worktree list --porcelain` prints paths RAW, so a worktree whose path
+        # holds a non-UTF-8 byte made the text=True capture raise UnicodeDecodeError —
+        # neither an OSError nor a SubprocessError, so it escaped both this function
+        # and prune_sandboxes' LaneWorktreesUnknown handler and the invocation printed
+        # a traceback instead of refusing. A listing that cannot be read unambiguously
+        # is a listing nothing gets deleted over.
+        cases = (
+            ("non-utf8 path byte", b"worktree /tmp/live/wt-x\xffy\nHEAD aaa\n\n",
+             "undecodable listing"),
+            ("nul byte in path", b"worktree /tmp/live/wt\x00y\nHEAD aaa\n\n",
+             "undecodable listing"),
+            ("newline in path", b"worktree /tmp/live/wt\ny\nHEAD aaa\n\n",
+             "unparsable output"),
+            ("record cut short", b"worktree /tmp/live\n", "unparsable output"),
+        )
+        for case, raw, reason in cases:
+            for apply_flag in (True, False):
+                with self.subTest(case=case, apply=apply_flag):
+                    self.assert_prune_refused(
+                        [mock.patch.object(self.agent.subprocess, "run",
+                                           return_value=mock.Mock(returncode=0, stdout=raw))],
+                        reason, apply_flag)
+
+    @unittest.skipIf(os.name == "nt", "a non-UTF-8 path name is a POSIX byte string")
+    def test_a_real_worktree_with_a_non_utf8_path_refuses_the_prune(self):
+        repo = os.path.join(self.tmp, "real-repo")
+        os.makedirs(repo)
+
+        def real_git(*args):
+            r = subprocess.run(["git", "-C", repo,
+                                "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+                               + list(args), capture_output=True)
+            self.assertEqual(0, r.returncode, "%s: %s" % (args[0], r.stderr))
+            return r
+
+        real_git("init", "-q")
+        with io.open(os.path.join(repo, "f"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        real_git("add", "f")
+        real_git("commit", "-q", "-m", "x")
+        # The path git itself prints back is raw bytes, unquotable and unencodable.
+        weird = os.fsdecode(os.fsencode(repo) + b"/wt-x\xffy")
+        real_git("worktree", "add", "--detach", weird)
+        listing = subprocess.run(["git", "-C", repo, "worktree", "list", "--porcelain"],
+                                 capture_output=True).stdout
+        self.assertIn(b"wt-x\xffy", listing, "real git quoted the path, not raw bytes")
+        with mock.patch.object(self.agent, "ROOT", repo):
+            with self.assertRaises(self.agent.LaneWorktreesUnknown) as got:
+                self.agent._lane_worktree_sandbox_dirs()
+            self.assertEqual("undecodable listing", got.exception.reason)
+            for apply_flag in (True, False):
+                with self.subTest(apply=apply_flag):
+                    self.assert_prune_refused(
+                        [mock.patch.object(self.agent, "ROOT", repo)],
+                        "undecodable listing", apply_flag)
+
+    def test_the_git_env_is_an_allowlist_so_no_caller_git_name_survives(self):
+        # Dropping GIT_DIR and GIT_WORK_TREE by name left every other GIT_* the caller
+        # set in place: GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_
+        # DIRECTORIES, GIT_INDEX_FILE, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES,
+        # GIT_CONFIG, GIT_CONFIG_SYSTEM, GIT_QUARANTINE_PATH — each of which steers or
+        # spoofs what the listing says. The env is built from scratch instead.
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        out = mock.Mock(returncode=0,
+                        stdout=b"worktree " + os.fsencode(live) + b"\nHEAD aaa\n\n")
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen.update(kw.get("env") or {})
+            return out
+
+        hostile = {name: "/tmp/not-the-" + name for name in (
+            "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG",
+            "GIT_CONFIG_SYSTEM", "GIT_QUARANTINE_PATH", "GIT_DIR", "GIT_WORK_TREE",
+            "GIT_SSH_COMMAND", "SSH_ASKPASS", "GIT_CONFIG_KEY_9", "GIT_CONFIG_VALUE_9")}
+        hostile["GH_TOKEN"] = "caller-secret"
+        with mock.patch.dict(os.environ, hostile), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            self.agent._lane_worktree_sandbox_dirs()
+        guards = {name for name, _v in self.agent.WORKER_GIT_GUARDS}
+        self.assertEqual(guards, {k for k in seen if k.startswith("GIT_")},
+                         "a GIT_* name other than the guards reached the git call")
+        for name in hostile:
+            self.assertNotIn(name, seen, "%s survived into the git env" % name)
+        self.assertEqual(set(), {k for k in seen
+                                 if k not in guards and k not in ("PATH", "HOME", "LANG")},
+                         "the git env carries a caller name outside the allowlist")
+        self.assertIn("PATH", seen, "git cannot be found without a PATH")
+        self.assertIn("HOME", seen)
+        self.assertEqual("C", seen.get("LANG"))
+
+    def test_min_age_hours_is_a_non_negative_gate(self):
+        # P8b-FIX: a negative age gate means "prune runs that have not ended yet", so
+        # argparse refuses it (rc 2) before any root is walked; 0 still parses.
+        ap = argparse.ArgumentParser()
+        sub = ap.add_subparsers(dest="cmd", required=True)
+        self.agent._parser_prune_sandboxes(sub)
+        self.assertEqual(0.0, ap.parse_args(
+            ["prune-sandboxes", "--min-age-hours", "0"]).min_age_hours)
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.object(self.agent, "prune_sandboxes") as pruner, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as got:
+                self.agent.main(["prune-sandboxes", "--apply", "--min-age-hours", "-1"])
+        self.assertEqual(2, got.exception.code)
+        pruner.assert_not_called()
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)),
+                        "the refused invocation deleted a sandbox")
+
+
+class ToolHomeCapTests(_PruneSandboxBase):
+    """P8b (B): before an --isolate run provisions its toolhome, the total of the
+    `*.toolhome` dirs under the three roots is capped by pruning the OLDEST ENDED
+    runs' caches only — never a live or current run — and it never raises."""
+
+    def toolhome(self, root, run_id, mb):
+        base, _ = self.make_sandbox(root, run_id, mb=mb)
+        return base
+
+    def test_under_the_cap_nothing_is_pruned(self):
+        rid = "20260901-000000-small-aaaaaa"
+        self.toolhome(self.main, rid, 1)
+        self.write_record(rid)
+        self.agent.cap_toolhomes(cap_mb=1024, roots=self.roots, workers=self.workers,
+                                 state=self.state, now=self.now)
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + rid + ".toolhome"),
+                           0, "under the cap the caches were pruned anyway")
+
+    def test_over_the_cap_prunes_oldest_ended_first(self):
+        oldest = "20260801-000000-oldest-aaaaaa"
+        newest = "20260901-000000-newest-bbbbbb"
+        self.toolhome(self.main, oldest, 4)
+        self.toolhome(self.main, newest, 4)
+        self.write_record(oldest, ended=self.iso(72))
+        self.write_record(newest, ended=self.iso(24))
+        # cap 6 MB: only the oldest (4 MB) is needed to get under it.
+        self.agent.cap_toolhomes(cap_mb=6, roots=self.roots, workers=self.workers,
+                                 state=self.state, now=self.now)
+        self.assertLess(self.agent.tree_bytes(self.main + "/AutoOS-" + oldest + ".toolhome"),
+                        1 << 20, "the oldest ended toolhome was not pruned")
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + newest + ".toolhome"),
+                           1 << 20, "the cap pruned past the point it was under")
+
+    def test_never_prunes_a_live_or_current_run(self):
+        live = "20260801-000000-live-cccccc"
+        cur = "20260801-000000-current-dddddd"
+        self.toolhome(self.main, live, 8)
+        self.toolhome(self.main, cur, 8)
+        self.write_record(live)
+        self.write_record(cur)
+        with mock.patch.object(self.agent, "_pid_alive", return_value=True), \
+                mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": cur}):
+            self.agent.cap_toolhomes(cap_mb=1, roots=self.roots, workers=self.workers,
+                                     state=self.state, now=self.now)
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + live + ".toolhome"),
+                           1 << 20, "a live run's toolhome was pruned")
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + cur + ".toolhome"),
+                           1 << 20, "the current run's toolhome was pruned")
+
+    def test_the_cap_never_raises(self):
+        with mock.patch.object(self.agent, "_prune_sandbox_roots", side_effect=OSError("boom")):
+            self.assertEqual(0, self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                                         state=self.state, now=self.now))
+
+    def test_an_unknown_lane_enumeration_prunes_no_toolhome(self):
+        # P8b-FIX: the cap discovers its own roots, so a git that cannot answer makes
+        # the lane set UNKNOWN — it must prune nothing, say so on one line, and still
+        # never raise.
+        old = "20260801-000000-older-aaaaaa"
+        main = os.path.join(self.state, "sandboxes")
+        os.makedirs(main)
+        base, _ = self.make_sandbox(main, old, mb=4)
+        self.write_record(old)
+        out = mock.Mock(returncode=1, stdout=b"")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.state,
+                                          "HOME": os.path.join(self.tmp, "home")}), \
+                mock.patch.object(self.agent.subprocess, "run", return_value=out), \
+                contextlib.redirect_stderr(err):
+            rc = self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                          state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+        self.assertIn("could not list lane worktrees (git exit 1)", err.getvalue())
+        self.assertGreater(self.agent.tree_bytes(base + ".toolhome"), 1 << 20,
+                           "the cap pruned while the lane worktrees were unknown")
+
+    def test_an_undecodable_lane_listing_prunes_no_toolhome(self):
+        # P8b-FIX2: the same fail-closed shape as a git that exits — a raw non-UTF-8
+        # path byte is not a crash on the cap's path either, it prunes nothing.
+        old = "20260801-000000-older-aaaaaa"
+        main = os.path.join(self.state, "sandboxes")
+        os.makedirs(main)
+        base, _ = self.make_sandbox(main, old, mb=4)
+        self.write_record(old)
+        out = mock.Mock(returncode=0, stdout=b"worktree /tmp/wt-x\xffy\nHEAD aaa\n\n")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.state,
+                                          "HOME": os.path.join(self.tmp, "home")}), \
+                mock.patch.object(self.agent.subprocess, "run", return_value=out), \
+                contextlib.redirect_stderr(err):
+            rc = self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                          state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+        self.assertIn("could not list lane worktrees (undecodable listing)", err.getvalue())
+        self.assertGreater(self.agent.tree_bytes(base + ".toolhome"), 1 << 20,
+                           "the cap pruned over an undecodable lane listing")
+
+    def test_the_isolate_run_calls_the_cap_before_provisioning(self):
+        with io.open(AGENT, encoding="utf-8") as fh:
+            src = fh.read()
+        end = src[src.index("def cmd_run("):]
+        self.assertIn("cap_toolhomes(", end, "the startup cap is not wired into the run")
+        self.assertLess(end.index("cap_toolhomes("), end.index("isolate_clone(source"),
+                        "the cap must run before a new sandbox is provisioned")
 
 
 if __name__ == "__main__":

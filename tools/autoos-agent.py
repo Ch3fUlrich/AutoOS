@@ -292,6 +292,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import uuid
@@ -2794,6 +2795,427 @@ def prune_toolhome(sandbox_path: str) -> dict:
         return {"refused": "%s: %s" % (type(exc).__name__, exc)}
 
 
+# ---------------------------------------------------------------------------
+# AO-TOOLHOME-SIZE P8b: the `prune-sandboxes` subcommand (A) and the startup
+# cap (B). P8 prunes a run's own toolhome when its run ends; P8b reclaims whole
+# sandboxes of runs that ENDED long ago and caps the toolhomes before the next
+# --isolate run is provisioned. A sandbox and its `.toolhome` / `.opencode-data`
+# siblings can sit in THREE roots: the main checkout's `logs/sandboxes`, the same
+# dir inside each lane worktree of one `.git`, and `~/fleet/sandboxes/<repo>`.
+# Nothing here is decided from job.json — only the runner-private worker record and
+# kill store (R-orch-17), and every deletion is fd-relative from one pinned
+# descriptor per root (P8a2), never a re-resolved path.
+MIN_AGE_HOURS_DEFAULT = 6
+_RUN_ID_TAIL_RE = re.compile(r"\d{8}-\d{6}-[A-Za-z0-9_.-]+-[0-9a-f]{6}$")
+# How long the one lane-worktree git call may take before the answer is given up on.
+LANE_WORKTREE_GIT_TIMEOUT = 10.0
+
+
+def _run_id_from_entry(name: str):
+    """The run id a sandbox directory name carries, or None: the tail after the
+    timestamp with any `.toolhome` / `.opencode-data` suffix stripped. `<run id>` is
+    `YYYYMMDD-HHMMSS-<slug>-<hex6>`, so the id is the only thing in the name matching
+    that grammar; anything else is not a sandbox and is skipped."""
+    stem = name
+    for suf in SANDBOX_PRIVATE_SUFFIXES:
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]
+            break
+    m = _RUN_ID_TAIL_RE.search(stem)
+    return m.group(0) if m else None
+
+
+class LaneWorktreesUnknown(Exception):
+    """The lane-worktree enumeration could not answer, so which worktrees exist is
+    UNKNOWN. P8b-FIX (L1 decision): an unknown set is never read as "no lane
+    worktrees" — a pruner that cannot say what it must not touch keeps everything."""
+
+    def __init__(self, reason):
+        Exception.__init__(self, "could not list lane worktrees (%s)" % reason)
+        self.reason = reason
+
+
+def _lane_worktree_git_env():
+    """The env of the one lane-worktree git call, built FROM SCRATCH (P8b-FIX2, L1
+    decision: an allowlist, not a filter).
+
+    The filter named GIT_DIR and GIT_WORK_TREE and let the rest through —
+    GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+    GIT_INDEX_FILE, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES, GIT_CONFIG,
+    GIT_CONFIG_SYSTEM, GIT_QUARANTINE_PATH are git's own too, and each one steers or
+    spoofs what the listing says. So nothing of the caller's survives except PATH and
+    HOME; the locale is pinned and the repo's guards are stamped on top, the same keys
+    `worker_env` carries, so neither a caller's override nor an operator's repo, global
+    or system config can change what the listing says."""
+    env = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+           "HOME": os.environ.get("HOME") or "/",
+           "LANG": "C"}
+    for name, value in WORKER_GIT_GUARDS:
+        env[name] = value
+    return env
+
+
+def _worktree_path_undecodable(path: str) -> bool:
+    """True when a listed path is not a single unambiguous filesystem path: a NUL, a
+    DEL, or any other C0 control (tab excepted, which is legal in a name) cannot be
+    handed to os.path.isdir / os.path.join and be trusted to mean one directory."""
+    return any(ord(ch) < 0x20 and ch != "\t" or ch == "\x7f" for ch in path)
+
+
+def _lane_worktree_sandbox_dirs():
+    """(label, path) for `logs/sandboxes` inside every live lane worktree (root ii).
+
+    ONE audited subprocess: `git worktree list --porcelain` against the common
+    checkout, with an env built from scratch so it reads the real repo and not a
+    caller's override. A prunable entry (git's own "the worktree is gone") and a path
+    that is not there are skipped. A timeout, an OS error, a non-zero exit, output with
+    no `worktree` line, a record git did not finish, or bytes that are not a UTF-8 path
+    raises LaneWorktreesUnknown — the enumeration refuses to guess.
+
+    The capture is BYTES and the decode happens here, strict: git prints worktree paths
+    raw, so a path with a non-UTF-8 byte (a same-uid seat can create `wt-x\xffy` in the
+    shared repo) made `text=True` raise UnicodeDecodeError — neither an OSError nor a
+    SubprocessError — and the traceback escaped every handler.
+    """
+    # subprocess-audit: read-only git plumbing, literal argv; an env built from scratch
+    # (PATH, HOME, LANG=C, the repo's git guards — no caller GIT_* name), no shell, a
+    # timeout, bytes captured and decoded strictly here, and the output parsed for
+    # `worktree `/`prunable ` lines only.
+    try:
+        r = subprocess.run(["git", "-C", ROOT, "worktree", "list", "--porcelain"],
+                           capture_output=True, stdin=subprocess.DEVNULL,
+                           env=_lane_worktree_git_env(),
+                           timeout=LANE_WORKTREE_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LaneWorktreesUnknown(type(exc).__name__) from exc
+    if r.returncode != 0:
+        raise LaneWorktreesUnknown("git exit %d" % r.returncode)
+    try:
+        text = r.stdout.decode("utf-8")
+    except (UnicodeError, ValueError, AttributeError, TypeError):
+        raise LaneWorktreesUnknown("undecodable listing") from None
+    lines = text.splitlines()
+    if not any(line.startswith("worktree ") for line in lines):
+        raise LaneWorktreesUnknown("unparsable output")
+    out, path, prunable = [], None, False
+
+    def flush():
+        if path and not prunable and os.path.isdir(path):
+            out.append((os.path.basename(path.rstrip("/")) or "lane",
+                        os.path.join(path, "logs", "sandboxes")))
+
+    for index, line in enumerate(lines):
+        if line.startswith("worktree "):
+            # git always prints HEAD on the line right after the path. A path holding a
+            # newline (or a line someone injected) breaks that alignment, and a listing
+            # whose records cannot be told apart is a listing nothing gets deleted over.
+            nxt = lines[index + 1] if index + 1 < len(lines) else ""
+            if not nxt.startswith("HEAD "):
+                raise LaneWorktreesUnknown("unparsable output")
+            value = line[len("worktree "):]
+            if _worktree_path_undecodable(value.strip()):
+                raise LaneWorktreesUnknown("undecodable listing")
+            flush()
+            path, prunable = value.strip(), False
+        elif line.startswith("prunable"):
+            prunable = True
+    flush()
+    return out
+
+
+def _fleet_sandbox_roots():
+    """(label, path) for every `<repo>` dir under `~/fleet/sandboxes` (root iii)."""
+    base = os.path.join(os.path.expanduser("~"), "fleet", "sandboxes")
+    out = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for name in names:
+        path = os.path.join(base, name)
+        try:
+            if stat.S_ISDIR(os.stat(path).st_mode):
+                out.append((name, path))
+        except OSError:
+            continue
+    return out
+
+
+def _prune_sandbox_roots():
+    """The THREE roots a sandbox and its toolhome/opencode-data siblings can live in."""
+    return ([("main", os.path.join(clients.state_dir(), "sandboxes"))]
+            + _lane_worktree_sandbox_dirs() + _fleet_sandbox_roots())
+
+
+def _load_worker_record(workers, run_id):
+    """The runner-private worker record for `run_id`, and the reason it is unusable.
+
+    (record, None) on a good one; (None, <reason>) otherwise — `record absent`,
+    `corrupt record`, or `record id mismatch` (its own id must equal the directory
+    name). Never job.json."""
+    path = os.path.join(workers, run_id + ".json")
+    try:
+        with io.open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None, "record absent"
+    except (OSError, ValueError):
+        return None, "corrupt record"
+    if not isinstance(data, dict):
+        return None, "corrupt record"
+    if data.get("id") != run_id:
+        return None, "record id mismatch"
+    return data, None
+
+
+def _record_alive(run_id, record, state):
+    """True when a pid or a recorded process group of the run is still there.
+
+    The pid-reuse guard is `ps`'s own: a live pid whose start time disagrees with the
+    record is a recycled pid, so not this run. The group check reads the runner-private
+    kill store (never job.json, R-orch-17) and counts a group whose leader still
+    matches the recorded start as alive."""
+    pid = record.get("pid")
+    if pid is not None and _pid_alive(pid):
+        pid_start = record.get("pid_start")
+        current = _proc_starttime(pid) if pid_start is not None else None
+        if current is None or current == pid_start:
+            return True
+    kill = read_kill_record(run_id, state) or {}
+    pgid = kill.get("pgid")
+    if pgid is not None:
+        start = proc_start_time(pgid)
+        if start is not None and (kill.get("start") is None or start == kill.get("start")):
+            return True
+    return False
+
+
+def _ended_of(record):
+    ended = _parse_iso(record.get("ended"))
+    if ended is not None and ended.tzinfo is None:
+        ended = ended.replace(tzinfo=datetime.timezone.utc)
+    return ended
+
+
+def _sandbox_eligible(run_id, workers, state, now, min_age_hours, current_id):
+    """(ended_dt, None) when this run may be pruned, else (None, <reason>).
+
+    Fail-closed, and every "never" of the spec is one of these reasons: the record
+    must exist, be a valid object whose id matches the directory, say the run ENDED
+    with a computable age >= min_age_hours; the run must not be alive and must not be
+    the current run."""
+    if current_id and run_id == current_id:
+        return None, "current run"
+    record, err = _load_worker_record(workers, run_id)
+    if err is not None:
+        return None, err
+    if not record.get("ended"):
+        return None, "not ended"
+    if _record_alive(run_id, record, state):
+        return None, "alive"
+    ended = _ended_of(record)
+    if ended is None:
+        return None, "age uncomputable"
+    if (now - ended).total_seconds() < float(min_age_hours) * 3600.0:
+        return None, "younger than %dh" % int(min_age_hours)
+    return ended, None
+
+
+def _sandbox_dir_guard(root_path, root_fd, base):
+    """Why the sandbox dir `base` must NOT be deleted, or None. It must be a real
+    directory — not a symlink, not reached through one — whose realpath stays inside
+    the root, and it must open as the descriptor the fd-relative delete needs."""
+    full = os.path.join(root_path, base)
+    try:
+        rp, real_root = os.path.realpath(full), os.path.realpath(root_path)
+    except OSError:
+        return "unreadable dir"
+    if rp != real_root and not rp.startswith(real_root + os.sep):
+        return "realpath outside root"
+    try:
+        st = os.stat(base, dir_fd=root_fd, follow_symlinks=False)
+    except OSError:
+        return "unreadable dir"
+    if not stat.S_ISDIR(st.st_mode):
+        return "not a real directory"
+    if _child_dir_fd(root_fd, base) is None:
+        return "unreadable dir"
+    return None
+
+
+def _list_root(root_fd):
+    """The sandboxes of one pinned root as {run_id: {base, toolhome, data, dirs}}.
+
+    `dirs` is what the fd-relative delete removes (the clone dir and the opencode-data
+    sibling); `toolhome` is handled separately. A root that cannot be listed is None."""
+    try:
+        with os.scandir(root_fd) as entries:
+            names = [e.name for e in entries]
+    except OSError:
+        return None
+    found = {}
+    for name in names:
+        run_id = _run_id_from_entry(name)
+        if run_id is None:
+            continue
+        rec = found.setdefault(run_id, {"base": None, "toolhome": None, "data": None,
+                                        "dirs": []})
+        if name.endswith(TOOLHOME_SUFFIX):
+            rec["toolhome"] = name
+        elif name.endswith(OPENCODE_DATA_SUFFIX):
+            rec["data"] = name
+            rec["dirs"].append(name)
+        else:
+            rec["base"] = name
+            rec["dirs"].append(name)
+    return found
+
+
+def _child_mb(root_fd, name):
+    fd = _child_dir_fd(root_fd, name)
+    if fd is None:
+        return 0
+    try:
+        return _fd_bytes(fd) // _MIB
+    finally:
+        os.close(fd)
+
+
+def prune_sandboxes(apply=False, min_age_hours=MIN_AGE_HOURS_DEFAULT, roots=None,
+                    workers=None, state=None, now=None):
+    """(rc, results): reclaim the ended-and-aged sandboxes of the three roots.
+
+    DEFAULT DRY RUN — nothing is deleted unless `apply`. Each candidate is decided from
+    the runner-private record, age-gated, and deleted fd-relative from one pinned
+    descriptor per root (`delete_tree(name, root_fd)`). Prints one line per candidate
+    `<run id> <root> <MB> pruned|kept: <reason>` and a total; rc 1 when a whole root
+    cannot be listed, or when the lane worktrees are UNKNOWN (P8b-FIX: git could not
+    say which worktrees exist, so this invocation keeps everything in every root)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if roots is None:
+        try:
+            roots = _prune_sandbox_roots()
+        except LaneWorktreesUnknown as exc:
+            print("prune-sandboxes: refused: %s; nothing deleted" % exc, file=sys.stderr)
+            return 1, []
+    workers = workers or workers_dir()
+    current_id = os.environ.get("AUTOOS_AGENT_RUN_ID")
+    results, rc = [], 0
+    for _label, path in roots:
+        try:
+            root_fd = _pin_dir_fd(path)
+        except FileNotFoundError:
+            continue                                   # an absent root is not an error
+        except OSError:
+            print("%s %s kept: the root cannot be listed" % (_label, path), file=sys.stderr)
+            rc = 1
+            continue
+        try:
+            found = _list_root(root_fd)
+            if found is None:
+                print("%s %s kept: the root cannot be listed" % (_label, path),
+                      file=sys.stderr)
+                rc = 1
+                continue
+            for run_id in sorted(found):
+                rec = found[run_id]
+                _ended, why = _sandbox_eligible(run_id, workers, state, now,
+                                                min_age_hours, current_id)
+                mb = sum(_child_mb(root_fd, nm) for nm in rec["dirs"])
+                if why is not None:
+                    results.append((run_id, path, mb, "kept", why))
+                    continue
+                base = rec["base"]
+                guard = _sandbox_dir_guard(path, root_fd, base) if base else None
+                if guard is not None:
+                    results.append((run_id, path, mb, "kept", guard))
+                    continue
+                if not apply:
+                    results.append((run_id, path, mb, "kept", "dry run"))
+                    continue
+                freed = sum(delete_tree(nm, root_fd) for nm in rec["dirs"])
+                if rec["toolhome"]:
+                    freed += delete_tree(rec["toolhome"], root_fd)
+                results.append((run_id, path, freed // _MIB, "pruned", "ended and aged"))
+        finally:
+            os.close(root_fd)
+    for run_id, path, mb, action, reason in results:
+        print("%s %s %d %s: %s" % (run_id, path, mb, action, reason))
+    total = sum(r[2] for r in results if r[3] == "pruned")
+    print("total: %d MB pruned, %d kept" % (total, sum(1 for r in results if r[3] == "kept")))
+    return rc, results
+
+
+def cmd_prune_sandboxes(args) -> int:
+    rc, _ = prune_sandboxes(apply=args.apply, min_age_hours=args.min_age_hours)
+    return rc
+
+
+def _toolhome_cap_mb(cap_mb=None) -> int:
+    if cap_mb is not None:
+        return int(cap_mb)
+    try:
+        return int(os.environ.get(TOOLHOME_CAP_MB_ENV) or TOOLHOME_CAP_MB_DEFAULT)
+    except (TypeError, ValueError):
+        return TOOLHOME_CAP_MB_DEFAULT
+
+
+def cap_toolhomes(cap_mb=None, roots=None, workers=None, state=None, now=None,
+                  min_age_hours=MIN_AGE_HOURS_DEFAULT):
+    """(B): keep the sum of every `*.toolhome` under the three roots under `cap_mb`
+    (AUTOOS_TOOLHOME_CAP_MB, default 2048) before a new --isolate toolhome is
+    provisioned. Prune ONLY the oldest ENDED runs' toolhomes — same eligibility as the
+    subcommand — via `prune_toolhome`, so just the redirected cache dirs go and the
+    toolhome dir stays. Never raises, never blocks the run, prints one line."""
+    try:
+        cap_mb = _toolhome_cap_mb(cap_mb)
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        roots = roots if roots is not None else _prune_sandbox_roots()
+        workers = workers or workers_dir()
+        current_id = os.environ.get("AUTOOS_AGENT_RUN_ID")
+        total, ended_caches = 0, []
+        for _label, path in roots:
+            try:
+                root_fd = _pin_dir_fd(path)
+            except OSError:
+                continue
+            try:
+                for run_id, rec in (_list_root(root_fd) or {}).items():
+                    nm = rec["toolhome"]
+                    if not nm:
+                        continue
+                    mb = _child_mb(root_fd, nm)
+                    total += mb
+                    ended, why = _sandbox_eligible(run_id, workers, state, now,
+                                                   min_age_hours, current_id)
+                    if why is None:
+                        sandbox = os.path.join(path, nm[:-len(TOOLHOME_SUFFIX)])
+                        ended_caches.append((ended, sandbox, mb))
+            finally:
+                os.close(root_fd)
+        if total <= cap_mb or not ended_caches:
+            return 0
+        freed, count = 0, 0
+        for _ended, sandbox, _mb in sorted(ended_caches, key=lambda t: (t[0] is None, t[0])):
+            if total - freed <= cap_mb:
+                break
+            res = prune_toolhome(sandbox)
+            if res.get("refused"):
+                continue
+            freed += max(0, res["before"] - res["after"])
+            count += 1
+        print("toolhome cap: %d MB total over %d MB cap, pruned %d ended toolhome(s)"
+              % (total, cap_mb, count))
+        return freed
+    except LaneWorktreesUnknown as exc:                   # P8b-FIX: unknown → prune nothing
+        print("toolhome cap: %s; nothing pruned" % exc, file=sys.stderr)
+        return 0
+    except Exception as exc:                              # never blocks the run
+        print("toolhome cap: skipped (%s)" % type(exc).__name__, file=sys.stderr)
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # SEAT-PYTEST (AO-L2-SEAT-INTEGRITY P4, measured): the redirect above moves
 # PYTHONUSERBASE into the toolhome and `site.getusersitepackages()` with it — in an
 # --isolate seat `python3 -m pytest` printed "No module named pytest" (it lives in
@@ -5054,27 +5476,60 @@ def review_run_refusal(review: dict | None):
 # two seats from two different families, so a record carries at least two lines.
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
 REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence",
-                       "run", "task", "failure", "risk")
+                       "run", "task", "failure", "risk",
+                       # P12 (AO-READY-FAMILY): why a Claude-family final was paid for
+                       # at all. P12c: only `reason=` states it; `note=` is free text.
+                       "reason", "note",
+                       # P12b (D-1116): what a seat actually RAN, required of one seat
+                       # in a HIGH (R3) lane.
+                       "ran")
+# One `key=value` at a time, a quoted value keeping its spaces: the statement the final
+# checker writes goes in quotes (`reason="no free leg available"`), and splitting the
+# body on whitespace alone would read it as three tokens and keep none of them.
+REVIEW_ENTRY_FIELD_RE = re.compile(
+    r"([A-Za-z][A-Za-z0-9_-]*)=(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
                             # SPAWNFIX3 (S3) item 5 (REVGATE.record.md): a Sonnet
                             # final signs its lanes "SHIP"; "fix-first" is the same
                             # vocabulary's OPEN finding and stays refused.
                             "ship", seat_verdict.READY_TOKEN))  # AO-SEAT-VERDICT-GRAMMAR
-# The final check is the operator's unchanged decision (Q-003 2026-09-27): a
-# cross-family model reads the diff, Sonnet signs it off. Sonnet is not a
-# registry route -- it is the orchestrator's own interactive model -- so this one
-# matches the NAME, while the cross-family half is decided by registry families.
+# The final check is the operator's unchanged decision (Q-003 2026-09-27) that SOME
+# independent family signs off — since P12 (AO-READY-FINAL-FAMILY, D-1061/D-1062) it is
+# no longer one NAME. Sonnet is not a registry route: it is the orchestrator's own
+# interactive model, so the Claude-family exception still matches the NAME, while every
+# other final is decided by registry families.
 FINAL_REVIEWER = "sonnet"
 # REVGATE2: the final checker is recognized by its NAME, never as a substring of
 # one -- "notsonnet" contains "sonnet" and is not a sign-off. The vendor's full
 # model id (claude-sonnet-5, claude-sonnet-4-6) is the same checker spelled by
 # the client, so it counts too; anything else does not.
 FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
+# P12: the family that used to be the ONLY sign-off now has to justify itself: free
+# legs come first (D-1061/D-1062), so a Claude-family final counts only when the
+# entry states that no free leg was available.
+# P12c (D-1062 exact): NO_FREE_LEG_PHRASE is the WHOLE `reason=` value, not a phrase to
+# be found inside a field — see `_no_free_leg_stated`.
+CLAUDE_FAMILY = "anthropic"
+NO_FREE_LEG_PHRASE = "no free leg available"
+_NO_FREE_LEG_SPACES_RE = re.compile(r"[_\s]+")
+# P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
+# lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
+# would otherwise read as the evidence the gate exists to demand.
+SEAT_RAN_VALUES = ("tests", "live")
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
                      "[run=<writer-run-id> task=<ops|code|docs|infra> "
-                     "failure=<class> risk=<R0..R3>]")
+                     "failure=<class> risk=<R0..R3> ran=<tests|live>] -- a HIGH (R3) "
+                     "lane needs ran=tests|live on at least one counted seat | final: EITHER "
+                     "AutoOS-Review: kind=final author=<model> "
+                     "reviewer=<3rd-family model> verdict=<...> evidence=<path> -- a "
+                     "Claude-family final counts only when its reason= field is exactly "
+                     "no_free_leg_available (the phrase \"no free leg available\" in "
+                     "quotes is the same statement; note= never counts) -- OR no "
+                     "kind=final line at all "
+                     "once two counted cross-family seats from two different "
+                     "non-Claude families each carry a valid evidence=<path>")
 
 
 def _family_of_one_spelling(name, registry):
@@ -5487,6 +5942,68 @@ def is_final_reviewer(spelling):
     return name == FINAL_REVIEWER or bool(FINAL_REVIEWER_RE.match(name))
 
 
+def _is_claude_family(family):
+    """True when a resolved family is the Claude family (P12, shape (b)'s exclusion).
+
+    Said from the REGISTRY family, never from the spelling: `haiku`, `claude-haiku-4-5`
+    and `sonnet` are one family here, and an invented name is not.
+    """
+    return resolver.family_key(family) == CLAUDE_FAMILY
+
+
+def _statement_char_ok(ch):
+    """True for a plain-ASCII character, or one NFKC folds to non-space ASCII.
+
+    What NFKC folds INTO space or nothing (`\u00a0` padding, `\u200b` inside a word) and
+    a lookalike of another script (`n\u043e`) are refused pre-fold, because stripping the
+    folded padding would hide exactly the padding the fold made.
+    """
+    if ord(ch) < 128:
+        return True
+    folded = unicodedata.normalize("NFKC", ch)
+    return bool(folded) and folded.isascii() and not folded.isspace()
+
+
+def _no_free_leg_stated(entry):
+    """True when the entry's ``reason=`` field IS the D-1062 statement and nothing else.
+
+    P12c (D-1062 exact): this was a phrase search over ``reason`` AND ``note``, so
+    `note="not no free leg available"` stated it, as did any sentence carrying the
+    words. It is one exact field now: NFKC + casefolded, `_` and whitespace runs
+    collapsed to single spaces, stripped, equal to ``no free leg available`` — no
+    prefix, suffix, punctuation, empty value, or second disagreeing `reason` token
+    (duplicates fail closed), and ``note=`` is free text that states nothing.
+    """
+    raw = entry.get("reason") or ""
+    if "reason" in (entry.get("_repeated") or ()):
+        return False
+    if not all(_statement_char_ok(ch) for ch in raw):
+        return False
+    folded = _NO_FREE_LEG_SPACES_RE.sub(
+        " ", unicodedata.normalize("NFKC", raw).casefold()).strip()
+    return folded == NO_FREE_LEG_PHRASE
+
+
+def _record_author_family(entries, registry):
+    """``(family, why_not)`` for the model the record says wrote the lane.
+
+    A final entry may name its own `author=`; when it does not, the author is the one the
+    cross-family seats were checked against, which is the record's own claim about who
+    wrote the diff. Unknown is None (REVFIX S2): an author nobody can place is not a
+    family, so it cannot be told apart from a reviewer's either.
+    """
+    why = "no entry names an author the registry can place"
+    for entry in entries:
+        raw = (entry.get("author") or "").strip()
+        if not raw:
+            continue
+        family, reason = resolver.author_family(raw, registry)
+        if family is not None:
+            return family, None
+        why = reason
+    return None, why
+
+
 # P2/G1a: `evidence=<path>` points at the seat's own answer, so a READY claim in the
 # record is checked against the file the reviewer wrote. No field, no change of behaviour.
 EVIDENCE_DIR = os.path.join("logs", "briefs", "evidence")
@@ -5519,35 +6036,68 @@ def _resolve_evidence_path(root, raw):
 LEDGER_VERDICTS = {"ACCEPT": "accepted", "REJECT": "rejected"}
 
 
-def _ledger_append(row):
+def _ledger_append(row, writer=None):
     """One check-then-append under an advisory lock, so two parallel gate calls
     cannot both pass the duplicate check and double-append. POSIX flock on a
-    sibling `.lock`; the lock call sits in a branch Windows never takes."""
+    sibling `.lock`; the lock call sits in a branch Windows never takes.
+
+    P6c: the key is (run_id, reviewer, verdict, sha, ref) — the same seat of the same
+    answer at a NEW pushed sha is new evidence and earns its row, while the same seat
+    at the same sha is the same claim said twice. `writer` is the door the row goes
+    through: a production seat row takes `record_seat`, which refuses one that cannot
+    name its lane and sha.
+
+    P6d-FIX F2: for a REJECT that key is not enough on its own — `run=` names who the
+    review condemns, and one piece of evidence typed under two run ids condemned two
+    writers. So a seat row (one that names its sha) whose (reviewer, ref, sha, verdict)
+    is already on the ledger under a DIFFERENT run is refused, and says which run owns
+    that evidence. A row that names no sha is not a lane's measurement and keeps its
+    old, looser key. Returns True when the row landed, False when this exact row was
+    already there (a re-run, said nothing about), and the reason string when a different
+    run already made this claim."""
     target = writer_ledger.default_path()
     folder = os.path.dirname(os.path.abspath(target))
+    # The home is the MAIN checkout's logs/ (P6c), which a fresh clone has not
+    # created yet: the lock file has to have a directory to sit in, or the first
+    # verdict of a whole fleet would fail on a missing folder rather than on a gate.
+    if folder and not os.path.isdir(folder):
+        os.makedirs(folder, exist_ok=True)
     fd = os.open(os.path.join(folder, "." + os.path.basename(target) + ".lock"),
                  os.O_RDWR | os.O_CREAT, 0o600)
     try:
         if os.name != "nt":
             fcntl.flock(fd, fcntl.LOCK_EX)
+        claimed = None
         for seen in writer_ledger.load()[0]:
-            if (seen["run_id"], seen.get("reviewer"), seen["verdict"], seen.get("ref")) \
-                    == (row["run_id"], row["reviewer"], row["verdict"], row["ref"]):
-                return False
-        writer_ledger.record(row)
+            key = (seen.get("reviewer"), seen["verdict"], seen.get("sha"), seen.get("ref"))
+            if key == (row["reviewer"], row["verdict"], row.get("sha"), row.get("ref")):
+                if seen["run_id"] == row["run_id"]:
+                    return False
+                if row["verdict"] == "rejected" and row.get("sha") and claimed is None:
+                    claimed = seen["run_id"]
+        if claimed is not None:
+            return "evidence already recorded for run %s" % claimed
+        (writer or writer_ledger.record)(row)
         return True
     finally:
         os.close(fd)
 
 
-def _ledger_record_seat(entry, parsed, ref, write):
+def _ledger_record_seat(entry, parsed, ref, write, lane_sha=None, only_verdicts=None):
     """Append this seat's verdict to the writer ledger (AO-LEDGER-WRITE P6), and
     return the reason the seat must not pass the gate, or None. `ref` is the sha256
     of the evidence text, so re-running the gate over the same answer is a no-op and
     a changed answer is a new row. Notes ride on the entry for review_status. P6-FIX F1:
-    called only for a PAIR that agrees, never for a mismatch the gate refused."""
+    called only for a PAIR that agrees, never for a mismatch the gate refused.
+    `lane_sha` (P6c) is the (lane, pushed sha) the ready gate certified: naming them
+    makes the row take `record_seat`, and the client, model and cost are copied from
+    the writer's own run record rather than invented here.
+    `only_verdicts` (P6d) restricts the feed to the named ledger verdicts -- the refused
+    `ready` passes ("rejected",): it owes the writer's clock the rejection only."""
     verdict = LEDGER_VERDICTS.get(parsed["verdict"]) if parsed["countable"] else None
     if verdict is None or not write:
+        return None
+    if only_verdicts is not None and verdict not in only_verdicts:
         return None
     run = (entry.get("run") or "").strip()
     writer = writer_ledger.writer_for_run(run) if run else None
@@ -5564,15 +6114,31 @@ def _ledger_record_seat(entry, parsed, ref, write):
         row["failure_class"] = entry.get("failure") or "other"  # F3 refused an unknown one
     if entry.get("risk") in writer_ledger.RISKS:
         row["risk"] = entry["risk"]
+    cost = writer_ledger.run_cost(run)
+    if cost is not None:
+        row["cost"] = cost
+    seat = lane_sha is not None
+    if seat:
+        row["lane"], row["sha"] = lane_sha
     try:
-        _ledger_append(row)
-    except (writer_ledger.LedgerError, OSError, ValueError) as exc:
+        outcome = _ledger_append(row, writer_ledger.record_seat if seat else None)
+    except (writer_ledger.LedgerError, OSError) as exc:
         # Fail closed, as P3 defined it: a verdict that cannot be recorded does not
-        # clear the gate, and it says so rather than raising a traceback.
+        # clear the gate, and it says so rather than raising a traceback. The ledger
+        # path sits in the exception text, and a path is nothing to print here.
         reason = "ledger write failed: %s" % type(exc).__name__
-        entry.setdefault("_ledger", []).append("ledger: %s" % reason)
-        return reason
-    return None
+    except ValueError as exc:
+        # A shape the schema refused names the field, which is what to show.
+        reason = "ledger write refused: %s" % exc
+    else:
+        if isinstance(outcome, str):
+            # F2: the claim is not this run's to make — the evidence already condemns
+            # another writer. A note, not a gate failure: the review still happened.
+            entry.setdefault("_ledger", []).append("ledger: %s, not recorded" % outcome)
+        return None
+    entry.setdefault("_ledger", []).append(reason)
+    entry.setdefault("_ledger_failed", []).append(reason)
+    return reason
 
 
 def _ledger_field_refusal(entry):
@@ -5588,7 +6154,8 @@ def _ledger_field_refusal(entry):
     return None
 
 
-def _evidence_reason(entry, root, write_ledger=True):
+def _evidence_reason(entry, root, write_ledger=True, lane_sha=None,
+                     only_verdicts=None):
     """Why this entry's evidence file does not back its verdict, or None when it does:
     it must sit inside the repo, be readable, be a valid `parse_verdict` answer, say
     the word the record claims — PASS/SHIP/LGTM being one ACCEPT in different prose —
@@ -5643,10 +6210,11 @@ def _evidence_reason(entry, root, write_ledger=True):
         return "evidence verdict %s != entry %s" % (parsed["verdict"], word or "missing")
     return _ledger_record_seat(entry, parsed,
                                hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                               write_ledger)
+                               write_ledger, lane_sha, only_verdicts)
 
 
-def _review_entry_verdict(entry, root=None, write_ledger=True):
+def _review_entry_verdict(entry, root=None, write_ledger=True, lane_sha=None,
+                          only_verdicts=None):
     """``(ok, reason)`` for one entry's verdict field, read through the seat grammar
     (AO-SEAT-VERDICT-GRAMMAR): `verdict=**ACCEPT**` is `verdict=ACCEPT`, a finding (REJECT,
     HOLD, fix-first) refuses, every legacy READY_VERDICTS word still works. When the entry
@@ -5654,7 +6222,8 @@ def _review_entry_verdict(entry, root=None, write_ledger=True):
     verdict has to reach the writer ledger (P6). P6-FIX F1: the evidence is read on BOTH
     paths — a finding is not ready, and its matching rejection is still data."""
     raw = (entry.get("verdict") or "").strip()
-    refused = _ledger_field_refusal(entry) or _evidence_reason(entry, root, write_ledger)
+    refused = (_ledger_field_refusal(entry)
+                 or _evidence_reason(entry, root, write_ledger, lane_sha, only_verdicts))
     if (seat_verdict.verdict_word(raw) or "").lower() not in READY_VERDICTS:
         return False, "verdict %s" % (raw or "missing")
     if refused:
@@ -5662,14 +6231,30 @@ def _review_entry_verdict(entry, root=None, write_ledger=True):
     return True, None
 
 
-def _cross_family_seat(entry, registry, root=None, write_ledger=True):
+def _max_r_level(levels):
+    """The highest of a lane's risk levels, or None when none is known (P12b).
+
+    The class of a lane is the diff's judgement and whatever the record itself
+    declares, whichever is higher; anything the R-scale does not know -- an absent
+    field, a value that belongs to a seat the seat-check already refused -- is no
+    level at all. One source of the R-scale rules: `tools/autoos_writer_rule`, never
+    restated here.
+    """
+    known = [l for l in levels if l in ready_guards.R_LEVELS]
+    return max(known, key=ready_guards.R_LEVELS.index) if known else None
+
+
+def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=None,
+                       only_verdicts=None):
     """``(seat, reason)`` for one kind=cross-family entry.
 
     A *seat* is one entry that counts: a reviewer the registry places, an author
     the registry places, two different families, a declared ``family=`` that
-    agrees with the registry, and a READY verdict. Anything else is a reason the
-    entry does not count, said out loud -- an unplaced name is never evidence of
-    independence (REVFIX S2), and a non-READY verdict is a finding, not a seat.
+    agrees with the registry, a READY verdict, and -- for the Claude family -- the
+    words that say no free leg was available (D-1116, the same rule P12 put on the
+    sign-off). Anything else is a reason the entry does not count, said out loud --
+    an unplaced name is never evidence of independence (REVFIX S2), and a non-READY
+    verdict is a finding, not a seat.
     """
     reviewer = entry["reviewer"]
     family = reviewer_family(reviewer, registry)
@@ -5691,14 +6276,34 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True):
         # seat is refused and the mismatch names both sides.
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
-    ok, reason = _review_entry_verdict(entry, root, write_ledger)
+    ran = (entry.get("ran") or "").strip()
+    if ran and ran not in SEAT_RAN_VALUES:
+        return None, "%s ran=%s is not one of %s" % (
+            reviewer, ran, ", ".join(SEAT_RAN_VALUES))
+    if _is_claude_family(family) and not _no_free_leg_stated(entry):
+        # D-1116 (3): the free-first rule P12 put on the sign-off is a rule about
+        # Claude LEGS, so it gates a Claude SEAT the same way — an unproved
+        # "no free leg available" buys the seat no counting (P12c: one exact field).
+        return None, ("the Claude-family seat %s counts only when its reason= field "
+                      "is exactly the statement \"%s\" -- write "
+                      "reason=no_free_leg_available or "
+                      "reason=\"%s\"; note= never counts"
+                      % (reviewer, NO_FREE_LEG_PHRASE, NO_FREE_LEG_PHRASE))
+    ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha, only_verdicts)
     if not ok:
         return None, "%s %s" % (reviewer, reason)
     return {"reviewer": reviewer, "family": family,
-            "verdict": (entry.get("verdict") or "").strip()}, None
+            "verdict": (entry.get("verdict") or "").strip(),
+            # P12b: what this seat ran, if it said. A HIGH lane needs one that did.
+            "ran": ran,
+            # P12 shape (b) is carried by the seats, and only by the ones a file
+            # backs: an evidence-less seat is a claim, and the no-final shape is
+            # the one place the gate asks for proof of the reviews it never re-reads.
+            "evidence": bool((entry.get("evidence") or "").strip())}, None
 
 
-def _cross_family_review(entries, registry, root=None, write_ledger=True):
+def _cross_family_review(entries, registry, root=None, write_ledger=True,
+                         lane_sha=None, r_level=None, only_verdicts=None):
     """The record's independent review: >=2 READY seats from DISTINCT families.
 
     REVGATE2F (operator 2026-09-30): the gate used to pass on the FIRST valid
@@ -5709,6 +6314,13 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True):
     refusal. Missing and duplicated seats are both named in the detail, because
     "try again" without names sends someone to book a review that already
     happened.
+
+    P12b (D-1116): `r_level` is the lane's risk class, and an R3 (HIGH: privileged,
+    installer, state-mutating, auth/access/secrets) lane pays one more seat-floor --
+    at least ONE counted seat has to say it RAN the tests or a live check
+    (`ran=tests|live`), because reading a secrets diff is not the same evidence as
+    running it. None means the caller never judged the class (the library callers,
+    `review-status`), and asks for nothing, exactly as before.
     """
     wanted = [e for e in entries if e.get("kind") == "cross-family"]
     if not wanted:
@@ -5716,7 +6328,8 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True):
                 "detail": "no AutoOS-Review: kind=cross-family entry"}
     reasons, seats = [], []
     for entry in wanted:
-        seat, reason = _cross_family_seat(entry, registry, root, write_ledger)
+        seat, reason = _cross_family_seat(entry, registry, root, write_ledger,
+                                          lane_sha, only_verdicts)
         if reason is not None:
             reasons.append(reason)
             continue
@@ -5728,6 +6341,9 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True):
         seats.append(seat)
     if len(seats) < 2:
         reasons.append("2 cross-family seats required; have %d" % len(seats))
+    if r_level == "R3" and not any(s.get("ran") for s in seats):
+        reasons.append("R3 (HIGH) lane: at least one counted seat must have run the "
+                       "tests or a live check -- add ran=tests|live to its entry")
     if reasons:
         return {"ok": False, "families": [s["family"] for s in seats],
                 "seats": seats, "detail": "; ".join(reasons)}
@@ -5740,28 +6356,111 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True):
             "seats": seats, "detail": detail}
 
 
-def _final_review(entries, root=None, write_ledger=True):
-    """The record's sign-off: a kind=final entry naming the final checker."""
+#: (P12) The accepted shapes of the sign-off, said out loud in the report: a reader of
+#: a ready line should know whether a human family signed the lane or two free seats
+#: carried it, and those are different things to audit.
+FINAL_SHAPE_LABELS = {"a": "(a): a kind=final entry from a 3rd family",
+                      "b": "(b): no kind=final entry, two evidenced non-Claude seats"}
+
+
+def _final_review(entries, cross, registry, author_family=None, root=None,
+                  write_ledger=True, lane_sha=None, only_verdicts=None):
+    """The record's sign-off, FAMILY-AGNOSTIC (P12 AO-READY-FINAL-FAMILY).
+
+    Exactly one of three shapes has to hold, and the answer says which one it took:
+
+    (a) a `kind=final` entry from ANY countable family that is a THIRD family: the
+    registry places the reviewer (exact names, no substring or prefix matching,
+    R-orch-16), its family is not the author's and not the family of any counted
+    cross-family seat, and its verdict passes the seat grammar. A non-Claude final is a
+    seat like any other and needs a valid ``evidence=<path>``. The Claude family --
+    Sonnet, Haiku, the vendor's own ids -- counts ONLY when its ``reason=`` field is
+    exactly the statement ``no free leg available`` (`reason=no_free_leg_available`, the
+    same phrase in quotes, any case): free legs come first (D-1061/D-1062), a Claude
+    sign-off says why it was unavoidable in that one field, and ``note=`` states nothing.
+
+    (b) NO `kind=final` entry at all, once the record already holds >=2 counted
+    cross-family seats from two different NON-Claude families, each carrying a valid
+    countable evidence file. That is the free-first lane: nothing left to sign off.
+
+    (c) otherwise not ready, and the detail names the shape that is missing and why --
+    a family collision is named with both sides, a Claude final without the words is
+    told which words to write.
+    """
+    seats = list(cross.get("seats") or [])
     wanted = [e for e in entries if e.get("kind") == "final"]
     if not wanted:
-        return {"ok": False,
-                "detail": "no AutoOS-Review: kind=final entry naming %s" % FINAL_REVIEWER}
-    named = [e for e in wanted if is_final_reviewer(e["reviewer"])]
-    if not named:
-        return {"ok": False,
-                "detail": "the final entries name %s, not %s"
-                          % (", ".join(sorted(e["reviewer"] for e in wanted)), FINAL_REVIEWER)}
+        free = [s for s in seats if not _is_claude_family(s["family"])]
+        counted = sorted({s["family"] for s in free if s.get("evidence")})
+        if len(counted) >= 2:
+            return {"ok": True, "shape": "b", "seats": free,
+                    "detail": "no final needed: %d non-Claude seats" % len(free)}
+        why = "have %s" % (", ".join(counted) or "no counted non-Claude seat with a "
+                           "valid evidence=<path>")
+        missing = [s["reviewer"] for s in free if not s.get("evidence")]
+        if missing:
+            why += "; the seat(s) %s carry no evidence=<path>" % ", ".join(missing)
+        claude = [s["reviewer"] for s in seats if _is_claude_family(s["family"])]
+        if claude:
+            why += ("; the Claude-family seat(s) %s do not count toward it"
+                    % ", ".join(claude))
+        return {"ok": False, "shape": "b",
+                "detail": "no AutoOS-Review: kind=final entry naming %s: shape (b) "
+                          "needs 2 counted cross-family seats from two different "
+                          "non-Claude families with valid evidence -- %s"
+                          % (FINAL_REVIEWER, why)}
     reasons = []
-    for entry in named:
-        ok, reason = _review_entry_verdict(entry, root, write_ledger)
-        if ok:
-            return {"ok": True,
-                    "detail": "%s verdict %s" % (entry["reviewer"], entry.get("verdict"))}
-        reasons.append("%s %s" % (entry["reviewer"], reason))
-    return {"ok": False, "detail": "; ".join(reasons)}
+    for entry in wanted:
+        reviewer = (entry.get("reviewer") or "").strip()
+        family = reviewer_family(reviewer, registry)
+        if family is None:
+            if not is_final_reviewer(reviewer):
+                # REVGATE2 kept: a name that merely CONTAINS sonnet is not the checker,
+                # and a name the registry cannot place is no family at all.
+                reasons.append("the final entry names %s, which is not a known reviewer "
+                               "and is not %s" % (reviewer, FINAL_REVIEWER))
+                continue
+            family = CLAUDE_FAMILY  # the orchestrator's own model, matched by NAME
+        ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha,
+                                           only_verdicts)
+        if not ok:
+            reasons.append("%s %s" % (reviewer, reason))
+            continue
+        if _is_claude_family(family):
+            if not _no_free_leg_stated(entry):
+                reasons.append("the final reviewer %s (%s) counts only when its reason= "
+                               "field is exactly the statement \"%s\" -- write "
+                               "reason=no_free_leg_available or "
+                               "reason=\"%s\"; note= never counts"
+                               % (reviewer, family, NO_FREE_LEG_PHRASE,
+                                  NO_FREE_LEG_PHRASE))
+                continue
+        elif not (entry.get("evidence") or "").strip():
+            reasons.append("the final reviewer %s (%s) carries no evidence=<path> file "
+                           "to back its verdict" % (reviewer, family))
+            continue
+        if author_family is None:
+            reasons.append("the record names no author the registry can place, so the "
+                           "final cannot be checked against the author's family")
+            continue
+        if family == author_family:
+            reasons.append("the final reviewer %s is the same family (%s) as the author"
+                           % (reviewer, family))
+            continue
+        same = [s["reviewer"] for s in seats if s["family"] == family]
+        if same:
+            reasons.append("the final reviewer %s is the same family (%s) as "
+                           "cross-family seat %s" % (reviewer, family, same[0]))
+            continue
+        return {"ok": True, "shape": "a",
+                "detail": "%s verdict %s" % (reviewer, entry.get("verdict"))}
+    return {"ok": False, "shape": "a",
+            "detail": "shape (a) unsatisfied: %s -- shape (b) is not open while a "
+                      "kind=final entry is present" % "; ".join(reasons)}
 
 
-def review_status(text, registry, root=None, write_ledger=True):
+def review_status(text, registry, root=None, write_ledger=True, lane_sha=None,
+                  r_level=None, only_verdicts=None):
     """Which of the two reviews a lane record carries, read off the record itself.
 
     An item 2 spawn has already proved a reviewer EXISTS for this card; this is
@@ -5770,12 +6469,25 @@ def review_status(text, registry, root=None, write_ledger=True):
     that says FIX-FIRST all fail, and each says which, because "missing" would
     send someone to book a review that already happened and did not pass. The
     floor is two seats from distinct families (REVGATE2F): one entry is no
-    longer a review, and two spellings of one family are one seat.
+    longer a review, and two spellings of one family are one seat. The sign-off
+    is family-agnostic since P12 (see `_final_review`): a 3rd-family `kind=final`
+    entry, or no final at all once two evidenced non-Claude seats carry the lane.
 
     Each countable evidence-backed seat is written to the writer verdict ledger as
-    it is read (AO-LEDGER-WRITE P6); `write_ledger=False` is the `--no-ledger` dry
-    inspection, and a seat whose row cannot be written is refused with the reason --
-    an unrecorded verdict ticks none of the clocks the ledger feeds.
+    it is read (AO-LEDGER-WRITE P6) -- but ONLY for a caller that asked for it: P6c
+    made the read the default, because a gate that writes on every look wrote rows for
+    a `--dry-run`, for a refused `ready`, and for a record nobody acted on. Pass
+    `write_ledger=True` (the `review-status --write-ledger` flag) to record, and
+    `lane_sha=(lane, pushed sha)` (what `ready` passes after its line landed) for rows
+    that must name both. A seat whose row cannot be written is refused with the reason
+    -- an unrecorded verdict ticks none of the clocks the ledger feeds.
+
+    P12b (D-1116): `r_level` is the lane's risk class -- what
+    `tools/autoos_writer_rule.required_r_level` says of its diff, which `ready` passes
+    in -- and a class of R3 (HIGH) raises the seat floor: one counted seat has to have
+    RAN something (`ran=tests|live`). The class is the higher of that and the
+    record's own declared `risk=`. None means nobody judged the diff, and the gate
+    asks for nothing, as it always did.
     """
     entries, malformed = [], []
     for line in (text or "").splitlines():
@@ -5783,19 +6495,35 @@ def review_status(text, registry, root=None, write_ledger=True):
         if not match:
             continue
         fields = {}
-        for token in match.group("body").split():
-            key, _sep, value = token.partition("=")
-            if value and key.lower() in REVIEW_ENTRY_FIELDS:
-                fields[key.lower()] = value
+        for field in REVIEW_ENTRY_FIELD_RE.finditer(match.group("body")):
+            key = field.group(1).lower()
+            if key not in REVIEW_ENTRY_FIELDS:
+                continue
+            value = next((group for group in field.group(2, 3, 4) if group), "")
+            if key == "kind":
+                # P12c: the gate compares kind= with lower-case literals, so a
+                # hand-written `kind=Final` is stored lower-cased. verdict= folds case
+                # where it is read; ran= stays case-sensitive (P12b).
+                value = value.strip().lower()
+            if key in fields and fields[key] != value:
+                # A field written twice with two values states nothing: fail closed.
+                fields.setdefault("_repeated", []).append(key)
+            if value:
+                fields[key] = value
         if fields.get("kind") and fields.get("reviewer"):
             entries.append(fields)
         else:
             malformed.append(match.group("body").strip())
-    cross = _cross_family_review(entries, registry, root, write_ledger)
-    final = _final_review(entries, root, write_ledger)
+    level = _max_r_level([r_level] + [e.get("risk") for e in entries])
+    cross = _cross_family_review(entries, registry, root, write_ledger, lane_sha,
+                                 level, only_verdicts)
+    author_family, _author_why = _record_author_family(entries, registry)
+    final = _final_review(entries, cross, registry, author_family, root,
+                          write_ledger, lane_sha, only_verdicts)
     return {"entries": len(entries), "malformed": malformed,
             "cross_family": cross, "final": final,
             "ledger_notes": [n for e in entries for n in e.get("_ledger") or []],
+            "ledger_failures": [n for e in entries for n in e.get("_ledger_failed") or []],
             "ready": cross["ok"] and final["ok"],
             "hint": REVIEW_ENTRY_HINT}
 
@@ -5821,15 +6549,24 @@ def print_review_report(label, report):
     """
     print("review-status: %s -- %d review entr%s"
           % (label, report["entries"], "y" if report["entries"] == 1 else "ies"))
-    for key, name in (("cross_family", "cross-family"), ("final", "final (%s)" % FINAL_REVIEWER)):
+    for key, name in (("cross_family", "cross-family"),
+                      ("final", "final (any family)")):
         item = report[key]
         print("  %-16s %s: %s" % (name, "ok" if item["ok"] else "NOT READY", item["detail"]))
+        # P12: WHICH accepted shape the sign-off is. The ready line carries the detail
+        # only, so the report is where a reader learns whether a human signed the lane
+        # or two free seats carried it.
+        if key == "final" and FINAL_SHAPE_LABELS.get(item.get("shape")):
+            print("  %-16s %s" % ("", "shape " + FINAL_SHAPE_LABELS[item["shape"]]))
         # REVGATE2F: every counted seat prints as model (family) + verdict, so
         # "which reviews" is answerable from the output without re-reading the
         # record line by line.
         for number, seat in enumerate(item.get("seats") or [], 1):
-            print("  seat %d: %s (%s) verdict=%s"
-                  % (number, seat["reviewer"], seat["family"], seat["verdict"]))
+            # P12b: a HIGH lane's reader needs to see WHICH seat ran something, not
+            # just that the lane cleared.
+            print("  seat %d: %s (%s) verdict=%s%s"
+                  % (number, seat["reviewer"], seat["family"], seat["verdict"],
+                     " ran=%s" % seat["ran"] if seat.get("ran") else ""))
     for line in report["malformed"]:
         print("  note: entry without a kind= or reviewer= ignored: %s" % line)
     # AO-LEDGER-WRITE P6: a verdict the ledger could not name a writer for, or could
@@ -5888,8 +6625,10 @@ def cmd_review_status(args) -> int:
 
     Exit 0 ready, 1 a review is missing or still open, 2 the record could not be
     read -- a typo'd path is not a lane that needs reviewing, and a caller that
-    waits on 1 would wait forever on that mistake. `--no-ledger` reads the record
-    without writing the verdict ledger; `ready` always writes (AO-LEDGER-WRITE P6).
+    waits on 1 would wait forever on that mistake. Since P6c the command is a
+    READER: looking at a record is not a verdict, so nothing lands on the ledger
+    unless `--write-ledger` asks for it (`--no-ledger` stays accepted as the no-op
+    it now is). `ready` is the writer: its rows follow the line it appended.
     """
     try:
         text, label = read_lane_record(args.record)
@@ -5898,7 +6637,7 @@ def cmd_review_status(args) -> int:
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
     report = review_status(text, registry, root=os.getcwd(),
-                           write_ledger=not getattr(args, "no_ledger", False))
+                           write_ledger=getattr(args, "write_ledger", False))
     print_review_report(label, report)
     return 0 if report["ready"] else 1
 
@@ -6232,6 +6971,80 @@ def read_guards_text(path):
         return None, "%s" % exc
 
 
+def _rejected_seat_present(text):
+    """Whether a refusal could write a rejected row at all: does one entry line carry a
+    `verdict=` that maps to the ledger's `rejected`.
+
+    A NECESSARY condition only — the write path still applies the pair rule and every
+    other seat check — and it exists so a refusal that can only ever write zero rows (a
+    HOLD, a finding) costs no `git ls-remote`. The verdict word and the ledger name are
+    read through their own owners (`seat_verdict`, `LEDGER_VERDICTS`), never restated."""
+    for line in (text or "").splitlines():
+        match = REVIEW_ENTRY_RE.match(line)
+        if not match:
+            continue
+        for field in REVIEW_ENTRY_FIELD_RE.finditer(match.group("body")):
+            if field.group(1).lower() != "verdict":
+                continue
+            value = next((group for group in field.group(2, 3, 4) if group), "")
+            word = (seat_verdict.verdict_word(value) or "").upper()
+            if LEDGER_VERDICTS.get(word) == "rejected":
+                return True
+    return False
+
+
+def _record_rejected_seats(args, text, registry):
+    """The reject feed a refused `ready` earns (AO-LEDGER-REJECT-ROWS P6d).
+
+    P6c moved the rows to after the appended line, which had a consequence nobody meant:
+    a countable REJECT refuses the gate first, so `ready` could only ever write
+    `accepted` rows and `demoted()` never saw a rejection. A refusal is not the noise P6c
+    removed -- a dry run or a stale sha records a decision nobody made, a seat's REJECT
+    IS the measurement -- so this writes just the rejected rows, never an `accepted` one
+    that would credit the writer for the review that stopped it. The caller still exits 1
+    either way; a row that cannot be written says so once.
+
+    P6d-FIX F1: `--sha` is the lane's own claim, and this path runs BEFORE the pushed-sha
+    gate, so it used to record a rejection against any 40-hex the caller typed -- a typo
+    wrote a real row naming a commit that is not the lane's tip, which is exactly the
+    provenance these rows exist to carry. So the tip is read here, the same way the gate
+    below reads it, and anything that is not origin's current tip records nothing: the
+    refusal stands, only the measurement is withheld, said once.
+    """
+    if not _FULL_SHA_RE.fullmatch(args.sha or ""):
+        # Say it rather than let "no rows appeared" read as "there was no reject".
+        print("ready: the refused lane records no verdict -- --sha %r is not a 40-hex "
+              "commit, so no row can name the commit the rejection judged"
+              % (args.sha,), file=sys.stderr)
+        return
+    if not _rejected_seat_present(text):
+        return
+    root = args.repo or os.getcwd()
+    tip, git_error = remote_branch_tip(root, args.branch)
+    if git_error:
+        print("ready: reject rows not recorded: cannot read origin/%s: %s"
+              % (args.branch, git_error), file=sys.stderr)
+        return
+    if tip != args.sha:
+        print("ready: reject rows not recorded: --sha is not origin/%s's tip"
+              % args.branch, file=sys.stderr)
+        return
+    refused = review_status(text, registry, root=root,
+                            write_ledger=True, lane_sha=(args.branch, args.sha),
+                            only_verdicts=("rejected",))
+    failures = refused["ledger_failures"]
+    for note in dict.fromkeys(failures):
+        print("ready: %s -- the lane stays refused for the review it carries; only "
+              "the measurement is missing" % note, file=sys.stderr)
+    # F3: the success path prints a row it never wrote because no writer record names
+    # the run (the seat still counted, the measurement just cannot name its subject).
+    # The refusal path dropped that note on the floor, so "no row appeared" read as
+    # "there was nothing to record".
+    for note in dict.fromkeys(refused["ledger_notes"]):
+        if note not in failures:
+            print("ready: %s" % note, file=sys.stderr)
+
+
 def cmd_ready(args) -> int:
     """Write the `ready` line an orchestrator used to type by hand.
 
@@ -6267,7 +7080,13 @@ def cmd_ready(args) -> int:
 
     Exit 0 the line was written (or, with --dry-run, would be), 1 a gate is not
     met, 2 a gate could not be read (unreadable record, git or gh failure,
-    unwritable inbox).
+    unwritable inbox). The seat verdicts land on the writer ledger only after the
+    line landed, carrying this lane's `--branch` and `--sha` (AO-LEDGER-DRYRUN P6c):
+    a --dry-run and a read of the record write nothing, and a row that cannot be
+    written afterwards is reported on stderr with exit 1 while the line stays where it
+    is. The review gate's refusal is the exception (AO-LEDGER-REJECT-ROWS P6d): a
+    countable, evidence-backed REJECT is a measurement of the writer that no other
+    caller takes, so a refused lane writes just those rows and never an `accepted` one.
 
     WRITER-GUARDS (AO-WRITER-GUARDS P4b) sits between the pushed-sha gate and the
     CI gate and reads the lane's own diff (`lane_diff_paths`, injected from
@@ -6293,17 +7112,51 @@ def cmd_ready(args) -> int:
     to judge` — is exit 2. A lane that clears the guards appends ` guards=ok` to
     the ready line (` ops=1` too for an ops lane); a lane that triggers nothing
     appends no new field, and `preflight` (the same module's tool check, exit 3 on
-    input_required) tells the operator whether the guard tools exist at all."""
+    input_required) tells the operator whether the guard tools exist at all.
+
+    P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
+    `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
+    privileged, installer, state-mutating, auth/access/secrets) lane is refused unless
+    one counted seat says it RAN the tests or a live check (`ran=tests|live`).
+    `--dry-run` changes nothing there: it refuses the same way and writes nothing."""
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
         print("ready: %s" % exc, file=sys.stderr)
         return 2
     registry = load_registry(args.registry or REGISTRY_PATH)
-    report = review_status(text, registry, root=args.repo or os.getcwd())
+    base = getattr(args, "base", None) or "origin/main"
+    task_type = getattr(args, "task_type", None) or "code"
+    # P12b (D-1116): the HIGH-class review floor reads the SAME diff the writer-guards
+    # below read, so the diff is taken up here and ONCE. Its own refusals stay where
+    # they were reported — after the push check — because "which review is missing" is
+    # the nearer answer than "which commit the base is", and a diff this gate cannot
+    # read has no judged class at all: it asks for no ran= seat here, then exits on its
+    # own gate below rather than failing open on an unknown one.
+    try:
+        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
+                                                           base, args.sha)
+        diff_refusal = None
+    except LaneDiffRefusal as exc:
+        diff_paths, diff_raw, diff_error = [], "", None
+        diff_refusal = exc
+    try:
+        lane_level = ready_guards.required_r_level(task_type, diff_paths, diff_raw)
+    except (ready_guards.GuardError, ValueError):
+        lane_level = None
+    # AO-LEDGER-DRYRUN (P6c): the gate is a READ here. It used to record as it
+    # checked, so a --dry-run and every refused lane left rows on the ledger —
+    # measurements of decisions that were never made.
+    report = review_status(text, registry, root=args.repo or os.getcwd(),
+                           write_ledger=False, r_level=lane_level)
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")
+        # AO-LEDGER-REJECT-ROWS (P6d): the rejection the lane was refused for is the
+        # one row this refusal owes the writer's measurement. --dry-run still writes
+        # nothing -- a dry run is a decision nobody made yet.
+        if not args.dry_run:
+            _record_rejected_seats(args, text, registry)
         return 1
     tip, git_error = remote_branch_tip(args.repo or os.getcwd(), args.branch)
     if git_error:
@@ -6330,13 +7183,8 @@ def cmd_ready(args) -> int:
     guards_fields = ""
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
-    base = getattr(args, "base", None) or "origin/main"
-    task_type = getattr(args, "task_type", None) or "code"
-    try:
-        diff_paths, diff_raw, diff_error = lane_diff_paths(args.repo or os.getcwd(),
-                                                           base, args.sha)
-    except LaneDiffRefusal as exc:
-        print("ready: not appended -- %s" % exc, file=sys.stderr)
+    if diff_refusal is not None:
+        print("ready: not appended -- %s" % diff_refusal, file=sys.stderr)
         return 1
     if diff_error:
         print("ready: cannot read diff: %s" % diff_error, file=sys.stderr)
@@ -6528,7 +7376,23 @@ def cmd_ready(args) -> int:
         return 2
     print("ready: appended to %s" % args.inbox)
     print("  %s" % line)
-    return 0
+    # AO-LEDGER-DRYRUN (P6c): the rows this line earned, written through the door that
+    # requires a lane and a pushed sha. AFTER the append, and never instead of it: the
+    # line is the record of the DECISION while a row is only the measurement, so
+    # deleting the line because the ledger could not be written would claim a lane was
+    # never readied when it was. Loud, then exit 1: the caller fixes the ledger and
+    # re-runs, where the (run_id, reviewer, verdict, sha, ref) key writes nothing twice.
+    rc = 0
+    seated = review_status(text, registry, root=args.repo or os.getcwd(),
+                           lane_sha=(args.branch, args.sha))
+    for note in seated["ledger_notes"]:
+        if note not in seated["ledger_failures"]:
+            print("  %s" % note)  # e.g. a seat whose run names no writer: not recorded
+            continue
+        print("ready: %s -- the line stays in %s: it records the decision, the row "
+              "only the measurement" % (note, args.inbox), file=sys.stderr)
+        rc = 1
+    return rc
 
 
 def cmd_preflight(args, which=None) -> int:
@@ -12856,6 +13720,10 @@ def cmd_run(args, cfg: dict) -> int:
         watch_before = tool_watch_snapshot(watch_paths)
         # I12: the plaintext-secret refusal runs BEFORE anything is created,
         # so a denied card leaves no ~/fleet directory in the operator's home.
+        # AO-TOOLHOME-SIZE P8b (B): before a new toolhome is provisioned, keep the
+        # sum of every existing *.toolhome under the three roots under the cap by
+        # pruning the oldest ENDED runs' cache dirs. Never raises, never blocks.
+        cap_toolhomes()
         try:
             sandbox_root_prepare(source, sb["path"])
             isolate_clone(source, sb["path"], sb["branch"], sb.get("review_base"))
@@ -13794,10 +14662,14 @@ def _parser_review_status(sub):
     review_status_p.add_argument("--registry",
                                  help="registry to resolve model families against "
                                       "(default: catalog/ai-registry.json)")
+    review_status_p.add_argument("--write-ledger", action="store_true",
+                                 help="append this record's countable seat verdicts to "
+                                      "the writer ledger (P6c: the command is a reader "
+                                      "without it — looking at a record is not a verdict)")
     review_status_p.add_argument("--no-ledger", action="store_true",
-                                 help="read the record without appending its seat "
-                                      "verdicts to the writer ledger (dry inspection; "
-                                      "`ready` always writes)")
+                                 help="accepted for compatibility; the command has read "
+                                      "the record without writing the verdict ledger "
+                                      "since P6c, so this is a no-op")
 
 
 def _parser_ready(sub):
@@ -13909,6 +14781,34 @@ def _parser_card(sub):
     check_p.add_argument("file", help="the card file, usually <RUN>/status/<name>.card.md")
 
 
+def _nonneg_hours(text):
+    """argparse type: `--min-age-hours` is a number of hours >= 0. A negative gate
+    would mean "prune runs that have not ended yet", so it is refused at the parser
+    (rc 2) before any root is walked."""
+    try:
+        val = float(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("expected a number of hours, got %r" % text)
+    if not val >= 0.0:                      # also refuses NaN, which no compare wins
+        raise argparse.ArgumentTypeError("expected a value >= 0, got %r" % text)
+    return val
+
+
+def _parser_prune_sandboxes(sub):
+    p = sub.add_parser(
+        "prune-sandboxes", help="reclaim ended-and-aged run sandboxes and their "
+                                ".toolhome/.opencode-data siblings across the three roots "
+                                "(main logs/sandboxes, each lane worktree, ~/fleet/sandboxes). "
+                                "DEFAULT DRY RUN — deleting needs --apply; each candidate is "
+                                "decided from the runner-private record only, never job.json")
+    p.add_argument("--apply", action="store_true",
+                   help="delete the eligible sandboxes (default: report only, delete nothing)")
+    p.add_argument("--min-age-hours", dest="min_age_hours", type=_nonneg_hours,
+                   metavar="N", default=MIN_AGE_HOURS_DEFAULT,
+                   help="prune only runs ended at least N hours ago, N >= 0 "
+                        "(default: %(default)s)")
+
+
 VERB_PARSERS = {
     "usage": _parser_usage,
     "token-rate": _parser_token_rate,
@@ -13924,6 +14824,7 @@ VERB_PARSERS = {
     "preflight": _parser_preflight,
     "inbox": _parser_inbox,
     "card": _parser_card,
+    "prune-sandboxes": _parser_prune_sandboxes,
 }
 
 # Every handler takes (args, cfg); cfg is the opencode.jsonc only the spawning
@@ -13934,6 +14835,7 @@ VERB_PARSERS = {
 VERB_HANDLERS = {
     "context": lambda args, cfg: cmd_context(args),
     "card": lambda args, cfg: cmd_card(args),
+    "prune-sandboxes": lambda args, cfg: cmd_prune_sandboxes(args),
     "heartbeat": lambda args, cfg: cmd_heartbeat(args),
     "inbox": lambda args, cfg: cmd_inbox(args),
     "list": lambda args, cfg: cmd_list(cfg),
