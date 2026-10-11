@@ -292,6 +292,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.parse
 import urllib.request
 import uuid
@@ -5476,15 +5477,15 @@ def review_run_refusal(review: dict | None):
 REVIEW_ENTRY_RE = re.compile(r"^\s*(?:[#>*-]+\s*)?AutoOS-Review:\s*(?P<body>.+)$")
 REVIEW_ENTRY_FIELDS = ("kind", "author", "reviewer", "family", "verdict", "evidence",
                        "run", "task", "failure", "risk",
-                       # P12 (AO-READY-FAMILY): the two fields that let a Claude-family
-                       # final say WHY it was paid for at all.
+                       # P12 (AO-READY-FAMILY): why a Claude-family final was paid for
+                       # at all. P12c: only `reason=` states it; `note=` is free text.
                        "reason", "note",
                        # P12b (D-1116): what a seat actually RAN, required of one seat
                        # in a HIGH (R3) lane.
                        "ran")
-# One `key=value` at a time, a quoted value keeping its spaces: the free phrase the
-# final checker writes goes in quotes, and splitting the body on whitespace alone
-# would read `note="no free leg available"` as three tokens and keep none of them.
+# One `key=value` at a time, a quoted value keeping its spaces: the statement the final
+# checker writes goes in quotes (`reason="no free leg available"`), and splitting the
+# body on whitespace alone would read it as three tokens and keep none of them.
 REVIEW_ENTRY_FIELD_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9_-]*)=(?:\"([^\"]*)\"|'([^']*)'|(\S+))")
 READY_VERDICTS = frozenset(("ready", "pass", "passed", "approve", "approved", "lgtm",
@@ -5506,9 +5507,11 @@ FINAL_REVIEWER_RE = re.compile(r"^claude-sonnet-[0-9][0-9a-z.-]*$")
 # P12: the family that used to be the ONLY sign-off now has to justify itself: free
 # legs come first (D-1061/D-1062), so a Claude-family final counts only when the
 # entry states that no free leg was available.
+# P12c (D-1062 exact): NO_FREE_LEG_PHRASE is the WHOLE `reason=` value, not a phrase to
+# be found inside a field — see `_no_free_leg_stated`.
 CLAUDE_FAMILY = "anthropic"
 NO_FREE_LEG_PHRASE = "no free leg available"
-_NO_FREE_LEG_WORDS_RE = re.compile(r"[^a-z0-9]+")
+_NO_FREE_LEG_SPACES_RE = re.compile(r"[_\s]+")
 # P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
 # lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
 # would otherwise read as the evidence the gate exists to demand.
@@ -5521,9 +5524,10 @@ REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "lane needs ran=tests|live on at least one counted seat | final: EITHER "
                      "AutoOS-Review: kind=final author=<model> "
                      "reviewer=<3rd-family model> verdict=<...> evidence=<path> -- a "
-                     "Claude-family final counts only when it also says "
-                     "reason=no_free_leg_available or "
-                     "note=\"no free leg available...\" -- OR no kind=final line at all "
+                     "Claude-family final counts only when its reason= field is exactly "
+                     "no_free_leg_available (the phrase \"no free leg available\" in "
+                     "quotes is the same statement; note= never counts) -- OR no "
+                     "kind=final line at all "
                      "once two counted cross-family seats from two different "
                      "non-Claude families each carry a valid evidence=<path>")
 
@@ -5947,19 +5951,37 @@ def _is_claude_family(family):
     return resolver.family_key(family) == CLAUDE_FAMILY
 
 
-def _no_free_leg_stated(entry):
-    """True when the entry says the free legs were unavailable, in either form.
+def _statement_char_ok(ch):
+    """True for a plain-ASCII character, or one NFKC folds to non-space ASCII.
 
-    The machine spelling `reason=no_free_leg_available` and the free phrase in a quoted
-    `note="no free leg available: ..."`. Punctuation and case are not part of the phrase,
-    but a word glued to it is: `note="no free leg availablex"` is not the statement.
+    What NFKC folds INTO space or nothing (`\u00a0` padding, `\u200b` inside a word) and
+    a lookalike of another script (`n\u043e`) are refused pre-fold, because stripping the
+    folded padding would hide exactly the padding the fold made.
     """
-    for field in ("reason", "note"):
-        words = " %s " % _NO_FREE_LEG_WORDS_RE.sub(
-            " ", (entry.get(field) or "").lower()).strip()
-        if " %s " % NO_FREE_LEG_PHRASE in words:
-            return True
-    return False
+    if ord(ch) < 128:
+        return True
+    folded = unicodedata.normalize("NFKC", ch)
+    return bool(folded) and folded.isascii() and not folded.isspace()
+
+
+def _no_free_leg_stated(entry):
+    """True when the entry's ``reason=`` field IS the D-1062 statement and nothing else.
+
+    P12c (D-1062 exact): this was a phrase search over ``reason`` AND ``note``, so
+    `note="not no free leg available"` stated it, as did any sentence carrying the
+    words. It is one exact field now: NFKC + casefolded, `_` and whitespace runs
+    collapsed to single spaces, stripped, equal to ``no free leg available`` — no
+    prefix, suffix, punctuation, empty value, or second disagreeing `reason` token
+    (duplicates fail closed), and ``note=`` is free text that states nothing.
+    """
+    raw = entry.get("reason") or ""
+    if "reason" in (entry.get("_repeated") or ()):
+        return False
+    if not all(_statement_char_ok(ch) for ch in raw):
+        return False
+    folded = _NO_FREE_LEG_SPACES_RE.sub(
+        " ", unicodedata.normalize("NFKC", raw).casefold()).strip()
+    return folded == NO_FREE_LEG_PHRASE
 
 
 def _record_author_family(entries, registry):
@@ -6236,9 +6258,11 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
     if _is_claude_family(family) and not _no_free_leg_stated(entry):
         # D-1116 (3): the free-first rule P12 put on the sign-off is a rule about
         # Claude LEGS, so it gates a Claude SEAT the same way — an unproved
-        # "no free leg available" buys the seat no counting.
-        return None, ("the Claude-family seat %s counts only when the entry says %s "
-                      "-- reason=no_free_leg_available or note=\"%s ...\""
+        # "no free leg available" buys the seat no counting (P12c: one exact field).
+        return None, ("the Claude-family seat %s counts only when its reason= field "
+                      "is exactly the statement \"%s\" -- write "
+                      "reason=no_free_leg_available or "
+                      "reason=\"%s\"; note= never counts"
                       % (reviewer, NO_FREE_LEG_PHRASE, NO_FREE_LEG_PHRASE))
     ok, reason = _review_entry_verdict(entry, root, write_ledger, lane_sha)
     if not ok:
@@ -6324,10 +6348,10 @@ def _final_review(entries, cross, registry, author_family=None, root=None,
     R-orch-16), its family is not the author's and not the family of any counted
     cross-family seat, and its verdict passes the seat grammar. A non-Claude final is a
     seat like any other and needs a valid ``evidence=<path>``. The Claude family --
-    Sonnet, Haiku, the vendor's own ids -- counts ONLY when the entry states
-    ``no free leg available`` (`reason=no_free_leg_available`, or the phrase in a quoted
-    ``note="..."``): free legs come first (D-1061/D-1062), so a Claude sign-off has to
-    say why it was unavoidable.
+    Sonnet, Haiku, the vendor's own ids -- counts ONLY when its ``reason=`` field is
+    exactly the statement ``no free leg available`` (`reason=no_free_leg_available`, the
+    same phrase in quotes, any case): free legs come first (D-1061/D-1062), a Claude
+    sign-off says why it was unavoidable in that one field, and ``note=`` states nothing.
 
     (b) NO `kind=final` entry at all, once the record already holds >=2 counted
     cross-family seats from two different NON-Claude families, each carrying a valid
@@ -6377,9 +6401,10 @@ def _final_review(entries, cross, registry, author_family=None, root=None,
             continue
         if _is_claude_family(family):
             if not _no_free_leg_stated(entry):
-                reasons.append("the final reviewer %s (%s) counts only when the entry "
-                               "says %s -- reason=no_free_leg_available or "
-                               "note=\"%s ...\""
+                reasons.append("the final reviewer %s (%s) counts only when its reason= "
+                               "field is exactly the statement \"%s\" -- write "
+                               "reason=no_free_leg_available or "
+                               "reason=\"%s\"; note= never counts"
                                % (reviewer, family, NO_FREE_LEG_PHRASE,
                                   NO_FREE_LEG_PHRASE))
                 continue
@@ -6448,6 +6473,14 @@ def review_status(text, registry, root=None, write_ledger=True, lane_sha=None,
             if key not in REVIEW_ENTRY_FIELDS:
                 continue
             value = next((group for group in field.group(2, 3, 4) if group), "")
+            if key == "kind":
+                # P12c: the gate compares kind= with lower-case literals, so a
+                # hand-written `kind=Final` is stored lower-cased. verdict= folds case
+                # where it is read; ran= stays case-sensitive (P12b).
+                value = value.strip().lower()
+            if key in fields and fields[key] != value:
+                # A field written twice with two values states nothing: fail closed.
+                fields.setdefault("_repeated", []).append(key)
             if value:
                 fields[key] = value
         if fields.get("kind") and fields.get("reviewer"):
