@@ -179,6 +179,12 @@ services:
       # Carries start-server-013.sh into the container at /cluster (same mount
       # omnigraph-local-init uses; compose resolves it from this file's directory).
       - ./cluster:/cluster:ro
+    # RAM only, and gone with the container. start-server-013.sh (Server d37fe8504)
+    # writes the S3 credentials to a 0600 curl config under /tmp and keeps its
+    # heartbeat scratch (marker, lease-lost flag) there; on a tmpfs neither ever
+    # reaches the image layer or the developer's host filesystem.
+    tmpfs:
+      - /tmp
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
