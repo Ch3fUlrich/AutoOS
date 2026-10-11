@@ -27,9 +27,13 @@ name: mcp-server
 
 services:
   # ─── MinIO — S3-compatible object store (Omnigraph storage backend) ────────
+  #   The image is a REQUIRED variable, never a public `:latest`: a target host that
+  #   cannot pull Docker Hub fails here with a message instead of at install time, and
+  #   a floating tag could never be traced back to the bytes that wrote the store.
+  #   Point it at your internal mirror of the digest .env.shared.example names.
   minio:
-    image: minio/minio:latest
-    container_name: omnigraph-minio
+    image: ${OMNIGRAPH_MINIO_IMAGE:?set OMNIGRAPH_MINIO_IMAGE in .env.shared (an internally mirrored image reference, see .env.shared.example)}
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -55,9 +59,12 @@ services:
           memory: 512M
 
   # ─── one-shot: create the Omnigraph bucket, then exit ─────────────────────
+  #   There is no separate mc image: mc ships inside that same mirrored minio image at
+  #   /usr/bin/mc, which is why this service overrides the entrypoint below. The value
+  #   is quoted because its refusal message contains a colon — YAML reads it as a map.
   minio-init:
-    image: minio/mc:latest
-    container_name: omnigraph-minio-init
+    image: "${OMNIGRAPH_MC_IMAGE:?set OMNIGRAPH_MC_IMAGE in .env.shared (the same mirrored minio image: mc ships inside it)}"
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-minio-init
     depends_on:
       minio:
         condition: service_healthy
@@ -83,7 +90,7 @@ services:
   #   decides fresh vs existing, and a fresh apply releases the admission lock it prints.
   omnigraph-init:
     image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
-    container_name: omnigraph-init
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-init
     depends_on:
       minio:
         condition: service_healthy
@@ -111,7 +118,7 @@ services:
   #   there being no other holder.
   omnigraph-server:
     image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
-    container_name: omnigraph-server
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-server
     restart: unless-stopped
     entrypoint: ["sh", "/cluster/start-server-013.sh"]
     # The server's graceful-shutdown budget is 25 s; stop must not kill it mid-flush.
@@ -152,7 +159,9 @@ services:
     tmpfs:
       - /tmp
     ports:
-      - "127.0.0.1:8080:8080"
+      # Loopback only; the host port is a knob so a second stack can sit beside this
+      # one. The container-side 8080 is what the other services dial, and it never moves.
+      - "127.0.0.1:${OMNIGRAPH_PORT:-8080}:8080"
     networks:
       - mcp-net
     healthcheck:
@@ -183,7 +192,7 @@ services:
   # variables alone (the bug that broke the old init guard).
   omnigraph-seed:
     image: modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1
-    container_name: omnigraph-seed
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-seed
     depends_on:
       omnigraph-server: { condition: service_healthy }
     entrypoint: ["sh", "-c", "rc=0; for f in /cluster/seed/*.jsonl; do g=$$(basename \"$$f\" .jsonl); echo \"seeding $$f -> graph $$g\"; omnigraph load --server http://omnigraph-server:8080 --graph \"$$g\" --data \"$$f\" --mode merge --yes || { echo \"ERROR: seed $$f -> graph $$g FAILED\"; rc=1; }; done; echo 'omnigraph-seed complete'; exit $$rc"]
@@ -200,7 +209,7 @@ services:
   omnigraph-viewer:
     build:
       context: ./servers/omnigraph-viewer
-    container_name: omnigraph-viewer
+    container_name: ${OMNIGRAPH_CONTAINER_PREFIX:-}omnigraph-viewer
     restart: unless-stopped
     depends_on:
       omnigraph-server:
@@ -210,7 +219,7 @@ services:
       - OMNIGRAPH_TOKEN=${OMNIGRAPH_TOKEN:?Set OMNIGRAPH_TOKEN in .env.shared}
       - OMNIGRAPH_GRAPH=memory
     ports:
-      - "127.0.0.1:8090:8090"
+      - "127.0.0.1:${OMNIGRAPH_VIEWER_PORT:-8090}:8090"
     networks:
       - mcp-net
     deploy:
