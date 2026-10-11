@@ -42,9 +42,10 @@ oh_client_sandbox() {
 
 # oh_fake_npm_install <prefix> <name> <version> <bin-name>
 # The observable contract of `npm install -g --prefix P <pkg>`: the package tree
-# under P/lib/node_modules and one executable under P/bin (verified against the
-# registry metadata for @modernrelay/omnigraph-mcp@0.8.0: bin omnigraph-mcp ->
-# dist/bin.js).
+# under P/lib/node_modules and one executable under P/bin (the shape measured
+# against the registry metadata for the then-pinned
+# @modernrelay/omnigraph-mcp@0.8.0: bin omnigraph-mcp -> dist/bin.js; the tree
+# layout is what the stub promises, not the version).
 oh_fake_npm_install() {
     local prefix="$1" name="$2" version="$3" bin="$4"
     mkdir -p "$prefix/lib/node_modules/$name" "$prefix/bin"
@@ -70,6 +71,19 @@ json.dump(data, open(dst, "w", encoding="utf-8"))
 ' catalog/agent-harness.json "$file" "$version" "$name"
     printf '%s\n' "$file"
 }
+
+# oh_pinned_version: the bridge pin this checkout's catalog declares, read the way
+# install.sh reads it — the harness file $AUTOOS_HARNESS points at, the part after
+# the last '@' of mcp_servers.omnigraph.package. Not a literal here: the run under
+# test prints the pin it resolved from the same file, so a bump moves the installer
+# and this case together instead of breaking the case.
+oh_pinned_version="$(
+    python3 -c '
+import json, sys
+spec = json.load(open(sys.argv[1], encoding="utf-8"))["mcp_servers"]["omnigraph"]["package"]
+sys.stdout.write(spec[spec.rindex("@") + 1:])
+' "$AUTOOS_HARNESS" 2>/dev/null
+)"
 
 # oh_run_client <sandbox> [harness] [token]: the component, with a URL answer and
 # a token, npm stubbed. Prints the UI output. The token argument defaults to a
@@ -218,7 +232,10 @@ if it "omnigraph-client: a full run writes the env file at 600, the pinned bridg
     [[ "$mode" == 600 ]] || { ok=0; echo "env file mode [$mode]" >&2; }
     [[ "$base" == 1 && "$tok" == 1 ]] || { ok=0; echo "env file rows [$base/$tok]" >&2; }
     [[ "$link" == *".autoos-omnigraph.env" ]] || { ok=0; echo "environment.d link [$link]" >&2; }
-    [[ "$out" == *"0.8.0"* ]] || { ok=0; echo "the run never named the pinned version: [${out:0:400}]" >&2; }
+    [[ -n "$oh_pinned_version" ]] \
+        || { ok=0; echo "no pin could be derived from [$AUTOOS_HARNESS]" >&2; }
+    [[ "$out" == *"$oh_pinned_version"* ]] \
+        || { ok=0; echo "the run never named the pinned version [$oh_pinned_version]: [${out:0:400}]" >&2; }
     [[ "$wmode" == 755 && "$wtype" == file && "$srcdiff" == same ]] \
         || { ok=0; echo "wrapper mode=[$wmode] type=[$wtype] content=[$srcdiff]" >&2; }
     [[ "$out" == *"CHANGED 1"* ]] || { ok=0; echo "the run did not report a change: $out" >&2; }
