@@ -1167,6 +1167,7 @@ if it "omnigraph 0.13 start-server-013: an old lock and no heartbeat marker rele
         # because the release also depends on the decoded lock age (73-79, mawk 1.3.4).
         variants=(); for cand in mawk gawk; do [[ -x "/usr/bin/$cand" ]] && variants+=("$cand"); done
         [[ ${#variants[@]} -gt 0 ]] || variants=("")
+        echo "    awk variants run: ${variants[*]:-host-awk}" >&2
         problems=""
         for cand in "${variants[@]}"; do
             d="$(mktemp -d)"; og13_lease_up "$d" none "$cand"
@@ -1192,6 +1193,7 @@ if it "omnigraph 0.13 start-server-013: a marker naming another container three 
         # The die names both containers — the holder identity the lock object lacks.
         variants=(); for cand in mawk gawk; do [[ -x "/usr/bin/$cand" ]] && variants+=("$cand"); done
         [[ ${#variants[@]} -gt 0 ]] || variants=("")
+        echo "    awk variants run: ${variants[*]:-host-awk}" >&2
         problems=""
         for cand in "${variants[@]}"; do
             d="$(mktemp -d)"; og13_lease_up "$d" "3:other-container" "$cand"
