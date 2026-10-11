@@ -23,7 +23,13 @@ metadata:
 
 # Whole cluster (state ledger, lock, catalog, graph roots) lives on MinIO.
 # Credentials come from the standard AWS_* env contract, never from this file.
-storage: s3://omnigraph/cluster
+# The bucket must equal S3_BUCKET of the compose stack you are applying to — the
+# stacks boot `apply-fresh-013.sh ... s3://${S3_BUCKET:-omnigraph-013}/cluster`,
+# whose default is omnigraph-013 — and must NEVER be a bucket a 0.8.x server wrote
+# to (notably the old `omnigraph`): 0.13 state sharing a root with 0.8.x data
+# corrupts both. `cp cluster.yaml.example cluster.yaml` copies this line verbatim,
+# so keep it in step with the compose default (tests pin the two against each other).
+storage: s3://omnigraph-013/cluster
 
 state:
   backend: cluster
