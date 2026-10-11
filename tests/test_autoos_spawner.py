@@ -10109,6 +10109,39 @@ class ReviewStatusTests(unittest.TestCase):
                 self.assertIn("same family", report["cross_family"]["detail"])
 
 
+# P12c (D-1062 exact): the free-leg statement is the WHOLE `reason=` field and nothing
+# else. Accepted: the machine spelling, the phrase in quotes in any case, and fullwidth
+# letters NFKC folds to ASCII. Refused: a negation, punctuation, a longer sentence, a
+# padded or lookalike value, a disagreeing duplicate field, and anything in `note=` —
+# free text that no longer counts.
+D1062_ACCEPTED = (
+    "reason=no_free_leg_available",
+    'reason="no free leg available"',
+    'reason="No Free Leg Available"',
+    'reason="NO_FREE_LEG_AVAILABLE"',
+    'reason="\uff4e\uff4f \uff46\uff52\uff45\uff45 \uff4c\uff45\uff47 '
+    '\uff41\uff56\uff41\uff49\uff4c\uff41\uff42\uff4c\uff45"',
+)
+# The line orchestrators wrote through the D-1062 transition: the phrase in a
+# comment-like note and nowhere else. P12c refuses it, naming the field to write.
+D1062_NOTE_ONLY = ('note="no free leg available: gate requires Sonnet final '
+                   '(D-1062 transition, promo legs ended)"')
+D1062_REFUSED = (
+    'reason="not no free leg available"',
+    'reason="no free leg available."',
+    'reason="no free leg available because the qoder promo ended"',
+    'reason="no free leg availablex"',
+    'reason="no\u200bfree leg available"',
+    'reason="\u00a0no free leg available\u00a0"',
+    'reason="n\u043e free leg available"',
+    "reason=no_free_leg_available reason=paid_leg_used_instead",
+    'reason=""',
+    'note="no free leg available: both free legs were down"',
+    'note="the gate wants no free leg available written somewhere in the prose"',
+    D1062_NOTE_ONLY,
+)
+
+
 class FinalReviewFamilyTests(unittest.TestCase):
     """P12 (AO-READY-FINAL-FAMILY, D-1061/D-1062): the `ready` final is family-agnostic.
 
@@ -10204,14 +10237,42 @@ class FinalReviewFamilyTests(unittest.TestCase):
                              self.final("sonnet", extra=" reason=no_free_leg_available"))
         self.assertTrue(report["ready"], report["final"]["detail"])
 
-    def test_a_sonnet_final_with_the_phrase_in_a_quoted_note_is_ready(self):
-        # The judge reads the words, not one field: a free-text note carries them too,
-        # which is what the record's line parser has to survive with spaces in it.
+    # --- P12c: the statement is the whole reason= field, for the sign-off --------
+    # (A quoted `note=` alone, which P12 accepted, is a refused-table row now.)
+
+    def test_each_accepted_reason_spelling_states_the_free_leg_statement(self):
+        for case in D1062_ACCEPTED:
+            with self.subTest(case=case):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final("sonnet", extra=" " + case))
+                self.assertTrue(report["ready"], report["final"]["detail"])
+
+    def test_a_final_reason_that_is_not_the_plain_statement_is_refused(self):
+        for case in D1062_REFUSED:
+            with self.subTest(case=case):
+                report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
+                                     self.final("sonnet", extra=" " + case))
+                self.assertFalse(report["ready"], report)
+                self.assertIn("reason=no_free_leg_available", report["final"]["detail"])
+
+    def test_the_current_note_only_d_1062_line_is_refused_with_the_field_to_write(self):
         report = self.status(self.seat("omniroute/muse"), self.seat("gem-flash"),
-                             self.final("sonnet",
-                                        extra=' note="no free leg available: '
-                                              'both free legs were down"'))
-        self.assertTrue(report["ready"], report["final"]["detail"])
+                             self.final("sonnet", extra=" " + D1062_NOTE_ONLY))
+        self.assertFalse(report["ready"], report)
+        self.assertIn("reason=no_free_leg_available", report["final"]["detail"])
+
+    def test_kind_and_verdict_are_read_case_insensitively(self):
+        # P12c: the parser stores the lower-cased kind, so a hand-written `kind=Final`
+        # is the sign-off it means; verdict= is read through the seat grammar, which
+        # folds case too. Both were matched case-sensitively by at least one caller.
+        final = ("AutoOS-Review: kind=Final author=%s reviewer=nvidia-nemotron "
+                 "verdict=Ready evidence=%s" % (self.AUTHOR, self.evidence("final-n.md")))
+        report = self.status("AutoOS-Review: Kind=CROSS-FAMILY author=%s "
+                             "reviewer=omniroute/muse verdict=Pass evidence=%s"
+                             % (self.AUTHOR, self.evidence("seat-m.md")),
+                             self.seat("gem-flash"), final)
+        self.assertTrue(report["ready"], report)
+        self.assertEqual(report["final"]["shape"], "a")
 
     def test_a_claude_final_on_a_claude_authored_lane_is_refused(self):
         # The words are necessary, never sufficient: anthropic is still the author's
@@ -10411,6 +10472,39 @@ class FinalRanSeatTests(unittest.TestCase):
                              % (self.AUTHOR, self.evidence("final-nvidia.md")))
         self.assertTrue(report["ready"], report["final"]["detail"])
         self.assertEqual(report["cross_family"]["families"], ["anthropic", "meta"])
+
+    # --- P12c: the same exact-field rule gates the SEAT, read by the same helper --
+
+    def claude_seat_lane(self, case):
+        return (self.seat("haiku", " " + case), self.seat("omniroute/muse"),
+                "AutoOS-Review: kind=final author=%s reviewer=nvidia-nemotron "
+                "verdict=READY evidence=%s" % (self.AUTHOR,
+                                               self.evidence("final-nvidia.md")))
+
+    def test_each_accepted_reason_spelling_counts_the_claude_seat(self):
+        for case in D1062_ACCEPTED:
+            with self.subTest(case=case):
+                report = self.status(*self.claude_seat_lane(case))
+                self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    def test_a_seat_reason_that_is_not_the_plain_statement_is_not_counted(self):
+        # One row is the note-only D-1062 transition line: the same helper gates a seat,
+        # so it refuses there too and names the field to write.
+        for case in D1062_REFUSED:
+            with self.subTest(case=case):
+                report = self.status(*self.claude_seat_lane(case))
+                self.assertFalse(report["ready"], report)
+                self.assertIn("haiku", report["cross_family"]["detail"])
+                self.assertIn("reason=no_free_leg_available",
+                              report["cross_family"]["detail"])
+
+    def test_a_seat_refused_for_ran_is_case_sensitive_as_p12b_decided(self):
+        # P12b kept `ran=` case-sensitive on purpose: `ran=Tests refused` is prose,
+        # not the tests the HIGH lane has to show it ran.
+        report = self.status(self.seat("omniroute/muse", ' ran="Tests refused"'),
+                             self.seat("gem-flash", " ran=tests"), r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=Tests refused", report["cross_family"]["detail"])
 
 
 class EvidenceGateTests(unittest.TestCase):
