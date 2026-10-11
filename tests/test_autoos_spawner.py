@@ -25140,7 +25140,7 @@ class ToolHomeFdWalkTests(unittest.TestCase):
 
     The guard is on the CLASS, not on the tests one by one, because what each of
     them asserts is the fd walk: run against `_FD_WALK = False` — the nt branch —
-    6 of these 8 fail (the 1500-deep tree dies in the recursive path walk, and the
+    6 of these 9 fail (the 1500-deep tree dies in the recursive path walk, and the
     two root-swap tests never fire their seam, since nt opens no
     `os.open(toolhome, O_NOFOLLOW)` pin to patch). `tree_bytes` is the one thing
     here that reads by lstat and so is not walk-dependent, but the test that covers
@@ -25148,6 +25148,7 @@ class ToolHomeFdWalkTests(unittest.TestCase):
     nothing in here is separable onto nt."""
 
     MARKER = "p8a2-marker"
+    DEEP_TREE = 1500              # the deepest tree this class builds, in levels
 
     @classmethod
     def setUpClass(cls):
@@ -25155,11 +25156,55 @@ class ToolHomeFdWalkTests(unittest.TestCase):
 
     def setUp(self):
         self.tmp = os.path.realpath(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(self.remove_tree, self.tmp)
         self.sandbox = os.path.join(self.tmp, "AutoOS-run-9")
         os.makedirs(self.sandbox)
         self.toolhome = self.agent.toolhome_dir(self.sandbox)
         self.cache = os.path.join(self.toolhome, "uv_cache_dir")
+
+    def remove_tree(self, path):
+        """Cleanup that cannot print a RecursionError over the real failure: until
+        Python 3.13 `shutil.rmtree` recursed one frame per level, so a deep tail the
+        prune gave up on blew the cleanup up instead. The product's own delete is
+        fd-relative with an explicit stack and never raises; it wants one descriptor
+        per level too, so the budget goes up for the removal and back down after."""
+        if not getattr(self.agent, "_FD_WALK", False):
+            shutil.rmtree(path, True)                       # nt: no fd walk to reuse
+            return
+        restore = self.set_fd_budget(self.DEEP_TREE + 700) or (lambda: None)
+        try:
+            self.agent.delete_tree(path)
+        finally:
+            restore()
+
+    def set_fd_budget(self, want):
+        """Raise the SOFT RLIMIT_NOFILE to `want`, capped at the hard limit and at
+        4096, and return the callable that puts it back — None when the runner cannot
+        reach `want`. `resource` is POSIX-only, hence imported and guarded here."""
+        if os.name == "nt":
+            return None
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        budget = 4096 if hard < 0 else min(hard, 4096)      # RLIM_INFINITY is -1 here
+        if budget < want:
+            return None
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (budget, hard))
+        except (ValueError, OSError):
+            return None
+        return lambda: resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    def raise_fd_budget(self, depth):
+        """Room for a `depth`-deep tree: the fd walk holds one descriptor per level —
+        the parent chain it has to keep to delete bottom-up — so a runner whose SOFT
+        RLIMIT_NOFILE is 1024 (the CI default) makes `os.open` hit EMFILE and the
+        prune stop early. That is the runner's descriptor budget failing the test,
+        not the walk, so the test raises the budget and, on a runner whose HARD limit
+        cannot fit the tree, skips rather than fails."""
+        restore = self.set_fd_budget(depth + 700)           # plus the suite's own fds
+        if restore is None:
+            self.skipTest("cannot raise RLIMIT_NOFILE for a %d-deep tree" % depth)
+        self.addCleanup(restore)
 
     def make_seat(self):
         """A run's toolhome with its own caches; `uv_cache_dir` carries MARKER, so a
@@ -25294,9 +25339,10 @@ class ToolHomeFdWalkTests(unittest.TestCase):
     def test_a_tree_deeper_than_the_recursion_limit_is_pruned(self):
         """1500 levels: the walk keeps an explicit stack, so cleanup is not a
         RecursionError the run has to swallow."""
+        self.raise_fd_budget(self.DEEP_TREE)
         self.make_seat()
         deep = self.cache
-        for _ in range(1500):
+        for _ in range(self.DEEP_TREE):
             deep = os.path.join(deep, "d")
             os.mkdir(deep)                         # makedirs recurses; mkdir does not
         with open(os.path.join(deep, "leaf"), "wb") as fh:
@@ -25304,6 +25350,39 @@ class ToolHomeFdWalkTests(unittest.TestCase):
         got = self.agent.prune_toolhome(self.sandbox)
         self.assertNotIn("refused", got, got)
         self.assertFalse(os.path.lexists(self.cache), "the deep tail survived the prune")
+        self.assertTrue(os.path.isdir(self.toolhome), "the dir stays for the discard: line")
+
+    @unittest.skipIf(os.name == "nt", "RLIMIT_NOFILE is POSIX-only")
+    def test_a_descriptor_budget_short_of_the_depth_gives_up_the_tail_and_stays_put(self):
+        """KNOWN LIMIT M5, as the product behaves: the walk needs one descriptor per
+        level it stands on, so a SOFT RLIMIT_NOFILE of 64 starves it ~64 levels into a
+        400-deep tree. The tail is then given up on the way an unreadable entry is
+        given up on — the prune is partial or complete, it never raises, and what it
+        cannot reach it leaves alone, including a link out to the canary it never
+        opened. Documented here so a runner that trips it reads as the budget, not
+        as the walk escaping."""
+        import resource
+        try:
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
+        except (ValueError, OSError):
+            self.skipTest("cannot lower RLIMIT_NOFILE to starve the walk")
+        try:
+            keep = self.make_seat()
+            outside = self.outside()
+            canary = os.path.join(outside, "canary")
+            deep = self.cache
+            for _ in range(400):
+                deep = os.path.join(deep, "d")
+                os.mkdir(deep)
+            os.symlink(outside, os.path.join(deep, "escape"))
+            got = self.agent.prune_toolhome(self.sandbox)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        self.assertNotIn("refused", got, got)
+        self.assertTrue(os.path.isdir(outside), "a starved walk deleted the operator's dir")
+        self.assertTrue(os.path.isfile(canary), "a starved walk deleted outside the seat")
+        self.assertTrue(os.path.isfile(keep), "a starved walk went past the caches")
         self.assertTrue(os.path.isdir(self.toolhome), "the dir stays for the discard: line")
 
     @unittest.skipIf(os.name == "nt", "POSIX mode bits")
