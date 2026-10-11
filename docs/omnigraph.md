@@ -25,7 +25,7 @@ skill in this repo's `.agents/skills/` directory. What follows is the minimum co
   edged to the `Project` hub **and** to the components/decisions it touches.
   Never write project data to the global `memory` graph.
 
-## The dialect (verified against server v0.8.1 — GraphQL/Cypher habits fail)
+## The dialect (verified against server v0.8.1 and v0.13.0 — GraphQL/Cypher habits fail)
 
 - Every call is a **named** `query name() { ... }` — parens required even
   with no params. No `mutation {}` wrapper; writes dispatch via `mutate`.
@@ -35,14 +35,31 @@ skill in this repo's `.agents/skills/` directory. What follows is the minimum co
   never interpolate). **Edges are PascalCase on write**
   (`insert DecidedIn { from: $slug, to: $project }`), **lowerCamelCase on
   traversal** (`$d decidedIn $p`).
+- On v0.13.0 the system identity is `$x.@id` — `$x.id` and `$x.__id` are type
+  errors. `insert E { from: $a, to: $b }` stays valid; `@src:` is a parse error.
+- On v0.13.0 a NULL column or property is **omitted** from query rows and from
+  exports — the returned `columns` list still names it — so a missing key means
+  null and a row read by key must tolerate the absence.
+- Every v0.13.0 HTTP request except `/healthz` needs the header
+  `omnigraph-http-api: 0.13`, otherwise the answer is `400
+  {"code":"api_contract_mismatch"}`. The stdio MCP bridge sends it itself;
+  `/healthz` needs no header and reports
+  `{"status":"ok","version":"0.13.0","internal_schema_version":14}`.
 - One mutation is insert/update-only **or** delete-only, never both.
 - Bulk NDJSON (`load`, `mode: merge` upserts by slug): nodes are
   `{"type":"<Type>","data":{"slug":"...", ...}}`, edges are
-  `{"edge":"<Edge>","from":"<slug>","to":"<slug>"}`. Never `overwrite` a
+  `{"edge":"<Edge>","from":"<slug>","to":"<slug>"}`. On v0.13.0 the node id is a
+  **top-level** field (`{"type":"T","id":"<id>","data":{...}}`, derived from the
+  `@key` slug when omitted) and `data.id` is refused on load — the error says to
+  "move data.id to the top-level 'id' field"; an edge takes an optional top-level
+  id too (`{"edge":"E","id":"<ULID>","from":"<id>","to":"<id>","data":{}}`,
+  `from`/`to` unchanged, a supplied edge id kept). Never `overwrite` a
   populated `main`.
 - Slugs are lowercase kebab-case and stable — re-writing the same slug
   upserts; a case variant forks a duplicate. Nodes are safe to retry;
-  **edges are not** (no `@key` — a retried edge insert duplicates).
+  **edges are not** (no `@key` — a retried edge insert duplicates, and v0.13.0's
+  `load --mode merge` does not dedupe them either: a re-run took one graph's
+  edges from 79 to 158 while its nodes upserted).
 - **Verify every write**: `commits_list` head before/after must move, then
   re-read the data at session end (a confirmed read-back can still revert;
   prefer inserting a new node over updating one).
@@ -275,7 +292,9 @@ Every bridge answered and every slug was correct, but the startup cost alone is
 is per-bridge npm resolution. On this host that fails D9 and points at the
 pre-installed alternative: install the pinned client once (`npm i -g
 @modernrelay/omnigraph-mcp@0.8.0`, which provides `omnigraph-mcp`) and re-run the
-same benchmark against it with `--bridge-cmd omnigraph-mcp`.
+same benchmark against it with `--bridge-cmd omnigraph-mcp`. The pin has since
+moved: `catalog/agent-harness.json` now names `@modernrelay/omnigraph-mcp@0.13.0`,
+which declares node >= 22.
 
 ### What broke on 2026-09-24
 

@@ -20,8 +20,10 @@ insert-xor-delete rule, duplicate-edge handling, never-overwrite-shared-`main`,
 lowercase slugs, `nomic-embed-text` 768-dim embeddings, remote CLI ops). These
 capture failure modes already debugged — honoring them avoids re-troubleshooting.
 
-MCP server: `@modernrelay/omnigraph-mcp`. Tools: `schema_get` (read schema
-first), `query` (read GQ), `mutate` (write GQ, insert/update/delete), `load`
+MCP server: `@modernrelay/omnigraph-mcp` (0.13.0: 15 tools, the 0.8.0 names plus
+the read-only `commits_changes` and `changes_poll`; node >= 22). Tools:
+`schema_get` (read schema first), `query` (read GQ), `mutate` (write GQ,
+insert/update/delete; 0.13 adds an optional `ifGraphCommit` parameter), `load`
 (bulk NDJSON upsert by `@key`), `branches_create` / `branches_merge` /
 `branches_delete`, `commits_list` (verify writes), `snapshot`, `health`.
 
@@ -159,10 +161,14 @@ Memory writes are reviewable like code. For anything risky or large:
 does not compute the `@embed("rationale")` vector — and if you merge a Decision that
 *had* one, it **erases** it (the upsert replaces the row). An unembedded `Decision`
 is *dropped* from `nearest()` — not ranked low, absent. On v0.8.1 there is no
-working way to re-embed a populated graph (both `overwrite` and vector-carrying
-`merge` hit a Lance bug), so this is a known limitation, not a step you can just
-run: the node stays findable by traversal and full-text, and a rebuild via
-`scripts/dedup-graph.py` is the only re-embed path. Don't claim semantic search
+working way to re-embed a populated graph — both `overwrite` and vector-carrying
+`merge` hit a Lance bug (measured on v0.8.1; not re-measured on 0.13) — so this is a
+known limitation, not a step you can just run: the node stays findable by traversal
+and full-text, and a rebuild via `scripts/dedup-graph.py --image
+modernrelay/omnigraph-server:v0.8.<patch>` is the only re-embed path — a 0.8.x-only
+procedure (a no-argument run aborts by design), never to be run on a 0.13 stack,
+where the path is the export/import migration
+(Server repo `scripts/omnigraph-migrate-013.py`). Don't claim semantic search
 covers a Decision you merged without checking it with a `nearest()` query. Detail +
 evidence: [references/operations.md](references/operations.md) rule 10.
 
