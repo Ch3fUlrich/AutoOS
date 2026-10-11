@@ -1570,11 +1570,31 @@ if it "omnigraph 0.13 client compose: the offline profile pins the digested imag
         grep -qE '^[[:space:]]*restart:[[:space:]]*unless-stopped[[:space:]]*$' <<<"$srv" \
             || problems+=" omnigraph-local lost its restart policy;"
 
+        # The same three properties as the server file, for the same reasons (the
+        # helpers are defined with the P7b block above): the wrapper's 0600 curl
+        # config and its heartbeat scratch live under /tmp, so /tmp is RAM and dies
+        # with the container; the lease refuses to run without its endpoint and
+        # credentials; and init must apply to the root the server boots.
+        cli_tmpfs="$(og13_tmpfs_paths "$srv")"
+        [[ "$cli_tmpfs" == "/tmp" ]] \
+            || problems+=" omnigraph-local tmpfs is [$(printf '%s' "$cli_tmpfs" | tr '\n' ' ')] (want /tmp);"
+        for hkey in AWS_ENDPOINT_URL_S3 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            grep -qE "^[[:space:]]*-?[[:space:]]*${hkey}=" <<<"$srv" \
+                || problems+=" omnigraph-local has no $hkey, so the heartbeat lease cannot run;"
+        done
+
         init="$(og13_client_svc omnigraph-local-init)"
         grep -qF 'apply-fresh-013.sh' <<<"$init" \
             || problems+=" omnigraph-local-init does not run apply-fresh-013.sh;"
         grep -qF 'cluster import' <<<"$init" \
             && problems+=" omnigraph-local-init still calls the removed cluster import;"
+
+        cli_init_root="$(og13_init_root "$init")"
+        cli_srv_root="$(og13_cluster_root "$srv")"
+        [[ -n "$cli_init_root" && -n "$cli_srv_root" ]] \
+            || problems+=" could not read both client roots (init [$cli_init_root], server [$cli_srv_root]);"
+        [[ "$cli_init_root" == "$cli_srv_root" ]] \
+            || problems+=" omnigraph-local-init applies to [$cli_init_root], omnigraph-local boots [$cli_srv_root];"
 
         bad="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OG13_CLIENT" | grep -v '^S3_BUCKET:-omnigraph-013$' | sort -u)"
         [[ -z "$bad" ]] || problems+=" a non-0.13 bucket default: $(printf '%s' "$bad" | tr '\n' ' ');"
