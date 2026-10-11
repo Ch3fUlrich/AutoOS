@@ -1018,3 +1018,390 @@ if it "omnigraph 0.13 start-server-013: the age guard decodes the same under maw
     fi
 fi
 
+
+# ─── P7a2 part 2 A: the heartbeat lease ──────────────────────────────────────
+# Part 1 ran every case with AWS_ENDPOINT_URL_S3 unset — the branch at
+# start-server-013.sh:152-154, where the guard only reports that it was skipped.
+# These take the other one, and each names the lines it rests on: the marker read
+# that decides a release (135-151), the PUT that takes the lease ahead of the boot
+# (170, before 186), the DELETE on a clean child exit (197), and the credential
+# check that dies before the first call (60).
+# No bucket is touched: a fake S3 on loopback answers only the key the wrapper
+# builds from lines 44-45 ("$ep/$bucket/guard/heartbeat" for the s3://b/cluster root
+# every case here uses), and it records every request — so the key layout, the
+# method and the take/release order are observed, not inferred. It dies at case end;
+# nothing here leaves 127.0.0.1.
+describe "omnigraph 0.13 start-server-013 (heartbeat lease)"
+
+OG13_KEY="/b/guard/heartbeat"
+OG13_ME="me-container"   # HOSTNAME below is the wrapper's own `me` (line 42)
+
+# og13_py_gate — the fake S3 needs python3; record the skip, tell the case to stop.
+og13_py_gate() {
+    command -v python3 >/dev/null 2>&1 || skip "no python3 to stand the fake S3 up"
+    command -v python3 >/dev/null 2>&1
+}
+
+# og13_s3 <dir> — start it, set OG13_S3_PID and OG13_S3_PORT (globals, so the stop
+# below can reach the process: a command substitution would lose the pid). State
+# lives in <dir>/s3-state: GET answers the forced status from get_status, else the
+# stored marker bytes, else 404; PUT stores the body as the marker; DELETE removes it;
+# each request appends "METHOD /path" to reqs. The server writes its own port to
+# <state>/port (chosen with port 0), so the poll cannot read before bind.
+og13_s3() {
+    local _d="$1" _i
+    mkdir -p "$_d/s3-state"; : >"$_d/s3-state/reqs"
+    python3 -c '
+import http.server, socketserver, sys, os
+st = sys.argv[1]; key = "/b/guard/heartbeat"
+def p(n): return os.path.join(st, n)
+def rd(n): return open(p(n), "rb").read() if os.path.exists(p(n)) else None
+def wr(n, b):
+    if b is None:
+        if os.path.exists(p(n)): os.remove(p(n))
+    else: open(p(n), "wb").write(b)
+def ap(n, s): open(p(n), "a").write(s)
+class FakeS3(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+    def say(self, code, body=b""):
+        ap("reqs", "%s %s\n" % (self.command, self.path))
+        self.send_response(code); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        if body: self.wfile.write(body)
+    def do_GET(self):
+        if self.path != key: return self.say(404)
+        forced = rd("get_status")
+        if forced: return self.say(int(forced), b"forced")
+        marker = rd("marker")
+        if marker is None: return self.say(404)
+        self.say(200, marker)
+    def do_PUT(self):
+        if self.path != key: return self.say(404)
+        wr("marker", self.rfile.read(int(self.headers.get("Content-Length") or 0))); self.say(200)
+    def do_DELETE(self):
+        if self.path != key: return self.say(404)
+        wr("marker", None); self.say(200)
+socketserver.TCPServer.allow_reuse_address = True
+srv = socketserver.TCPServer(("127.0.0.1", 0), FakeS3)
+ap("port", str(srv.server_address[1])); srv.serve_forever()
+' "$_d/s3-state" >/dev/null 2>&1 &
+    OG13_S3_PID=$!
+    for _i in $(seq 1 50); do [[ -s "$_d/s3-state/port" ]] && break; sleep 0.1; done
+    OG13_S3_PORT="$(cat "$_d/s3-state/port" 2>/dev/null)"
+}
+
+# og13_s3_stop — no test may leave a server behind (AGENTS.md: nothing outlives it).
+og13_s3_stop() {
+    [[ -z "${OG13_S3_PID:-}" ]] && return 0
+    kill "$OG13_S3_PID" 2>/dev/null || true
+    wait "$OG13_S3_PID" 2>/dev/null || true
+    OG13_S3_PID=""
+}
+
+# og13_lease_entry <dir> — og13_stub's entrypoint, plus it copies the marker the
+# bucket holds at the moment the server would already be serving: "the lease was
+# taken before the boot" (170 runs ahead of 186) is then read, not inferred.
+og13_lease_entry() {
+    cat >"$1/bin/og13-lease-entry" <<'OG13'
+#!/bin/sh
+printf 'ENTRY %s\n' "$*" >>"$STUB_LOG"
+cat "$OG13_S3_STATE/marker" >"$OG13_S3_STATE/entry_saw" 2>/dev/null || true
+exit 0
+OG13
+    chmod +x "$1/bin/og13-lease-entry"
+}
+
+# og13_lease_up <dir> <state> [awk] — held-lock fixture, stand-ins and fake S3, then
+# the bucket seeded as <state> says: none | <age-seconds>:<hostname> | http:<status>
+# (GET answers that) | raw:<bytes> (marker body, unparsed). [awk] resolves awk inside
+# the run to that /usr/bin binary, as part 1's awk case does — the image ships mawk.
+og13_lease_up() {
+    local _d="$1" _s="$2" _a="${3:-}" _now _age _host
+    og13_stub "$_d"; og13_fx "$_d" fx_held held; og13_lease_entry "$_d"
+    [[ -z "$_a" ]] || ln -sf "/usr/bin/$_a" "$_d/bin/awk"
+    og13_s3 "$_d"
+    case "$_s" in
+        none)   ;;
+        http:*) printf '%s' "${_s#http:}" >"$_d/s3-state/get_status" ;;
+        raw:*)  printf '%s' "${_s#raw:}"  >"$_d/s3-state/marker" ;;
+        *)      _age="${_s%%:*}"; _host="${_s#*:}"; _now="$(date +%s)"
+                printf '%s %s' "$((_now - _age))" "$_host" >"$_d/s3-state/marker" ;;
+    esac
+}
+og13_lease_down() { og13_s3_stop; rm -rf "$1"; }
+
+# og13_start_s3 <dir> [KEY=VAL ...] — og13_start's shape with the lease branch on:
+# the endpoint and fake credentials (43, 59-63), this container's HOSTNAME (42) and a
+# one-second beat, so maxfail (54) resolves without waiting. Trailing KEY=VAL pairs
+# override, which is how a case drops its credentials or re-points the endpoint.
+# og13_start is part 1's lease-off runner and stays exactly as it was.
+og13_start_s3() {
+    local _d="$1"; shift
+    : >"$_d/calls.log"
+    gate_stub_run "$_d" \
+        "AWS_ENDPOINT_URL_S3=http://127.0.0.1:${OG13_S3_PORT:-9}" \
+        AWS_ACCESS_KEY_ID=k AWS_SECRET_ACCESS_KEY=s "HOSTNAME=$OG13_ME" \
+        OG_HEARTBEAT_SECONDS=1 "OG13_S3_STATE=$_d/s3-state" \
+        "OMNIGRAPH_CLUSTER=$OG13_ROOT" \
+        "OMNIGRAPH_ENTRYPOINT=$_d/bin/og13-lease-entry" "STUB_LOG=$_d/calls.log" \
+        "$@" -- sh "$OG13_START" serve --config /srv/c.yaml
+}
+
+# og13_reqs_pin <dir> <glob> — the request record ("METHOD /path" joined by |) matches
+# <glob> and holds no request off the guard key: that pins both the key layout and the
+# writes the wrapper must NOT do. The glob is unquoted so a case can pin the head and
+# the tail and still let the background beater (172-182) land a beat in between.
+og13_reqs_pin() {
+    local _r; _r="$(tr '\n' '|' <"$1/s3-state/reqs")"
+    # shellcheck disable=SC2053   # $2 is a glob here, deliberately (see above)
+    [[ "$_r" == $2 ]] || printf 'requests [%s], wanted [%s]; ' "$_r" "$2"
+    [[ -z "$(grep -v " $OG13_KEY\$" "$1/s3-state/reqs")" ]] \
+        || printf 'a request off the guard key [%s]; ' "$_r"
+}
+
+if it "omnigraph 0.13 start-server-013: an old lock and no heartbeat marker releases, the lease is taken before the boot and dropped on the graceful stop"; then
+    if og13_py_gate; then
+        # 149 is the 404 arm — nobody holds the lease, so the release goes ahead; 170
+        # then writes "<epoch> me-container", which the entrypoint read while it ran,
+        # and the child's clean exit at 197 DELETEs it. Run under every awk here,
+        # because the release also depends on the decoded lock age (73-79, mawk 1.3.4).
+        variants=(); for cand in mawk gawk; do [[ -x "/usr/bin/$cand" ]] && variants+=("$cand"); done
+        [[ ${#variants[@]} -gt 0 ]] || variants=("")
+        problems=""
+        for cand in "${variants[@]}"; do
+            d="$(mktemp -d)"; og13_lease_up "$d" none "$cand"
+            out="$(STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+            p="$(og13_problems "$d" "$rc" 0 \
+                "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+                "$out" "releasing retained admission lock" "!REFUSING TO START")"
+            [[ "$(cat "$d/s3-state/entry_saw" 2>/dev/null)" =~ ^[0-9]+" $OG13_ME"$ ]] \
+                || p+="no lease held at the boot: [$(cat "$d/s3-state/entry_saw" 2>/dev/null)]; "
+            p+="$(og13_reqs_pin "$d" "GET $OG13_KEY|PUT $OG13_KEY*|DELETE $OG13_KEY|")"
+            [[ ! -e "$d/s3-state/marker" ]] || p+="the graceful stop left the marker behind; "
+            og13_lease_down "$d"; [[ -z "$p" ]] || problems+="[${cand:-host-awk}]$p"
+        done
+        [[ -z "$problems" ]] && pass || fail "$problems"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: a marker naming another container three seconds ago is a live holder — no unlock, no boot, its marker untouched"; then
+    if og13_py_gate; then
+        # 145-147: another hostname whose lease is younger than stale (default 20 = four
+        # missed beats) refuses, and the die happens before the release, so the lock API
+        # is never reached and the other holder's lease is neither rewritten nor deleted.
+        # The die names both containers — the holder identity the lock object lacks.
+        variants=(); for cand in mawk gawk; do [[ -x "/usr/bin/$cand" ]] && variants+=("$cand"); done
+        [[ ${#variants[@]} -gt 0 ]] || variants=("")
+        problems=""
+        for cand in "${variants[@]}"; do
+            d="$(mktemp -d)"; og13_lease_up "$d" "3:other-container" "$cand"
+            out="$(STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+            p="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" "$out" \
+                "REFUSING TO START" "another holder is alive on $OG13_ROOT: container 'other-container' heartbeat" \
+                "s ago (< 20s). This container is '$OG13_ME'" "!releasing")"
+            p+="$(og13_reqs_pin "$d" "GET $OG13_KEY|")"
+            grep -q other-container "$d/s3-state/marker" \
+                || p+="the refusal removed the other holder's marker; "
+            og13_lease_down "$d"; [[ -z "$p" ]] || problems+="[${cand:-host-awk}]$p"
+        done
+        [[ -z "$problems" ]] && pass || fail "$problems"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: a marker naming another container past OG_HEARTBEAT_STALE_SECONDS is a dead holder — released"; then
+    if og13_py_gate; then
+        # 146-147 with stale=20 and a 100 s lease: mage >= stale, so the refusal is not
+        # taken and holder_is_dead returns 0 (155). A crashed holder is only "alive" for
+        # as long as a beat could still have been written — the limit the header states.
+        d="$(mktemp -d)"; og13_lease_up "$d" "100:other-container"
+        out="$(OG_HEARTBEAT_STALE_SECONDS=20 STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+        og13_expect "$d" "$rc" 0 \
+            "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+            "$out" "releasing retained admission lock" "!another holder is alive" "!REFUSING TO START"
+        og13_lease_down "$d"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: a fresh marker naming THIS hostname is the container's own previous incarnation — released"; then
+    if og13_py_gate; then
+        # 145: the age test sits inside `if [ "$mhost" != "$me" ]`, so a lease that names
+        # this very container never blocks — docker reuses the name across stop/start and
+        # the wrapper is that incarnation's first process. It overwrites it at 170 anyway.
+        d="$(mktemp -d)"; og13_lease_up "$d" "0:$OG13_ME"
+        out="$(STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+        og13_expect "$d" "$rc" 0 \
+            "$(og13_calls "$OG13_STATUS_CALL" "$(og13_unlock "$OG13_HELD_ID")" "$OG13_ENTRY_CALL")" \
+            "$out" "releasing retained admission lock" "!another holder is alive" "!REFUSING TO START"
+        og13_lease_down "$d"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: a heartbeat marker that cannot be read (HTTP 500) is unverifiable, which is not safe — no unlock, no boot"; then
+    if og13_py_gate; then
+        # 150: only 200 and 404 are answers. curl exits 0 on a 500 (this GET has no -f),
+        # so the guard reads %{http_code} rather than the transport status.
+        d="$(mktemp -d)"; og13_lease_up "$d" "http:500"
+        out="$(STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+        p="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" "$out" \
+            "REFUSING TO START" "cannot read the heartbeat marker (HTTP 500)" \
+            "cannot prove no other server runs on $OG13_ROOT" "!releasing")"
+        p+="$(og13_reqs_pin "$d" "GET $OG13_KEY|")"
+        og13_lease_down "$d"; [[ -z "$p" ]] && pass || fail "$p"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: an HTTP-200 marker with garbage in it proves nothing — malformed, no unlock, no boot"; then
+    if og13_py_gate; then
+        # 140-143: the body must split into "<epoch> <hostname>"; a timestamp that is not
+        # all digits is a refusal (an empty holder name would be too, 144).
+        d="$(mktemp -d)"; og13_lease_up "$d" "raw:garbage"
+        out="$(STUB_STATUS_FILE="$d/status-held" og13_start_s3 "$d" 2>&1)"; rc=$?
+        p="$(og13_problems "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" "$out" \
+            "REFUSING TO START" "heartbeat marker is malformed (timestamp 'garbage')" "!releasing")"
+        p+="$(og13_reqs_pin "$d" "GET $OG13_KEY|")"
+        og13_lease_down "$d"; [[ -z "$p" ]] && pass || fail "$p"
+    fi
+fi
+
+if it "omnigraph 0.13 start-server-013: AWS_ENDPOINT_URL_S3 without credentials refuses before the first call, so no unauthenticated curl is ever tried"; then
+    # 60, ahead of the 0600 curl-config write (61) and of the status call (81). The
+    # endpoint is overridden to the discard port here, so a leak of a run could not
+    # reach a bucket even if the credential check were the thing that moved.
+    d="$(mktemp -d)"; og13_stub "$d"; og13_fx "$d" fx_held held
+    out="$(og13_start_s3 "$d" AWS_ENDPOINT_URL_S3=http://127.0.0.1:9 AWS_ACCESS_KEY_ID= 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "" "$out" "REFUSING TO START" \
+        "AWS_ENDPOINT_URL_S3 is set but AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY are not"
+    rm -rf "$d"
+fi
+
+# ─── P7a2 part 2 B: apply-fresh-013.sh ───────────────────────────────────────
+# The other half of the pair: a stack recreation applies the declared cluster to a
+# FRESH root only, and releases exactly the lock that apply printed. The script reads
+# status with 2>&1 (14): rc 0 means a store exists and it is left alone (15-18); a
+# failed status counts as fresh ONLY if the text says state_missing (20-28), anything
+# else is "cannot determine" and exit 1 with the apply never reached; a failed apply
+# previews its output on stderr, says "apply FAILED" and exits 1 (30); the id comes
+# off the "Admission lock: <id>;" line by exact id (32-38) and is force-unlocked
+# against the same config dir (43-44) only after it passes the ULID check (39-42).
+describe "omnigraph 0.13 apply-fresh-013 (fresh-root gate)"
+
+OG13_APPLY="$ROOT/infra/mcp-servers/cluster/apply-fresh-013.sh"
+
+# og13_apply_stub <dir> — og13_stub's recorder extended for this script: `cluster
+# status` can answer on stderr the way the real CLI does (the script merges the two
+# streams, but a fixture should not have to believe that), and `cluster apply` prints
+# STUB_APPLY_OUT and exits STUB_APPLY_RC. Also the config dir whose `storage:` IS the
+# probed root (12-13 refuse a mismatch) and the measured fresh-root stderr sample.
+# og13_stub itself is part 1's and is unchanged.
+og13_apply_stub() {
+    local _d="$1"
+    og13_stub "$_d"
+    cat >"$_d/bin/omnigraph" <<'OG13'
+#!/bin/sh
+printf 'omnigraph %s\n' "$*" >>"$STUB_LOG"
+case "$1 $2" in
+    "cluster status")       cat "${STUB_STATUS_FILE:-/dev/null}"
+                            [ -z "${STUB_STATUS_ERR:-}" ] || cat "$STUB_STATUS_ERR" >&2
+                            exit "${STUB_STATUS_RC:-0}" ;;
+    "cluster apply")        printf '%s\n' "${STUB_APPLY_OUT:-}"
+                            exit "${STUB_APPLY_RC:-0}" ;;
+    "cluster force-unlock") exit "${STUB_UNLOCK_RC:-0}" ;;
+esac
+exit 0
+OG13
+    chmod +x "$_d/bin/omnigraph"
+    mkdir -p "$_d/cfg"
+    printf 'storage: %s\n' "$OG13_ROOT" >"$_d/cfg/cluster.yaml"
+    fx_fresh_stderr >"$_d/fresh-err"
+}
+
+# og13_apply <dir> [KEY=VAL ...] — run the script as the stack does: the cfg dir and
+# the root that must match it; merged streams and the script's own exit code. A case
+# that owes "that went to stderr" redirects the function instead of merging.
+og13_apply() {
+    local _d="$1"; shift
+    : >"$_d/calls.log"
+    gate_stub_run "$_d" "STUB_LOG=$_d/calls.log" "$@" \
+        -- sh "$OG13_APPLY" "$_d/cfg" "$OG13_ROOT"
+}
+
+# the recorded calls, built from the strings the stand-in writes
+og13_apply_call() { printf 'omnigraph cluster apply --config %s/cfg --yes --as default' "$1"; }
+og13_cfg_unlock() { printf 'omnigraph cluster force-unlock %s --config %s/cfg' "$1" "$2"; }
+
+if it "omnigraph 0.13 apply-fresh-013: a root that answers status is an existing store — skipped, never applied"; then
+    d="$(mktemp -d)"; og13_apply_stub "$d"; og13_fx "$d" fx_after_reconcile existing
+    out="$(STUB_STATUS_FILE="$d/status-existing" og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 "$(og13_calls "$OG13_STATUS_CALL")" "$out" \
+        "existing store at $OG13_ROOT: skipping apply" "!released admission lock"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: a state_missing root applies and force-unlocks exactly the id the apply printed"; then
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    ap="Applied the declared cluster to $OG13_ROOT
+Admission lock: $OG13_HELD_ID; retain until prior work is quiescent, then exact-ID force-unlock"
+    out="$(STUB_STATUS_RC=1 STUB_STATUS_ERR=$d/fresh-err STUB_APPLY_OUT="$ap" og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 \
+        "$(og13_calls "$OG13_STATUS_CALL" "$(og13_apply_call "$d")" "$(og13_cfg_unlock "$OG13_HELD_ID" "$d")")" \
+        "$out" "released admission lock $OG13_HELD_ID" "Admission lock: $OG13_HELD_ID"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: a status that fails without state_missing is not a fresh root — cannot determine, exit 1, no apply"; then
+    # 20-28: an unreachable root must never read as an empty one, or a live ledger gets
+    # applied over. The recorded sequence is the proof that apply was not reached.
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    printf '%s\n' 'Error:   0: connection refused 127.0.0.1:9000' >"$d/refused-err"
+    out="$(STUB_STATUS_RC=1 STUB_STATUS_ERR=$d/refused-err og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL")" "$out" \
+        "cannot determine if store at $OG13_ROOT is fresh" "status failed without state_missing" \
+        "connection refused"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: a failed apply ends the run with its preview and never force-unlocks"; then
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    ap="Error:
+   0: state_lock_held __cluster/lock.json: another process holds the admission lock"
+    out="$(STUB_STATUS_RC=1 STUB_STATUS_ERR=$d/fresh-err STUB_APPLY_OUT="$ap" STUB_APPLY_RC=1 og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL" "$(og13_apply_call "$d")")" "$out" \
+        "apply FAILED" "state_lock_held"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: an apply that prints no admission lock exits 0 saying so, and unlocks nothing"; then
+    # 33-36: no lock line is not an error, and the script must not go hunting for an id.
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    out="$(STUB_STATUS_RC=1 STUB_STATUS_ERR=$d/fresh-err STUB_APPLY_OUT="Applied the declared cluster" og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 0 "$(og13_calls "$OG13_STATUS_CALL" "$(og13_apply_call "$d")")" "$out" \
+        "apply reported no admission lock" "!released admission lock"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: an admission lock id that is not a ULID is refused, never force-unlocked"; then
+    # 39-42: the same alphabet the start wrapper decodes lock ages from, so an id this
+    # script cannot date is never unlocked by a guess.
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    ap="Admission lock: not-a-ulid; retain until prior work is quiescent"
+    out="$(STUB_STATUS_RC=1 STUB_STATUS_ERR=$d/fresh-err STUB_APPLY_OUT="$ap" og13_apply "$d" 2>&1)"; rc=$?
+    og13_expect "$d" "$rc" 1 "$(og13_calls "$OG13_STATUS_CALL" "$(og13_apply_call "$d")")" "$out" \
+        "admission lock id 'not-a-ulid' is not a valid ULID" "!released admission lock"
+    rm -rf "$d"
+fi
+
+if it "omnigraph 0.13 apply-fresh-013: the failure preview goes to stderr and stdout stays empty"; then
+    # 30: `printf '%s\n' "$out" | tail -20 >&2`. A caller that reads only stdout must
+    # see an empty success channel; the operator must see why the run failed.
+    d="$(mktemp -d)"; og13_apply_stub "$d"
+    ap="Error:
+   0: deployment_outstanding an interrupted apply is still outstanding"
+    og13_apply "$d" STUB_STATUS_RC=1 "STUB_STATUS_ERR=$d/fresh-err" STUB_APPLY_OUT="$ap" STUB_APPLY_RC=1 \
+        >"$d/out" 2>"$d/err"; rc=$?
+    p="$(og13_problems "$d" "$rc" 1 \
+        "$(og13_calls "$OG13_STATUS_CALL" "$(og13_apply_call "$d")")" "$(cat "$d/err")" \
+        "apply FAILED" "deployment_outstanding")"
+    [[ -s "$d/out" ]] && p+="stdout held: [$(cat "$d/out")]; "
+    rm -rf "$d"
+    [[ -z "$p" ]] && pass || fail "$p"
+fi
