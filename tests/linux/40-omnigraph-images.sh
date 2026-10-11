@@ -1644,6 +1644,148 @@ if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+# ─── D-1038 P7e (boot-proof A/B/C): a mirrored MinIO, and a stack that can coexist ──
+# The server-L1 boot proof at ad9eb485 (Addendum 7) brought both profiles up on the
+# 0.13 rehearsal host, but only with scratch patches — three defects in the PUBLIC repo:
+#   A `minio/minio:latest` / `minio/mc:latest` are not pullable on a target host and a
+#     floating tag is untraceable, so each image is a REQUIRED var (the `:?` form refuses
+#     while it is unset) and the example names only the reserved host
+#     registry.example.invalid plus one measured digest. There is no separate mc image —
+#     mc ships inside that minio image at /usr/bin/mc, which is why minio-init overrides
+#     the entrypoint rather than pulling an image that does not exist.
+#   B six hard-coded container_names: a second stack beside a live one cannot come up.
+#     The prefix defaults EMPTY because the operator scripts address these containers BY
+#     NAME (apply-cluster.sh `docker stop omnigraph-server`, dedup-graph.py filters
+#     `name=omnigraph-minio`), so the rendered names stay byte-identical. Service names
+#     (the DNS names on mcp-net) do not change; datadog-agent is not an omnigraph one.
+#   C hard-coded host ports collide on 8080/8090 the same way: a knob each with the old
+#     value as its default, the container-side port and the 127.0.0.1 bind unmoved.
+# Static — no docker, no network, no live root; the boot itself is server-L1's proof.
+OG13_MINIO_SHA="52dfd5c0bbd38d3219f2058c7af216d9f9a27a994b7b5baad09bbd38866015ff"
+OG13_ENV_SHARED="$ROOT/infra/mcp-servers/.env.shared.example"
+OG13_PREFIX_EXPR='${OMNIGRAPH_CONTAINER_PREFIX:-}'
+OG13_CNAME_RE='^[[:space:]]*container_name:[[:space:]]*\$\{OMNIGRAPH_CONTAINER_PREFIX:-\}omnigraph-[A-Za-z0-9_-]+$'
+OG13_MINIO_IMG='    image: ${OMNIGRAPH_MINIO_IMAGE:?set OMNIGRAPH_MINIO_IMAGE in .env.shared (an internally mirrored image reference, see .env.shared.example)}'
+OG13_MC_IMG='    image: "${OMNIGRAPH_MC_IMAGE:?set OMNIGRAPH_MC_IMAGE in .env.shared (the same mirrored minio image: mc ships inside it)}"'
+# The names as they were before this lane — what the empty prefix must still render.
+OG13_OLD_NAMES=(omnigraph-minio omnigraph-minio-init omnigraph-init omnigraph-server omnigraph-seed omnigraph-viewer)
+
+if it "omnigraph 0.13 compose: the MinIO image is required by env, names and host ports overridable"; then
+    problems=""
+    [[ -f "$OMNI_COMPOSE" && -f "$OG13_ENV_SHARED" ]] \
+        || problems+=" missing $OMNI_COMPOSE or $OG13_ENV_SHARED;"
+
+    # A refusal message with a colon in it is a YAML mapping error, and compose reads
+    # the file before it interpolates anything — so the quoted scalar is load-bearing.
+    if [[ -f "$OMNI_COMPOSE" ]]; then
+        parsed=0
+        if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+            python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1], encoding="utf-8"))' \
+                "$OMNI_COMPOSE" 2>/dev/null || problems+=" $OMNI_COMPOSE no longer parses as YAML;"
+            parsed=1
+        elif has_cmd yamllint; then
+            yamllint -d '{extends: relaxed, rules: {line-length: disable}}' "$OMNI_COMPOSE" \
+                >/dev/null 2>&1 || problems+=" yamllint rejected $OMNI_COMPOSE;"
+            parsed=1
+        fi
+        [[ "$parsed" -eq 1 ]] || echo "    no PyYAML and no yamllint: the compose parse check did not run" >&2
+    fi
+
+    # (A) the MinIO image: a required variable, never a name pulled from a public registry.
+    if [[ -f "$OMNI_COMPOSE" ]]; then
+        if grep -qE '^[[:space:]]*image:[[:space:]]*minio/' "$OMNI_COMPOSE"; then
+            problems+=" a minio/* image is still pulled by name;"
+        fi
+        msvc="$(og13_svc minio)"
+        misvc="$(og13_svc minio-init)"
+        [[ "$(grep -cE '^[[:space:]]*image:' <<<"$msvc")" -eq 1 ]] \
+            || problems+=" the minio service has other than one image line;"
+        grep -qxF -- "$OG13_MINIO_IMG" <<<"$msvc" \
+            || problems+=" minio's image line is not the OMNIGRAPH_MINIO_IMAGE :? form;"
+        grep -qxF -- "$OG13_MC_IMG" <<<"$misvc" \
+            || problems+=" minio-init's image line is not the OMNIGRAPH_MC_IMAGE :? form;"
+        # The entrypoint that proves there is no separate mc image — mc inside minio.
+        grep -qF 'mc alias set local http://minio:9000' <<<"$misvc" \
+            || problems+=" minio-init lost its mc alias entrypoint;"
+        grep -qF 'mc mb --ignore-existing' <<<"$misvc" \
+            || problems+=" minio-init lost its bucket-creation entrypoint;"
+
+        # (B) container names: the prefix expression on all six omnigraph services.
+        n_prefixed="$(grep -cE -- "$OG13_CNAME_RE" "$OMNI_COMPOSE")"
+        n_omni="$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*//p' "$OMNI_COMPOSE" | grep -c 'omnigraph-')"
+        [[ "$n_omni" -eq 6 ]] || problems+=" $n_omni container_name values name an omnigraph- container (want 6);"
+        [[ "$n_prefixed" -eq 6 ]] \
+            || problems+=" only $n_prefixed of them use the \${OMNIGRAPH_CONTAINER_PREFIX:-} form;"
+        grep -qxF -- '    container_name: datadog-agent' "$OMNI_COMPOSE" \
+            || problems+=" datadog-agent's container_name changed (it is not an omnigraph container);"
+        # Unset prefix ⇒ the OLD names, byte for byte, in the same set.
+        rendered="$(sed -nE 's/^[[:space:]]*container_name:[[:space:]]*//p' "$OMNI_COMPOSE" \
+            | while IFS= read -r _v; do printf '%s\n' "${_v#"$OG13_PREFIX_EXPR"}"; done \
+            | grep 'omnigraph-' | sort)"
+        want="$(printf '%s\n' "${OG13_OLD_NAMES[@]}" | sort)"
+        [[ "$rendered" == "$want" ]] \
+            || problems+=" with the prefix unset the names render [$(printf '%s' "$rendered" | tr '\n' ' ')] (want [${OG13_OLD_NAMES[*]}]);"
+
+        # (C) the two host ports: a knob each, old value as default, still loopback.
+        srvp="$(og13_svc omnigraph-server)"
+        vwp="$(og13_svc omnigraph-viewer)"
+        grep -qxF -- '      - "127.0.0.1:${OMNIGRAPH_PORT:-8080}:8080"' <<<"$srvp" \
+            || problems+=" omnigraph-server does not publish \${OMNIGRAPH_PORT:-8080} on 127.0.0.1:8080;"
+        grep -qxF -- '      - "127.0.0.1:${OMNIGRAPH_VIEWER_PORT:-8090}:8090"' <<<"$vwp" \
+            || problems+=" omnigraph-viewer does not publish \${OMNIGRAPH_VIEWER_PORT:-8090} on 127.0.0.1:8090;"
+        if grep -qF -- '"127.0.0.1:8080:8080"' "$OMNI_COMPOSE"; then
+            problems+=" the server host port is still hard-coded;"
+        fi
+        if grep -qF -- '"127.0.0.1:8090:8090"' "$OMNI_COMPOSE"; then
+            problems+=" the viewer host port is still hard-coded;"
+        fi
+        # The MinIO knobs predate this lane; they must survive it.
+        grep -qF -- '"127.0.0.1:${MINIO_API_PORT:-9000}:9000"' "$OMNI_COMPOSE" \
+            || problems+=" the MinIO API port lost its MINIO_API_PORT knob;"
+        grep -qF -- '"127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"' "$OMNI_COMPOSE" \
+            || problems+=" the MinIO console port lost its MINIO_CONSOLE_PORT knob;"
+    fi
+
+    # (A, public-repo half) the example ships the mirror, under the reserved host only.
+    if [[ -f "$OG13_ENV_SHARED" ]]; then
+        grep -qF 'MinIO / mc image' "$OG13_ENV_SHARED" \
+            || problems+=" the example has no 'MinIO / mc image' section;"
+        grep -qF 'mc ships inside the mirrored minio image' "$OG13_ENV_SHARED" \
+            || problems+=" the example never says mc ships inside the mirrored minio image;"
+        mirror_host=""; v_minio=""; v_mc=""
+        for evar in OMNIGRAPH_MINIO_IMAGE OMNIGRAPH_MC_IMAGE; do
+            lines="$(grep -cE "^${evar}=" "$OG13_ENV_SHARED")"
+            [[ "$lines" -eq 1 ]] || { problems+=" $lines ^${evar}= lines in the example (want 1);"; continue; }
+            line="$(grep -E "^${evar}=" "$OG13_ENV_SHARED")"
+            value="${line#*=}"
+            [[ "$value" == *"@sha256:${OG13_MINIO_SHA}" ]] \
+                || problems+=" $evar does not end in the mirrored minio digest @sha256:$OG13_MINIO_SHA;"
+            if [[ "$evar" == OMNIGRAPH_MINIO_IMAGE ]]; then v_minio="$value"; else v_mc="$value"; fi
+            # A real-looking hostname here is a leak: only the reserved placeholder may
+            # appear, and it is the whole host part of the reference.
+            hosts="$(printf '%s\n' "$line" | grep -oE '[A-Za-z0-9._-]+\.[A-Za-z]{2,}' | sort -u | tr '\n' ' ')"
+            [[ "$hosts" == "registry.example.invalid " ]] \
+                || problems+=" $evar names host(s) [$hosts] (want registry.example.invalid only);"
+            mirror_host="${value%%/*}"
+            [[ "$mirror_host" == "registry.example.invalid" ]] \
+                || problems+=" $evar points at [$mirror_host], not the placeholder registry;"
+        done
+        [[ "$v_minio" == "$v_mc" ]] \
+            || problems+=" the two image variables differ — mc has no image of its own, it is the same minio digest;"
+
+        # The three knobs are documented and commented out, so the defaults stand.
+        for cl in '# OMNIGRAPH_CONTAINER_PREFIX=' '# OMNIGRAPH_PORT=8080' '# OMNIGRAPH_VIEWER_PORT=8090'; do
+            grep -qxF -- "$cl" "$OG13_ENV_SHARED" \
+                || problems+=" the example does not document '$cl' commented out;"
+            vname="${cl#'# '}"; vname="${vname%%=*}"
+            if grep -qE "^${vname}=" "$OG13_ENV_SHARED"; then
+                problems+=" the example ships an ACTIVE $vname= line (it must stay commented out so the default applies);"
+            fi
+        done
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 # ─── D-1038 A1/A6 (P7c): the client's OFFLINE profile boots 0.13 the same way ───
 # docker-compose.client.yml is the same stack shrunk to a developer machine, so it
 # carries the same three measured facts: no `cluster import` in 0.13 (apply-fresh-013.sh
