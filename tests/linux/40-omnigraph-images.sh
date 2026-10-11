@@ -224,11 +224,16 @@ fi
 # record, because "the gate let it through" is only proven by what it then reached.
 OG_PY="$ROOT/infra/mcp-servers/scripts"
 _head() { git -C "$ROOT" rev-parse HEAD; }
+# The cases below test the D-825 GO gate, so they must reach it: dedup-graph.py's
+# --image default is the pinned v0.13.0 reference, which refuse_unsupported_image
+# fails closed on (the store wipe it guards against is a 0.8-only procedure) — and
+# that abort happens before the gate. Every gate case names a 0.8 image explicitly.
+DEDUP_IMG08=(--image modernrelay/omnigraph-server:v0.8.1)
 
 if it "D-825: dedup-graph refuses a live dedup with no --go and touches nothing"; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "a --go-less dedup exited 0" >&2; }
     [[ "$out" == *"refusing to dedup the live omnigraph store without --go"* ]] \
@@ -242,7 +247,7 @@ fi
 if it "D-825: dedup-graph refuses a malformed --go reference" ; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go not-a-ref --go-sha "$(_head)" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go not-a-ref --go-sha "$(_head)" 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not a judge run id"* ]] && pass \
         || fail "a malformed --go reference was accepted: rc=$rc out=$out"
 fi
@@ -250,7 +255,7 @@ fi
 if it "D-825: dedup-graph refuses when --go-sha is not this checkout's HEAD"; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go D-825 --go-sha 0000000000000000000000000000000000000000 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "a wrong --go-sha was accepted: rc=$rc out=$out"
 fi
@@ -258,7 +263,7 @@ fi
 if it "D-825: dedup-graph --dry-run needs no --go and is unchanged"; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --dry-run 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --dry-run 2>&1)"; rc=$?
     [[ "$out" != *"refusing to dedup the live omnigraph store"* ]] && pass \
         || fail "the dry run hit the D-825 gate: $out"
 fi
@@ -269,7 +274,7 @@ if it "D-825: dedup-graph a valid --go + --go-sha echoes GO first and proceeds";
     # log proves the run that followed it talked to a stub, never to docker on the host.
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
     first_line="$(printf '%s\n' "$out" | head -1)"
     ok=1
     [[ "$first_line" == "GO: D-825 sha=$(_head)" ]] \
@@ -351,7 +356,7 @@ if it "D-825: dedup-graph refuses a --go that names no decision, exact id only";
     ok=1
     for ref in D-9999 D-82; do
         out="$(gate_stub_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- \
-            python3 "$OG_PY/dedup-graph.py" --go "$ref" --go-sha "$(_head)" 2>&1)"; rc=$?
+            python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go "$ref" --go-sha "$(_head)" 2>&1)"; rc=$?
         [[ $rc -ne 0 ]] || { ok=0; echo "--go $ref cleared the gate: $out" >&2; }
         [[ "$out" == *"names no decision"* ]] || { ok=0; echo "$ref: no existence refusal: $out" >&2; }
         [[ "$out" != *"GO:"* ]] || { ok=0; echo "$ref: printed a GO line for nothing: $out" >&2; }
@@ -366,7 +371,7 @@ if it "D-825: dedup-graph refuses when the decisions log cannot be read"; then
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
     out="$(gate_stub_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/log.md" -- \
-        python3 "$OG_PY/dedup-graph.py" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
+        python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go D-825 --go-sha "$(_head)" 2>&1)"; rc=$?
     ok=1
     [[ $rc -ne 0 ]] || { ok=0; echo "an unreadable source cleared the gate: $out" >&2; }
     [[ "$out" == *"cannot read the routing decisions log"* ]] \
@@ -380,10 +385,38 @@ if it "D-825: dedup-graph --go-offline still refuses a bad --go-sha"; then
     # refusal on the sha is what keeps this case safe to run with no stack at all.
     d="$(mktemp -d)"
     gate_stubs_make "$d/stub"
-    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" --go D-825 \
+    out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${DEDUP_IMG08[@]}" --go D-825 \
         --go-sha 0000000000000000000000000000000000000000 --go-offline 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] && pass \
         || fail "--go-offline waived the sha bar: rc=$rc out=$out"
+fi
+
+# ─── D-1038 A1: the no-image run fails closed ────────────────────────────────
+# --image now defaults to the pinned v0.13.0 reference, and this script's rebuild
+# wipes the whole MinIO store — a 0.8-only procedure — so refuse_unsupported_image
+# aborts on that default BEFORE the D-825 GO gate. Every case above therefore names
+# a 0.8 image explicitly; this one is the flip itself, at harness level.
+if it "D-1038: dedup-graph with no --image aborts before the GO gate and touches nothing"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    ok=1
+    # A valid --go + --go-sha is the shape that used to open the gate and reach docker;
+    # --dry-run is the shape that used to start the export path. Both must now abort.
+    for _shape in go dry-run; do
+        case "$_shape" in
+            go)      _set=(--go D-825 --go-sha "$(_head)") ;;
+            dry-run) _set=(--dry-run) ;;
+        esac
+        out="$(gate_stub_run "$d" -- python3 "$OG_PY/dedup-graph.py" "${_set[@]}" 2>&1)"; rc=$?
+        [[ $rc -ne 0 ]] || { ok=0; echo "[$_shape] a no-image run exited 0" >&2; }
+        [[ "$out" == *"[dedup] ABORT:"* ]] \
+            || { ok=0; echo "[$_shape] no image refusal: $out" >&2; }
+        [[ "$out" != *"GO:"* ]] || { ok=0; echo "[$_shape] the gate opened on a refused image: $out" >&2; }
+    done
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "the refused run reached a host binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dedup-graph ran live without a verifiable 0.8 image"; fi
 fi
 
 if it "D-825: apply-cluster refuses a --go that names no artefact, unknown flags still rc 2"; then
