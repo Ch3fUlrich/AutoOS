@@ -1442,6 +1442,30 @@ og13_svc() {
         inb { print }' "$OMNI_COMPOSE"
 }
 
+# og13_tmpfs_paths <block> — the paths listed under the block's `tmpfs:` key, so an
+# assert can name /tmp instead of grepping the word somewhere in the service.
+og13_tmpfs_paths() {
+    awk '
+        { line = $0; sub(/[[:space:]]+$/, "", line) }
+        line ~ /^[[:space:]]*tmpfs:[[:space:]]*$/ { intmp = 1; next }
+        intmp {
+            if (line !~ /^[[:space:]]*-/) { intmp = 0; next }
+            sub(/^[[:space:]]*-[[:space:]]*/, "", line); print line
+        }' <<<"$1"
+}
+
+# og13_init_root <block> — the s3:// root the block passes as an argument (the init
+# entrypoint's target). og13_cluster_root <block> — the block's OMNIGRAPH_CLUSTER
+# value. Both RAW, `${S3_BUCKET:-...}` expression and all: the two sides must be the
+# same root as WRITTEN, because compose interpolates each independently, and a suffix
+# that drifts on one side is a different data root while still naming one bucket.
+og13_init_root() {
+    grep -oE '"s3://[^"]*"' <<<"$1" | head -1 | tr -d '"'
+}
+og13_cluster_root() {
+    sed -nE 's/^[[:space:]]*-?[[:space:]]*OMNIGRAPH_CLUSTER=([^[:space:]]*).*/\1/p' <<<"$1" | head -1
+}
+
 if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots it through the wrappers"; then
     problems=""
     [[ -f "$OMNI_COMPOSE" ]] || problems+=" missing $OMNI_COMPOSE;"
@@ -1466,6 +1490,22 @@ if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots
         grep -qE '^[[:space:]]*restart:[[:space:]]*unless-stopped[[:space:]]*$' <<<"$srv" \
             || problems+=" omnigraph-server lost its restart policy;"
 
+        # /tmp is RAM and dies with the container. The mirrored wrapper (Server
+        # d37fe8504) writes the S3 credentials to a 0600 curl config under /tmp and
+        # keeps its heartbeat scratch there, so an image-owned or host-backed /tmp
+        # would outlive the run with a credential file sitting in it.
+        srv_tmpfs="$(og13_tmpfs_paths "$srv")"
+        [[ "$srv_tmpfs" == "/tmp" ]] \
+            || problems+=" omnigraph-server tmpfs is [$(printf '%s' "$srv_tmpfs" | tr '\n' ' ')] (want /tmp);"
+
+        # The lease needs its endpoint and credentials on the SERVER service: the
+        # wrapper refuses before its first call without them, and a lease that
+        # silently never runs is the fail-open this whole re-mirror was for.
+        for hkey in AWS_ENDPOINT_URL_S3 AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            grep -qE "^[[:space:]]*-?[[:space:]]*${hkey}=" <<<"$srv" \
+                || problems+=" omnigraph-server has no $hkey, so the heartbeat lease cannot run;"
+        done
+
         # Init: `cluster import --config` is gone in 0.13 — apply-fresh-013.sh decides
         # fresh vs existing instead, so a re-deploy must never re-apply.
         init="$(og13_svc omnigraph-init)"
@@ -1473,6 +1513,16 @@ if it "omnigraph 0.13 compose: the stack pins the digested 0.13 server and boots
             || problems+=" omnigraph-init does not run apply-fresh-013.sh;"
         grep -qF 'cluster import' <<<"$init" \
             && problems+=" omnigraph-init still calls the removed cluster import;"
+
+        # One root, written twice: the root init applies to is the root the server
+        # boots. Compared as literal strings, not as bucket names — keeping the
+        # bucket but changing the path suffix on one side is a different store.
+        init_root="$(og13_init_root "$init")"
+        srv_root="$(og13_cluster_root "$srv")"
+        [[ -n "$init_root" && -n "$srv_root" ]] \
+            || problems+=" could not read both roots (init [$init_root], server [$srv_root]);"
+        [[ "$init_root" == "$srv_root" ]] \
+            || problems+=" omnigraph-init applies to [$init_root], omnigraph-server boots [$srv_root];"
 
         # Every bucket default in the file is the 0.13-only bucket; a bare `omnigraph`
         # default would point 0.13 at the 0.8.1 data.
