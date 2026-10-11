@@ -113,6 +113,54 @@ if it "omnigraph images: packages: write via the automatic GITHUB_TOKEN, no oper
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+# ─── D-1038 P4b: the bridge container pins the bridge verified against 0.13 ──
+# The image build context is not derivable from the catalog, so this case is the
+# ONE place that states the intended bridge version — bumping the pin on purpose
+# means changing the literal below. The other three files are checked against the
+# same literal so a lane that moves one and leaves the others fails here. Static:
+# no docker, no network.
+OMNI_BRIDGE_DF="$ROOT/infra/mcp-servers/servers/omnigraph-mcp/Dockerfile"
+
+if it "omnigraph images: the bridge Dockerfile pins the 0.13.0 bridge on node >= 22 and the four pins agree"; then
+    problems=""
+    for omni_f in "$OMNI_BRIDGE_DF" "$ROOT/.mcp.json" \
+                  "$ROOT/catalog/agent-harness.json" "$ROOT/opencode.jsonc"; do
+        if [[ ! -f "$omni_f" ]]; then
+            problems+=" missing $omni_f;"
+            continue
+        fi
+        omni_n="$(grep -cF '@modernrelay/omnigraph-mcp@0.13.0' "$omni_f" || true)"
+        [[ "$omni_n" == 1 ]] \
+            || problems+=" $omni_f states the 0.13.0 pin $omni_n time(s), expected exactly 1;"
+        grep -qF 'omnigraph-mcp@0.8' "$omni_f" \
+            && problems+=" $omni_f still pins an 0.8 bridge;"
+    done
+    if [[ -z "$problems" ]]; then
+        omni_from="$(grep -m1 -E '^FROM[[:space:]]+node:' "$OMNI_BRIDGE_DF" || true)"
+        if [[ -z "$omni_from" ]]; then
+            problems+=" the Dockerfile has no FROM node:<tag> line;"
+        else
+            # The bridge declares engines.node >= 22; a FROM below that builds an
+            # image npm has already disowned. Parse the major so node:24-slim
+            # passes and node:20-slim does not.
+            omni_tag="${omni_from#*node:}"
+            omni_major="${omni_tag%%[!0-9]*}"
+            if [[ -z "$omni_major" ]]; then
+                problems+=" the FROM line is not a numeric node tag ($omni_from);"
+            elif (( omni_major < 22 )); then
+                problems+=" node $omni_major is below the bridge's declared engine (>= 22);"
+            fi
+        fi
+        while IFS= read -r omni_pin; do
+            [[ -n "$omni_pin" ]] || continue
+            omni_ver="${omni_pin#@modernrelay/omnigraph-mcp@}"
+            [[ "$omni_ver" == 0.13.0 ]] \
+                || problems+=" the Dockerfile pins the bridge at $omni_ver, not 0.13.0;"
+        done < <(grep -oE '@modernrelay/omnigraph-mcp@[0-9][0-9.]*' "$OMNI_BRIDGE_DF" || true)
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
+
 # ─── Omnigraph cluster declaration (SPEC-OMNI A6) ───────────────────────────
 # The graph list names repositories, so the live cluster.yaml must never be
 # tracked; the example and its schema must be, or the shape is undocumented.
