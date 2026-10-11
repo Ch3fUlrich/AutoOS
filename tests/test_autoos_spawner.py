@@ -25743,6 +25743,131 @@ class PruneSandboxTests(_PruneSandboxBase):
         self.assertNotIn(os.path.join(gone, "logs", "sandboxes"), dirs.values(),
                         "a missing worktree was walked")
 
+    # --- P8b-FIX: an unknown lane-worktree enumeration refuses the whole prune ---
+
+    @contextlib.contextmanager
+    def discovered_roots(self):
+        """One ended-and-aged, eligible sandbox in every root `prune_sandboxes` finds
+        for itself when handed no `roots` — main under AUTOOS_STATE_DIR, a fleet repo
+        under a fake HOME — yielding {label: sandbox base}; the lane roots are whatever
+        the test's git stub says. Fresh dirs per call, so one subTest's deletion cannot
+        hide another's."""
+        tmp = os.path.realpath(tempfile.mkdtemp(prefix="discovered-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        home, state = os.path.join(tmp, "home"), os.path.join(tmp, "state")
+        bases = {}
+        for label, root in (("main", os.path.join(state, "sandboxes")),
+                            ("fleet", os.path.join(home, "fleet", "sandboxes", "AutoOS"))):
+            os.makedirs(root)
+            bases[label] = self.make_sandbox(root, self.RID)[0]
+            self.write_record(self.RID)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state, "HOME": home}):
+            yield bases
+
+    def assert_prune_refused(self, patchers, reason, apply_flag):
+        """The prune over the discovered roots with git failing this way: rc 1, that
+        one refusal line, no results walked, and nothing gone from any root."""
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers:
+                stack.enter_context(patcher)
+            with self.discovered_roots() as bases:
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    rc, results = self.agent.prune_sandboxes(
+                        apply=apply_flag, workers=self.workers, state=self.state,
+                        now=self.now)
+        self.assertEqual(1, rc, err.getvalue())
+        self.assertIn("prune-sandboxes: refused: could not list lane worktrees (%s); "
+                      "nothing deleted" % reason, err.getvalue())
+        self.assertEqual([], results, "a refusal still walked a root")
+        for label, base in bases.items():
+            for path in (base, base + ".toolhome", base + ".opencode-data"):
+                self.assertTrue(os.path.isdir(path), "%s root lost %s" % (label, path))
+
+    def test_an_unknown_lane_enumeration_refuses_the_whole_prune(self):
+        # P8b-FIX (L1 decision): git could not say which lane worktrees exist, so the
+        # set is UNKNOWN and the invocation keeps everything, in every root, with or
+        # without --apply — it never degrades to "no worktrees found, prune the rest".
+        # The timeout is exercised for real: the stubbed git is a child that outlives a
+        # 1 s budget, so TimeoutExpired comes from subprocess, not from a mock.
+        real_run, ag = subprocess.run, self.agent
+
+        def slow_git(argv, **kw):
+            return real_run([sys.executable, "-c", "import time; time.sleep(30)"], **kw)
+
+        cases = (
+            ("timeout", lambda: [mock.patch.object(ag, "LANE_WORKTREE_GIT_TIMEOUT", 1.0),
+                                 mock.patch.object(ag.subprocess, "run",
+                                                   side_effect=slow_git)],
+             "TimeoutExpired"),
+            ("git exit 1", lambda: [mock.patch.object(
+                ag.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=""))],
+             "git exit 1"),
+            ("garbage output", lambda: [mock.patch.object(
+                ag.subprocess, "run",
+                return_value=mock.Mock(returncode=0, stdout="not porcelain"))],
+             "unparsable output"),
+            ("OSError", lambda: [mock.patch.object(ag.subprocess, "run",
+                                                   side_effect=OSError(5, "denied"))],
+             "OSError"),
+        )
+        for case, make_patchers, reason in cases:
+            for apply_flag in (True, False):
+                with self.subTest(case=case, apply=apply_flag):
+                    self.assert_prune_refused(make_patchers(), reason, apply_flag)
+
+    def test_the_worktree_git_env_carries_the_repo_git_guards(self):
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        out = mock.Mock(returncode=0, stdout="worktree %s\n\n" % live)
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen.update(kw)
+            return out
+
+        guards = self.agent.WORKER_GIT_GUARDS
+        with mock.patch.dict(os.environ, {
+                "GIT_DIR": "/tmp/not-the-repo", "GIT_WORK_TREE": "/tmp/not-the-tree",
+                "GIT_CONFIG_GLOBAL": os.path.expanduser("~/.gitconfig"),
+                "GIT_CONFIG_SYSTEM": "/tmp/not-the-system",
+                "GIT_SSH_COMMAND": "ssh -i /tmp/not-the-key",
+                # a parent's `git -c` leftover: read by index, past the guard count
+                "GIT_CONFIG_KEY_3": "url.insteadOf", "GIT_CONFIG_VALUE_3": "x"}), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            self.agent._lane_worktree_sandbox_dirs()
+        env = seen.get("env") or {}
+        for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_SSH_COMMAND"):
+            self.assertNotIn(name, env, "%s was not scrubbed from the git env" % name)
+        self.assertNotIn("GIT_CONFIG_KEY_3", env, "a leftover config channel survived")
+        self.assertEqual(self.agent.LANE_WORKTREE_GIT_TIMEOUT, seen.get("timeout"),
+                         "the git call has no timeout, or not the module's")
+        self.assertEqual(os.devnull, env.get("GIT_CONFIG_GLOBAL"))
+        self.assertEqual("1", env.get("GIT_CONFIG_NOSYSTEM"))
+        self.assertEqual("0", env.get("GIT_TERMINAL_PROMPT"))
+        self.assertEqual(str(len(self.agent._GIT_GUARD_CONFIG)), env.get("GIT_CONFIG_COUNT"))
+        for name, value in guards:
+            self.assertEqual(value, env.get(name), "guard %s is missing" % name)
+
+    def test_min_age_hours_is_a_non_negative_gate(self):
+        # P8b-FIX: a negative age gate means "prune runs that have not ended yet", so
+        # argparse refuses it (rc 2) before any root is walked; 0 still parses.
+        ap = argparse.ArgumentParser()
+        sub = ap.add_subparsers(dest="cmd", required=True)
+        self.agent._parser_prune_sandboxes(sub)
+        self.assertEqual(0.0, ap.parse_args(
+            ["prune-sandboxes", "--min-age-hours", "0"]).min_age_hours)
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.object(self.agent, "prune_sandboxes") as pruner, \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as got:
+                self.agent.main(["prune-sandboxes", "--apply", "--min-age-hours", "-1"])
+        self.assertEqual(2, got.exception.code)
+        pruner.assert_not_called()
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)),
+                        "the refused invocation deleted a sandbox")
+
 
 class ToolHomeCapTests(_PruneSandboxBase):
     """P8b (B): before an --isolate run provisions its toolhome, the total of the
@@ -25797,6 +25922,28 @@ class ToolHomeCapTests(_PruneSandboxBase):
         with mock.patch.object(self.agent, "_prune_sandbox_roots", side_effect=OSError("boom")):
             self.assertEqual(0, self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
                                                          state=self.state, now=self.now))
+
+    def test_an_unknown_lane_enumeration_prunes_no_toolhome(self):
+        # P8b-FIX: the cap discovers its own roots, so a git that cannot answer makes
+        # the lane set UNKNOWN — it must prune nothing, say so on one line, and still
+        # never raise.
+        old = "20260801-000000-older-aaaaaa"
+        main = os.path.join(self.state, "sandboxes")
+        os.makedirs(main)
+        base, _ = self.make_sandbox(main, old, mb=4)
+        self.write_record(old)
+        out = mock.Mock(returncode=1, stdout="")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.state,
+                                          "HOME": os.path.join(self.tmp, "home")}), \
+                mock.patch.object(self.agent.subprocess, "run", return_value=out), \
+                contextlib.redirect_stderr(err):
+            rc = self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                          state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+        self.assertIn("could not list lane worktrees (git exit 1)", err.getvalue())
+        self.assertGreater(self.agent.tree_bytes(base + ".toolhome"), 1 << 20,
+                           "the cap pruned while the lane worktrees were unknown")
 
     def test_the_isolate_run_calls_the_cap_before_provisioning(self):
         with io.open(AGENT, encoding="utf-8") as fh:

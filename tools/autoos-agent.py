@@ -2806,6 +2806,8 @@ def prune_toolhome(sandbox_path: str) -> dict:
 # descriptor per root (P8a2), never a re-resolved path.
 MIN_AGE_HOURS_DEFAULT = 6
 _RUN_ID_TAIL_RE = re.compile(r"\d{8}-\d{6}-[A-Za-z0-9_.-]+-[0-9a-f]{6}$")
+# How long the one lane-worktree git call may take before the answer is given up on.
+LANE_WORKTREE_GIT_TIMEOUT = 10.0
 
 
 def _run_id_from_entry(name: str):
@@ -2822,24 +2824,55 @@ def _run_id_from_entry(name: str):
     return m.group(0) if m else None
 
 
+class LaneWorktreesUnknown(Exception):
+    """The lane-worktree enumeration could not answer, so which worktrees exist is
+    UNKNOWN. P8b-FIX (L1 decision): an unknown set is never read as "no lane
+    worktrees" — a pruner that cannot say what it must not touch keeps everything."""
+
+    def __init__(self, reason):
+        Exception.__init__(self, "could not list lane worktrees (%s)" % reason)
+        self.reason = reason
+
+
+def _lane_worktree_git_env():
+    """The env of the one lane-worktree git call: the caller's env with the
+    invocation overrides dropped and the repo's own git guards applied — the same
+    keys `worker_env` stamps — so neither a caller's GIT_DIR nor an operator's
+    repo, global or system config can change what the listing says."""
+    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    for name, value in WORKER_GIT_GUARDS:
+        env[name] = value
+    _drop_extra_git_config(env)
+    for name in WORKER_ENV_FORCED_OFF:
+        env.pop(name, None)
+    return env
+
+
 def _lane_worktree_sandbox_dirs():
     """(label, path) for `logs/sandboxes` inside every live lane worktree (root ii).
 
     ONE audited subprocess: `git worktree list --porcelain` against the common
-    checkout, GIT_DIR/GIT_WORK_TREE scrubbed so it reads the real repo and not a
-    caller's override. A prunable entry (git's own "the worktree is gone") and a path
-    that is not there are skipped; this never raises.
+    checkout, with the repo's git guards and GIT_DIR/GIT_WORK_TREE scrubbed so it
+    reads the real repo and not a caller's override. A prunable entry (git's own
+    "the worktree is gone") and a path that is not there are skipped. A timeout, an
+    OS error, a non-zero exit or output with no `worktree` line raises
+    LaneWorktreesUnknown — the enumeration refuses to guess.
     """
-    # subprocess-audit: read-only git query, chosen env (GIT_DIR/GIT_WORK_TREE
-    # scrubbed), no shell, output parsed for `worktree `/`prunable ` lines only.
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    # subprocess-audit: read-only git plumbing, literal argv; chosen env (the repo's
+    # git guards, GIT_DIR/GIT_WORK_TREE scrubbed), no shell, a timeout, and the output
+    # is parsed for `worktree `/`prunable ` lines only.
     try:
         r = subprocess.run(["git", "-C", ROOT, "worktree", "list", "--porcelain"],
-                           capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env)
-    except (OSError, subprocess.SubprocessError):
-        return []
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           env=_lane_worktree_git_env(),
+                           timeout=LANE_WORKTREE_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise LaneWorktreesUnknown(type(exc).__name__) from exc
     if r.returncode != 0:
-        return []
+        raise LaneWorktreesUnknown("git exit %d" % r.returncode)
+    lines = r.stdout.splitlines()
+    if not any(line.startswith("worktree ") for line in lines):
+        raise LaneWorktreesUnknown("unparsable output")
     out, path, prunable = [], None, False
 
     def flush():
@@ -2847,7 +2880,7 @@ def _lane_worktree_sandbox_dirs():
             out.append((os.path.basename(path.rstrip("/")) or "lane",
                         os.path.join(path, "logs", "sandboxes")))
 
-    for line in r.stdout.splitlines():
+    for line in lines:
         if line.startswith("worktree "):
             flush()
             path, prunable = line[len("worktree "):].strip(), False
@@ -3022,10 +3055,16 @@ def prune_sandboxes(apply=False, min_age_hours=MIN_AGE_HOURS_DEFAULT, roots=None
     DEFAULT DRY RUN — nothing is deleted unless `apply`. Each candidate is decided from
     the runner-private record, age-gated, and deleted fd-relative from one pinned
     descriptor per root (`delete_tree(name, root_fd)`). Prints one line per candidate
-    `<run id> <root> <MB> pruned|kept: <reason>` and a total; rc 0 unless a whole root
-    cannot be listed."""
+    `<run id> <root> <MB> pruned|kept: <reason>` and a total; rc 1 when a whole root
+    cannot be listed, or when the lane worktrees are UNKNOWN (P8b-FIX: git could not
+    say which worktrees exist, so this invocation keeps everything in every root)."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    roots = roots if roots is not None else _prune_sandbox_roots()
+    if roots is None:
+        try:
+            roots = _prune_sandbox_roots()
+        except LaneWorktreesUnknown as exc:
+            print("prune-sandboxes: refused: %s; nothing deleted" % exc, file=sys.stderr)
+            return 1, []
     workers = workers or workers_dir()
     current_id = os.environ.get("AUTOOS_AGENT_RUN_ID")
     results, rc = [], 0
@@ -3135,6 +3174,9 @@ def cap_toolhomes(cap_mb=None, roots=None, workers=None, state=None, now=None,
         print("toolhome cap: %d MB total over %d MB cap, pruned %d ended toolhome(s)"
               % (total, cap_mb, count))
         return freed
+    except LaneWorktreesUnknown as exc:                   # P8b-FIX: unknown → prune nothing
+        print("toolhome cap: %s; nothing pruned" % exc, file=sys.stderr)
+        return 0
     except Exception as exc:                              # never blocks the run
         print("toolhome cap: skipped (%s)" % type(exc).__name__, file=sys.stderr)
         return 0
@@ -14260,6 +14302,19 @@ def _parser_card(sub):
     check_p.add_argument("file", help="the card file, usually <RUN>/status/<name>.card.md")
 
 
+def _nonneg_hours(text):
+    """argparse type: `--min-age-hours` is a number of hours >= 0. A negative gate
+    would mean "prune runs that have not ended yet", so it is refused at the parser
+    (rc 2) before any root is walked."""
+    try:
+        val = float(text)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("expected a number of hours, got %r" % text)
+    if not val >= 0.0:                      # also refuses NaN, which no compare wins
+        raise argparse.ArgumentTypeError("expected a value >= 0, got %r" % text)
+    return val
+
+
 def _parser_prune_sandboxes(sub):
     p = sub.add_parser(
         "prune-sandboxes", help="reclaim ended-and-aged run sandboxes and their "
@@ -14269,9 +14324,10 @@ def _parser_prune_sandboxes(sub):
                                 "decided from the runner-private record only, never job.json")
     p.add_argument("--apply", action="store_true",
                    help="delete the eligible sandboxes (default: report only, delete nothing)")
-    p.add_argument("--min-age-hours", dest="min_age_hours", type=float, metavar="N",
-                   default=MIN_AGE_HOURS_DEFAULT,
-                   help="prune only runs ended at least N hours ago (default: %(default)s)")
+    p.add_argument("--min-age-hours", dest="min_age_hours", type=_nonneg_hours,
+                   metavar="N", default=MIN_AGE_HOURS_DEFAULT,
+                   help="prune only runs ended at least N hours ago, N >= 0 "
+                        "(default: %(default)s)")
 
 
 VERB_PARSERS = {
