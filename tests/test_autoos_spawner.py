@@ -25448,5 +25448,364 @@ class ToolHomeFdWalkTests(unittest.TestCase):
                         "tree_bytes measured through a link out of the seat")
 
 
+class _PruneSandboxBase(unittest.TestCase):
+    """AO-TOOLHOME-SIZE P8b shared fixtures: three fake roots, a workers dir and a
+    kill store, a frozen `now`, and a liveness stub so a planted pid is never alive
+    unless a test says it is."""
+
+    RID = "20261010-120000-oldrun-abc123"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("prune-sandboxes uses the fd-relative POSIX walk")
+        self.agent = load_agent()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.main = os.path.join(self.tmp, "main", "sandboxes")
+        self.wt = os.path.join(self.tmp, "wt", "sandboxes")
+        self.fleet = os.path.join(self.tmp, "fleet", "AutoOS")
+        for d in (self.main, self.wt, self.fleet):
+            os.makedirs(d)
+        self.roots = [("main", self.main), ("worktree", self.wt), ("fleet", self.fleet)]
+        self.workers = os.path.join(self.tmp, "workers")
+        os.makedirs(self.workers, mode=0o700)
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(os.path.join(self.state, "kill"), mode=0o700)
+        self.now = datetime.datetime(2026, 10, 11, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        # A planted pid is dead unless a test patches this back to True.
+        p = mock.patch.object(self.agent, "_pid_alive", return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def iso(self, hours_before):
+        return (self.now - datetime.timedelta(hours=hours_before)).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
+
+    def write_record(self, run_id, **over):
+        rec = {"id": run_id, "pid": 424242, "pid_start": 999,
+               "started": self.iso(12), "ended": self.iso(10)}
+        rec.update(over)
+        with io.open(os.path.join(self.workers, run_id + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def write_kill(self, run_id, **over):
+        rec = {"run_id": run_id, "created_at": self.iso(12)}
+        rec.update(over)
+        with io.open(os.path.join(self.state, "kill", run_id + ".json"), "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+
+    def make_sandbox(self, root, run_id=RID, mb=1, *, sibling_only=False):
+        """A seat clone dir + its .toolhome (with a redirected cache blob) + sibling,
+        all under `root`. Returns (base_path, toolhome_path)."""
+        base = os.path.join(root, "AutoOS-" + run_id)
+        toolhome = base + ".toolhome"
+        cache = os.path.join(toolhome, "uv_cache_dir")
+        os.makedirs(cache)
+        with open(os.path.join(cache, "blob"), "wb") as fh:
+            fh.truncate(mb * 1024 * 1024)
+        if not sibling_only:
+            os.makedirs(base)
+        opend = base + ".opencode-data"
+        os.makedirs(opend)
+        return base, toolhome
+
+    def run_prune(self, apply=False, min_age_hours=6):
+        rc, results = self.agent.prune_sandboxes(
+            apply=apply, min_age_hours=min_age_hours, roots=self.roots,
+            workers=self.workers, state=self.state, now=self.now)
+        return rc, results
+
+    def reason_for(self, results, run_id):
+        for rid, _root, _mb, action, reason in results:
+            if rid == run_id:
+                return action, reason
+        raise AssertionError("no result line for %s in %r" % (run_id, results))
+
+
+class PruneSandboxTests(_PruneSandboxBase):
+    """P8b (A): the subcommand walks the three roots, deletes only ended-and-aged
+    sandboxes decided from the runner-private record (never job.json), fd-relative,
+    and keeps every fail-closed case with a printed reason."""
+
+    def test_dry_run_deletes_nothing(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        rc, results = self.run_prune(apply=False)
+        self.assertEqual(rc, 0)
+        action, reason = self.reason_for(results, self.RID)
+        self.assertEqual("kept", action, reason)
+        self.assertIn("dry run", reason)
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID + ".toolhome")))
+
+    def test_apply_deletes_only_ended_and_aged(self):
+        old = "20261001-010000-old-aabbcc"
+        young = "20261011-110000-young-ddEEff".replace("EE", "ee")  # hex6 lowercase
+        obase, _ = self.make_sandbox(self.main, old)
+        self.make_sandbox(self.main, young)
+        self.write_record(old, ended=self.iso(10))
+        self.write_record(young, ended=self.iso(1))
+        rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertFalse(os.path.lexists(obase), "the aged sandbox was not deleted")
+        self.assertFalse(os.path.lexists(obase + ".toolhome"), "the .toolhome sibling was left")
+        self.assertFalse(os.path.lexists(obase + ".opencode-data"), "the sibling was left")
+        self.assertEqual("pruned", self.reason_for(results, old)[0])
+        action, reason = self.reason_for(results, young)
+        self.assertEqual("kept", action)
+        self.assertIn("younger than 6h", reason)
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + young)),
+                        "a too-young sandbox was deleted")
+
+    def test_every_fail_closed_case_keeps_with_a_reason(self):
+        cases = {
+            "20261001-010101-absent-aaaaaa": "record absent",     # no workers record
+            "20261001-010102-corrupt-bbbbbb": "corrupt record",
+            "20261001-010103-mismatch-cccccc": "record id mismatch",
+            "20261001-010104-notended-dddddd": "not ended",
+            "20261001-010105-agecomp-eeeeee": "age uncomputable",
+            "20261001-010106-alive-ffffff": "alive",
+        }
+        for rid, _ in cases.items():
+            self.make_sandbox(self.main, rid)
+        # corrupt: not a dict
+        with io.open(os.path.join(self.workers, "20261001-010102-corrupt-bbbbbb.json"),
+                     "w", encoding="utf-8") as fh:
+            json.dump(["not", "a", "record"], fh)
+        self.write_record("20261001-010103-mismatch-cccccc", id="20261001-010103-other-999999")
+        self.write_record("20261001-010104-notended-dddddd", ended=None)
+        self.write_record("20261001-010105-agecomp-eeeeee", ended="not-a-real-timestamp")
+        self.write_record("20261001-010106-alive-ffffff")
+        # Detect the "alive" case through the runner-private kill store, not a live
+        # pid: setUp pins _pid_alive False for the whole suite, and a pid-start stub
+        # that also matched agecomp would misroute it. A recorded group whose leader
+        # still matches the stored start is the other half of _record_alive.
+        self.write_kill("20261001-010106-alive-ffffff", pgid=777, start=555)
+        with mock.patch.object(self.agent, "proc_start_time", return_value=555):
+            rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        for rid, want in cases.items():
+            action, reason = self.reason_for(results, rid)
+            self.assertEqual("kept", action, "%s: %s" % (rid, reason))
+            self.assertIn(want, reason, "%s gave %r" % (rid, reason))
+            self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + rid)),
+                            "fail-closed case %s deleted the sandbox" % want)
+
+    def test_a_live_pid_keeps(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.object(self.agent, "_pid_alive", return_value=True):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("alive", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_a_live_scope_keeps(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        self.write_kill(self.RID, pgid=424242, start=555)
+        with mock.patch.object(self.agent, "proc_start_time", return_value=555):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("alive", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_the_current_run_never_prunes(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        with mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": self.RID}):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("current run", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(os.path.join(self.main, "AutoOS-" + self.RID)))
+
+    def test_an_unreadable_sandbox_dir_keeps(self):
+        base, _ = self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        # Deterministic regardless of who runs the suite: the pinned child open the
+        # shape guard relies on is what refuses, so stub exactly that.
+        with mock.patch.object(self.agent, "_child_dir_fd", return_value=None):
+            _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("unreadable", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(base))
+
+    def test_a_symlinked_sandbox_dir_keeps(self):
+        target = os.path.join(self.main, "AutoOS-20260101-000000-real-abcdef")
+        os.makedirs(target)
+        link = os.path.join(self.main, "AutoOS-" + self.RID)
+        os.symlink(target, link)
+        self.write_record(self.RID)
+        _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("not a real directory", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.islink(link), "the symlink was followed and removed")
+
+    def test_a_sandbox_whose_realpath_escapes_the_root_keeps(self):
+        outside = os.path.join(self.tmp, "operator-home")
+        os.makedirs(outside)
+        link = os.path.join(self.main, "AutoOS-" + self.RID)
+        os.symlink(outside, link)
+        self.write_record(self.RID)
+        _rc, results = self.run_prune(apply=True)
+        self.assertEqual("kept", self.reason_for(results, self.RID)[0])
+        self.assertIn("realpath outside root", self.reason_for(results, self.RID)[1])
+        self.assertTrue(os.path.isdir(outside), "the delete landed outside the root")
+        self.assertTrue(os.path.islink(link))
+
+    def test_all_three_roots_are_walked(self):
+        bases = []
+        for i, (_label, root) in enumerate(self.roots):
+            rid = "20260901-0%d0000-runroot-%06x" % (i, i)
+            b, _t = self.make_sandbox(root, rid)
+            self.write_record(rid)
+            bases.append(os.path.join(root, "AutoOS-" + rid))
+        rc, results = self.run_prune(apply=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(len([r for r in results if r[3] == "pruned"]), 3)
+        for b in bases:
+            self.assertFalse(os.path.lexists(b), "a root's sandbox was not pruned: %s" % b)
+
+    def test_a_root_that_cannot_be_listed_moves_rc(self):
+        missing = os.path.join(self.tmp, "nope", "sandboxes")
+        # A root that exists but cannot be opened is the one rc-mover; a missing
+        # root is skipped silently, so this pins a root and refuses to open it.
+        os.makedirs(missing)
+        with mock.patch.object(self.agent, "_pin_dir_fd",
+                               side_effect=PermissionError(13, "denied", missing)):
+            rc, _r = self.agent.prune_sandboxes(apply=True, roots=[("blocked", missing)],
+                                                workers=self.workers, state=self.state, now=self.now)
+        self.assertEqual(1, rc)
+
+    def test_a_missing_root_is_skipped_not_an_error(self):
+        rc, _r = self.agent.prune_sandboxes(apply=True,
+                                            roots=[("gone", os.path.join(self.tmp, "gone"))],
+                                            workers=self.workers, state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+
+    def test_one_line_per_candidate_and_a_total(self):
+        self.make_sandbox(self.main)
+        self.write_record(self.RID)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.run_prune(apply=True)
+        lines = buf.getvalue().splitlines()
+        self.assertIn(self.RID, lines[0])
+        self.assertTrue(lines[-1].startswith("total:"), lines[-1])
+
+    def test_the_run_id_is_extracted_from_the_directory_name(self):
+        name = "AutoOS-20261011-132636-p8b-prune-sandboxes-and-e44559"
+        self.assertEqual("20261011-132636-p8b-prune-sandboxes-and-e44559",
+                         self.agent._run_id_from_entry(name))
+        self.assertEqual("20261010-120000-oldrun-abc123",
+                         self.agent._run_id_from_entry("AutoOS-20261010-120000-oldrun-abc123.toolhome"))
+        self.assertIsNone(self.agent._run_id_from_entry("not-a-sandbox"))
+
+    def test_the_default_roots_are_main_worktrees_and_fleet(self):
+        lane = os.path.join(self.tmp, "lane-wt")
+        os.makedirs(lane)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": os.path.join(self.tmp, "state")}), \
+                mock.patch.object(self.agent, "_lane_worktree_sandbox_dirs",
+                                  return_value=[("lane-wt", os.path.join(lane, "logs", "sandboxes"))]), \
+                mock.patch.object(self.agent, "_fleet_sandbox_roots",
+                                  return_value=[("AutoOS", self.fleet)]):
+            labels = {r[0]: r[1] for r in self.agent._prune_sandbox_roots()}
+        self.assertEqual(os.path.join(self.tmp, "state", "sandboxes"), labels["main"])
+        self.assertEqual(os.path.join(lane, "logs", "sandboxes"), labels["lane-wt"])
+        self.assertEqual(self.fleet, labels["AutoOS"])
+
+    def test_worktree_list_scrubs_git_env_and_skips_prunable_and_missing(self):
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        gone = os.path.join(self.tmp, "gone-wt")  # never created -> missing
+        out = mock.Mock(returncode=0, stdout=(
+            "worktree %s\nHEAD aaa\nbranch refs/heads/main\n\n"
+            "worktree %s\nHEAD bbb\nbranch refs/heads/live\n\n"
+            "worktree %s\nprunable locked\n\n" % (self.tmp, live, gone)))
+        seen_env = {}
+
+        def fake_run(argv, **kw):
+            seen_env.update(kw.get("env") or {})
+            return out
+
+        # Seed the very vars the scrub must drop, so the assertion is not vacuous.
+        with mock.patch.dict(os.environ, {"GIT_DIR": "/tmp/not-the-repo",
+                                          "GIT_WORK_TREE": "/tmp/not-the-tree"}), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            dirs = dict(self.agent._lane_worktree_sandbox_dirs())
+        self.assertNotIn("GIT_DIR", seen_env, "GIT_DIR was not scrubbed from the git env")
+        self.assertNotIn("GIT_WORK_TREE", seen_env, "GIT_WORK_TREE was not scrubbed")
+        self.assertIn(os.path.join(live, "logs", "sandboxes"), dirs.values())
+        self.assertNotIn(os.path.join(gone, "logs", "sandboxes"), dirs.values(),
+                        "a missing worktree was walked")
+
+
+class ToolHomeCapTests(_PruneSandboxBase):
+    """P8b (B): before an --isolate run provisions its toolhome, the total of the
+    `*.toolhome` dirs under the three roots is capped by pruning the OLDEST ENDED
+    runs' caches only — never a live or current run — and it never raises."""
+
+    def toolhome(self, root, run_id, mb):
+        base, _ = self.make_sandbox(root, run_id, mb=mb)
+        return base
+
+    def test_under_the_cap_nothing_is_pruned(self):
+        rid = "20260901-000000-small-aaaaaa"
+        self.toolhome(self.main, rid, 1)
+        self.write_record(rid)
+        self.agent.cap_toolhomes(cap_mb=1024, roots=self.roots, workers=self.workers,
+                                 state=self.state, now=self.now)
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + rid + ".toolhome"),
+                           0, "under the cap the caches were pruned anyway")
+
+    def test_over_the_cap_prunes_oldest_ended_first(self):
+        oldest = "20260801-000000-oldest-aaaaaa"
+        newest = "20260901-000000-newest-bbbbbb"
+        self.toolhome(self.main, oldest, 4)
+        self.toolhome(self.main, newest, 4)
+        self.write_record(oldest, ended=self.iso(72))
+        self.write_record(newest, ended=self.iso(24))
+        # cap 6 MB: only the oldest (4 MB) is needed to get under it.
+        self.agent.cap_toolhomes(cap_mb=6, roots=self.roots, workers=self.workers,
+                                 state=self.state, now=self.now)
+        self.assertLess(self.agent.tree_bytes(self.main + "/AutoOS-" + oldest + ".toolhome"),
+                        1 << 20, "the oldest ended toolhome was not pruned")
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + newest + ".toolhome"),
+                           1 << 20, "the cap pruned past the point it was under")
+
+    def test_never_prunes_a_live_or_current_run(self):
+        live = "20260801-000000-live-cccccc"
+        cur = "20260801-000000-current-dddddd"
+        self.toolhome(self.main, live, 8)
+        self.toolhome(self.main, cur, 8)
+        self.write_record(live)
+        self.write_record(cur)
+        with mock.patch.object(self.agent, "_pid_alive", return_value=True), \
+                mock.patch.dict(os.environ, {"AUTOOS_AGENT_RUN_ID": cur}):
+            self.agent.cap_toolhomes(cap_mb=1, roots=self.roots, workers=self.workers,
+                                     state=self.state, now=self.now)
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + live + ".toolhome"),
+                           1 << 20, "a live run's toolhome was pruned")
+        self.assertGreater(self.agent.tree_bytes(self.main + "/AutoOS-" + cur + ".toolhome"),
+                           1 << 20, "the current run's toolhome was pruned")
+
+    def test_the_cap_never_raises(self):
+        with mock.patch.object(self.agent, "_prune_sandbox_roots", side_effect=OSError("boom")):
+            self.assertEqual(0, self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                                         state=self.state, now=self.now))
+
+    def test_the_isolate_run_calls_the_cap_before_provisioning(self):
+        with io.open(AGENT, encoding="utf-8") as fh:
+            src = fh.read()
+        end = src[src.index("def cmd_run("):]
+        self.assertIn("cap_toolhomes(", end, "the startup cap is not wired into the run")
+        self.assertLess(end.index("cap_toolhomes("), end.index("isolate_clone(source"),
+                        "the cap must run before a new sandbox is provisioned")
+
+
 if __name__ == "__main__":
     unittest.main()
