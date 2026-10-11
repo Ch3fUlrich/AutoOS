@@ -102,3 +102,11 @@ def test_mutate_sends_contract_header(monkeypatch):
     assert req.get_header("Omnigraph-http-api") == "0.13"
     assert req.get_header("Authorization") == "Bearer tok"
     assert req.get_header("Content-type") == "application/json"
+
+
+def test_default_image_is_v0_13_0():
+    assert split_project_graph.IMAGE == (
+        "modernrelay/omnigraph-server:"
+        "v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1"
+    )
+    assert "v0.8" not in split_project_graph.IMAGE

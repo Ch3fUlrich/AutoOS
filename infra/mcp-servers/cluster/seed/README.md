@@ -32,13 +32,15 @@ Bash). Note `--graph` matches the file name:
 ```bash
 cd infra/mcp-servers; set -a; . ./.env.shared; set +a
 docker run --rm -i --network mcp-server_mcp-net -e OMNIGRAPH_BEARER_TOKEN="$OMNIGRAPH_TOKEN" \
-  --entrypoint sh modernrelay/omnigraph-server:v0.8.1 -c \
+  --entrypoint sh modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1 -c \
   'cat > /tmp/d.jsonl; omnigraph load --server http://omnigraph-server:8080 --graph agent-skills --data /tmp/d.jsonl --mode merge --yes --json' \
   < cluster/seed/agent-skills.jsonl
 ```
 
 Format: NDJSON — `{"type":"NodeType","data":{…}}` and
-`{"edge":"EdgeType","from":"<slug>","to":"<slug>"}`. Schema:
+`{"edge":"EdgeType","from":"<slug>","to":"<slug>"}`. Nodes carry **no `id`** (0.13
+refuses `data.id`; the id is derived from the `@key` slug), edges use `from`/`to`
+slugs. Schema:
 `../../../../.agents/skills/structured-memory/references/schema.md`.
 
 **Vector search:** `Decision` embeddings are intentionally NOT stored in these

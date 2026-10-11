@@ -89,10 +89,37 @@ elif [ -n "$_go_verified" ]; then
 fi
 echo "GO: $GO_REF sha=$CHECKOUT_HEAD"
 
+# D-1038 P4c4: this script is an omnigraph-server 0.8.x procedure — stop the server,
+# `cluster apply`, start it again — against the LIVE store. On 0.13 the server keeps its
+# admission lock when it shuts down, so the apply would hit state_lock_held unless the
+# whole sequence is re-measured, and the branch calls and the curls below carry no
+# omnigraph-http-api header. Nothing is ported, so the default IMAGE is the pinned 0.13
+# reference and the guard under it FAILS CLOSED on >= 0.13 (or an unverifiable tag) —
+# before the env files, before any docker or curl call. Converging a 0.8 stack still
+# works, with an explicit OMNIGRAPH_IMAGE=v0.8.x. The guard judges the image string,
+# never the running server — the same rule as dedup-graph.py refuse_unsupported_image.
+refuse_unsupported_image() { # abort unless $1 is a tagged omnigraph-server below 0.13
+    local image="$1" ref tag major minor
+    ref="${image%%@*}"                     # an @sha256:… digest says nothing about version
+    tag="${ref##*:}"                       # the tag after the last ':' …
+    if [[ "$tag" != "$ref" && "$tag" != */* ]] \
+        && [[ "$tag" =~ ^v?([0-9]+)\.([0-9]+)(\.[0-9]+)?$ ]]; then
+        # … unless that was a registry port: only MAJOR.MINOR[.PATCH] reads as a version.
+        major=$((10#${BASH_REMATCH[1]}))
+        minor=$((10#${BASH_REMATCH[2]}))
+        if (( major == 0 && minor < 13 )); then
+            return 0
+        fi
+    fi
+    printf '%s\n' "apply-cluster.sh: ABORT: image $image is Omnigraph >= 0.13 (or unverifiable). This script is a 0.8.x procedure (stop server, cluster apply, start): on 0.13 the server retains its admission lock on shutdown and the apply, the branch calls and the curls (no omnigraph-http-api header) are unported. For 0.13 use Server's scripts/omnigraph-cluster-dir.sh (the production apply path) and cluster/apply-fresh-013.sh. Port tracked as AO-APPLY-CLUSTER-013." >&2
+    exit 2
+}
+IMAGE="${OMNIGRAPH_IMAGE:-modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1}"
+refuse_unsupported_image "$IMAGE"
+
 here="$(cd "$(dirname "$0")/.." && pwd)"        # infra/mcp-servers
 cd "$here"
 set -a; . ./.env.shared; . ./.env.server; set +a # OMNIGRAPH_TOKEN/S3_BUCKET + MINIO_ROOT_USER/PASSWORD
-IMAGE="modernrelay/omnigraph-server:v0.8.1"
 # Ask docker which network the live server is on rather than assuming: local is
 # `mcp-server_mcp-net` (compose project `mcp-server`), central/coding.example.internal is
 # `mcp-servers_default` (project `mcp-servers`). A wrong network is a quiet failure —

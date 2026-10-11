@@ -28,7 +28,7 @@ import sys
 import urllib.request
 from collections import Counter
 
-IMAGE = "modernrelay/omnigraph-server:v0.8.1"
+IMAGE = "modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1"
 # Omnigraph 0.13.0 answers 400 {"code":"api_contract_mismatch"} to every request
 # (except /healthz) that does not carry this header.
 CONTRACT_HEADERS = {"omnigraph-http-api": "0.13"}

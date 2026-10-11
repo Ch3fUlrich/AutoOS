@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import json
 import os
@@ -79,6 +80,34 @@ class TestPopulateEmbeddings(unittest.TestCase):
             )
 
         mock_urlopen.assert_called_once_with(mock_req_instance, timeout=60)
+
+    def test_image_default_is_v0130_digest(self):
+        # The --image default must pin the 0.13 CLI image (digest measured by
+        # server-L1); the 0.8.1 CLI sends no omnigraph-http-api: 0.13 header, so
+        # the 0.13 server rejects it with 400 api_contract_mismatch.
+        class _Sentinel(Exception):
+            pass
+
+        captured = {}
+        real_parse_args = argparse.ArgumentParser.parse_args
+
+        def spy(parser, *args, **kwargs):
+            ns = real_parse_args(parser, *args, **kwargs)
+            captured["ns"] = ns
+            return ns
+
+        argv = ["populate-embeddings.py", "--seeds", "x.ndjson", "--no-load"]
+        with patch.object(argparse.ArgumentParser, "parse_args", spy), \
+                patch.object(populate_embeddings, "enforce",
+                             side_effect=_Sentinel), \
+                patch.object(sys, "argv", argv):
+            with self.assertRaises(_Sentinel):
+                populate_embeddings.main()
+
+        self.assertEqual(
+            captured["ns"].image,
+            "modernrelay/omnigraph-server:v0.13.0"
+            "@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1")
 
 if __name__ == "__main__":
     unittest.main()
