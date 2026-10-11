@@ -2835,42 +2835,65 @@ class LaneWorktreesUnknown(Exception):
 
 
 def _lane_worktree_git_env():
-    """The env of the one lane-worktree git call: the caller's env with the
-    invocation overrides dropped and the repo's own git guards applied — the same
-    keys `worker_env` stamps — so neither a caller's GIT_DIR nor an operator's
-    repo, global or system config can change what the listing says."""
-    env = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+    """The env of the one lane-worktree git call, built FROM SCRATCH (P8b-FIX2, L1
+    decision: an allowlist, not a filter).
+
+    The filter named GIT_DIR and GIT_WORK_TREE and let the rest through —
+    GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+    GIT_INDEX_FILE, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES, GIT_CONFIG,
+    GIT_CONFIG_SYSTEM, GIT_QUARANTINE_PATH are git's own too, and each one steers or
+    spoofs what the listing says. So nothing of the caller's survives except PATH and
+    HOME; the locale is pinned and the repo's guards are stamped on top, the same keys
+    `worker_env` carries, so neither a caller's override nor an operator's repo, global
+    or system config can change what the listing says."""
+    env = {"PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+           "HOME": os.environ.get("HOME") or "/",
+           "LANG": "C"}
     for name, value in WORKER_GIT_GUARDS:
         env[name] = value
-    _drop_extra_git_config(env)
-    for name in WORKER_ENV_FORCED_OFF:
-        env.pop(name, None)
     return env
+
+
+def _worktree_path_undecodable(path: str) -> bool:
+    """True when a listed path is not a single unambiguous filesystem path: a NUL, a
+    DEL, or any other C0 control (tab excepted, which is legal in a name) cannot be
+    handed to os.path.isdir / os.path.join and be trusted to mean one directory."""
+    return any(ord(ch) < 0x20 and ch != "\t" or ch == "\x7f" for ch in path)
 
 
 def _lane_worktree_sandbox_dirs():
     """(label, path) for `logs/sandboxes` inside every live lane worktree (root ii).
 
     ONE audited subprocess: `git worktree list --porcelain` against the common
-    checkout, with the repo's git guards and GIT_DIR/GIT_WORK_TREE scrubbed so it
-    reads the real repo and not a caller's override. A prunable entry (git's own
-    "the worktree is gone") and a path that is not there are skipped. A timeout, an
-    OS error, a non-zero exit or output with no `worktree` line raises
-    LaneWorktreesUnknown — the enumeration refuses to guess.
+    checkout, with an env built from scratch so it reads the real repo and not a
+    caller's override. A prunable entry (git's own "the worktree is gone") and a path
+    that is not there are skipped. A timeout, an OS error, a non-zero exit, output with
+    no `worktree` line, a record git did not finish, or bytes that are not a UTF-8 path
+    raises LaneWorktreesUnknown — the enumeration refuses to guess.
+
+    The capture is BYTES and the decode happens here, strict: git prints worktree paths
+    raw, so a path with a non-UTF-8 byte (a same-uid seat can create `wt-x\xffy` in the
+    shared repo) made `text=True` raise UnicodeDecodeError — neither an OSError nor a
+    SubprocessError — and the traceback escaped every handler.
     """
-    # subprocess-audit: read-only git plumbing, literal argv; chosen env (the repo's
-    # git guards, GIT_DIR/GIT_WORK_TREE scrubbed), no shell, a timeout, and the output
-    # is parsed for `worktree `/`prunable ` lines only.
+    # subprocess-audit: read-only git plumbing, literal argv; an env built from scratch
+    # (PATH, HOME, LANG=C, the repo's git guards — no caller GIT_* name), no shell, a
+    # timeout, bytes captured and decoded strictly here, and the output parsed for
+    # `worktree `/`prunable ` lines only.
     try:
         r = subprocess.run(["git", "-C", ROOT, "worktree", "list", "--porcelain"],
-                           capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                           capture_output=True, stdin=subprocess.DEVNULL,
                            env=_lane_worktree_git_env(),
                            timeout=LANE_WORKTREE_GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError) as exc:
         raise LaneWorktreesUnknown(type(exc).__name__) from exc
     if r.returncode != 0:
         raise LaneWorktreesUnknown("git exit %d" % r.returncode)
-    lines = r.stdout.splitlines()
+    try:
+        text = r.stdout.decode("utf-8")
+    except (UnicodeError, ValueError, AttributeError, TypeError):
+        raise LaneWorktreesUnknown("undecodable listing") from None
+    lines = text.splitlines()
     if not any(line.startswith("worktree ") for line in lines):
         raise LaneWorktreesUnknown("unparsable output")
     out, path, prunable = [], None, False
@@ -2880,10 +2903,19 @@ def _lane_worktree_sandbox_dirs():
             out.append((os.path.basename(path.rstrip("/")) or "lane",
                         os.path.join(path, "logs", "sandboxes")))
 
-    for line in lines:
+    for index, line in enumerate(lines):
         if line.startswith("worktree "):
+            # git always prints HEAD on the line right after the path. A path holding a
+            # newline (or a line someone injected) breaks that alignment, and a listing
+            # whose records cannot be told apart is a listing nothing gets deleted over.
+            nxt = lines[index + 1] if index + 1 < len(lines) else ""
+            if not nxt.startswith("HEAD "):
+                raise LaneWorktreesUnknown("unparsable output")
+            value = line[len("worktree "):]
+            if _worktree_path_undecodable(value.strip()):
+                raise LaneWorktreesUnknown("undecodable listing")
             flush()
-            path, prunable = line[len("worktree "):].strip(), False
+            path, prunable = value.strip(), False
         elif line.startswith("prunable"):
             prunable = True
     flush()

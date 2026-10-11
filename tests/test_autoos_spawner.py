@@ -25722,10 +25722,11 @@ class PruneSandboxTests(_PruneSandboxBase):
         live = os.path.join(self.tmp, "live-wt")
         os.makedirs(live)
         gone = os.path.join(self.tmp, "gone-wt")  # never created -> missing
+        # `git worktree list --porcelain` prints paths RAW, so the capture is bytes.
         out = mock.Mock(returncode=0, stdout=(
-            "worktree %s\nHEAD aaa\nbranch refs/heads/main\n\n"
-            "worktree %s\nHEAD bbb\nbranch refs/heads/live\n\n"
-            "worktree %s\nprunable locked\n\n" % (self.tmp, live, gone)))
+            b"worktree " + os.fsencode(self.tmp) + b"\nHEAD aaa\nbranch refs/heads/main\n\n"
+            + b"worktree " + os.fsencode(live) + b"\nHEAD bbb\nbranch refs/heads/live\n\n"
+            + b"worktree " + os.fsencode(gone) + b"\nHEAD ccc\nprunable locked\n\n"))
         seen_env = {}
 
         def fake_run(argv, **kw):
@@ -25801,11 +25802,11 @@ class PruneSandboxTests(_PruneSandboxBase):
                                                    side_effect=slow_git)],
              "TimeoutExpired"),
             ("git exit 1", lambda: [mock.patch.object(
-                ag.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=""))],
+                ag.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=b""))],
              "git exit 1"),
             ("garbage output", lambda: [mock.patch.object(
                 ag.subprocess, "run",
-                return_value=mock.Mock(returncode=0, stdout="not porcelain"))],
+                return_value=mock.Mock(returncode=0, stdout=b"not porcelain"))],
              "unparsable output"),
             ("OSError", lambda: [mock.patch.object(ag.subprocess, "run",
                                                    side_effect=OSError(5, "denied"))],
@@ -25819,7 +25820,8 @@ class PruneSandboxTests(_PruneSandboxBase):
     def test_the_worktree_git_env_carries_the_repo_git_guards(self):
         live = os.path.join(self.tmp, "live-wt")
         os.makedirs(live)
-        out = mock.Mock(returncode=0, stdout="worktree %s\n\n" % live)
+        out = mock.Mock(returncode=0,
+                        stdout=b"worktree " + os.fsencode(live) + b"\nHEAD aaa\n\n")
         seen = {}
 
         def fake_run(argv, **kw):
@@ -25848,6 +25850,103 @@ class PruneSandboxTests(_PruneSandboxBase):
         self.assertEqual(str(len(self.agent._GIT_GUARD_CONFIG)), env.get("GIT_CONFIG_COUNT"))
         for name, value in guards:
             self.assertEqual(value, env.get(name), "guard %s is missing" % name)
+
+    # --- P8b-FIX2: a non-UTF-8 worktree path crashed the enumeration; a caller's
+    # --- GIT_* names survived the filter and steered it.
+
+    def test_an_undecodable_or_ambiguous_listing_refuses_the_whole_prune(self):
+        # `git worktree list --porcelain` prints paths RAW, so a worktree whose path
+        # holds a non-UTF-8 byte made the text=True capture raise UnicodeDecodeError —
+        # neither an OSError nor a SubprocessError, so it escaped both this function
+        # and prune_sandboxes' LaneWorktreesUnknown handler and the invocation printed
+        # a traceback instead of refusing. A listing that cannot be read unambiguously
+        # is a listing nothing gets deleted over.
+        cases = (
+            ("non-utf8 path byte", b"worktree /tmp/live/wt-x\xffy\nHEAD aaa\n\n",
+             "undecodable listing"),
+            ("nul byte in path", b"worktree /tmp/live/wt\x00y\nHEAD aaa\n\n",
+             "undecodable listing"),
+            ("newline in path", b"worktree /tmp/live/wt\ny\nHEAD aaa\n\n",
+             "unparsable output"),
+            ("record cut short", b"worktree /tmp/live\n", "unparsable output"),
+        )
+        for case, raw, reason in cases:
+            for apply_flag in (True, False):
+                with self.subTest(case=case, apply=apply_flag):
+                    self.assert_prune_refused(
+                        [mock.patch.object(self.agent.subprocess, "run",
+                                           return_value=mock.Mock(returncode=0, stdout=raw))],
+                        reason, apply_flag)
+
+    @unittest.skipIf(os.name == "nt", "a non-UTF-8 path name is a POSIX byte string")
+    def test_a_real_worktree_with_a_non_utf8_path_refuses_the_prune(self):
+        repo = os.path.join(self.tmp, "real-repo")
+        os.makedirs(repo)
+
+        def real_git(*args):
+            r = subprocess.run(["git", "-C", repo,
+                                "-c", "user.email=t@example.invalid", "-c", "user.name=t"]
+                               + list(args), capture_output=True)
+            self.assertEqual(0, r.returncode, "%s: %s" % (args[0], r.stderr))
+            return r
+
+        real_git("init", "-q")
+        with io.open(os.path.join(repo, "f"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        real_git("add", "f")
+        real_git("commit", "-q", "-m", "x")
+        # The path git itself prints back is raw bytes, unquotable and unencodable.
+        weird = os.fsdecode(os.fsencode(repo) + b"/wt-x\xffy")
+        real_git("worktree", "add", "--detach", weird)
+        listing = subprocess.run(["git", "-C", repo, "worktree", "list", "--porcelain"],
+                                 capture_output=True).stdout
+        self.assertIn(b"wt-x\xffy", listing, "real git quoted the path, not raw bytes")
+        with mock.patch.object(self.agent, "ROOT", repo):
+            with self.assertRaises(self.agent.LaneWorktreesUnknown) as got:
+                self.agent._lane_worktree_sandbox_dirs()
+            self.assertEqual("undecodable listing", got.exception.reason)
+            for apply_flag in (True, False):
+                with self.subTest(apply=apply_flag):
+                    self.assert_prune_refused(
+                        [mock.patch.object(self.agent, "ROOT", repo)],
+                        "undecodable listing", apply_flag)
+
+    def test_the_git_env_is_an_allowlist_so_no_caller_git_name_survives(self):
+        # Dropping GIT_DIR and GIT_WORK_TREE by name left every other GIT_* the caller
+        # set in place: GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_
+        # DIRECTORIES, GIT_INDEX_FILE, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES,
+        # GIT_CONFIG, GIT_CONFIG_SYSTEM, GIT_QUARANTINE_PATH — each of which steers or
+        # spoofs what the listing says. The env is built from scratch instead.
+        live = os.path.join(self.tmp, "live-wt")
+        os.makedirs(live)
+        out = mock.Mock(returncode=0,
+                        stdout=b"worktree " + os.fsencode(live) + b"\nHEAD aaa\n\n")
+        seen = {}
+
+        def fake_run(argv, **kw):
+            seen.update(kw.get("env") or {})
+            return out
+
+        hostile = {name: "/tmp/not-the-" + name for name in (
+            "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG",
+            "GIT_CONFIG_SYSTEM", "GIT_QUARANTINE_PATH", "GIT_DIR", "GIT_WORK_TREE",
+            "GIT_SSH_COMMAND", "SSH_ASKPASS", "GIT_CONFIG_KEY_9", "GIT_CONFIG_VALUE_9")}
+        hostile["GH_TOKEN"] = "caller-secret"
+        with mock.patch.dict(os.environ, hostile), \
+                mock.patch.object(self.agent.subprocess, "run", side_effect=fake_run):
+            self.agent._lane_worktree_sandbox_dirs()
+        guards = {name for name, _v in self.agent.WORKER_GIT_GUARDS}
+        self.assertEqual(guards, {k for k in seen if k.startswith("GIT_")},
+                         "a GIT_* name other than the guards reached the git call")
+        for name in hostile:
+            self.assertNotIn(name, seen, "%s survived into the git env" % name)
+        self.assertEqual(set(), {k for k in seen
+                                 if k not in guards and k not in ("PATH", "HOME", "LANG")},
+                         "the git env carries a caller name outside the allowlist")
+        self.assertIn("PATH", seen, "git cannot be found without a PATH")
+        self.assertIn("HOME", seen)
+        self.assertEqual("C", seen.get("LANG"))
 
     def test_min_age_hours_is_a_non_negative_gate(self):
         # P8b-FIX: a negative age gate means "prune runs that have not ended yet", so
@@ -25932,7 +26031,7 @@ class ToolHomeCapTests(_PruneSandboxBase):
         os.makedirs(main)
         base, _ = self.make_sandbox(main, old, mb=4)
         self.write_record(old)
-        out = mock.Mock(returncode=1, stdout="")
+        out = mock.Mock(returncode=1, stdout=b"")
         err = io.StringIO()
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.state,
                                           "HOME": os.path.join(self.tmp, "home")}), \
@@ -25944,6 +26043,27 @@ class ToolHomeCapTests(_PruneSandboxBase):
         self.assertIn("could not list lane worktrees (git exit 1)", err.getvalue())
         self.assertGreater(self.agent.tree_bytes(base + ".toolhome"), 1 << 20,
                            "the cap pruned while the lane worktrees were unknown")
+
+    def test_an_undecodable_lane_listing_prunes_no_toolhome(self):
+        # P8b-FIX2: the same fail-closed shape as a git that exits — a raw non-UTF-8
+        # path byte is not a crash on the cap's path either, it prunes nothing.
+        old = "20260801-000000-older-aaaaaa"
+        main = os.path.join(self.state, "sandboxes")
+        os.makedirs(main)
+        base, _ = self.make_sandbox(main, old, mb=4)
+        self.write_record(old)
+        out = mock.Mock(returncode=0, stdout=b"worktree /tmp/wt-x\xffy\nHEAD aaa\n\n")
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": self.state,
+                                          "HOME": os.path.join(self.tmp, "home")}), \
+                mock.patch.object(self.agent.subprocess, "run", return_value=out), \
+                contextlib.redirect_stderr(err):
+            rc = self.agent.cap_toolhomes(cap_mb=1, workers=self.workers,
+                                          state=self.state, now=self.now)
+        self.assertEqual(0, rc)
+        self.assertIn("could not list lane worktrees (undecodable listing)", err.getvalue())
+        self.assertGreater(self.agent.tree_bytes(base + ".toolhome"), 1 << 20,
+                           "the cap pruned over an undecodable lane listing")
 
     def test_the_isolate_run_calls_the_cap_before_provisioning(self):
         with io.open(AGENT, encoding="utf-8") as fh:
