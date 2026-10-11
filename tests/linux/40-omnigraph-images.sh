@@ -1404,3 +1404,32 @@ if it "omnigraph 0.13 client compose: the offline profile pins the digested imag
     [[ -z "$problems" ]] && pass || fail "$problems"
 fi
 
+
+# ─── D-1038 P7d: the shared env EXAMPLE must not ship the old bucket ───
+# Both compose files default S3_BUCKET to omnigraph-013, but the README and the
+# runbook tell the operator to `cp .env.shared.example .env.shared`. An example
+# carrying S3_BUCKET=omnigraph turns that copy into an EXPLICIT old value that
+# overrides the compose default, and the 0.13 server silently shares the 0.8.1
+# bucket. Static — reads the example and the compose default, nothing runs.
+OMNI_ENV_EXAMPLE="$ROOT/infra/mcp-servers/.env.shared.example"
+
+if it "omnigraph 0.13 env example: S3_BUCKET ships the 0.13 bucket, equal to the compose default"; then
+    problems=""
+    [[ -f "$OMNI_ENV_EXAMPLE" ]] || problems+=" missing $OMNI_ENV_EXAMPLE;"
+    if [[ -z "$problems" ]]; then
+        lines="$(grep -cE '^S3_BUCKET=' "$OMNI_ENV_EXAMPLE")"
+        [[ "$lines" -eq 1 ]] || problems+=" $lines S3_BUCKET= lines (want exactly 1);"
+        want_line="$(grep -E '^S3_BUCKET=' "$OMNI_ENV_EXAMPLE" | head -1)"
+        [[ "$want_line" == "S3_BUCKET=omnigraph-013" ]] \
+            || problems+=" the example ships '$want_line' (want S3_BUCKET=omnigraph-013);"
+
+        # Same value as the compose default, extracted from both files.
+        example_bucket="${want_line#S3_BUCKET=}"
+        compose_bucket="$(grep -oE 'S3_BUCKET:-[A-Za-z0-9_-]+' "$OMNI_COMPOSE" | head -1)"
+        compose_bucket="${compose_bucket#S3_BUCKET:-}"
+        [[ -n "$compose_bucket" ]] || problems+=" no S3_BUCKET:- default in $OMNI_COMPOSE;"
+        [[ "$example_bucket" == "$compose_bucket" ]] \
+            || problems+=" the example ($example_bucket) is not the compose default ($compose_bucket);"
+    fi
+    [[ -z "$problems" ]] && pass || fail "$problems"
+fi
