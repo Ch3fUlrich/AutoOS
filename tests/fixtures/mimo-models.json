@@ -1,0 +1,126 @@
+{
+  "_comment": [
+    "Gateway view of provider xiaomi-mimo (OmniRoute :20128), captured 2026-10-12 by fixes-L2-mimo.",
+    "NOT the vendor's own /v1/models: the key lives only in the gateway DB. Sources: GET /v1/models (ids with the xiaomi-mimo/ prefix) and GET /api/v1/providers/xiaomi-mimo/models (capability fields).",
+    "Live-call findings the list does not show: chat xiaomi-mimo/mimo-v2.6-flash|v2.6-pro|v2.6-pro-ultraspeed|v2.5-asr|v2.5-tts -> 400 'not available in the active live catalog'; only mimo-v2.5-pro and mimo-v2.5 answered 200. mimo-v2.5-pro image input -> 404 'No endpoints found that support image input'; mimo-v2.5 image input -> 200.",
+    "Refresh the fixture when the gateway's xiaomi-mimo catalog changes (v2.6 ids expected after 2026-10-14)."
+  ],
+  "captured": "2026-10-12",
+  "gateway_v1_models_ids": [
+    "xiaomi-mimo/mimo-v2.5",
+    "xiaomi-mimo/mimo-v2.5-pro",
+    "xiaomi-mimo/mimo-v2.5-tts",
+    "xiaomi-mimo/mimo-v2.5-tts-voiceclone",
+    "xiaomi-mimo/mimo-v2.5-tts-voicedesign"
+  ],
+  "provider_models": [
+    {
+      "id": "mimo-v2.5-pro",
+      "capabilities": {
+        "vision": false,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "context_length": 1048576,
+      "max_output_tokens": 131072,
+      "max_input_tokens": 1048576
+    },
+    {
+      "id": "mimo-v2.5",
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "context_length": 1048576,
+      "max_output_tokens": 131072,
+      "max_input_tokens": 1048576
+    },
+    {
+      "id": "mimo-v2.5-tts",
+      "type": "audio",
+      "subtype": "speech",
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "max_output_tokens": 131072,
+      "max_input_tokens": 1048576
+    },
+    {
+      "id": "mimo-v2.5-tts-voicedesign",
+      "type": "audio",
+      "subtype": "speech",
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "max_output_tokens": 131072,
+      "max_input_tokens": 1048576
+    },
+    {
+      "id": "mimo-v2.5-tts-voiceclone",
+      "type": "audio",
+      "subtype": "speech",
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ],
+      "max_output_tokens": 131072,
+      "max_input_tokens": 1048576
+    }
+  ],
+  "live_call_results": {
+    "mimo-v2.5-pro": {
+      "text": "200",
+      "tools": "200 tool_call",
+      "image_in": "404 no image endpoint",
+      "prompt_cache": "cached_tokens 1792 of 1917 on 2nd identical call"
+    },
+    "mimo-v2.5": {
+      "text": "200",
+      "tools": "200 tool_call",
+      "image_in": "200 image_tokens 9"
+    },
+    "mimo-v2.5-tts": {
+      "chat": "400 not in live catalog"
+    },
+    "mimo-v2.6-flash": {
+      "chat": "400 not in live catalog"
+    },
+    "mimo-v2.6-pro": {
+      "chat": "400 not in live catalog"
+    }
+  }
+}
