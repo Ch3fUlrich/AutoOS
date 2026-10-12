@@ -62,11 +62,11 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
 | `l2-orchestrator-clean` | frontier | 1M | vertex `gemini-3.8-flash` |
 | `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
-| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` |
+| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.5-pro` |
 | `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` |
+| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.5` |
 | `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
 | `l3-driver-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |

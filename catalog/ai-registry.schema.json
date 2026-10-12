@@ -297,6 +297,18 @@
           "description": "Ordered rungs, e.g. [\"none\",\"low\",\"medium\",\"high\",\"xhigh\"]. Empty for a non-reasoning model."
         },
         "tool_calls": { "enum": ["proven", "unproven", "broken"] },
+        "capabilities": {
+          "type": "object",
+          "description": "Additive field, not in spec 3.1 (AO-MIMO-WIRING, 2026-10-12): which input/output modalities this model row has actually been seen serving. Optional, and each key is optional; every value is one of the three strings `proven` (a live call through the gateway answered it), `unproven` (nothing has answered for it yet) and `broken` (a live call refused it - a measured refusal, not an absence of evidence). Absence means the same as `unproven`: a consumer that needs a modality tests `== \"proven\"`, never truthiness. Tool use is NOT one of these keys - it stays in the existing `tool_calls` field, which the resolver already gates on, so a row carrying `capabilities.text: proven` while `tool_calls: unproven` is honest, not contradictory. Written for the Xiaomi MiMo Token Plan legs, where the gateway's own `capabilities.vision` cell and a live image call disagreed (mimo-v2.5-pro advertises no image endpoint and 404s on one, mimo-v2.5 answers image input): a per-modality table is what keeps a measured 404 from silently reading as 'unmeasured'.",
+          "additionalProperties": false,
+          "properties": {
+            "text": { "enum": ["proven", "unproven", "broken"] },
+            "image_in": { "enum": ["proven", "unproven", "broken"] },
+            "audio_in": { "enum": ["proven", "unproven", "broken"] },
+            "audio_out": { "enum": ["proven", "unproven", "broken"] },
+            "video_in": { "enum": ["proven", "unproven", "broken"] }
+          }
+        },
         "price_in": { "type": "number", "minimum": 0 },
         "price_out": { "type": "number", "minimum": 0 },
         "price_source": {

@@ -1684,17 +1684,23 @@ class FreeAiProviderTests(unittest.TestCase):
                     if leg.startswith(("free_ai/", "free-ai/"))]
             self.assertFalse(hits, "route %s still declares %s" % (rid, hits))
 
-    def test_l2_worker_closes_with_the_vertex_leg(self):
+    def test_l2_worker_closes_with_the_vertex_leg_then_the_subscription_tail(self):
         """BRIEF T2FREE (S1, urgent stopgap 2026-09-28) put the leg that
         measured answering 200 last, so a request always fell through to
         something. D657-D2 (2026-10-08) keeps that shape and changes the name:
         probe D-657 measured `vertex/gemini-3.8-flash` answering on both
         gateways with a documented cache, and spec SS8's paid-deepseek ban took
         the old tail out, so the vertex leg is now the last leg a real request
-        can fall through to."""
+        can fall through to.
+        MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg: `xiaomi-mimo/
+        mimo-v2.5-pro` is a `subscription` leg, contract rule (b) ranks
+        subscription with paid (tools/combo-contract.py TIER_ORDER) and
+        tools/autoos_resolver.py holds a non-free tier back as a last resort
+        while a free/trial/credit leg is healthy, so vertex stays the last
+        CREDIT leg and the subscription tail follows it."""
         route = self.reg["routes"]["l2-worker"]
-        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
-                         "vertex/gemini-3.8-flash")
+        self.assertEqual(live_legs(self.reg, "l2-worker")[-2:],
+                         ["vertex/gemini-3.8-flash", "xiaomi-mimo/mimo-v2.5-pro"])
         legs = route["legs"]
         for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
                      "ovhcloud/gpt-oss-120b",
@@ -2805,7 +2811,10 @@ class MistralPlanLimitsTests(unittest.TestCase):
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
         self.assertNotIn("mistral/mistral-code-latest", legs)
-        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+        # MIMO 2026-10-12 (AO-MIMO-WIRING): vertex is no longer the closing leg —
+        # the subscription tail follows it (rule (b) ranks subscription with paid).
+        self.assertEqual(legs[-2], "vertex/gemini-3.8-flash")
+        self.assertEqual(legs[-1], "xiaomi-mimo/mimo-v2.5")
 
     # -- the invariant ------------------------------------------------------
 
@@ -3653,8 +3662,10 @@ class ComboCrossProviderTests(unittest.TestCase):
         # the openrouter :free legs top out at 262144 < the route's 1M need, so
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
-        "l2-worker": 3,
-        "l3-driver": 10,
+        # MIMO 2026-10-12 (AO-MIMO-WIRING): +1 each — the subscription legs are
+        # tool_calls proven and 1M, so the resolver counts them in the band.
+        "l2-worker": 4,
+        "l3-driver": 11,
         "l3-driver-free-only": 9,
     }
 
@@ -4121,17 +4132,23 @@ class CleanTierRouteTests(unittest.TestCase):
                                  and legs[i - 1].startswith("ovhcloud/"),
                                  (rid, legs[i - 1], legs[i]))
 
-        # (2) the two priced ids, one per L3 chain, in the trial position.
+        # (2) the two priced ids, one per L3 chain, in the trial position:
+        # immediately ahead of the vertex credit leg. MIMO 2026-10-12
+        # (AO-MIMO-WIRING) adds a subscription tail BEHIND vertex in l3-driver
+        # (rule (b) ranks subscription with paid, so the credit pair keeps its
+        # place and only a paid-band leg may close the chain), which is why this
+        # pins the OVH->vertex adjacency by index instead of pinning the tail.
         for rid in ("l3-driver", "l3-implementer"):
             legs = routes[rid]["legs"]
             carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
             self.assertEqual(len(carried), 1, (rid, carried))
             self.assertIn(carried[0], priced, rid)
-            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
-        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
-                            routes["l3-implementer"]["legs"][-2],
-                            "both L3 chains carry the same OVH id: one grant, "
-                            "not two seats")
+            ovh_at = legs.index(carried[0])
+            self.assertEqual(legs[ovh_at + 1], "vertex/gemini-3.8-flash", rid)
+        self.assertNotEqual(
+            [leg for leg in routes["l3-driver"]["legs"] if leg.startswith("ovhcloud/")],
+            [leg for leg in routes["l3-implementer"]["legs"] if leg.startswith("ovhcloud/")],
+            "both L3 chains carry the same OVH id: one grant, not two seats")
 
         # every -clean route stays off the grant, cached-tail or not.
         for rid, route in routes.items():
@@ -4560,6 +4577,17 @@ PROMPT_CACHE_D657 = {model_id: value
                      for value, ids in _D657_BY_VALUE.items()
                      for model_id in ids}
 
+# AO-MIMO-WIRING (2026-10-12) is a SECOND provenance, not an extension of the
+# D-657 TSV: two MiMo chat ids measured through the OmniRoute gateway the same
+# day the provider was wired. Kept apart from the D657 table on purpose — a row
+# this lane never probed must not read as if it came out of that probe's data.
+PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.5-pro": "true", "mimo-v2.5": "unknown"}
+PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
+# The source string must name the measurement event that set the verdict, so
+# each accepted provenance is one dated event.
+PROMPT_CACHE_PROVENANCES = ("probe D-657 2026-10-08 central+workstation",
+                            "gateway smoke 2026-10-12")
+
 
 
 class PromptCacheFieldTests(unittest.TestCase):
@@ -4584,12 +4612,15 @@ class PromptCacheFieldTests(unittest.TestCase):
     def test_the_committed_registry_carries_the_D657_probe_rows_and_nothing_else(self):
         """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
         leg resolved to, at the verdict its TSV cells add up to - no invented
-        row, no verdict for a leg the probe never answered."""
+        row, no verdict for a leg the probe never answered.
+        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: two rows
+        from a gateway smoke the D-657 TSV never saw. The set is still closed —
+        a verdict with no measurement behind it is what this test refuses."""
         reg = load_registry()
         rows = {model_id: model["prompt_cache"]
                 for model_id, model in reg["models"].items()
                 if "prompt_cache" in model}
-        self.assertEqual(rows, PROMPT_CACHE_D657)
+        self.assertEqual(rows, PROMPT_CACHE_ROWS)
         self.assertEqual(registry.check_registry(reg), [])
 
     def test_every_set_verdict_names_where_it_came_from(self):
@@ -4597,8 +4628,12 @@ class PromptCacheFieldTests(unittest.TestCase):
         for model_id, model in sorted(reg["models"].items()):
             if "prompt_cache" not in model:
                 continue
-            self.assertIn("probe D-657 2026-10-08 central+workstation",
-                          model["prompt_cache_source"], model_id)
+            self.assertIn(
+                True, [names in model["prompt_cache_source"]
+                       for names in PROMPT_CACHE_PROVENANCES],
+                "%s: prompt_cache_source %r names no probe event in %s"
+                % (model_id, model["prompt_cache_source"],
+                   PROMPT_CACHE_PROVENANCES))
 
     def test_the_four_strings_validate(self):
         for value in ("true", "documented", "false", "unknown"):
