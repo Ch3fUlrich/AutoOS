@@ -35,9 +35,9 @@ four traps, all measured 2026-09-24 against opencode 2.0.16:
 Routing: without --tier the model comes from a task card. A v1 card
 (role/complexity/ctx/spend, or empty) goes through autoos_routing.select_combo
 (ADR 0006) - the one decision point, shared with the MCP server. An empty card
-is l2-worker; `--card privacy=sensitive,ctx=1m` fails closed (the only
-sensitive 1M leg is off, so --allow-training is accepted for
-compatibility but inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
+is l2-worker; a card's `privacy` field is recorded and never a filter
+(AO-MIMO-D1201 2026-10-12: privacy=sensitive gets the combo its role/complexity
+/ctx names, `--allow-training` and `--clean` stay accepted and are inert). A v2 card (any of kind/risk/spec/mode/deferrable/deadline/
 paths/override, spec 6.1 "run takes card v2") instead goes through the
 resolver (route_plan_for/autoos_resolver.plan, the same core the `route`
 subcommand uses): `state` input_required refuses with exit 2 and the plan's
@@ -50,7 +50,8 @@ Clients (autoos_clients.py; `list` prints the matrix): opencode (default),
 claude (`claude -p` on its own login; --joinable = a `--bg --remote-control`
 session), qwen / gemini / codex through `omniroute run <target>` on the card's
 combo, agy and qoder on their own account login (no gateway; qoder is a promo
-and takes privacy=public work only).
+client, and since AO-MIMO-D1201 privacy is a card field, not a gate, so it runs
+any card's work like every other client).
 
 --lean: no serena/playwright/context7 for research and review agents - about
 0.7 GB less per agent (LEAN_DROP). Implemented for the clients that can honour
@@ -97,7 +98,7 @@ Usage:
     python3 tools/autoos-agent.py run --run-id 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
     python3 tools/autoos-agent.py run --card kind=review --isolate --not-family nvidia --no-fallthrough "..."
-    python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."       # no-training twin
+    python3 tools/autoos-agent.py run --tier 3 --isolate "..."               # normal combo
     python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/l2-orchestrator "..."
     python3 tools/autoos-agent.py run --tier 1 --free "..."        # no keys at all
     python3 tools/autoos-agent.py run --tier 3 --isolate --dry-run "..."     # print the plan only
@@ -117,7 +118,8 @@ Usage:
 --free maps every tier agent to one of opencode's own free models (default
 opencode/muse-spark-1.3-contributor-free) through OPENCODE_CONFIG_CONTENT: no
 gateway, no key, no spend - for exercising the tier chain and the permission
-fences. Free promo models may train on prompts, so --free refuses --clean. A
+fences. --free and --clean no longer interact: AO-MIMO-D1201 (2026-10-12) made
+--clean an accepted no-op with the -clean combos gone, so it refuses nothing. A
 --free run that hits a provider stop re-runs the same task in the same sandbox
 on the next model of policy.free_client_models in catalog/ai-registry.json
 (SPAWNFREE item 1), and waits for a free slot before starting at all when the
@@ -320,7 +322,10 @@ import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
-from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
+# private_safe left this import at AO-MIMO-D1201 (2026-10-12): sensitive_combo_refusal()
+# was its only reader here and the -clean gate went with it. The predicate stays
+# in tools/registry.py as registry data.
+from registry import registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "l1-orchestrator", 2: "l2-worker", 3: "t3-reviewer"}
@@ -426,7 +431,7 @@ PROBE_PROPOSALS_LOG = os.path.join(ROOT, "logs", "routing", "probe-proposals.jso
 # (operator): the 4-6 generation is retired upstream, so the default moves to
 # the 5-5 spelling the agy CLI and the live gateway catalog serve.
 DEFAULT_ORCHESTRATOR_MODEL = "claude-opus-5-5-medium"
-# A v1 combo (l1-orchestrator, l2-worker, l3-driver, their -clean twins) always
+# A v1 combo (l1-orchestrator, l2-worker, l3-driver) always
 # carries one of these prefixes. A resolver v2 route id (RUNV2) may or may not
 # (e.g. "l1-orchestrator-free-only" does; "t4-rag" and "deepseek-v4.1-flash" do
 # not - t4 is not even a TIERS key). _tier_for_route defaults to tier 2 when it
@@ -3510,8 +3515,11 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     qualified = qualify_pinned_model(cfg, base)
     if qualified:
         base = qualified
-    if clean and not base.endswith("-clean"):
-        base += "-clean"
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): `clean` is accepted and is
+    # a no-op. It used to rewrite the combo id to its `-clean` twin; the twins
+    # are gone, so a --clean run gets the normal combo's model. The parameter
+    # stays because callers (effective_spawn_model, the MCP spawn tool) still
+    # thread it, and a lane that still passes --clean must keep working.
     if base not in declared_models(cfg):
         raise ValueError("%s is not declared in opencode.jsonc providers "
                          "(a bare pin needs the provider prefix that declares "
@@ -4344,7 +4352,7 @@ def effective_spawn_model(client_name: str, model=None, card=None,
       * a gateway client with `--free` runs the promo model, not the tier's;
       * a gateway client with `--tier` runs that tier agent's `model` in
         opencode.jsonc -- through `resolve_model`, the launcher's own function, so
-        a `--clean` tier and a declared-variant model come back spelled exactly as
+        a declared-variant model comes back spelled exactly as
         the run receives them. HEAD read the client default first, which let a
         tier agent whose model IS Claude be priced as a free client default;
       * a gateway client with neither runs the card's combo (an absent card is the
@@ -4369,8 +4377,8 @@ def effective_spawn_model(client_name: str, model=None, card=None,
             agent = TIERS.get(_as_int(tier))
             if agent is None:
                 return None, None
-            # The launcher's own function: the same clean suffix, the same
-            # "is this declared" refusal, which the caller turns into its message.
+            # The launcher's own function: the same declared-model refusal,
+            # which the caller turns into its message.
             try:
                 return (resolve_model(opencode_cfg(cfg), _as_int(tier), clean, None),
                         "opencode.jsonc agent %s" % agent)
@@ -7667,9 +7675,10 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
     cmd_run catches ahead of its generic ValueError handler, so the message is
     printed as-is - no "(see: ...)" suffix tacked on.
 
-    privacy: a card's privacy=sensitive is enforced entirely inside plan()'s
-    own filters (spec 5.3 step 1) - this function adds no privacy rule of its
-    own; it only turns whatever route plan() already picked into a combo/tier.
+    privacy: a card's `privacy` field rides into plan() and is recorded on the
+    route, but since AO-MIMO-D1201 (2026-10-12) it filters nothing there and
+    adds no rule here - a sensitive card resolves to the route its own fields
+    name, exactly as a public one does.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     registry = load_live_registry()
@@ -7776,33 +7785,27 @@ def _resolve_route_v2(args, parsed_card: dict, cfg: dict, override: str | None,
 
 
 class PrivacyRefused(ValueError):
-    """A sensitive run whose explicit --model names a combo with a leg that is
-    not private-safe (PRIV3)."""
+    """A run refused for what it would expose: a plaintext secret in the source
+    HEAD or the --review-base side of a review (the secret-scan paths).
+
+    It used to also name PRIV3 — a sensitive run whose explicit --model named a
+    combo with a leg that was not private-safe. AO-MIMO-D1201 (2026-10-12,
+    operator answer 3) dropped the `-clean` combos and every gate that read
+    `private_safe`, so no combo can be refused for privacy here; what a run must
+    never carry is a secret in its own checkout, and that check is unchanged."""
 
 
 class GeminiRefused(ValueError):
     """A run aimed at a Gemini model the operator's allow-list does not name (D-255)."""
 
 
-def sensitive_combo_refusal(combo: str, registry: dict):
-    """Why `combo` may not carry privacy=sensitive work, or None when it may.
-
-    Every leg the gateway serves counts - unavailable_legs included, since
-    combos.json keeps them and OmniRoute can still fall through to them. An id
-    that is not a registry route is refused: nothing proves it private-safe.
-    """
-    route = (registry.get("routes") or {}).get(combo)
-    if route is None:
-        return "privacy: %r is not a registry route, so nothing proves it private-safe" % combo
-    for leg in route.get("legs") or []:
-        try:
-            provider_id, model_id = resolve_leg(leg, registry)
-        except ValueError as exc:
-            return "privacy: %s: %s" % (leg, exc)
-        safe, why = private_safe(provider_id, model_id, registry)
-        if not safe:
-            return "privacy: --model %s serves %s, which is not private-safe (%s)" % (combo, leg, why)
-    return None
+# AO-MIMO-D1201 (2026-10-12, operator answer 3): sensitive_combo_refusal() is
+# gone. It answered "may this combo carry privacy=sensitive work?" by walking
+# every declared leg through registry.private_safe(), which existed because the
+# `-clean` twins were the only answer to a sensitive card. With the class dropped
+# there is no private-safe destination to refuse towards, so the question has no
+# routing answer; keeping secrets off a model leg is the stated policy in
+# docs/models.md. private_safe() itself stays in tools/registry.py as data.
 
 
 # T0-PAID-2a1: the paid combos a --free run must never be labelled with, and the
@@ -7825,7 +7828,7 @@ def free_only_combo(combo):
     free — it stays pure, since the MCP `route` tool takes only a card — and
     labelling that run `l1-orchestrator` names a combo with a paid tail the run
     never touches (T0-PAID-2a1). None (a --tier --free run names no combo) and
-    combos without a twin (-clean, t4-rag, resolver ids, and paid combos with
+    combos without a twin (t4-rag, resolver ids, and paid combos with
     no free-only twin such as l2-orchestrator and l1-orchestrator-paid) pass
     through: the rule is that a free run is labelled with the paid combo's
     twin whenever a twin exists, not that every free run names one.
@@ -7838,11 +7841,13 @@ def free_only_combo(combo):
 def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
                   provider_cooldown: dict | None = None,
                   fence: dict | None = None) -> dict:
-    """resolve_route_unchecked plus the PRIV3 check: a sensitive run whose
-    explicit --model replaced the card's combo must still land on private-safe
-    legs only (--allow-training keeps its compatibility escape, which now only
-    waives that explicit-override check - it no longer unlocks a trainable leg,
-    since 2026-09-27). A --free run is relabelled to its *-free-only twin (see
+    """resolve_route_unchecked plus the D-255 Gemini allow-list check.
+
+    It also used to run the PRIV3 check: a sensitive run whose explicit --model
+    replaced the card's combo had to land on private-safe legs only.
+    AO-MIMO-D1201 (2026-10-12, operator answer 3) dropped it with the `-clean`
+    combos, so --allow_training keeps its accepted-and-inert shape and nothing
+    here reads it. A --free run is relabelled to its *-free-only twin (see
     free_only_combo) so the recorded combo never names a paid leg it resolves."""
     route = resolve_route_unchecked(args, cfg, client, exclude_routes, provider_cooldown,
                                     fence)
@@ -7850,21 +7855,18 @@ def resolve_route(args, cfg: dict, client, exclude_routes: set | None = None,
         twin = free_only_combo(route.get("combo"))
         if twin != route.get("combo"):
             route = dict(route, combo=twin)
-    if args.free and route.get("privacy") == "sensitive":
-        # close-priv 2026-09-26: --free replaces the combo with the promo
-        # model, which may train on prompts - never for a sensitive task.
-        raise PrivacyRefused("privacy: --free runs the promo model %s, which may train on "
-                             "prompts; a privacy=sensitive task cannot use it" % args.free_model)
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): both privacy gates that
+    # used to sit here are gone — the --free promo-model refusal (close-priv
+    # 2026-09-26) and the PRIV3 explicit-override check through
+    # sensitive_combo_refusal(). They existed to keep a privacy=sensitive run
+    # inside the `-clean` combos, and that class no longer has anywhere to route
+    # to. `privacy` is still resolved and recorded on the route (a card states
+    # what it carries); it never changes which combo runs. --allow_training keeps
+    # its accepted-and-inert shape for the same reason.
     override = args.model if client.gateway else None
-    if (override and route.get("model") and route.get("privacy") == "sensitive"
-            and not args.allow_training):
-        reason = sensitive_combo_refusal(route["combo"], load_registry(REGISTRY_PATH))
-        if reason:
-            raise PrivacyRefused(reason)
     # D-255 (operator 2026-10-01): no Gemini Pro model, only Gemini 3.6/3.7/3.8
-    # Flash. Same door as the PRIV3 read above, because it is the same question —
-    # what this run is aimed at — asked of the model name, the hand entry behind it
-    # and the route's legs.
+    # Flash. Asked of the model name, the hand entry behind it and the route's
+    # legs — the same question about what this run is aimed at.
     gemini = gemini_spawn_refusal(route.get("model"), route.get("combo"),
                                   load_registry(REGISTRY_PATH), cfg,
                                   explicit=bool(override))
@@ -7915,7 +7917,13 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
         if not model_decided:
             _fence_check_route(combo, fence)
         return {"tier": args.tier, "model": model, "combo": combo, "reason": "explicit-tier",
-                "card": None, "privacy": "sensitive" if args.clean else "public",
+                # AO-MIMO-D1201 (2026-10-12, operator answer 3): an explicit
+                # --tier run is recorded as public whatever --clean says. The
+                # flag no longer selects a combo (it is a no-op), and `privacy`
+                # on a route dict is what the run REPORTS it carries — an
+                # inherited --clean would claim sensitivity the caller never
+                # asked for. A card still states its own privacy value.
+                "card": None, "privacy": "public",
                 "review": args.tier == 3, "read_only": read_only_run(args, None),
                 "review_plan": None}
     parsed = routing.parse_card(args.card or "")
@@ -7926,7 +7934,7 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
     combo, reason = routing.select_combo(card, args.allow_training)
     if not model_decided:
         _fence_check_route(combo, fence)
-    tier = int(re.match(r"[tl](\d)-", combo).group(1))  # l2-worker-clean -> 2
+    tier = int(re.match(r"[tl](\d)-", combo).group(1))  # l2-worker -> 2
     model = None if args.free else resolve_model(cfg, tier, False, override or "omniroute/" + combo)
     if override and model:  # an explicit --model wins over the card's combo, and says so
         combo, reason = model_route_id(model), reason + "+model"
@@ -7958,7 +7966,10 @@ def _model_pin_key(value) -> str:
 
     `model_route_id` drops the `omniroute/` prefix and the `#<effort>` suffix;
     the `-clean` twin is dropped here because it is the same pin asked to run on
-    its paid variant. Without these three, every clean run, every effort rung
+    its paid variant — kept after AO-MIMO-D1201 as pure compatibility handling,
+    so a lane that still spells an old `-clean` pin is answered by the normal
+    combo instead of refused for wearing a suffix nothing declares any more.
+    Without these three, every effort rung
     and every gateway spelling would read as a mismatch and refuse a plan that
     launches exactly what was asked for.
     """
@@ -8015,8 +8026,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # report `l1-orchestrator` for a run that in fact ran `Efficient` on qoder.
         # Recorded as `native:<client>`: honest, and `combo_legs` answers it with no
         # legs, which is exactly what provider-benching should see. The rewrite is
-        # AFTER `resolve_route` on purpose: the fence and the PRIV3 check both read
-        # the real combo of the card, and standing them down here would be a hole.
+        # AFTER `resolve_route` on purpose: the fence reads the real combo of
+        # the card, and standing it down here would be a hole. (PRIV3 read it
+        # the same way until AO-MIMO-D1201 dropped it.)
         route = dict(route, combo="native:%s" % client.name)
     depth, max_depth = clients.child_depth(os.environ, args.max_depth)
     env = {"AUTOOS_AGENT_DEPTH": str(depth), "AUTOOS_AGENT_MAX_DEPTH": str(max_depth)}
@@ -13431,12 +13443,18 @@ def cmd_run(args, cfg: dict) -> int:
     modes_ok, modes_why = clients.check_client_modes(client)
     if modes_ok is False:
         return refuse(modes_why)
-    if args.free and args.clean:
-        return refuse("--free uses promo models that may train on prompts; it cannot be --clean.")
     if args.tier is not None and args.card is not None:
         return refuse("--tier and --card both pick the model; pass one of them.")
-    if args.card is not None and args.clean:
-        return refuse("--clean is for --tier; with a card say privacy=sensitive.")
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): --clean is accepted and is
+    # a no-op, so it is no longer refused against --free or --card either. The
+    # `-clean` combos it selected were dropped; a lane that still passes the
+    # flag runs the normal combo and is told so in one line, because a silent
+    # no-op on a flag that used to change the chain is how a policy mistake
+    # becomes invisible.
+    if args.clean:
+        print("notice: --clean is a no-op since AO-MIMO-D1201 (the -clean combos "
+              "were dropped); this run uses the normal combo for its tier/card.",
+              file=sys.stderr)
     if args.free and client.name != "opencode":
         return refuse("--free is opencode's own free model; --client %s cannot use it." % client.name)
     # T2-RECORD-PIN items 3 and 1: settle every pin HERE, before the fence, the
@@ -13577,7 +13595,7 @@ def cmd_run(args, cfg: dict) -> int:
     except clients.DepthError as exc:
         return refuse(str(exc), 4)
     except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused,
-            ReviewBaseRefused) as exc:  # plan's / PRIV3's / D-255's / P1's own
+            ReviewBaseRefused) as exc:  # plan's / the secret scan's / D-255's / P1's own
         return refuse(str(exc))                        # message, no suffix added
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
@@ -13645,8 +13663,10 @@ def cmd_run(args, cfg: dict) -> int:
                                  getattr(args, "free_model", None)) if p))
     if layer_refusal is not None:
         return refuse(layer_refusal, EXIT_LAYER_FENCE)
-    if client.promo and route["privacy"] != "public":
-        return refuse("%s is a promo client that may keep prompts; it runs privacy=public work only." % client.name)
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): the promo client no longer
+    # refuses a privacy=sensitive card. Privacy is what the card records, not a
+    # filter — keeping secrets off a model leg is the stated policy in
+    # docs/models.md, enforced by not putting them in the task text.
     # SPAWNFREE (S2) item 4: --lean is only a hard error where it cannot be
     # honoured *and* the run needs what it asks for (lean_decision).
     lean_note = None
@@ -14698,7 +14718,10 @@ def _parser_run(sub):
     run.add_argument("--joinable", action="store_true",
                      help="claude only: a background session you can join through Remote Control")
     run.add_argument("--max-depth", type=int, help="lower the depth budget for this child's subtree")
-    run.add_argument("--clean", action="store_true", help="use the -clean (paid, no free legs) twin")
+    run.add_argument("--clean", action="store_true",
+                     help="accepted for compatibility and a no-op: the -clean "
+                          "combos were dropped by AO-MIMO-D1201 (2026-10-12), so "
+                          "the run gets the normal combo for its tier or card")
     run.add_argument("--model", help="pin the model: a combo declared in opencode.jsonc "
                                      "(e.g. omniroute/l2-orchestrator) for a gateway client, "
                                      "or the client's own model name for an own-account one "

@@ -130,8 +130,11 @@ GH_READONLY = {
 
 # Fleet model policy (operator 2026-09-30): orchestration runs on the paid
 # DeepSeek combo at max effort (opencode-zen and the spark gateway leg were the
-# rate-limited / 502 heads), and leaves spawn on the Vertex AI provider in
-# OmniRoute (fast, not rate-limited). These are pins because the host source
+# rate-limited / 502 heads), and leaves spawn on registry combos. D-1201
+# (operator 2026-10-12) holds Vertex AI and Google AI Studio off everywhere, so no
+# leaf may pin or resolve a `vertex/*` or `google_ai_studio/*` model id; the
+# Vertex leg the implementer used to ride is replaced by the l3-implementer combo.
+# These are pins because the host source
 # (~/.config/opencode/opencode.json) is projected from an older opencode.jsonc
 # and would otherwise revert the live fixes on the next `ai-stack.sh init`.
 # D657-D2 (AO-DENYLEGS D2, operator D-657) supersedes the orchestrator choice:
@@ -139,43 +142,34 @@ GH_READONLY = {
 # `deepseek-v4.1-flash` route renders no combo and apply.sh prunes it from the
 # gateway store — an agent pinned to it would start against a combo the gateway
 # no longer serves. It moves to `l1-orchestrator`, the D-657 L1 chain (1M, head
-# `bzl/deepseek/deepseek-v4-flash-0731free:free` ack ok + tool ok, priced
-# `vertex/gemini-3.8-flash` tail), which is also the route `tools/autoos-agent.py`
-# TIERS[1] spawns. The variant/context pinning below still applies to any host
-# that declares the deepseek row.
+# `bzl/deepseek/deepseek-v4-flash-0731free:free` ack ok + tool ok), which is also
+# the route `tools/autoos-agent.py` TIERS[1] spawns. The variant/context pinning
+# below still applies to any host that declares the deepseek row.
 FLEET_AGENT_MODELS = {
     "orchestrator": "omniroute/l1-orchestrator",
     "suborchestrator": "omniroute/l1-orchestrator",
     # Operator D-255 (2026-10-01): NEVER a Gemini Pro model; only Gemini
-    # 3.6/3.7/3.8 Flash. leaf-implementer is re-pinned from the old
-    # vertex-gemini-3.1-pro-preview to the Vertex 3.8 Flash leg. The 2026-09-30
-    # probe still stands for the other legs: `vertex/claude-sonnet-4-5` is 501
-    # ("not implemented, or supported, or enabled" -- the Vertex project has no
-    # Claude entitlement) and `vertex/DeepSeek-V4-Flash` is 400 (gateway payload
-    # bug). Pointing the reviewer at a dead leg would fail every leaf review, so
-    # it defaults to a different family that is up now; free-first (NVIDIA nemotron).
-    "leaf-implementer": "omniroute/vertex-gemini-3.8-flash",
+    # 3.6/3.7/3.8 Flash. D-1201 (2026-10-12): leaf-implementer used to be pinned
+    # to the Vertex 3.8 Flash leg — the second pinnable-Vertex path — and now
+    # rides the registry combo `l3-implementer` instead (routes.l3-implementer in
+    # catalog/ai-registry.json, rendered into
+    # configuration/omniroute/combos.json). The reviewer stays free-first
+    # (NVIDIA nemotron) — a different family from the implementer and from the
+    # Qwen writers, so a leaf review never runs on the writer's model.
+    "leaf-implementer": "omniroute/l3-implementer",
     "leaf-reviewer": "omniroute/nemotron-3-ultra-free",
 }
 # Reviewer fallback (paid, funded, 1M, always up): omniroute/deepseek-v4.1-flash.
-# If the operator enables Claude in the Vertex Model Garden, the reviewer can
-# move back to omniroute/vertex-claude-sonnet-4-5.
 DEEPSEEK_VARIANTS = ("low", "high", "max")
-# id -> (gateway modelID, context window). The gateway (7647-model catalogue
-# 2026-09-30) serves a `vertex/` provider; these are the fleet's picks.
-# D-255 (2026-10-01): the off-list Gemini rows (3.1-pro-preview, 2.5-flash) are
-# dropped; 3.8-flash is added with the registry's advertised window
-# (catalog/ai-registry.json models.gemini-3.8-flash context_advertised 1048576).
-FLEET_VERTEX_MODELS = {
-    "vertex-gemini-3.8-flash": ("vertex/gemini-3.8-flash", 1048576),
-    "vertex-claude-sonnet-4-5": ("vertex/claude-sonnet-4-5", 200000),
-    "vertex-deepseek-v4-flash": ("vertex/DeepSeek-V4-Flash", 1000000),
-}
-# Non-Vertex fleet aliases the agents reference (same shape, same pinning).
+# Fleet aliases the agents reference: alias -> (gateway modelID, context window).
+# D-1201 (2026-10-12) deleted the `vertex-*` alias set with the Vertex provider —
+# the container config must not carry a model id that resolves to a Vertex or
+# Google AI Studio leg. The surviving alias is the non-Vertex free leg the
+# reviewer is pinned to.
 FLEET_EXTRA_MODELS = {
     "nemotron-3-ultra-free": ("nvidia/nemotron-3-ultra-550b-a55b:free", 1048576),
 }
-FLEET_ALIAS_MODELS = dict(FLEET_VERTEX_MODELS, **FLEET_EXTRA_MODELS)
+FLEET_ALIAS_MODELS = dict(FLEET_EXTRA_MODELS)
 
 
 def pin_fleet_overrides(cfg, notes):
@@ -242,8 +236,9 @@ def pin_fleet_overrides(cfg, notes):
                     ]
                     notes.append("%s.models.deepseek-v4.1-flash variants pinned %s"
                                  % (label, "/".join(DEEPSEEK_VARIANTS)))
-            # Operator 2026-09-30: expose the Vertex AI provider so leaves can
-            # spawn on a fast, non-rate-limited leg.
+            # D-1201 (2026-10-12): the fleet aliases ride here so the reviewer's
+            # free leg survives `init`; the set is non-Vertex by policy — nothing
+            # injected may resolve to a Vertex / Google AI Studio leg.
             for mid, (model_id, ctx) in FLEET_ALIAS_MODELS.items():
                 if mid in models:
                     continue

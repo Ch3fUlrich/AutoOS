@@ -18,17 +18,18 @@ Three subcommands:
     2. ids are unique within and across providers/models/clients/routes; a
        route may share the id of a model one of its legs serves (a per-model
        fallback group, mapping doc Open choice 11);
-    3. a privacy-sensitive route (one whose id ends in "-clean") uses only
-       private-safe legs (private_safe(): effective tier exactly paid or
-       subscription, provider trains_on_prompts exactly false, model
-       trains_on_prompts missing or exactly false) - checked for EVERY leg
-       the route lists, including one flagged in unavailable_legs or reached
-       through a provider marked available: false (PRIV2, 2026-09-26: the
-       OmniRoute gateway does not consult that registry-only flag, and
-       combos.json/apply.sh still push the leg verbatim). CLEAN_ROUTE_
-       EXEMPTIONS names the one route (l1-orchestrator-clean) deliberately
-       exempted from this rule; `check`/`validate` still report it, as an
-       info line, never silently;
+    3. (AO-MIMO-D1201, 2026-10-12) no route id ends in "-clean". The
+       privacy-sensitive route class was dropped by operator decision: private
+       work rides the normal routes, so a `-clean` id is a leftover, not a
+       class. The rule is now the permanent guard that keeps the six deleted
+       ids (l1-orchestrator-clean, l2-orchestrator-clean, l2-worker-clean,
+       l3-driver-clean, l3-implementer-clean, l3-researcher-clean) out of the
+       registry and therefore out of every render. `private_safe()` stays as
+       the DATA predicate for a caller that wants to ask whether a leg trains
+       on prompts (the per-provider `trains_on_prompts` flags and rule 3b's
+       cited privacy evidence both stay); nothing in the routing path requires
+       a private-safe leg any more. Keeping the number keeps the rule-map
+       reference (`R-safety-04`) pointing at one place;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
        vendor endpoint. Loopback (127.0.0.1 / localhost / ::1) is allowed ONLY in
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
@@ -699,7 +700,7 @@ def _check_model_key_case(registry) -> list:
 
 
 # ===========================================================================
-# rule 3 - privacy-sensitive routes
+# rule 3 - the dropped privacy-sensitive route class (AO-MIMO-D1201)
 # ===========================================================================
 
 
@@ -711,9 +712,14 @@ def private_safe(provider_id, model_id, registry) -> tuple:
     never" needs the pool's tier checked too -- and further tightened by PRIV2,
     2026-09-26: fail CLOSED on anything that is not exactly the safe shape, and
     let a model override its provider's ``tier`` too, not only its
-    ``trains_on_prompts``). The single predicate both this module's rule 3
-    (-clean routes) and tools/autoos_resolver.py's route-level privacy filter
-    use, so the two can never drift apart.
+    ``trains_on_prompts``).
+
+    AO-MIMO-D1201 (2026-10-12): the operator dropped the `-clean` route class
+    and every gate that consulted this predicate -- rule 3 now only guards the
+    absent ids, and neither the resolver's route filter nor the spawner refuses
+    a leg for it. The predicate and the data behind it stay: it is the one
+    answer to "would this leg train on my prompts?", which is a fact an operator
+    or a doc can still ask for, and privacy stays the stated policy it is.
 
     Safe only when ALL of:
       - the EFFECTIVE tier -- ``models.<id>.tier`` when present, else
@@ -779,68 +785,28 @@ def private_safe(provider_id, model_id, registry) -> tuple:
     return True, None
 
 
-# The one documented, deliberate exception to rule 3 (PRIV2, 2026-09-26):
-# l1-orchestrator-clean's only leg is the OpenRouter contributor model, which
-# trains by contract (see the meta/muse-spark-1.3-contributor $comment in
-# catalog/ai-registry.json). combos.json's own $comment already recorded this
-# trade-off on 2026-09-21 ("l1-orchestrator-clean ... no longer means
-# trains-nothing - it means paid-only"); tools/autoos-agent.py's spawner
-# requires an explicit --allow-training to route a sensitive card there
-# (tools/autoos_routing.py select_combo()). A route named here is never
-# evaluated by _check_privacy below - it is reported separately, as an
-# "info:" line (privacy_exemption_lines()), never silently and never as a
-# check_registry() problem. The resolver's own privacy filter
-# (tools/autoos_resolver.py filter_routes()) does NOT consult this table: it
-# calls private_safe() on every *available* serving leg of *every* route, and
-# l1-orchestrator-clean's only leg has no available leg at all, so a
-# privacy=sensitive card can never land there regardless.
-CLEAN_ROUTE_EXEMPTIONS = {
-    "l1-orchestrator-clean": (
-        "carries the OpenRouter contributor leg "
-        "(openrouter/meta/muse-spark-1.3-contributor) deliberately, since the "
-        "2026-09-21 contributor-only block made it paid-only rather than "
-        "trains-nothing (combos.json's own $comment); the spawner requires "
-        "--allow-training to route a privacy=sensitive card there "
-        "(tools/autoos-agent.py, tools/autoos_routing.py select_combo())."
-    ),
-}
-
-
+# AO-MIMO-D1201 (2026-10-12, operator answer 2): the privacy-sensitive route
+# class is gone. The six `-clean` routes (l1-orchestrator-clean,
+# l2-orchestrator-clean, l2-worker-clean, l3-driver-clean, l3-implementer-clean,
+# l3-researcher-clean) were deleted from catalog/ai-registry.json -- private
+# work uses the normal routes -- and every render is derived from the registry,
+# so an id that reappears here would reappear in combos.json, opencode.jsonc and
+# the rest. Rule 3 is that guard: it is the positive test the brief asks for,
+# written where the class used to be defined rather than as a one-off assertion,
+# so it keeps failing closed if anyone re-adds one. There is no exemption table
+# any more, and no info line to print: CLEAN_ROUTE_EXEMPTIONS and
+# privacy_exemption_lines() left with the class.
 def _check_privacy(registry) -> list:
+    """Rule 3: no route id ends in `-clean` (AO-MIMO-D1201)."""
     problems = []
-    for route_id, route in _section(registry, "routes").items():
-        if not isinstance(route, dict) or not route_id.endswith(CLEAN_ROUTE_SUFFIX):
-            continue
-        if route_id in CLEAN_ROUTE_EXEMPTIONS:
-            continue  # reported separately by privacy_exemption_lines(), never here
-        for leg in dict.fromkeys(route.get("legs") or []):
-            try:
-                provider_id, model_id = resolve_leg(leg, registry)
-            except ValueError:
-                continue  # rule 1 already reports an unresolved leg
-            # Every leg is checked, an unavailable_legs entry or a
-            # provider-wide available:false included (PRIV2, 2026-09-26): the
-            # OmniRoute gateway does not consult that registry-only flag, and
-            # combos.json/apply.sh push the leg verbatim regardless.
-            safe, reason = private_safe(provider_id, model_id, registry)
-            if not safe:
-                problems.append("privacy: %s leg %s %s" % (route_id, leg, reason))
+    for route_id in _section(registry, "routes"):
+        if route_id.endswith(CLEAN_ROUTE_SUFFIX):
+            problems.append(
+                "privacy: route %s ends in %r; the -clean route class was "
+                "dropped by AO-MIMO-D1201 (2026-10-12) -- private work uses "
+                "the normal routes, so this id must not come back"
+                % (route_id, CLEAN_ROUTE_SUFFIX))
     return problems
-
-
-def privacy_exemption_lines(registry) -> list:
-    """One ``"info: ..."`` line per routes.<id> in CLEAN_ROUTE_EXEMPTIONS that
-    exists in `registry` (PRIV2, 2026-09-26: "an exempt route is reported as
-    an info line by check, never silently skipped"). Always printed by
-    `check`/`validate`, regardless of whether the registry has any problem;
-    never counted in check_registry()'s own return value, so an exemption
-    never fails the check."""
-    lines = []
-    routes = _section(registry, "routes")
-    for route_id, reason in CLEAN_ROUTE_EXEMPTIONS.items():
-        if route_id in routes:
-            lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
-    return lines
 
 
 def _cited_privacy_block_required(provider: dict, effective_tier=None) -> bool:
@@ -895,8 +861,8 @@ def _privacy_block_problems(provider_id: str, provider: dict,
             problems.append(
                 "privacy evidence: providers.%s is tier credit with "
                 "trains_on_prompts false and no privacy block - a credit leg "
-                "admitted to a -clean route must cite the terms that say so"
-                % provider_id)
+                "that claims it trains on nothing must cite the terms that "
+                "say so" % provider_id)
         return problems
     block = provider.get("privacy")
     if not isinstance(block, dict):
@@ -1288,6 +1254,16 @@ OMNIROUTE_RETIRED_IDS = [
     # deleted and the id retires so apply prunes the live combo, the same way
     # ORQWEN404 retired or-qwen3.8-27b-free.
     "ovh-qwen3-coder-30b",
+    # AO-MIMO-D1201 2026-10-12 (operator answer 2): the privacy-sensitive route
+    # class is dropped — private work uses the normal routes. The six `-clean`
+    # ROUTES are deleted from catalog/ai-registry.json (rule 3 now fails closed
+    # on any id of that shape) and their ids move here, the OVHCODER-DROP shape,
+    # so `apply` prunes any of them the live store still holds instead of
+    # leaving a retired class servable. They are the only `-clean` names left in
+    # the repo that are not compat handling: history of what was removed, not a
+    # route anyone can route to.
+    "l1-orchestrator-clean", "l2-orchestrator-clean", "l2-worker-clean",
+    "l3-driver-clean", "l3-implementer-clean", "l3-researcher-clean",
 ]
 
 
@@ -1674,16 +1650,18 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # task A4c's brief is "keep today's value via the render" for exactly this kind
 # of gap (as A4b did for the litellm rpm lines).
 IDE_MODEL_ORDER = (
-    "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
+    "l1-orchestrator", "l1-orchestrator-paid",
     "l1-orchestrator-free-only",
-    "l2-worker", "l2-worker-clean", "l2-worker-paid", "l2-worker-free-only",
-    "l2-orchestrator", "l2-orchestrator-clean",
-    "l3-driver", "l3-driver-clean", "l3-driver-paid", "l3-driver-free-only",
+    "l2-worker", "l2-worker-paid", "l2-worker-free-only",
+    "l2-orchestrator",
+    "l3-driver", "l3-driver-paid", "l3-driver-free-only",
     # D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the SS2 layer twins and the SS3
     # review lenses named by operator D-657. Listed here because render_ide()
     # requires this constant to name every route id.
-    "l3-implementer", "l3-implementer-clean",
-    "l3-researcher", "l3-researcher-clean",
+    # AO-MIMO-D1201 2026-10-12: the six `-clean` ids left this list with their
+    # routes (the privacy-sensitive route class was dropped).
+    "l3-implementer",
+    "l3-researcher",
     "l3-review-diff", "l3-review-tests", "l3-review-codebase",
     "l3-review-transcript",
     "spark-1.3-contributor",
@@ -1965,15 +1943,12 @@ OPENHANDS_TIER_ORDER = (
     "omniroute-l2-worker",
     "omniroute-l3-driver",
     "omniroute-l2-orchestrator",
-    "omniroute-l2-worker-clean",
-    "omniroute-l3-driver-clean",
     "omniroute-t4-rag",
     "omniroute-opus-5-5",
     "omniroute-gemini-3.8-flash",
     "omniroute-l2-worker-free-only",
     "omniroute-deepseek-v4.1-flash",
     "omniroute-l3-driver-free-only",
-    "omniroute-l1-orchestrator-clean",
     "omniroute-spark-1.3-contributor",
     "openrouter-muse-spark-1.3-contributor",
     "litellm-l1-orchestrator",
@@ -3445,8 +3420,9 @@ def _check_credit_guards(registry, today=None) -> list:
     # No evasion (brief FREEKEYS-1b item 4): the grant is the fact and `tier` is the
     # label every reader branches on, so a row that keeps `credit_usd` and calls
     # itself `free` silently un-limits the money, drops out of the leg filter's
-    # guard, and re-admits the provider to the `-clean` sweeps. A real downgrade has
-    # to move the grant out of the row, which is the edit a reviewer can see.
+    # guard, and stops the credit-gate checks from pricing the grant it still
+    # holds. A real downgrade has to move the grant out of the row, which is the
+    # edit a reviewer can see.
     for provider_id, provider in sorted(_section(registry, "providers").items()):
         if not isinstance(provider, dict) or provider.get("tier") == "credit":
             continue
@@ -3780,8 +3756,6 @@ def _ok_line(registry) -> str:
 
 def _cmd_check(args) -> int:
     registry = load(args.registry)
-    for line in privacy_exemption_lines(registry):
-        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:
@@ -3793,8 +3767,6 @@ def _cmd_check(args) -> int:
 
 def _cmd_validate(args) -> int:
     registry = load(args.registry)
-    for line in privacy_exemption_lines(registry):
-        print(line)
     problems = check_registry(registry)
     if problems:
         for problem in problems:

@@ -75,6 +75,11 @@ class C1ShippedRegistryVertexPriced(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             cls.reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): the shipped registry has vertex_ai
+        # available:false (the grant is at its limit). This test pins the credit
+        # guard of the vertex leg's shape, so it switches the provider on in its own
+        # in-memory copy; the shipped file is untouched.
+        cls.reg["providers"]["vertex_ai"]["available"] = True
         # The figure is read from the row, never restated here: what these tests
         # own is that `leg_price` and the price table return the provider's own
         # scoped entry verbatim. The rate in force is pinned once, in

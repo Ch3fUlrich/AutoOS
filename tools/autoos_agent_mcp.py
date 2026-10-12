@@ -1980,10 +1980,14 @@ def build_server(profile: str | None = None):
         whose only diff is a file mode (100644 <-> 100755) — the MODEFLIP refusal
         is what a checkout artifact looks like, so say it when the chmod IS the
         task; it is recorded in the runner's private record at spawn, never in
-        the worker's job.json. Refused past the depth budget, and for
-        privacy=sensitive + ctx=1m (no gateway leg serves that, and `allow_training`
-        does not unlock it — routing.select_combo is explicit that the flag is
-        inert there; it only waives the privacy check on an explicit --model).
+        the worker's job.json. Refused past the depth budget. `privacy=sensitive`
+        is not a refusal and not a filter: since AO-MIMO-D1201 (2026-10-12) the
+        `-clean` combos are gone and a sensitive card resolves to exactly the
+        combo the same public card resolves to, ctx=1m included (it names
+        l1-orchestrator). `allow_training` is likewise accepted and inert — it
+        never changes the route. Keeping secrets off any model leg is the stated
+        policy in docs/models.md, which a card's privacy field records but no
+        gate enforces.
 
         L2 SPAWN GATE (D-665, AO-L2-LAUNCH criterion 3, as AO-L2-PRODTEST's live
         run corrected it): when this server's own environment marks it as running

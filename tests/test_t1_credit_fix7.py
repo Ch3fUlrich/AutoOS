@@ -168,6 +168,11 @@ class R3GatewayLegsUngated(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): the shipped registry has vertex_ai
+        # available:false (the grant is at its limit). This test pins the credit
+        # guard of the vertex leg's shape, so it switches the provider on in its own
+        # in-memory copy; the shipped file is untouched.
+        reg["providers"]["vertex_ai"]["available"] = True
         found = None
         for rid, route in (reg.get("routes") or {}).items():
             for leg in (route.get("legs") or []):
@@ -245,6 +250,10 @@ class R5LoudLineOnlyForSurvivors(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): vertex_ai ships available:false; this test
+        # pins the vertex leg's credit-guard shape, so it switches the provider on
+        # in its own in-memory copy (the shipped file is untouched).
+        reg["providers"]["vertex_ai"]["available"] = True
         for rid, route in (reg.get("routes") or {}).items():
             legs = route.get("legs") or []
             if any(l.split("/")[0] in ("vertex", "vertex_ai") for l in legs):
@@ -501,6 +510,11 @@ class C4UnknownWarnOnlyForSurvivors(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): the shipped registry has vertex_ai
+        # available:false (the grant is at its limit). This test pins the credit
+        # guard of the vertex leg's shape, so it switches the provider on in its own
+        # in-memory copy; the shipped file is untouched.
+        reg["providers"]["vertex_ai"]["available"] = True
         for rid, route in (reg.get("routes") or {}).items():
             legs = route.get("legs") or []
             if any(leg.split("/")[0] in ("vertex", "vertex_ai")
@@ -707,6 +721,10 @@ class T2WindowLimitedCaveat(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): vertex_ai ships available:false; this test
+        # pins the vertex leg's credit-guard shape, so it switches the provider on
+        # in its own in-memory copy (the shipped file is untouched).
+        reg["providers"]["vertex_ai"]["available"] = True
         for rid, route in (reg.get("routes") or {}).items():
             legs = route.get("legs") or []
             if any(leg.split("/")[0] in ("vertex", "vertex_ai")
@@ -718,6 +736,10 @@ class T2WindowLimitedCaveat(unittest.TestCase):
         with open(_ROOT / "catalog" / "ai-registry.json",
                   encoding="utf-8") as fh:
             reg = json.load(fh)
+        # AO-MIMO-D1201 (2026-10-12): vertex_ai ships available:false; this test
+        # pins the vertex leg's credit-guard shape, so it switches the provider on
+        # in its own in-memory copy (the shipped file is untouched).
+        reg["providers"]["vertex_ai"]["available"] = True
         for pid, entry in (reg.get("providers") or {}).items():
             if isinstance(entry, dict) and entry.get("tier") == "credit":
                 self.assertIsNone(entry.get("credit_started"),

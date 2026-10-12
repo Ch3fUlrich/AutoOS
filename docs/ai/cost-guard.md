@@ -136,7 +136,7 @@ Set the environment variable `AUTOOS_DAILY_GATE_FILE` to point to the output wri
 
 ```bash
 export AUTOOS_DAILY_GATE_FILE="/tmp/daily_gate.json"
-python tools/autoos-agent.py run --client opencode --model omniroute/vertex-gemini-3.8-flash "..."
+python tools/autoos-agent.py run --client opencode --model omniroute/l3-implementer "..."
 ```
 
 The gate runs at **three** points inside `autoos-agent.py`:

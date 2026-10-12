@@ -1902,10 +1902,11 @@ verify_combos() {
         v_fail "keyed combos" "AUTOOS_OMNIROUTE_KEY holds a line break"; return 0
     fi
     # The two picks that prove the gateway end to end without spending: the
-    # free-only worker and the no-training twin. Names are combo ids from
+    # free-only worker and the normal keyed worker. Names are combo ids from
     # configuration/omniroute/combos.json (the registry render); a rename there
-    # must be re-pinned here or verify FAILs a healthy stack.
-    read -ra combos <<<"${AUTOOS_VERIFY_COMBOS:-l2-worker-free-only l2-worker-clean}"
+    # must be re-pinned here or verify FAILs a healthy stack. The `-clean` twin
+    # that used to be the second pick is gone (AO-MIMO-D1201, 2026-10-12).
+    read -ra combos <<<"${AUTOOS_VERIFY_COMBOS:-l2-worker-free-only l2-worker}"
     if (( ${#combos[@]} == 0 )); then v_skip "keyed combos" "AUTOOS_VERIFY_COMBOS lists no combo"; return 0; fi
     url="http://127.0.0.1:$(service_port omniroute)/v1/chat/completions"
     for c in "${combos[@]}"; do

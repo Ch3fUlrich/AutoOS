@@ -62,21 +62,12 @@ temperature = 0.2
 max_input_tokens = 128000
 max_output_tokens = 16384
 
-# Sensitive data: swap tier ids for the -clean combos (no prompt training).
-# l1-orchestrator-clean is NOT here (PROVFIX3 finding 6): the combo has been
-# omitted since DSMAX 2026-09-27 (its only legs were OpenRouter and the
-# client-bound Zen deployment), apply.sh prunes an omitted combo from the
-# gateway store, and the OpenHands tier spec dropped the profile — so this table
-# would 404 on activation. The two clean tiers that do serve are below.
-[llm.l2-worker-clean]
-model = "openai/l2-worker-clean"
-base_url = "http://127.0.0.1:20128/v1"
-temperature = 0.1
-
-[llm.l3-driver-clean]
-model = "openai/l3-driver-clean"
-base_url = "http://127.0.0.1:20128/v1"
-temperature = 0.2
+# Sensitive data: since AO-MIMO-D1201 (2026-10-12, operator answer 2) there is
+# no separate `-clean` combo class to swap these tier ids for — privacy-sensitive
+# work rides the normal tiers above. What keeps a secret off a model leg is the
+# task text, not the route (docs/models.md). The two `[llm.*-clean]` tables that
+# used to sit here are gone with their combos: apply.sh prunes an omitted combo
+# from the gateway store, so activating one would 404.
 
 # LiteLLM fallback proxy (:4000; the openai/ prefix is the transport
 # selector OpenHands requires - its litellm stack strips it before the call,

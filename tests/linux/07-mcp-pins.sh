@@ -115,7 +115,7 @@ for name, prov in (("omniroute", omni), ("litellm", lit)):
     key = (prov.get("options") or {}).get("apiKey", "")
     if not (key.startswith("{env:") and key.endswith("}")):
         problems.append(name + "-key-not-placeholder")
-for m in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-worker", "l3-driver-clean", "auto/smart"):
+for m in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-worker", "l3-driver", "auto/smart"):
     if m not in (omni.get("models") or {}):
         problems.append("missing:" + m)
 # The full surface comes from catalog/ide-models.json (rendered from the

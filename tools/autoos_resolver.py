@@ -21,7 +21,10 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import autoos_track as track  # tools/ is on sys.path for every caller
-from registry import (resolve_leg, private_safe, unavailable_now,  # tools/ is on sys.path
+# private_safe left this import at AO-MIMO-D1201 (2026-10-12): the route-level
+# privacy filter and the reviewer privacy check were its only readers here and
+# both are gone. The predicate stays in tools/registry.py as registry data.
+from registry import (resolve_leg, unavailable_now,  # tools/ is on sys.path
                       _parse_until, leg_denied, leg_rule_for,
                       plan_dead_reasons, claude_budget as claude_budget_of,
                       context_label_to_tokens, gateway_legs,
@@ -844,8 +847,8 @@ def _claude_budget_removed(removed) -> bool:
     """Whether a no-survivors result was caused by the Claude hold.
 
     Required before deferring, so a card that failed for an unrelated reason
-    (privacy, a client nobody installed) is not reported as "waiting for free
-    capacity" when nothing is waiting for it.
+    (a client nobody installed, every leg rate-limited) is not reported as
+    "waiting for free capacity" when nothing is waiting for it.
     """
     return any("claude_budget" in reason
                for reasons in removed.values() for reason in reasons)
@@ -1433,17 +1436,21 @@ def filter_routes(card, features, client_state, registry, overlay,
     override runs later, over exactly these survivors.
 
     Route-level filters (unchanged by FT -- these remove the route outright,
-    regardless of any leg's own usability): retired; privacy (a
-    privacy-sensitive card removed by *any* serving leg that is not
-    registry.private_safe -- not just one that trains, but also a free-tier
-    pool, per the 2026-09-26 11:05Z operator decision "a training leg is
-    never a fallback for sensitive work" as amended by the PRIV finding
-    "Free first, private never": a free pool must never be a fallback for a
-    private prompt either, so it disqualifies the whole route even when
-    another leg of it would otherwise be perfectly usable); client
+    regardless of any leg's own usability): retired; client
     installed/signed in (a client marked ``unavailable_until``/``available:
     false`` in ``registry["clients"]`` is folded into that same reason by
     ``_client_reason``).
+
+    Privacy was a route-level filter until AO-MIMO-D1201 (2026-10-12, operator
+    answer 3): a privacy-sensitive card removed every route holding a serving leg
+    that was not ``registry.private_safe`` -- "Free first, private never" (the
+    PRIV finding 2026-09-26) made even a free pool disqualify the whole route.
+    The `-clean` route class that gave that filter somewhere to land is dropped,
+    so every card now routes on context, tools, cost and availability alone.
+    ``card["privacy"]`` is still read for the plan's own reporting and the
+    ``private_safe`` predicate still exists as registry data; neither gates a
+    route any more. Keeping the secrets off a model leg is a stated policy
+    (docs/models.md), not a filter.
 
     Every other filter (context, tool_calls, client_bound, policy.leg_rules,
     the rate-limit overlay, an unavailable leg/provider) is now per-leg
@@ -1459,7 +1466,6 @@ def filter_routes(card, features, client_state, registry, overlay,
     if "need_tokens" not in features:
         raise ValueError("missing feature 'need_tokens' in features")
     now = _now_or_default(now)
-    privacy_sensitive = card.get("privacy") == "sensitive"
     client_reason = _client_reason(client_state, client, registry, now)
     # D-102 CLAUDEBUDGET: the client half of the same rule. Running the work
     # *inside* Claude Code spends the allowance exactly as a Claude leg does,
@@ -1481,16 +1487,13 @@ def filter_routes(card, features, client_state, registry, overlay,
         if route.get("retired"):
             reasons.append("retired")
 
-        if privacy_sensitive:
-            # Every leg the gateway serves, unavailable ones included:
-            # unavailable_legs is registry-only and the combo still lists the
-            # leg (close-priv 2026-09-26; same rule as registry.py check).
-            for leg in route.get("legs") or []:
-                provider_id, model_id = resolve_leg(leg, registry)
-                safe, why = private_safe(provider_id, model_id, registry)
-                if not safe:
-                    reasons.append("privacy: %s/%s %s" % (provider_id, model_id, why))
-
+        # AO-MIMO-D1201 (2026-10-12, operator answer 3): the route-level
+        # privacy filter is gone. It used to remove a route for a
+        # privacy=sensitive card as soon as ANY leg of it was not
+        # registry.private_safe -- free pools included ("Free first, private
+        # never"). With the `-clean` class dropped there is no private-only
+        # destination left to filter towards, so sensitive cards resolve
+        # exactly like public ones.
         if client_reason:
             reasons.append(client_reason)
 
@@ -2183,9 +2186,9 @@ def _select_reviewers(scores, survivors, chosen, card, bucket_name, features,
 # data); this is the walk. It answers one question -- given the model that WROTE
 # the diff, who is allowed to read it -- and the operator's rule is that it must
 # not be the author's own family: a model reviewing its own output agrees with
-# itself. So the walk takes the first entry that clears four checks (family,
-# role in the review, availability, privacy) and reports every entry it passed
-# over, with its reasons.
+# itself. So the walk takes the first entry that clears its checks (family,
+# role in the review, availability; privacy stopped being one at AO-MIMO-D1201)
+# and reports every entry it passed over, with its reasons.
 #
 # Pure, like the rest of the module: `now` is passed in, the registry is the
 # caller's, nothing is read or written.
@@ -2384,6 +2387,10 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     reports one of its four problems hides the other three from whoever reads
     ``--explain``, and "why is Muse not reviewing this" is usually answered by
     the second reason, not the first.
+
+    ``privacy`` is accepted and never read (AO-MIMO-D1201, 2026-10-12): the
+    card's privacy value no longer disqualifies a reviewer, so the parameter
+    stays only so the callers that thread it keep working.
     """
     reasons = []
     reviewer_family = entry.get("family")
@@ -2425,18 +2432,13 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
         if bound and bound != entry.get("client"):
             reasons.append("client_bound: %s needs %s, not %s"
                            % (leg, bound, entry.get("client")))
-        # Never privacy=sensitive to a training model (operator's fixed rule:
-        # Muse trains by contributor contract). private_safe is the one
-        # predicate that already encodes "paid AND does not train", so a free
-        # pool cannot be a fallback for a private prompt here either.
-        if privacy == "sensitive":
-            safe, why = private_safe(provider_id, model_id, registry)
-            if not safe:
-                reasons.append("privacy: %s %s" % (leg, why))
-    elif privacy == "sensitive":
-        # Fail closed: with no leg there is nothing to check training against,
-        # and "unknown" is not "safe" for a private prompt.
-        reasons.append("privacy: no registry leg to check training against")
+        # AO-MIMO-D1201 (2026-10-12, operator answer 3): no privacy gate here.
+        # A reviewer entry used to be refused for a privacy=sensitive card when
+        # its leg was not registry.private_safe (and, fail-closed, when it had
+        # no leg at all to check). The `-clean` class that made that a routing
+        # decision is gone, so sensitive work is reviewed by whoever the family
+        # and availability rules pick; `privacy` stays a parameter of this
+        # function and is deliberately not read.
     return reasons, resolved
 
 
@@ -2475,7 +2477,9 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
       LAST (operator rule D-212/D-219, T0-PAID-4 Q1): the walk tries every
       NON-paid entry first (registry order kept), then the paid ones
       (registry order kept), stopping at the first entry that clears the
-      family, availability and privacy checks. A paid entry chosen this way
+      family and availability checks (privacy cleared them too until
+      AO-MIMO-D1201; the parameter stays accepted and is not read).
+      A paid entry chosen this way
       says so in the reason (``last resort: no free reviewer usable``).
       ``skipped`` holds every rejected entry in registry order, each with
       all of its reasons.

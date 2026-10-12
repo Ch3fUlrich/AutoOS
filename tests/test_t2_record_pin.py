@@ -597,17 +597,38 @@ class D284GuardTests(unittest.TestCase):
     def test_other_gemini_spellings_and_no_pin_are_allowed(self):
         agent = load_agent()
         for model in ("vertex/gemini-3.8-flash", "vertex-gemini-3.8-flash",
-                      "google/gemini-3.8-flash", "omniroute/vertex-3.8-flash",
+                      "google/gemini-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
                       "openrouter/anthropic/claude-opus-4-6",
                       "opencode/mimo-v2.6-flash-free", None, ""):
             self.assertIsNone(agent.d284_model_refusal(model), model)
 
     def test_the_cli_accepts_lifted_pin_and_reaches_argv(self):
-        r = plan_of("--client", "opencode", "--model",
-                    "omniroute/gemini-3.8-flash", "t")
+        # D-284 is a hold on a PIN, so what this pins is that an allowed spelling
+        # passes the gate and reaches argv. The exemplar was
+        # `omniroute/gemini-3.8-flash` until AO-MIMO-D1201 (2026-10-12): with
+        # vertex_ai and google_ai_studio available:false (operator answer 1, and
+        # already the state at the branch point) the gemini-3.8-flash route
+        # declares legs and serves none, so it renders no model and opencode
+        # cannot be handed it — the CLI refuses it as undeclared, never as D-284.
+        # The live declared hand entry carries the rc-0/argv half of the pin; the
+        # gemini half stays pinned below as "not named as D-284".
+        r = plan_of("--client", "opencode", "--model", QUALIFIED_OR, "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("D-284", r.stderr)
-        self.assertIn("--model omniroute/gemini-3.8-flash", r.stdout)
+        self.assertIn("--model %s" % QUALIFIED_OR, r.stdout)
+
+    def test_the_lifted_gemini_pin_is_still_not_held(self):
+        # The D-505/D-507 lift itself, at the CLI door: the render no longer
+        # declares gemini-3.8-flash, but that must not turn the lifted pin into a
+        # held pin — the only refusal it may get is the membership one.
+        for model in ("omniroute/gemini-3.8-flash", "gemini-3.8-flash"):
+            r = plan_of("--client", "opencode", "--model", model, "t")
+            self.assertNotIn("D-284", r.stderr, model)
+            self.assertNotIn("until stage 2", r.stderr, model)
+            # accepted, or refused for the render's membership alone.
+            self.assertTrue(r.returncode == 0
+                            or "not declared in opencode.jsonc providers" in r.stderr,
+                            "%s: %s" % (model, r.stderr))
 
     def test_the_cli_refuses_a_banned_pin(self):
         for model in ("openrouter/google/gemini-3.8-flash",
@@ -731,12 +752,19 @@ class D284NormalisedSpellingTests(unittest.TestCase):
         for model in self.ALLOWED_IDS:
             self.assertIsNone(agent.d284_model_refusal(model), model)
 
-    def test_the_cli_accepts_lifted_variants(self):
-        for model in ("omniroute/gemini-3.8-flash", "gemini-3.8-flash"):
+    def test_the_cli_accepts_both_spellings_of_an_allowed_pin(self):
+        # Item 5 + item 3 together: a D-284-allowed pin reaches argv in the one
+        # spelling opencode can resolve, whether the caller qualified it or not.
+        # AO-MIMO-D1201 2026-10-12 moved the exemplar off
+        # omniroute/gemini-3.8-flash — that model serves nothing now, so no
+        # spelling of it can reach argv (the lift itself stays pinned by
+        # test_the_helper_accepts_every_normalisable_lifted_variant above and by
+        # D284GuardTests.test_the_lifted_gemini_pin_is_still_not_held).
+        for model in (QUALIFIED_OR, BARE_OR):
             r = plan_of("--client", "opencode", "--model", model, "t")
             self.assertEqual(r.returncode, 0, f"{model}: {r.stderr}")
             self.assertNotIn("D-284", r.stderr, model)
-            self.assertIn("--model omniroute/gemini-3.8-flash", r.stdout)
+            self.assertIn("--model %s" % QUALIFIED_OR, r.stdout)
 
     def test_the_cli_refuses_every_variant_on_model_and_free_model(self):
         for model in ("openrouter/ google/gemini-3.8-flash",

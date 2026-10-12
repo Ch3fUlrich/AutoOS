@@ -267,7 +267,12 @@ class McpStartGateTests(GateFileCase):
         old = os.environ.pop(GATE_ENV, None)
         try:
             refused = mcp_server.preflight(
-                ["run", "--client", "opencode", "--model", VERTEX, "probe task"],
+                # AO-MIMO-D1201 (2026-10-12): opencode.jsonc no longer declares a
+                # Google pin (vertex/AI Studio are off), and a bare undeclared pin
+                # is refused for that reason; this premise is about the unset gate,
+                # so it pins a model the config still declares.
+                ["run", "--client", "opencode", "--model", "omniroute/ovh-qwen3.8-27b",
+                 "probe task"],
                 cwd=str(ROOT))
         finally:
             if old is not None:

@@ -206,7 +206,7 @@
         },
         "trains_on_prompts": {
           "type": ["boolean", "null"],
-          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices. `null` (brief FREEKEYS-1, D-132) means UNVERIFIED - the vendor's terms were never read - and is not the same as `false`: tools/registry.py's private_safe() passes only on exactly false, so an unverified provider is kept out of every -clean route by the same fail-closed rule a missing key already was. Never guess `false` to make a row look clean. L1-CLEAN 2026-10-01: a `false` a privacy=sensitive route now relies on must be backed by the cited `privacy` block."
+          "description": "Provider-level (spec 3.1), not per-model - a known simplification where one provider hosts both a training and a non-training leg; see mapping doc Open choices. `null` (brief FREEKEYS-1, D-132) means UNVERIFIED - the vendor's terms were never read - and is not the same as `false`: tools/registry.py's private_safe() passes only on exactly false, so an unverified provider never reads as verified. Never guess `false` to make a row look clean. L1-CLEAN 2026-10-01: at the time a `false` a privacy=sensitive route relied on had to be backed by the cited `privacy` block, which is still the honest provenance for the flag. AO-MIMO-D1201 (2026-10-12, operator answers 2 and 3) dropped the `*-clean` route class and every gate that read this flag on a sensitive card, so it is DATA now - recorded and validated, consulted by no combo selection; `null` still means UNVERIFIED rather than safe."
         },
         "credit_usd": {
           "type": ["number", "null"],

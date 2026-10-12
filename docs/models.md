@@ -37,7 +37,9 @@ grants (OVH trial, Vertex free tier). MUSEAPI
 2026-09-27 changed Meta: its contributor model now bills through the gateway
 as the `meta_api` provider (`meta-api/muse-spark-1.3-contributor`) and heads t1;
 the direct opencode `meta` provider is still how the plain `muse-spark` model
-answers. `meta_api` trains on prompts, so it is never a `*-clean` leg.
+answers. `meta_api` trains on prompts, recorded on `providers.meta_api.trains_on_prompts`.
+AO-MIMO-D1201 (2026-10-12) dropped the `*-clean` route class that used to filter on that
+flag: the data stays, the router no longer reads it.
 
 <!-- AUTOOS-MANAGED-START models-doc -->
 _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3 tools/registry.py render models-doc --check` after a registry change; if it fails, run `python3 tools/registry.py render models-doc` and replace the text between the two `AUTOOS-MANAGED-START/END models-doc` markers below with its output._
@@ -51,32 +53,26 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
 | `deepseek-v4.1-flash` | cheap | 1M | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
-| `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → vertex `gemini-3.8-flash` |
+| `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `groq-qwen3.8-27b` | free | 128k | groq `qwen/qwen3.8-27b` |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |
 | `hf-qwen3.8-27b` | free | 128k | ~~huggingface `Qwen/Qwen3.8-27B`~~ (unavailable) |
-| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l1-orchestrator-clean` | cheap | 1M | vertex `gemini-3.8-flash` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l1-orchestrator-free-only` | free | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` |
 | `l1-orchestrator-paid` | cheap | 1M | (none) |
-| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l2-orchestrator-clean` | frontier | 1M | vertex `gemini-3.8-flash` |
+| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
-| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.6-pro` |
-| `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
+| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) → xiaomi-mimo `mimo-v2.6-pro` |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.6-flash` |
-| `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
+| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → ~~vertex `gemini-3.8-flash`~~ (unavailable) → xiaomi-mimo `mimo-v2.6-flash` |
 | `l3-driver-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
-| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
-| `l3-implementer-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
-| `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
-| `l3-researcher-clean` | cheap | 1M | vertex `gemini-3.8-flash` |
-| `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
+| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l3-review-diff` | cheap | 128k | groq `qwen/qwen3.8-27b` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
-| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
+| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l3-review-transcript` | cheap | 1M | (none) |
 | `opus-5-5` | frontier | 1M | ~~antigravity `claude-opus-5-5-medium`~~ (unavailable) |
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
@@ -88,7 +84,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | ~~meta_api `muse-spark-1.3-contributor`~~ (unavailable) → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
 | `t4-rag` | cheap | 128k | cohere `command-r-plus-08-2024` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` |
-| `vertex-gemini-3.8-flash` | credit | 1M | vertex `gemini-3.8-flash` |
+| `vertex-gemini-3.8-flash` | credit | 1M | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 <!-- AUTOOS-MANAGED-END models-doc -->
 
 **l2-worker is not context-capped at 128k.** 128k is a display convention inherited
@@ -116,13 +112,12 @@ generated table above already shows it):
   `deepseek/deepseek-v4-flash-0731free:free`, whose `effort_ladder` is empty — so no
   rung is declared, `omniroute/l1-orchestrator` is called bare, and `#high` now answers
   `Variant unavailable`. The rung is dropped rather than inherited from DSAMEND's vendor
-  enum, which was measured against `api.deepseek.com` and not this mirror. The leg keeps
-  its `low`/`medium`/`high` ladder on `l1-orchestrator-clean`, which still heads
-  `vertex/gemini-3.8-flash`. No `gemini-3.1-pro` leg: it reasons worse than
+  enum, which was measured against `api.deepseek.com` and not this mirror. Its `low`/`medium`/`high` ladder now exists on no route (the
+rung was declared on `l1-orchestrator-clean`, whose combo AO-MIMO-D1201
+dropped). No `gemini-3.1-pro` leg: it reasons worse than
   `gemini-3.8-flash` while costing a 1M slot.
-- **`l1-orchestrator-clean`**: contributor legs train by contract, so "clean" here
-  means paid-only, not trains-nothing — the plain paid spark leg was removed with
-  the contributor-only block (2026-09-21).
+- **`l1-orchestrator-clean`**: dropped by AO-MIMO-D1201 (2026-10-12) with the
+  rest of the `-clean` class; its id is retired, so apply prunes the combo.
 - **`l1-orchestrator-free-only`**: a single-leg route (`gemini/gemini-3.8-flash`,
   1M) — zero spend, and it never degrades to paid by design; step up to
   `l1-orchestrator` instead when the free pool is exhausted. An effort/context
@@ -145,17 +140,20 @@ generated table above already shows it):
 - **`l2-orchestrator`**: for small-scope orchestration only; `l1-orchestrator`
   stays the long-horizon owner. Current legs (operator 2026-10-05):
   `antigravity/claude-sonnet-5-5-medium` → `vertex/gemini-3.8-flash` →
-  `deepseek/deepseek-flash`, declared 1M; the privacy-sensitive set is narrowed
-  to the `-clean` worker routes.
-- **`l3-driver-clean`**: no qwen free legs by design — paid review duty only, not
-  a downgrade path.
+  `deepseek/deepseek-flash`, declared 1M. Since AO-MIMO-D1201
+  (2026-10-12) a `privacy=sensitive` card lands on these same routes.
+  The `vertex/` leg in that list is superseded: D-1201 holds Vertex off
+  everywhere, so it serves nothing and the combo renders the legs the table
+  above shows.
+- **`l3-driver-clean`**: dropped by AO-MIMO-D1201 (2026-10-12) with the rest of
+  the `-clean` class; its id is retired, so apply prunes the combo.
 - **`l3-driver`**: OVHLEGS 2026-09-30: same three OVH credit-tier legs as `l2-worker`
   (`ovh/gpt-oss-120b`, `ovh/Qwen3-Coder-30B-A3B-Instruct`, `ovh/Qwen3.8-27B`)
   inserted after the free legs and before the paid legs. OVHCODER-DROP 2026-10-08:
   `Qwen3-Coder-30B-A3B-Instruct` was dropped (OVH withdrew the id upstream, HTTP 404),
   so it rides no route. `deepseek/deepseek-flash`
-  remains the paid fallback. Since L1-CLEAN (2026-10-05) the `-clean` twins also
-  carry the OVH credit legs plus vertex.
+  remains the paid fallback. The `-clean` twins that once carried the same OVH credit legs plus
+  vertex are gone (AO-MIMO-D1201, 2026-10-12).
 - **`l3-driver-free-only`**: the only true-free qwen legs; `mistral-code-latest`
   is keyed (paid) and deliberately stays out.
 - **`gemini-3.8-flash`**: probe-falsified 2026-09-22 — the bare
@@ -255,7 +253,7 @@ direct** → meta_api contributor → free-ai:
 
 | Leg | Door | Billing |
 |---|---|---|
-| `cheaperinference/deepseek-v4-flash` | partner resale (OpenAI-compatible, own `ci_live_…` key) | your cheap-inference balance; sits between free and paid, never in `*-clean`. Currently gated unavailable. |
+| `cheaperinference/deepseek-v4-flash` | partner resale (OpenAI-compatible, own `ci_live_…` key) | your cheap-inference balance; sits between free and paid. Currently gated unavailable. |
 | `openrouter/deepseek/deepseek-v4.1-flash` | OpenRouter resale | your OpenRouter credits (last-resort pool). Off entirely — DSMAX 2026-09-27, no credit. |
 | `deepseek/deepseek-flash` | DeepSeek API direct | your DeepSeek key (`$13` bulk). 402 since 2026-09-27T16:4xZ, topped up 2026-09-28T07:4xZ (DSBACK, router balance 19.99 USD) — answers again. |
 
@@ -329,15 +327,19 @@ omniroute/l1-orchestrator: xhigh`; after it the call answered, and
 **Hand entries** (`opencode.jsonc`, outside every `AUTOOS-MANAGED` region, so
 `tools/sync-ide-models.py` never rewrites them) are the same passthrough for a
 gateway connection that serves provider ids directly: no combo, no fall-through,
-one leg — `vertex-3.8-flash` → `vertex/gemini-3.8-flash`, `vertex-3.7-flash` →
-`vertex/gemini-3.7-flash` and `vertex-3.6-flash` → `vertex/gemini-3.6-flash`, and
-the OVH AI Endpoints trial grant as `ovh-direct-gpt-oss-120b` /
-`ovh-direct-qwen3-coder-30b` / `ovh-direct-qwen3.8-27b` → the gateway's own
+one leg — the OVH AI Endpoints trial grant as `ovh-direct-gpt-oss-120b` /
+`ovh-direct-qwen3.8-27b` → the gateway's own
 `ovh/*` spellings (OVH's `model_prefix`,
 so the registry reads them back as `ovhcloud/*` legs through
 `registry.registry_ref()`). They are named for trial credit and public work:
-`providers.ovhcloud.trains_on_prompts` is null — unverified, not false — so a
-`privacy=sensitive` card is refused on them (the PRIV3 door in `resolve_route`).
+`providers.ovhcloud.trains_on_prompts` is null — unverified, not false — and since AO-MIMO-D1201
+(2026-10-12) nothing reads that flag any more: the PRIV3 door in `resolve_route`
+is gone, so a `privacy=sensitive` card is no longer refused here. Keep a secret
+out of the task text.
+No Vertex or Google AI Studio hand entry exists: D-1201 holds both providers off
+everywhere, so `vertex-3.8-flash` / `vertex-3.7-flash` / `vertex-3.6-flash` were
+removed from `opencode.jsonc` and a `vertex/*` or `google_ai_studio/*` `modelID`
+there is a defect, not a seat (`tests/test_autoos_spawner.py::NoVertexSeatTests`).
 Operator D-255 bounds this whole surface: **no Gemini Pro model, and only Gemini
 3.6 / 3.7 / 3.8 Flash**, enforced by `tools/autoos-agent.py`'s
 `gemini_model_allowed()` at the spawn door over the model name, the hand entry's
@@ -454,16 +456,20 @@ through `#xhigh` are ack-proven, while the gateway combos resolve only
 `low/medium/high`. Reach for a direct model when you need the ladder; reach
 for a combo when you need fallback routing.
 
-**Sensitive data work:** `*-clean` never routes a model or plan with a
-published prompt-training policy — no Zen promo `-free` models, no Gemini free
-tier, no Meta/openrouter *contributor* tiers, no Kilo Free. Assumption:
-**any big free model may train on prompts**, so `*-clean` chains use
-**metered legs only** (OVH trial credit, Vertex free tier, deepseek direct —
-no free pools, no resellers). Contributor tiers are paid but train by
-contract ($0.10 pricing is the tell) — they stay in `l1-orchestrator`, never `*-clean`.
-OmniRoute's own free-tier catalog flags the known trainers; we additionally
-curate them out. If in doubt, use `tierN-clean` and check the provider's
-current policy.
+**Sensitive data work** (AO-MIMO-D1201, 2026-10-12, operator answers 2 and 3):
+there is no `*-clean` chain any more and no route is curated for non-training.
+What keeps a secret off a model leg is **the task text**: do not put a password,
+token, hostname or private prompt in what the agent is asked to do, and treat
+every leg as a provider that may see it. `providers.<id>.trains_on_prompts` and
+its `privacy` evidence blocks stay in `catalog/ai-registry.json` as recorded
+facts — `tools/registry.py private_safe()` still answers the question for anyone
+who asks — but no combo selection consults them. The assumption behind it is
+unchanged — **any big free model may train on prompts**, and a paid contributor
+tier trains by contract ($0.10 pricing is the tell) — which is exactly why the
+safeguard is the prompt, not the chain. OmniRoute's own free-tier catalog still
+flags the known trainers; nothing curates them out of a route here any more, so
+read the provider's current policy before you put anything private in a task
+text.
 
 **Meta direct:** unregistered since 2026-09-23 (openrouter-first decision):
 `apply.*` no longer maps the Meta key to `muse-code` — the installed
@@ -676,12 +682,12 @@ above. So `l3-driver` keeps `mistral/mistral-code-latest` as its head (it was
 already L1, so nothing was added), `codestral-latest` is registered as the
 tested alternative (`models.codestral-latest`, with its measured limits row) and
 is deliberately **not** a leg of any route, and the freed slots in
-`l2-worker-clean` / `l3-driver-clean` stayed empty: `mistral-code-latest`
-trains on prompts (`models.mistral-code-latest.trains_on_prompts`), so spec 3.1
-rule 3 rejects it in a `-clean` route and `registry.py validate` exits 1 if it is
-listed there. Those twins are where a `privacy=sensitive` card lands, so one
-live leg (`deepseek/deepseek-flash`, their head) beats a second leg that would
-bill private prompts to a training pool.
+`l2-worker-clean` / `l3-driver-clean` stayed empty: at the time `mistral-code-latest`
+trained on prompts (`models.mistral-code-latest.trains_on_prompts`) and spec 3.1
+rule 3 rejected a training leg in a `-clean` route. Both twins are gone now
+(AO-MIMO-D1201, 2026-10-12) and rule 3 no longer filters on training, so what
+that refusal protected no longer exists — the model row stays registered as the
+tested alternative it was.
 
 ## Connect each app (key = `AUTOOS_OMNIROUTE_KEY`)
 
@@ -733,11 +739,6 @@ flowchart TB
         T1G --> T1S --> T1F --> T1V --> T1Z --> T1D
     end
 
-    subgraph t1c["l1-orchestrator-clean \u00b7 1M \u00b7 paid legs only (trains: contributor-only block) \u2014 omitted (leg gated)"]
-        direction TB
-        T1CA["1 \u00b7 openrouter meta/muse-spark-1.3-contributor\nPAID \u00b7 1M \u00b7 trains by contract \u00b7 UNAVAILABLE (gated)"]
-    end
-
     subgraph t2["l2-worker \u00b7 smart-reasoning-128k \u00b7 free band \u2192 OVH credit band \u2192 paid tail"]
         direction TB
         T2A["1 \u00b7 gemini gemini-3.8-flash\nFREE pooled"]
@@ -749,14 +750,6 @@ flowchart TB
         T2A --> T2B --> T2C --> T2D --> T2E --> T2F
     end
 
-    subgraph t2c["l2-worker-clean \u00b7 metered legs only, no training"]
-        direction TB
-        T2CA["1 \u00b7 ovhcloud gpt-oss-120b + Qwen3.8-27B\ncredit"]
-        T2CB["2 \u00b7 vertex gemini-3.8-flash\ncredit"]
-        T2CC["3 \u00b7 deepseek deepseek-flash\nPAID direct"]
-        T2CA --> T2CB --> T2CC
-    end
-
     subgraph t3["l3-driver \u00b7 cheap-driver-128k \u00b7 cheapest capable loop"]
         direction TB
         T3A["1 \u00b7 gemini gemini-3.8-flash\nFREE pooled"]
@@ -765,14 +758,6 @@ flowchart TB
         T3D["4 \u00b7 mistral mistral-code-latest\nPAID direct \u00b7 measured 125 rpm / 625k tpm"]
         T3E["5 \u00b7 meta_api + deepseek\nPAID tail"]
         T3A --> T3B --> T3C --> T3D --> T3E
-    end
-
-    subgraph t3c["l3-driver-clean \u00b7 metered legs only, no training"]
-        direction TB
-        T3CA["1 \u00b7 ovhcloud gpt-oss-120b + Qwen3.8-27B\ncredit"]
-        T3CB["2 \u00b7 vertex gemini-3.8-flash\ncredit"]
-        T3CC["3 \u00b7 deepseek deepseek-flash\nPAID direct"]
-        T3CA --> T3CB --> T3CC
     end
 
     subgraph freeonly["*-free-only \u00b7 zero spend, never degrade to paid"]
@@ -803,21 +788,21 @@ flowchart TB
     end
 
     subgraph fb["Fallback client path — user picks litellm/*"]
-        LT["LiteLLM :4000 static mirror\nt1-orchestrator · l2-worker · l3-driver\n(+ -clean / -free-only twins)"]
+        LT["LiteLLM :4000 static mirror\nt1-orchestrator · l2-worker · l3-driver\n(+ -free-only twins)"]
     end
 
-    OC --> t1 & t1c & t2 & t2c & t3 & t3c & t2o & single
-    LB --> t1 & t1c & t2 & t2c & t3 & t3c & t2o
+    OC --> t1 & t2 & t3 & t2o & single
+    LB --> t1 & t2 & t3 & t2o
     AUTO -. "bootstrap only" .-> t2
     OC -. "model litellm/*" .-> LT
 ```
 
 Reading the diagram: each arrow is the fallback hop — top leg first, next on
 429/5xx/quota, so a weaker leg *below* a stronger one is a defect, not a
-fallback. `*-clean` means paid-only; since the 2026-09-21 contributor-only
-block, l1-orchestrator-clean trains by contract (its legs are contributor). Leg order
-in this diagram is the leg order `combos.json` must satisfy; see the sync
-contract below.
+fallback. The `-clean` subgraphs this diagram used to carry are gone with their
+combos (AO-MIMO-D1201, 2026-10-12); the six tiers drawn here are every tier a
+card can route to. Leg order in this diagram is the leg order `combos.json` must
+satisfy; see the sync contract below.
 
 ### Paid-overflow coverage (funded providers and their current gates)
 
@@ -829,10 +814,10 @@ The routes still name every funded provider's legs, but several are gated
 |---|---|
 | cerebras ($10 credit) | `l2-worker` gpt-oss-120b · `l3-driver` qwen-3.8-27b — both UNAVAILABLE (402/401 credits exhausted 2026-09-26) |
 | sambanova ($10 credit) | `l2-worker` gpt-oss-120b (UNAVAILABLE — policy) |
-| deepseek ($13 bulk) | `l2-worker`/`l3-driver`/`l3-driver-clean`/`l2-worker-clean` `deepseek-flash` direct — AVAILABLE again (DSBACK 2026-09-28T07:4xZ: operator top-up, router balance 19.99 USD, `providers.deepseek.available: true`, reversing the 402 Insufficient Balance of 2026-09-27T16:4xZ) · the pinned `deepseek-v4.1-flash` combo is back in every render |
+| deepseek ($13 bulk) | `l2-worker`/`l3-driver` `deepseek-flash` direct — AVAILABLE again (DSBACK 2026-09-28T07:4xZ: operator top-up, router balance 19.99 USD, `providers.deepseek.available: true`, reversing the 402 Insufficient Balance of 2026-09-27T16:4xZ) · the pinned `deepseek-v4.1-flash` combo is back in every render |
 | cheap-inference ($15 partner pool) | allows only `kimi-k3`, `glm-5.2`, `minimax-m2.7`: `l2-worker` kimi-k3 · `l3-driver` glm-5.2/minimax-m2.7. `deepseek-v4-flash`/`glm-4.5-air` are DENIED by `deny-cheaperinference` |
-| meta ($10) | `meta_api` direct (OpenAI-compatible, `providers.meta_api`) at the `l1-orchestrator` / `l1-orchestrator-paid` / `spark-1.3-contributor` heads and the `l2-worker` / `l3-driver` tails (MUSEAPI 2026-09-27) · the openrouter contributor leg at `l1-orchestrator-clean` is UNAVAILABLE (openrouter off, DSMAX 2026-09-27) · also reachable outside the gateway, via the opencode `meta` provider |
-| openrouter ($1, last resort) | ON for `:free` ids only (providers.openrouter.available: true; TORDER-OR: paid legs removed everywhere except the gated `l1-orchestrator-clean` contributor declaration). Serves the `:free` band in `l2-worker`/`l3-driver` and the free-only twins: nemotron, laguna, north-mini. The withdrawn `qwen/qwen3.8-27b:free` slug (ORQWEN-DEAD 2026-10-06) is dropped and gated. |
+| meta ($10) | `meta_api` direct (OpenAI-compatible, `providers.meta_api`) at the `l1-orchestrator` / `l1-orchestrator-paid` / `spark-1.3-contributor` heads and the `l2-worker` / `l3-driver` tails (MUSEAPI 2026-09-27) · the contributor leg it used to feed at `l1-orchestrator-clean` left with that combo (openrouter was off, DSMAX 2026-09-27; the `-clean` class was dropped, AO-MIMO-D1201 2026-10-12) · also reachable outside the gateway, via the opencode `meta` provider |
+| openrouter ($1, last resort) | ON for `:free` ids only (providers.openrouter.available: true; TORDER-OR: paid legs removed everywhere; the gated `l1-orchestrator-clean` contributor declaration that used to be the exception left with the combo (AO-MIMO-D1201, 2026-10-12)). Serves the `:free` band in `l2-worker`/`l3-driver` and the free-only twins: nemotron, laguna, north-mini. The withdrawn `qwen/qwen3.8-27b:free` slug (ORQWEN-DEAD 2026-10-06) is dropped and gated. |
 | zen (promo + paid) | Zen legs live only in the `spark-1.3-contributor` and `deepseek-v4.1-flash` singles — UNAVAILABLE *through the gateway* (client-bound: they answer the opencode client only) · paid `deepseek-v4.1-flash` at the tier tail — UNAVAILABLE (402) |
 
 `providers test-all` 2026-09-22: 12/13 OK (muse-code SKIP inactive by
@@ -847,7 +832,7 @@ job. **Where they disagree, `combos.json` is right.**
 
 | Surface | Owns | Must not do |
 |---|---|---|
-| `configuration/omniroute/combos.json` | **The truth for tier leg order.** Every `tierN` / `tierN-clean` combo, in `priority` order, free legs before the paid overflow order. This is what `apply.*` pushes to `:20128` and what the agents actually call. | List providers without keys (apply skips them with a warning) or a model ID the live catalog does not know. |
+| `configuration/omniroute/combos.json` | **The truth for tier leg order.** Every `tierN` combo, in `priority` order, free legs before the paid overflow order. This is what `apply.*` pushes to `:20128` and what the agents actually call. | List providers without keys (apply skips them with a warning) or a model ID the live catalog does not know. |
 | `configuration/litellm/config.yaml` | **A static mirror of `l2-worker` and `l3-driver`** (plus `l1-orchestrator` spark), used only when the user deliberately types `litellm/tierN`. LiteLLM resolves its own `model_list` order, so the mirror is a fallback, never a second source of truth. | Introduce a leg that is not in `combos.json` for the same tier, or promise a window/limit `opencode.jsonc` does not declare. |
 | `catalog/ide-models.json` | **The client-facing model list**: which gateway model ids every surface offers (opencode, Zed, OpenHands), their display names and token windows. The 1M tier is `1000000` everywhere. | Decide which model answers, or carry leg order. |
 | `opencode.jsonc` | The agent→tier pinning with spawn fences. Its `providers.omniroute/litellm.models` are a **generated copy** of the catalog between `// AUTOOS-MANAGED` markers. | Hand-edit inside the markers, or decide which model answers. |
@@ -871,8 +856,9 @@ contract it must satisfy):
    Cheap-inference sits *before* deepseek-direct: resale is ~30% under list.
    `meta` is out (unregistered 2026-09-23). The script checks rules 1–2;
    this ranking is checked by review until a price feed exists.
-4. **Clean tiers stay clean.** No leg of a `*-clean` tier may appear in a
-   `-contributor`, `-free`, or free-tier-pool form anywhere in either file.
+4. **Clean tiers stay clean** — RETIRED by AO-MIMO-D1201 (2026-10-12, operator
+   answer 2): there is no `*-clean` tier for a leg to be excluded from, so this
+   rule constrains nothing and is kept only so rules 5 and 6 keep their numbers.
 5. **`context` is not cross-checked.** `combos.json`'s `"context"` keys and
    LiteLLM's `rpm` hints are conservative display values; the script must not
    fail a tier whose models exceed them (l2-worker is deliberately ungated — see

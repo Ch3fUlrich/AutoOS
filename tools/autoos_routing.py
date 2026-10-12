@@ -13,21 +13,23 @@ Card v1 (unknown fields and values are an error):
     privacy     public | sensitive                   default public
     spend       free-ok                            default free-ok
 
-Resolution is filters, then preference: privacy, ctx, spend, then
-role/complexity. ctx=1m routes to l1-orchestrator again since 2026-09-27
-(T1FREE): the route keeps a free gemini/gemini-3.8-flash fallback leg while
-OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps
-a free leg). Sensitive 1m still has no route: l1-orchestrator-clean's only
-leg is a contributor model that trains on prompts and stays off, so it is
-reachable only through an explicit allow_training, which the caller logs -
-but that leg is provider-off too, so allow_training is retained for
-compatibility and is inert. spend no longer accepts credit (DEADROWS,
-2026-10-08): the -credit chains were dropped 2026-09-23, no -credit combo is
-left in ALL_COMBOS and the spawner's TIERS has no credit tier, so a
-spend=credit card could only ever resolve to a combo that ignores the request.
-Refusing it at parse time is honest; a card that wants a paid leg says so by
-role/complexity and gets l2-worker / l3-driver, which already overflow to their
-paid legs.
+Resolution is filters, then preference: ctx, spend, then role/complexity.
+ctx=1m routes to l1-orchestrator again since 2026-09-27 (T1FREE): the route
+keeps a free gemini/gemini-3.8-flash fallback leg while OpenRouter/DeepSeek
+credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg).
+privacy is no longer a filter (AO-MIMO-D1201, 2026-10-12, operator answer 2/3):
+the `-clean` route class was dropped, so a privacy=sensitive card resolves to
+exactly what the same card with privacy=public resolves to. The field stays a
+valid card field - it is the card's own statement of what the work contains,
+and the stated policy "secrets never go to any model leg" still rides on it -
+but there is no code gate behind it. allow_training is likewise retained for
+compatibility and is inert: it never changes the result. spend no longer
+accepts credit (DEADROWS, 2026-10-08): the -credit chains were dropped
+2026-09-23, no -credit combo is left in ALL_COMBOS and the spawner's TIERS has
+no credit tier, so a spend=credit card could only ever resolve to a combo that
+ignores the request. Refusing it at parse time is honest; a card that wants a
+paid leg says so by role/complexity and gets l2-worker / l3-driver, which
+already overflow to their paid legs.
 """
 from __future__ import annotations
 
@@ -46,8 +48,11 @@ CARD_VALUES = {
 }
 CARD_DEFAULTS = {"role": "implement", "complexity": "standard", "ctx": "128k",
                  "privacy": "public", "spend": "free-ok"}
-ALL_COMBOS = ("l1-orchestrator", "l2-worker", "l3-driver",
-              "l2-worker-clean", "l3-driver-clean")
+# AO-MIMO-D1201 (2026-10-12): l2-worker-clean and l3-driver-clean left this
+# tuple with their routes - the -clean class is gone, and every combo named
+# here must be a live route id (tests/test_autoos_spawner.py
+# RoutingTableTests.test_every_combo_exists_and_none_is_retired pins it).
+ALL_COMBOS = ("l1-orchestrator", "l2-worker", "l3-driver")
 
 # Card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4). v1 stays valid:
 # role/complexity/ctx/spend map onto kind/bucket_hint/min_context, and privacy
@@ -321,42 +326,38 @@ def normalize_v2(card: dict) -> dict:
 
 
 def select_combo(card: dict, allow_training: bool = False) -> tuple:
-    """Return (combo, reason). Raises CardError or NoRoute.
+    """Return (combo, reason). Raises CardError on a malformed card.
 
-    ``allow_training`` is accepted for backward compatibility and is inert:
-    sensitive ctx=1m's only candidate leg (l1-orchestrator-clean's
-    contributor leg) is off at the provider level since 2026-09-27, so there
-    is no trainable gateway leg for it to unlock. It never changes the
-    result.
+    ``allow_training`` is accepted for backward compatibility and is inert: it
+    never changes the result. Since AO-MIMO-D1201 (2026-10-12) privacy is not a
+    filter at all - the `-clean` combos it used to select were dropped by the
+    operator, private work runs on the normal combos - so there is nothing left
+    for a training waiver to unlock.
+
+    ``NoRoute`` is kept exported: every hard filter that could raise it left
+    with the `-clean` class and the `spend=credit` refusal happens at parse
+    time, so select_combo never raises it today, but callers catch ValueError
+    broadly and a card that cannot be served is still that family of error.
     """
     c = normalize(card)
     strong = c["role"] == "orchestrate" or c["complexity"] == "hard"
     light = not strong and (c["role"] == "review" or c["complexity"] == "trivial")
 
-    # 1. privacy - a hard filter; only -clean combos serve sensitive work.
-    if c["privacy"] == "sensitive":
-        # 2. ctx - the only 1M leg was switched off 2026-09-27 (OpenRouter
-        #    off; the Zen leg is client-bound), so 1M fails closed.
-        if c["ctx"] == "1m":
-            raise NoRoute(
-                "privacy=sensitive with ctx=1m has no route: the only 1M leg "
-                "(muse-spark-1.3-contributor) was switched off 2026-09-27 "
-                "(OpenRouter off; the Zen leg is client-bound). Split the work so "
-                "each part fits 128k and run it on l2-worker-clean "
-                "(card privacy=sensitive,ctx=128k).")
-        # 3. spend - only free-ok parses, so it changes nothing here.
-        # 4. role/complexity preference.
-        return ("l3-driver-clean", "sensitive-light") if light else ("l2-worker-clean", "sensitive")
-
-    # public
-    # ctx=1m routes to l1-orchestrator again (T1FREE, 2026-09-27): the route
-    # now carries a free gemini/gemini-3.8-flash fallback leg, so it stays
-    # servable while OpenRouter/DeepSeek credit is out.
+    # 1. privacy - not a filter (AO-MIMO-D1201): a privacy=sensitive card takes
+    #    the same combo as the same card with privacy=public, ctx=1m included.
+    #    The field still normalises and still reaches the caller's log; keeping
+    #    secrets off every model leg is the stated policy in docs/models.md,
+    #    not something a combo choice can enforce. The reason strings keep
+    #    their public-* names because they name the BUCKET, not the card's
+    #    privacy; renaming them would only churn the callers that log them.
+    # 2. ctx - 1M routes to l1-orchestrator (T1FREE, 2026-09-27): the route
+    #    carries a free fallback leg, so it stays servable while
+    #    OpenRouter/DeepSeek credit is out.
     if c["ctx"] == "1m":
         return "l1-orchestrator", "public-1m"
     if strong:
         return "l1-orchestrator", "public-strong"
-    # 3. spend - spend=credit is refused by normalize() (DEADROWS 2026-10-08: no
-    #    -credit combo since 2026-09-23, no credit tier in the spawner's TIERS),
-    #    so nothing here branches on it; these combos already overflow to paid.
+    # 3. spend - only free-ok parses, so it changes nothing here; a card that
+    #    wants a paid leg says so by role/complexity and these combos already
+    #    overflow to their paid legs.
     return ("l3-driver", "public-light") if light else ("l2-worker", "public-default")

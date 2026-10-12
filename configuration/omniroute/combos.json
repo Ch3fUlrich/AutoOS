@@ -153,7 +153,32 @@
     "B2-OVH 2026-10-01: ovh-qwen3.8-27b 256k->128k to match measured 128000 window (models.Qwen3.8-27B 262000->128000).",
     "CTX1M/PRIVACY 2026-10-05 (operator): l2-orchestrator renders [agy/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] at declared context 1M - the 128k declaration was a stale clamp (every serving leg advertises 1M) and the L2-CLEAN sensitive-capable classification is narrowed to the -clean worker routes (privacy sensitive means only credentials and the like; a privacy=sensitive CARD is still filtered per-leg at routing time).",
     "D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): every judged chain was re-cut from the probe union in configuration/omniroute/probes/probe-d657-{central,workstation}.tsv - only legs that answered ack 200 plus one tool call serve. The L1/L2 orchestrator chains are bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash (the cached pool is exactly those two free legs plus the vertex credit leg, so rule (b) free-before-credit moves vertex off the head spec SS7b put it at). The four SS3 lens combos land as l3-review-diff/-tests/-codebase; l3-review-transcript renders nothing because SS3's II>=44 bar has no probe-confirmed gateway leg (qoder legs left with SS7b, vertex claude 501s, muse free 403s). Every *-clean combo is one leg (vertex/gemini-3.8-flash): spec 3.1 rule 3 admits only a non-training paid/credit/subscription leg and rule (b-or) forces every openrouter leg :free, so the free band can never be clean - the clean band has no fallback until a second credit/paid leg passes a probe. policy.d657_combos (rendered through, like omitted/retired) is what tools/combo-contract.py --strict-d657 judges with its (f)-(i) gates.",
-    "OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured central: HTTP 404 'The model `Qwen3-Coder-30B-A3B-Instruct` does not exist'; probe D-657 the same day 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answered 200). The route is deleted from the registry and its id moved to tools/registry.py OMNIROUTE_RETIRED_IDS, so it left `omitted` and landed in `retired` here - apply prunes the live combo. TORDER's four credit singles are three; the models row stays for pricing history. providers.ovhcloud is available again (OVH-REPROBE same day), so this leg is retired, not provider-gated."
+    "OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop): OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream (measured central: HTTP 404 'The model `Qwen3-Coder-30B-A3B-Instruct` does not exist'; probe D-657 the same day 404'd both the ovh/ and ovhcloud/ spellings on central and workstation, while gpt-oss-120b, Qwen3.8-27B and Qwen3.5-397B-A17B answered 200). The route is deleted from the registry and its id moved to tools/registry.py OMNIROUTE_RETIRED_IDS, so it left `omitted` and landed in `retired` here - apply prunes the live combo. TORDER's four credit singles are three; the models row stays for pricing history. providers.ovhcloud is available again (OVH-REPROBE same day), so this leg is retired, not provider-gated.",
+    "",
+    "AO-MIMO-D1201 2026-10-12 (operator answers 1-3): the `*-clean` ROUTE CLASS is",
+    "deleted. The six routes (l1-orchestrator-clean, l2-orchestrator-clean,",
+    "l2-worker-clean, l3-driver-clean, l3-implementer-clean,",
+    "l3-researcher-clean) left catalog/ai-registry.json with their renders and moved",
+    "into `retired` above, so apply prunes any of them a live gateway still holds",
+    "instead of leaving servable a combo no card can route to; they also leave",
+    "`d657_combos` (21 -> 14), which is the list this file renders through, not a",
+    "decision about the gates — the fourteenth drop is gemini-3.8-flash, a declared",
+    "route that renders no combo (it sits in `omitted`), so combo-contract's gate",
+    "that every judged id names a shipped combo could never have judged it.",
+    "Privacy-sensitive work now rides the NORMAL combos:",
+    "the spawner and the resolver no longer filter a leg for providers.<id>",
+    "`trains_on_prompts`, `--clean` is accepted as a no-op that says so, and",
+    "tools/registry.py rule 3 changed shape to refuse a `-clean` id rather than",
+    "audit one. providers.<id>.trains_on_prompts and its `privacy` evidence blocks",
+    "STAY as data (private_safe() still answers the question) — what is gone is the",
+    "routing gate that consulted them. Keeping a secret off a model leg is now the",
+    "stated policy it always was, in docs/models.md: do not put it in the task text.",
+    "Same answer 1: providers.vertex_ai and providers.google_ai_studio stay",
+    "available:false, so l1-orchestrator DECLARES two legs and SERVES one",
+    "(bazaarlink's free DeepSeek); its combo is one model and one provider, named in",
+    "tools/combo-contract.py SINGLE_PROVIDER_EXEMPTIONS with that reason. Read every",
+    "dated entry above as history of the state at its date — several name `-clean`",
+    "routes that no longer exist; nothing here was rewritten to match today."
   ],
   "retired": [
     "tier1",
@@ -184,53 +209,46 @@
     "t3-driver-free-only",
     "t3-driver-paid",
     "t4-researcher",
-    "ovh-qwen3-coder-30b"
+    "ovh-qwen3-coder-30b",
+    "l1-orchestrator-clean",
+    "l2-orchestrator-clean",
+    "l2-worker-clean",
+    "l3-driver-clean",
+    "l3-implementer-clean",
+    "l3-researcher-clean"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
     "cheaperinference/kimi-k3",
     "deepseek-v4.1-flash",
     "faik-gpt-6-sol",
+    "gemini-3.8-flash",
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
     "opus-5-5",
     "ovh-gpt-oss-120b",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
-    "spark-1.3-contributor"
+    "spark-1.3-contributor",
+    "vertex-gemini-3.8-flash"
   ],
   "d657_combos": [
     "l1-orchestrator",
-    "l1-orchestrator-clean",
     "l1-orchestrator-free-only",
     "l2-orchestrator",
-    "l2-orchestrator-clean",
     "l2-worker",
-    "l2-worker-clean",
     "l2-worker-free-only",
     "l2-researcher",
     "l3-driver",
-    "l3-driver-clean",
     "l3-driver-free-only",
     "l3-implementer",
-    "l3-implementer-clean",
     "l3-researcher",
-    "l3-researcher-clean",
     "l3-review-diff",
     "l3-review-tests",
     "l3-review-codebase",
-    "t4-rag",
-    "gemini-3.8-flash"
+    "t4-rag"
   ],
   "combos": [
-    {
-      "name": "gemini-3.8-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
-      ]
-    },
     {
       "name": "groq-qwen3.8-27b",
       "strategy": "priority",
@@ -244,16 +262,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l1-orchestrator-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -269,16 +278,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l2-orchestrator-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -297,16 +297,7 @@
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash",
         "xiaomi-mimo/mimo-v2.6-pro"
-      ]
-    },
-    {
-      "name": "l2-worker-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -333,16 +324,7 @@
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
         "ovh/Qwen3.5-397B-A17B",
-        "vertex/gemini-3.8-flash",
         "xiaomi-mimo/mimo-v2.6-flash"
-      ]
-    },
-    {
-      "name": "l3-driver-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
       ]
     },
     {
@@ -375,16 +357,7 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l3-implementer-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "ovh/Qwen3.8-27B"
       ]
     },
     {
@@ -393,16 +366,7 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l3-researcher-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -410,8 +374,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -429,8 +392,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -473,14 +435,6 @@
         "cohere/command-r-plus-08-2024",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "cohere/command-a-03-2025"
-      ]
-    },
-    {
-      "name": "vertex-gemini-3.8-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
       ]
     }
   ]

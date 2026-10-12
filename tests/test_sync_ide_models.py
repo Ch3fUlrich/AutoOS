@@ -134,12 +134,18 @@ class RepoTests(unittest.TestCase):
         # out of the catalog entirely (asserted below), which is a gap, not a
         # narrower promise. The numbers differ per route because each surface
         # declares its own (1,000,000 marketing band vs 1,048,576 native window).
+        # AO-MIMO-D1201 2026-10-12 (operator answers 2 and 5): the three
+        # `-clean` twins leave this list with their routes - the ids are gone
+        # from the registry, so the catalog cannot carry a window for them.
+        # gemini-3.8-flash was already a gap at the branch point (vertex and
+        # google_ai_studio are available:false, so the route declares legs and
+        # serves none); it moves to the gap assertion below, same as
+        # spark-1.3-contributor.
         clamp = {"l1-orchestrator": 1000000, "l1-orchestrator-free-only": 1000000,
-                 "l1-orchestrator-paid": 1000000, "l1-orchestrator-clean": 1000000,
-                 "l2-orchestrator": 1048576, "l2-orchestrator-clean": 1048576,
-                 "l3-researcher": 1000000, "l3-researcher-clean": 1000000,
-                 "l3-review-tests": 1048576, "l3-review-codebase": 1000000,
-                 "gemini-3.8-flash": 1048576}
+                 "l1-orchestrator-paid": 1000000,
+                 "l2-orchestrator": 1048576,
+                 "l3-researcher": 1000000,
+                 "l3-review-tests": 1048576, "l3-review-codebase": 1000000}
         doc = json.loads(SOURCES["catalog"].read_text(encoding="utf-8"))
         seen = set()
         for m in doc["models"]:
@@ -147,7 +153,11 @@ class RepoTests(unittest.TestCase):
                 seen.add(m["id"])
                 self.assertEqual(m["context"], clamp[m["id"]], m["id"])
         self.assertEqual(seen, set(clamp), "a wide tier left the catalog")
-        self.assertNotIn("spark-1.3-contributor", {m["id"] for m in doc["models"]})
+        ids = {m["id"] for m in doc["models"]}
+        for gap in ("spark-1.3-contributor", "gemini-3.8-flash"):
+            self.assertNotIn(gap, ids)
+        self.assertEqual([i for i in ids if i.endswith("-clean")], [],
+                         "a -clean tier came back into the IDE catalog")
 
 
 class CheckTests(SandboxCase):
@@ -180,9 +190,11 @@ class WriteTests(SandboxCase):
     def drift(self):
         # deepseek-v4.1-flash was the drift model until it fail-closed
         # (deepseek 402, 2026-09-27T16:4xZ) and left ide-models.json;
-        # l2-worker-clean is the servable equivalent with a ladder.
+        # l2-worker-clean served until AO-MIMO-D1201 deleted the `-clean`
+        # routes, so the normal l2-worker is now the servable equivalent -
+        # same two gateways, same openhands profile.
         doc = self.box.catalog()
-        model(doc, "l2-worker-clean")["output"] = 40000
+        model(doc, "l2-worker")["output"] = 40000
         model(doc, "l3-driver")["context"] = 65536
         self.box.save_catalog(doc)
 
@@ -198,15 +210,16 @@ class WriteTests(SandboxCase):
         self.assertEqual(self.box.run("--check").returncode, 0)
 
         oc = json.loads(strip_jsonc(self.box.text("opencode")))
-        t1 = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
+        t1 = oc["providers"]["omniroute"]["models"]["l2-worker"]
         # CIGREEN: expectation moved by e1da4f7a (L1-CLEAN D2 render moved the
         # -clean twins from deepseek's 1M window to the 128k trial-first head;
         # 35148c5c made ovh the head) - the drift here only changes output.
-        self.assertEqual(t1["limit"], {"context": 128000, "output": 40000})
+        # AO-MIMO-D1201: same pin on l2-worker, whose catalog window is 131072.
+        self.assertEqual(t1["limit"], {"context": 131072, "output": 40000})
         self.assertEqual(oc["providers"]["litellm"]["models"]["l3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
-        self.assertEqual(by_id["omniroute-l2-worker-clean"]["max_output_tokens"], 40000)
+        self.assertEqual(by_id["omniroute-l2-worker"]["max_output_tokens"], 40000)
         self.assertEqual(by_id["litellm-l3-driver"]["max_input_tokens"], 65536)
         toml = self.box.text("openhands_toml")
         section = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
@@ -297,22 +310,23 @@ class WriteTests(SandboxCase):
         # is the point: an undeclared rung must not survive as a variant.
         # The gemini-3.8-flash combo heads on vertex (its gemini-3.8-flash model
         # ladder is low/medium/high) and stays the low/medium/high case.
-        free = oc["providers"]["omniroute"]["models"]["gemini-3.8-flash"]
-        self.assertEqual([v["id"] for v in free["variants"]],
+        # AO-MIMO-D1201 2026-10-12 (operator answers 2 and 5): the clean band is
+        # gone, and with the vertex/google_ai_studio gating that predates this
+        # change the gemini-3.8-flash route serves nothing, so it renders no
+        # model at all. The low/medium/high pin therefore moves to
+        # l3-review-codebase, which heads on the free nemotron ultra leg whose
+        # model row carries exactly that ladder. Same rule, live exemplar.
+        headed = oc["providers"]["omniroute"]["models"]["l3-review-codebase"]
+        self.assertEqual([v["id"] for v in headed["variants"]],
                          ["low", "medium", "high"])
-        for v in free["variants"]:
+        for v in headed["variants"]:
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         for gone in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-orchestrator"):
             self.assertNotIn("variants", oc["providers"]["omniroute"]["models"][gone], gone)
-        clean = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
-        self.assertEqual([v["id"] for v in clean["variants"]],
-                         ["low", "medium", "high"])
-        for v in clean["variants"]:
-            self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertEqual(
-            [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["l3-driver-clean"]["variants"]],
-            ["low", "medium", "high"])
+        for gw in ("omniroute", "litellm"):
+            self.assertEqual(
+                [mid for mid in oc["providers"][gw]["models"] if mid.endswith("-clean")],
+                [], f"{gw}: a -clean combo came back into the IDE render")
         # GLM55 2026-10-05 (operator): l3-driver heads on oc/glm-5.3-flash,
         # whose model row carries no effort ladder - the variants block drops
         # (the render's rule), and l2-worker moves with it.
@@ -625,14 +639,22 @@ class RegistrySourcedTests(unittest.TestCase):
         # the first route serving the gemini-3.8-flash model is now the
         # gemini-3.8-flash combo itself, whose id contains a dot, so the route
         # charset includes '.', not only [a-z0-9-].
+        # AO-MIMO-D1201 2026-10-12: gemini-3.8-flash renders nothing at all now
+        # (vertex and google_ai_studio are available:false, and the `-clean`
+        # band that used to head it is gone), so an inert ladder on it is not a
+        # render error. Same rule, live exemplar: l3-review-codebase serves the
+        # free nemotron ultra head, whose row carries a ladder — and the dotted
+        # ':'/'-' charset of that model id stays pinned in the message.
         doc = self.box.registry()
-        doc["models"]["gemini-3.8-flash"]["effort_ladder"] = ["low", 99, "high"]
+        bad = "nvidia/nemotron-3-ultra-550b-a55b:free"
+        doc["models"][bad]["effort_ladder"] = ["low", 99, "high"]
         self.box.save_registry(doc)
         result = self.box.run()
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
         self.assertRegex(result.stderr,
                          r"routes\.[\w.-]+: non-string rung 99 "
-                         r"in model gemini-3\.8-flash effort_ladder")
+                         r"in model nvidia/nemotron-3-ultra-550b-a55b:free "
+                         r"effort_ladder")
 
 
 if __name__ == "__main__":

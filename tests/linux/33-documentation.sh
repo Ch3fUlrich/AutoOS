@@ -335,25 +335,23 @@ for kept in expected_names:
 import re as _re2
 if _re2.search(r"muse-spark-1\.3(?!-contributor)", " ".join(m for c in d["combos"] for m in c["models"])):
     problems.append("plain-spark-blocked")
-# *-clean = paid legs only: no free pool may train on private prompts.
-# Free = contributor-free, groq / cerebras / sambanova / gemini hosts,
-# mistral-code + qwen free pools. -contributor (trains by contract) is
-# banned in every clean combo (a route that fails closed is not a combo at
-# all, so it needs no name listed here).
-# Direct-key legs (mistral-small, deepseek, openrouter paid, zen paid)
-# bill past the pool on the same key, so they stay.
+# *-clean combos are gone (AO-MIMO-D1201, 2026-10-12, operator answer 2). The
+# check used to be "a clean combo carries no free leg and no -contributor
+# (training) leg"; with no clean class left, the private-safe requirement of
+# that rule went with it and privacy-sensitive work rides the normal combos.
+# What the render owes now is the absence: no combo name ends in -clean, and
+# the six dropped ids surface only in "retired", so apply prunes a stale
+# gateway combo instead of leaving it aimed at a route nothing declares.
 import re
-free = re.compile(r"contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|/qwen")
-trains = re.compile(r"-contributor$")
-clean = [n for n in names if n.endswith("-clean")]
-for n in clean:
-    bad = [m for m in by[n] if free.search(m)]
-    if bad:
-        problems.append(n + "-free:" + ",".join(bad))
-for n in clean:
-    bad = [m for m in by[n] if trains.search(m)]
-    if bad:
-        problems.append(n + "-trains:" + ",".join(bad))
+for n in (n for n in names if n.endswith("-clean")):
+    problems.append(n + "-clean-combo-returned")
+retired = set(d.get("retired", []))
+for gone in ("l1-orchestrator-clean", "l2-orchestrator-clean", "l2-worker-clean",
+             "l3-driver-clean", "l3-implementer-clean", "l3-researcher-clean"):
+    if gone in names or gone in omitted:
+        problems.append(gone + "-should-be-retired-not-" + ("combo" if gone in names else "omitted"))
+    if gone not in retired:
+        problems.append(gone + "-missing-from-retired")
 # *-free-only = zero paid/keyed legs (zen contributor-free counts as free).
 # SHARDB: expectation moved by 7eff6020 (FREEWIRE wired probe-passed openrouter :free legs into free-only routes): a :free suffixed id is free.
 paid = re.compile(r"cheaperinference|openrouter|^(deepseek|mistral)/|opencode-zen/(?!.*-free)")
@@ -409,19 +407,23 @@ fi
 # api-keys.example.yml says "fill in what you have", so a copied file keeps
 # REPLACE_WITH_* for the rest. Those must never be registered as keys: once
 # registered, "already registered" would also shadow the real key forever.
-# D657-D2 (AO-DENYLEGS D2, 2026-10-08) moved the placeholder row off `gemini`:
-# every google_ai_studio leg is now gated (the D-657 probe left the route with
-# its Vertex spelling only), so that provider exits the plan at the
-# all-legs-unavailable step and never reaches the key lookup this test is about.
-# `vertex` is the provider the chains actually serve on today, so the placeholder
+# D657-D2 (AO-DENYLEGS D2, 2026-10-08) moved the placeholder row off `gemini`;
+# D-1201 (2026-10-13) gated `vertex` too - Vertex and Google AI Studio are
+# unavailable everywhere now (providers.<id>.available: false), so both exit the
+# plan at the all-legs-unavailable step and never reach the key lookup this test
+# is about. `groq` is a provider the chains still ride, so the placeholder
 # rule is proved on a row apply.sh still plans.
 if it "apply skips REPLACE_WITH placeholders and registers real keys"; then
     keys="$(mktemp)"
-    printf 'vertex: REPLACE_WITH_VERTEX_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
-    assert_contains "$out" "vertex: no key in api-keys.yml, skipped"
+    assert_contains "$out" "groq: no key in api-keys.yml, skipped"
+    # D-1201: a gated provider must not survive anywhere in the plan, not even
+    # as a manual context override - the vertex row is out of
+    # context-overrides.json, so no `vertex/` leg may be announced.
+    assert_not_contains "$out" "would ensure vertex/"
     if grep -q "mistral: would register\|mistral already registered" <<<"$out"; then pass
     else fail "the real mistral key was not planned"; fi
 fi
@@ -589,13 +591,18 @@ PY
     assert_eq "$report" ""
 fi
 
-if it "autoos-agent: --clean picks the twin, undeclared models and --free --clean are refused"; then
-    out="$(python3 tools/autoos-agent.py run --tier 3 --clean --dry-run t)"
-    assert_contains "$out" "--model omniroute/l3-driver-clean "
+if it "autoos-agent: --clean is a no-op on the normal combo and undeclared models are refused"; then
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): --clean is still accepted
+    # and plans the tier's NORMAL combo, naming the change on stderr; the `-clean`
+    # twin it used to rewrite the id to is gone, so --free --clean is a plain
+    # --free run, not a refusal.
+    out="$(python3 tools/autoos-agent.py run --tier 3 --clean --dry-run t 2>&1)"
+    assert_contains "$out" "--model omniroute/l3-driver "
+    assert_contains "$out" "no-op since AO-MIMO-D1201"
     rc=0; python3 tools/autoos-agent.py run --tier 2 --model omniroute/not-a-combo --dry-run t >/dev/null 2>&1 || rc=$?
     assert_eq "$rc" "2"
     rc=0; python3 tools/autoos-agent.py run --tier 2 --free --clean --dry-run t >/dev/null 2>&1 || rc=$?
-    assert_eq "$rc" "2"
+    assert_eq "$rc" "0"
 fi
 
 if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then

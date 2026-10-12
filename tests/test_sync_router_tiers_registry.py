@@ -309,7 +309,19 @@ class CliDefaultsToRegistryTests(unittest.TestCase):
         box = RegistrySandbox(with_combos=True)
         try:
             result = box.run("--check", "--quiet")
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            out = result.stdout + result.stderr
+            if result.returncode != 0:
+                # AO-MIMO-D1201 (2026-10-12): vertex is off, so combos.json no
+                # longer carries a vertex leg, while the registry default still
+                # declares one and renders it as a `# litellm-skip:` comment
+                # (the legs stay declared on purpose). The escape hatch may differ
+                # from the default in exactly those comment lines and nothing else.
+                changed = [l for l in out.splitlines()
+                           if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+                self.assertTrue(changed, out)
+                for line in changed:
+                    self.assertTrue(line[0] == "-" and "litellm-skip: vertex/" in line,
+                                    line)
         finally:
             box.close()
 

@@ -2,6 +2,11 @@
 
 ## 2026-10-07 refresh — status at a glance
 
+AO-MIMO-D1201 (operator 2026-10-12) supersedes every `vertex/*` and
+`google_ai_studio/*` row below: both providers are off everywhere, so those ids
+are neither pinnable nor resolvable. Read the keep/drop tables and the generated
+matrix as the 2026-10-07 record.
+
 Re-rendered §A from today's `configuration/omniroute/combos.json` (24 curated
 combos) and `catalog/ai-registry.json` route classes. Sections marked
 2026-09-30 below are the original evaluation record — leg lists there are
@@ -23,6 +28,12 @@ provider: leaf-implementer `vertex-gemini-3.1-pro-preview`, leaf-reviewer
 `vertex-deepseek-v4-flash` — pinned in
 `tools/render-opencode-container-config.py` so `ai-stack.sh init` cannot
 revert them.
+**SUPERSEDED (D-1201, operator 2026-10-12):** Vertex AI and Google AI Studio are
+off everywhere, so no leaf may pin or resolve a `vertex/*` id. The renderer's
+`vertex-*` alias table is deleted and leaf-implementer rides the registry combo
+`omniroute/l3-implementer`; leaf-reviewer stays on the non-Vertex free leg
+(`omniroute/nemotron-3-ultra-free`). The Vertex paragraphs below are the
+2026-09-30 record, not the current setup.
 
 **What changed since the 2026-09-24 revision.**
 
@@ -84,6 +95,12 @@ reordering, no separate credit combos needed.
 (free band only) is the strict free answer.
 
 ## Fleet model pins (live 2026-09-30 — what the orchestrators and leaves run)
+
+> **Not live since D-1201 (operator 2026-10-12).** Vertex AI and Google AI Studio
+> are off everywhere, so no `vertex-*` id below is pinnable or resolvable;
+> leaf-implementer is re-pinned to `omniroute/l3-implementer` in
+> `tools/render-opencode-container-config.py`. This section is the 2026-09-30
+> record of what was pinned then.
 
 Operator order 2026-09-30: the orchestration and worker heads were being
 rate-limited or answer 502 (opencode-zen free, the spark gateway leg), so the

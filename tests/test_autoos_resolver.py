@@ -58,17 +58,19 @@ def card(spec="exact", kind="implement"):
     return {"spec": spec, "kind": kind}
 
 
-def clean_head_leg(registry):
-    """The leg `l2-worker-clean` heads with, read from the registry.
+def chain_head_leg(registry):
+    """The leg `l2-worker` heads with, read from the registry.
 
-    Three cases below need "a private-safe leg that a probe has proven
-    tool_calls on" without reading the git-ignored probe overlay, so they prove
-    this leg in an inline overlay instead of naming a model. MISTRALFIX
-    (2026-09-28) moved them off the old name: mistral/mistral-small-latest is
-    no longer a leg of any route (0 rpm on the measured plan), and since DSBACK
-    the native DeepSeek leg heads both -clean twins.
+    Three cases below need "a leg that a probe has proven tool_calls on" without
+    reading the git-ignored probe overlay, so they prove this leg in an inline
+    overlay instead of naming a model. MISTRALFIX (2026-09-28) moved them off the
+    old name: mistral/mistral-small-latest is no longer a leg of any route (0 rpm
+    on the measured plan). AO-MIMO-D1201 (2026-10-12) moved them off
+    `l2-worker-clean` with the rest of the `-clean` class: the helper never needed
+    a private-safe leg for its own sake, only because that route was the sensitive
+    card's only destination, and privacy routes nothing now.
     """
-    return registry["routes"]["l2-worker-clean"]["legs"][0]
+    return registry["routes"]["l2-worker"]["legs"][0]
 
 
 class TableTests(unittest.TestCase):
@@ -447,18 +449,10 @@ class FilterTests(unittest.TestCase):
         _, removed = self.run_filters(overlay={})
         self.assertEqual(removed["r-noleg"], ["no usable leg: "])
 
-    def test_privacy_reason(self):
-        # Unchanged by FT: privacy stays route-level, checked regardless of
-        # any leg's own usability (the overlay here even makes clean/tiny
-        # usable too, so both legs *would* be usable -- privacy still wins).
-        _, removed = self.run_filters(card=self.card(privacy="sensitive"),
-                                      overlay=self.overlay)
-        self.assertIn("privacy: nosy/big trains on prompts", removed["r-mixed"])
-
-    def test_privacy_checks_an_unavailable_leg_the_gateway_still_serves(self):
-        # close-priv 2026-09-26: unavailable_legs is registry-only; the gateway
-        # combo still lists the leg, so a sensitive card must not pass a route
-        # whose hidden leg is unsafe.
+    def _freepool_routes(self):
+        """Two routes that head on `clean/big` and carry a free-pool leg — one of
+        them hidden by unavailable_legs, one listed. Both used to be the privacy
+        filter's evidence; they now show what it no longer does."""
         self.registry["providers"]["freepool"] = {
             "id": "freepool", "tier": "free", "trains_on_prompts": False}
         self.registry["models"]["free-model"] = {
@@ -467,28 +461,38 @@ class FilterTests(unittest.TestCase):
         self.registry["routes"]["r-hidden"] = {
             "id": "r-hidden", "legs": ["clean/big", "freepool/free-model"],
             "unavailable_legs": {"freepool/free-model": {"available": False}}}
-        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
-        self.assertNotIn("r-hidden", survivors)
-        self.assertTrue(any("freepool/free-model" in r for r in removed["r-hidden"]))
-
-    def test_privacy_removes_route_with_a_free_pool_leg_even_after_a_clean_leg(self):
-        # PRIV brief 2026-09-26 ("Free first, private never"): a free-tier
-        # leg is never private-safe, even one whose own trains_on_prompts is
-        # false, and even when it comes after an otherwise-clean first leg --
-        # the whole route is removed for a sensitive card (route-level, D-
-        # style, not per-leg fall-through).
-        self.registry["providers"]["freepool"] = {
-            "id": "freepool", "tier": "free", "trains_on_prompts": False}
-        self.registry["models"]["free-model"] = {
-            "id": "free-model", "tool_calls": "proven",
-            "context_usable": {"tokens": 100000, "source": "default"}}
         self.registry["routes"]["r-freepool"] = {
             "id": "r-freepool", "legs": ["clean/big", "freepool/free-model"]}
-        survivors, removed = self.run_filters(card=self.card(privacy="sensitive"))
-        self.assertNotIn("r-freepool", survivors)
-        self.assertTrue(
-            any("freepool/free-model" in reason for reason in removed["r-freepool"]),
-            removed.get("r-freepool"))
+
+    def test_privacy_removes_no_route(self):
+        """AO-MIMO-D1201 (2026-10-12, operator answer 3) deleted the route-level
+        privacy loop this class used to pin (PRIV brief 2026-09-26 "Free first,
+        private never" and close-priv 2026-09-26's hidden-leg half). `filter_routes`
+        still reads card["privacy"] nowhere: the survivors and every removal reason
+        are the public card's, byte for byte, even over a provider that
+        trains_on_prompts and a free-pool leg."""
+        self._freepool_routes()
+        public = self.run_filters(overlay=self.overlay)
+        sensitive = self.run_filters(card=self.card(privacy="sensitive"),
+                                     overlay=self.overlay)
+        self.assertEqual(sensitive[0], public[0])
+        self.assertEqual(sensitive[1], public[1])
+        for reasons in sensitive[1].values():
+            self.assertFalse([x for x in reasons if x.startswith("privacy:")], reasons)
+        self.assertIn("r-hidden", sensitive[0])
+        self.assertIn("r-freepool", sensitive[0])
+
+    def test_a_hidden_free_leg_is_still_excluded_as_a_leg(self):
+        # close-priv's other half survives on its own merits, with no privacy in
+        # it: unavailable_legs is registry-only, so the gateway combo can still
+        # name the leg while serving_legs() drops it.
+        self._freepool_routes()
+        self.assertEqual(
+            r.serving_legs(self.registry["routes"]["r-hidden"], self.registry),
+            [("clean", "big")])
+        self.assertEqual(
+            r.serving_legs(self.registry["routes"]["r-freepool"], self.registry),
+            [("clean", "big"), ("freepool", "free-model")])
 
     # --- per-leg filters (FT): usable_legs(), not a route removal ---------
 
@@ -544,18 +548,19 @@ class FilterTests(unittest.TestCase):
         self.assertIn("r-ok", survivors)
 
     def test_all_reasons_are_collected_never_stopping_at_the_first(self):
-        # A privacy-sensitive card whose every leg is *also* unusable (need
-        # is huge, so context fails everywhere): both the route-level
-        # privacy reason and the aggregate "no usable leg" reason show up,
-        # and the per-leg collection itself never stops at the first
-        # reason either -- clean/bound fails all three per-leg checks.
+        # A card whose every leg is unusable (need is huge, so context fails
+        # everywhere): the aggregate "no usable leg" reason shows up and the
+        # per-leg collection never stops at the first reason either —
+        # clean/bound fails all three per-leg checks. AO-MIMO-D1201: the route
+        # was removed for privacy here as well; the privacy reason is gone and
+        # this now asserts it is the ONLY thing gone, so the card's sensitivity
+        # adds nothing to the reasons a public card gets.
         _, removed = self.run_filters(
             card=self.card(kind="implement", privacy="sensitive"),
             features=self.feats(need_tokens=1_000_000), overlay={})
         reasons = removed["r-mixed"]
-        self.assertEqual(reasons[0], "privacy: nosy/big trains on prompts")
-        self.assertEqual(len(reasons), 2)
-        no_usable = reasons[1]
+        self.assertEqual(len(reasons), 1, reasons)
+        no_usable = reasons[0]
         self.assertTrue(no_usable.startswith("no usable leg: "))
         self.assertIn("clean/bound: context:", no_usable)
         self.assertIn("tool_calls: clean/bound is unproven", no_usable)
@@ -867,19 +872,22 @@ class FallThroughTests(unittest.TestCase):
 
     # --- privacy stays route-level, even with an otherwise-usable leg -----
 
-    def test_sensitive_card_removed_even_with_a_usable_leg(self):
+    def test_sensitive_card_survives_a_provider_that_trains_on_prompts(self):
+        """AO-MIMO-D1201 (operator answer 3) removed the route-level privacy
+        filter this test pinned: a sensitive card used to be dropped from every
+        route whose legs sat on a training provider, reasons and all. The same
+        fixture now answers the same way a public card does — `trains_on_prompts`
+        stays registry data that nothing in filter_routes reads."""
         registry = self.two_leg_registry()
         registry["providers"]["p"]["trains_on_prompts"] = True
-        card = self.card(privacy="sensitive")
         features, client_state = self.features(), self.state()
 
-        survivors, removed = r.filter_routes(card, features, client_state,
-                                             registry, {})
-        self.assertNotIn("r-ft", survivors)
-        self.assertEqual(removed["r-ft"], [
-            "privacy: p/model-a trains on prompts",
-            "privacy: p/model-b trains on prompts",
-        ])
+        survivors, removed = r.filter_routes(self.card(privacy="sensitive"),
+                                             features, client_state, registry, {})
+        self.assertIn("r-ft", survivors)
+        self.assertNotIn("r-ft", removed)
+        public, _ = r.filter_routes(self.card(), features, client_state, registry, {})
+        self.assertEqual(survivors, public)
 
     # --- the overlay rate limit: unproven skipped, proven kept -------------
 
@@ -914,18 +922,18 @@ class FallThroughTests(unittest.TestCase):
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
         # Every model in the real catalog is tool_calls unproven today (no
-        # probe has proven one yet); marking the -clean routes' head leg
-        # proven in the overlay is enough to keep l2-worker-clean alive, even
-        # though its other legs (openrouter/deepseek, gated by its provider,
-        # and opencode-zen/deepseek-v4.1-flash, gated on the route) stay
+        # probe has proven one yet); marking the chain head proven in the overlay
+        # is enough to keep l2-worker alive, even though its other legs stay
         # unproven. MISTRALFIX 2026-09-28: this used to prove
-        # mistral/mistral-small-latest, which is no longer a leg of the route.
-        overlay = {"legs": {clean_head_leg(registry): {
+        # mistral/mistral-small-latest, which is no longer a leg of the route;
+        # AO-MIMO-D1201 moved the read from the dropped `l2-worker-clean` onto the
+        # normal route the same card resolves to.
+        overlay = {"legs": {chain_head_leg(registry): {
             "tool_calls": {"value": "proven", "source": "test"}}}}
         survivors, removed = r.filter_routes(card, features, client_state,
                                              registry, overlay)
-        self.assertIn("l2-worker-clean", survivors)
-        self.assertNotIn("l2-worker-clean", removed)
+        self.assertIn("l2-worker", survivors)
+        self.assertNotIn("l2-worker", removed)
 
 
 class ProviderLimitsFilterTests(unittest.TestCase):
@@ -2089,11 +2097,10 @@ class PlanTests(unittest.TestCase):
     def _inline_toolcalls_overlay(registry):
         """Build a tool_calls overlay in-process (PRIV2, 2026-09-26): the
         sensitive-routing regression below needs an agentic kind's
-        tool_calls proven for at least one private-safe leg, but
+        tool_calls proven for at least one leg, but
         the real probe's overlay (tools/autoos_overlay.py) is never in
-        git and absent on a fresh clone or in CI. Marks the -clean routes'
-        head leg (clean_head_leg: private-safe — paid tier,
-        trains_on_prompts false, no model-level override) proven and every
+        git and absent on a fresh clone or in CI. Marks the chain head leg
+        (chain_head_leg) proven and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
         ["value"]``) -- so this test never depends on that file."""
@@ -2101,119 +2108,96 @@ class PlanTests(unittest.TestCase):
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
-        overlay["legs"][clean_head_leg(registry)] = {"tool_calls": {"value": "proven"}}
+        overlay["legs"][chain_head_leg(registry)] = {"tool_calls": {"value": "proven"}}
         return overlay
 
-    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
-        # CIGREEN: expectation moved by 35148c5c (CLEAN put the unproven
-        # ovhcloud/gpt-oss-120b head on -clean) and ffe384a0 (credit spend
-        # guard refuses it as unpriced). D657-D2 (2026-10-08) moved it again:
-        # every ovh leg 404s on both probe gateways and is out of the chains,
-        # and the clean head is now vertex/gemini-3.8-flash — priced and
-        # private-safe — so "prove only the clean head" no longer starves. The
-        # fail-closed half is now pinned the honest way: prove NOTHING, and the
-        # sensitive plan must answer input_required naming the unproven head.
-        # Then prove the head and every serving leg of the route it picks must
-        # be private-safe. Either half fails if an unsafe leg were ever picked.
-        # PRIV brief 2026-09-26, the found bug: `route --card
-        # kind=implement,paths=...,privacy=sensitive` chose t3-driver-free-
-        # only via groq/qwen/qwen3.8-27b, a free pool -- "Free first, private
-        # never" was violated. PRIV2 (2026-09-26): this must run in CI, so
-        # the tool_calls overlay is built inline (_inline_toolcalls_overlay)
-        # instead of reading the machine-wide overlay --
-        # see
-        # test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay
-        # below for the real-probe-overlay variant, which may still skip.
+    def test_real_registry_sensitive_implement_card_routes_like_the_public_one(self):
+        """AO-MIMO-D1201 (2026-10-12, operator answer 3) rewrote PRIV/PRIV2's
+        regression. It pinned that `route --card kind=implement,paths=...,
+        privacy=sensitive` never lands on a route with a non-private-safe serving
+        leg — the found bug was t3-driver-free-only via groq/qwen/qwen3.8-27b, a
+        free pool ("Free first, private never"). privacy is no longer a filter, so
+        the two cards answer the same route, bucket and state, and no answer carries
+        the dropped `-clean` suffix.
+
+        The fail-closed half is NOT privacy and stays: prove NOTHING and the plan
+        must answer input_required naming the unproven chain head. The tool_calls
+        overlay is built inline (_inline_toolcalls_overlay) because the real probe's
+        file is machine-local and absent in CI — see the measured-overlay variant
+        below, which runs where one exists."""
         registry_path = (Path(__file__).resolve().parent.parent
                          / "catalog" / "ai-registry.json")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
         overlay = self._inline_toolcalls_overlay(registry)
-        card = {"kind": "implement", "spec": "exact", "risk": "normal",
-               "mode": "balanced", "privacy": "sensitive"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
-                   "tests": True, "need_tokens": 1000}
+                    "tests": True, "need_tokens": 1000}
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
+        now = self.dt(2026, 9, 29, 9, 0)
+
+        def card(privacy):
+            return {"kind": "implement", "spec": "exact", "risk": "normal",
+                    "mode": "balanced", "privacy": privacy}
+
         nothing_proven = {"legs": {leg: {"tool_calls": {"value": "unproven"}}
                                    for leg in overlay["legs"]}}
-        starved = r.plan(card, features, client_state, registry, nothing_proven,
-                         [], "muse-spark", self.dt(2026, 9, 29, 9, 0))
+        starved = r.plan(card("sensitive"), features, client_state, registry,
+                         nothing_proven, [], "muse-spark", now)
         self.assertIsNone(starved["route"], starved)
         self.assertEqual(starved["state"], "input_required", starved)
-        self.assertIn("%s: tool_calls" % clean_head_leg(registry),
+        self.assertIn("%s: tool_calls" % chain_head_leg(registry),
                       starved["reason"], starved["reason"])
-        result = r.plan(card, features, client_state, registry, overlay, [],
-                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
-        self.assertIsNotNone(result["route"], result)
-        route = registry["routes"][result["route"]]
-        for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
-            self.assertTrue(
-                safe, "%s/%s on route %s is not private-safe: %s"
-                     % (provider_id, model_id, result["route"], reason))
-        # CIGREEN-REWORK1 (Sonnet seat; expectation moved by 35148c5c): the two
-        # variants above prove only the clean/private-safe head, so the only
-        # usable route is private-safe either way -- a plan with the privacy
-        # route filter removed, or with private_safe forced True, still passes
-        # them. This third variant proves EVERY registry leg, so a filter-less
-        # plan falls onto a free pool while the correct plan must still route
-        # to a route whose every serving leg is private-safe.
-        all_proven = {"legs": {leg: {"tool_calls": {"value": "proven"}}
-                               for leg in overlay["legs"]}}
-        result = r.plan(card, features, client_state, registry, all_proven, [],
-                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
-        self.assertIsNotNone(result["route"], result)
-        route = registry["routes"][result["route"]]
-        for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
-            self.assertTrue(
-                safe, "%s/%s on route %s is not private-safe: %s"
-                     % (provider_id, model_id, result["route"], reason))
 
-    def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg_with_measured_overlay(self):
-        # Extra (PRIV2): the same regression against the real probe's
-        # overlay, when one happens to be on disk. The machine-wide overlay
-        # (autoos_overlay, OVERLAYHOME) is never in git, so this skips on a
-        # fresh clone or in CI rather than failing -- the inline-overlay test
-        # above is the one that must run. Read-only: it never writes the file.
+        for proven in (overlay,
+                       {"legs": {leg: {"tool_calls": {"value": "proven"}}
+                                 for leg in overlay["legs"]}}):
+            sensitive = r.plan(card("sensitive"), features, client_state, registry,
+                               proven, [], "muse-spark", now)
+            public = r.plan(card("public"), features, client_state, registry,
+                            proven, [], "muse-spark", now)
+            self.assertIsNotNone(sensitive["route"], sensitive)
+            self.assertFalse(sensitive["route"].endswith("-clean"), sensitive["route"])
+            self.assertEqual(sensitive["route"], public["route"], proven)
+            self.assertEqual(sensitive["bucket"], public["bucket"], proven)
+
+    def test_real_registry_sensitive_card_routes_like_public_with_measured_overlay(self):
+        # Extra (PRIV2): the same equivalence against the real probe's overlay,
+        # when one happens to be on disk. The machine-wide overlay (autoos_overlay,
+        # OVERLAYHOME) is never in git, so this skips on a fresh clone or in CI
+        # rather than failing — the inline-overlay test above is the one that must
+        # run. Read-only: it never writes the file.
         import autoos_overlay
         found = autoos_overlay.found(
             autoos_overlay.default_path(),
             autoos_overlay.legacy_path(str(Path(__file__).resolve().parent.parent)))
         if found is None:
             self.skipTest("no tool_calls overlay on this machine to probe with")
-        overlay_path = Path(found)
-        registry_path = (Path(__file__).resolve().parent.parent
-                         / "catalog" / "ai-registry.json")
-        registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
-        card = {"kind": "implement", "spec": "exact", "risk": "normal",
-               "mode": "balanced", "privacy": "sensitive"}
+        registry = json.loads((Path(__file__).resolve().parent.parent
+                               / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+        overlay = json.loads(Path(found).read_text(encoding="utf-8"))
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
-                   "tests": True, "need_tokens": 1000}
+                    "tests": True, "need_tokens": 1000}
         client_state = {"opencode": {"installed": True, "signed_in": True,
                                      "reason": ""}}
-        result = r.plan(card, features, client_state, registry, overlay, [],
-                        "muse-spark", self.dt(2026, 9, 29, 9, 0))
-        # What is under test is the RULE, not the state of the market. The
-        # overlay is a snapshot of probes, so "a route exists" is a claim about
-        # the day the file was written: with a real measured overlay on disk,
-        # every private-safe route can legitimately be down, and the correct
-        # answer to a sensitive card then is input_required. Asserting a non-None
-        # route here made the suite machine-dependent — and pushed towards
-        # keeping an unsafe route alive just to satisfy it.
-        if result["route"] is None:
-            self.assertEqual(result["state"], "input_required", result)
-            # ... but only with a reason. A plan that gives up naming nothing is
-            # a resolver hole, not a private-safe refusal.
-            self.assertTrue(result.get("reason", "").strip(), result)
+
+        def plan(privacy):
+            return r.plan({"kind": "implement", "spec": "exact", "risk": "normal",
+                           "mode": "balanced", "privacy": privacy},
+                          features, client_state, registry, overlay, [],
+                          "muse-spark", self.dt(2026, 9, 29, 9, 0))
+
+        sensitive, public = plan("sensitive"), plan("public")
+        if sensitive["route"] is None:
+            # What is under test is the RULE, not the state of the market: the
+            # overlay is a snapshot of probes, so "a route exists" is a claim about
+            # the day the file was written. A plan that gives up must still name a
+            # reason — one that resolves nothing silently is a resolver hole.
+            self.assertEqual(sensitive["state"], "input_required", sensitive)
+            self.assertTrue(sensitive.get("reason", "").strip(), sensitive)
+            self.assertEqual(public["route"], None, public)
             return
-        route = registry["routes"][result["route"]]
-        for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
-            self.assertTrue(
-                safe, "%s/%s on route %s is not private-safe: %s"
-                     % (provider_id, model_id, result["route"], reason))
+        self.assertFalse(sensitive["route"].endswith("-clean"), sensitive["route"])
+        self.assertEqual(sensitive["route"], public["route"], public)
 
 
 class GatewayOrderTests(unittest.TestCase):
@@ -2430,7 +2414,7 @@ class GatewayOrderTests(unittest.TestCase):
         # builds (every other real leg explicitly unproven).
         registry = self.registry()
         overlay = PlanTests._inline_toolcalls_overlay(registry)
-        proven_leg = clean_head_leg(registry)
+        proven_leg = chain_head_leg(registry)
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "public"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
@@ -2890,16 +2874,17 @@ class UnavailableUntilResolverTests(unittest.TestCase):
 
 class MetaApiResolverTests(unittest.TestCase):
     """BRIEF MUSEAPI (2026-09-27): meta_api/muse-spark-1.3-contributor is the
-    main writer for normal work, but the contributor contract trains on prompts
-    (evidence: dev.meta.ai/docs/pricing-rate-limits), so a privacy=sensitive
-    card must never reach it. filter_routes() is where that is enforced: one
-    non-private-safe serving leg disqualifies the whole route (spec: privacy is
-    a hard filter, only -clean routes serve sensitive work).
+    main writer for normal work, and the contributor contract trains on prompts
+    (evidence: dev.meta.ai/docs/pricing-rate-limits), which used to make it a
+    privacy=sensitive refusal inside filter_routes() — one non-private-safe
+    serving leg disqualified the whole route.
 
-    D657-D2 (2026-10-08) supersedes the "main writer for normal work" half:
+    D657-D2 (2026-10-08) superseded the "main writer for normal work" half:
     combo-v2 §8 bans the paid meta muse from every chain, so the leg is gated
-    unavailable and rides only its own declaration. The private-safe rule it was
-    written to protect is still pinned, now over the routes that declare it.
+    unavailable and rides only its own declaration. AO-MIMO-D1201 (2026-10-12,
+    operator answer 3) superseded the privacy half: privacy filters nothing in
+    filter_routes() any more, so this class pins the §8 availability gate and that
+    `private_safe` still answers as data (tools/registry.py).
     """
 
     @classmethod
@@ -2920,42 +2905,45 @@ class MetaApiResolverTests(unittest.TestCase):
 
     def contributor_routes(self):
         """Route ids that still DECLARE a meta contributor leg (either
-        spelling). D657-D2 + combo-v2 §8 leave only the two gated declarations —
-        the single-writer route and l1-orchestrator-clean's documented
-        CLEAN_ROUTE_EXEMPTIONS leg — so both tests below read that set from the
-        registry instead of naming chains that no longer carry the leg."""
+        spelling). D657-D2 + combo-v2 §8 leave one gated declaration, the
+        single-writer route — AO-MIMO-D1201 (2026-10-12) removed the second,
+        `l1-orchestrator-clean`'s documented CLEAN_ROUTE_EXEMPTIONS leg, when the
+        whole `-clean` class was dropped — so both tests below read that set from
+        the registry instead of naming chains that no longer carry the leg."""
         contributors = ("meta_api/muse-spark-1.3-contributor",
                         "openrouter/meta/muse-spark-1.3-contributor")
         return sorted(rid for rid, route in self.registry["routes"].items()
                       if set(route.get("legs") or []) & set(contributors))
 
-    def test_a_sensitive_card_removes_every_route_the_leg_heads(self):
-        # D657-D2 (2026-10-08) + combo-v2 §8 ("no paid deepseek/meta muse"):
-        # the contributor leg left the orchestrator chains, so naming
-        # l1-orchestrator / l1-orchestrator-paid here pinned a membership that
-        # no longer exists — those two are now refused for a sensitive card by
-        # the free-pool privacy rule, not by this leg. The routes that DO still
-        # declare it are read back from the registry (l1-orchestrator-clean
-        # keeps it deliberately: tools/registry.py CLEAN_ROUTE_EXEMPTIONS), and
-        # each must be refused with a reason that names a training contract.
+    def test_a_sensitive_card_is_refused_nothing_that_a_public_one_is_not(self):
+        """AO-MIMO-D1201 (2026-10-12, operator answer 3) rewrote this test's
+        subject: it pinned that a sensitive card is REMOVED from every route the
+        contributor leg heads, with a reason naming the training contract, plus the
+        free-pool `privacy:` refusals of the L1 band. filter_routes reads privacy
+        nowhere now, so what survives here is the gate that never was about
+        privacy — combo-v2 §8 keeps the paid meta muse out of every chain, so the
+        one route still declaring it is refused by availability — and the two cards
+        answer identically. The leg's own private_safe verdict stays registry data
+        (test_the_contributor_leg_is_never_private_safe)."""
         headed = self.contributor_routes()
-        self.assertEqual(headed, ["l1-orchestrator-clean",
-                                 "spark-1.3-contributor"], headed)
-        card = {"kind": "review", "privacy": "sensitive"}
-        survivors, removed = r.filter_routes(
-            card, {"need_tokens": 1000}, self.state(), self.registry, {})
+        self.assertEqual(headed, ["spark-1.3-contributor"], headed)
+        public = r.filter_routes({"kind": "review", "privacy": "public"},
+                                 {"need_tokens": 1000}, self.state(),
+                                 self.registry, {})
+        sensitive = r.filter_routes({"kind": "review", "privacy": "sensitive"},
+                                    {"need_tokens": 1000}, self.state(),
+                                    self.registry, {})
+        self.assertEqual(sensitive[0], public[0])
+        self.assertEqual(sensitive[1], public[1])
         for route_id in headed:
-            self.assertNotIn(route_id, survivors, route_id)
-            self.assertIn(route_id, removed, route_id)
-            self.assertTrue(any("trains on prompts" in reason
-                                for reason in removed[route_id]),
-                            "%s: refused without naming the training contract "
-                            "(%s)" % (route_id, removed[route_id]))
-        # the L1 band a sensitive card still must not reach, now for the free
-        # pools it heads (PRIV: "Free first, private never"):
+            self.assertNotIn(route_id, sensitive[0], route_id)
+            self.assertIn(route_id, sensitive[1], route_id)
+            self.assertFalse([x for x in sensitive[1][route_id]
+                              if x.startswith("privacy:")], sensitive[1][route_id])
+        # The L1 band a sensitive card used to be refused from for its free pools
+        # now serves it — a free head is a routing answer, not a privacy one.
         for route_id in ("l1-orchestrator", "l1-orchestrator-free-only"):
-            self.assertNotIn(route_id, survivors, route_id)
-            self.assertIn("privacy:", " ".join(removed[route_id]), route_id)
+            self.assertIn(route_id, sensitive[0], route_id)
 
     def test_a_public_card_is_never_served_the_banned_contributor_leg(self):
         # §8 (combo-v2) bans the paid meta muse out of every chain, so the leg
@@ -2975,8 +2963,7 @@ class MetaApiResolverTests(unittest.TestCase):
         legs, skipped, _notes = r.usable_legs(
             self.registry["routes"]["l1-orchestrator"], card,
             {"need_tokens": 1000}, self.state(), self.registry, {})
-        self.assertEqual(self.contributor_routes(),
-                         ["l1-orchestrator-clean", "spark-1.3-contributor"],
+        self.assertEqual(self.contributor_routes(), ["spark-1.3-contributor"],
                          "§8 leaves the contributor leg in gated declarations "
                          "only — it rides no chain any more")
         self.assertNotIn("meta_api/muse-spark-1.3-contributor", skipped,
@@ -3017,8 +3004,9 @@ class FreeAiResolverTests(unittest.TestCase):
     """BRIEF FREEAI (2026-09-27): free_ai declares only rpm/tpd (no tpm), so
     the resolver's request-size filter never skips its qwen7b leg - a
     need_tokens*1.3 that exceeds the daily 30k cap must NOT be mistaken for a
-    tpm skip. And because free_ai is a free, may-train public pool, a
-    privacy=sensitive card disqualifies every route carrying it."""
+    tpm skip. Its other half — that free_ai is a free, may-train public pool no
+    privacy=sensitive card may reach — was a filter_routes privacy rule, dropped
+    by AO-MIMO-D1201 (2026-10-12, operator answer 3) and pinned here as gone."""
 
     @classmethod
     def setUpClass(cls):
@@ -3066,27 +3054,28 @@ class FreeAiResolverTests(unittest.TestCase):
                                  for leg in route.get("legs") or []))
         self.assertEqual(carriers, [])
 
-    def test_a_sensitive_card_removes_routes_carrying_free_ai(self):
-        # The rule FREEAI was written for: a free, may-train public pool may
-        # never serve a privacy=sensitive card. After D657-D2 no chain carries
-        # the leg, so the rule is asserted where it is still load-bearing — the
-        # route that names it — plus the chain-level fact that nothing does.
-        card = {"kind": "review", "privacy": "sensitive"}
+    def test_a_sensitive_card_is_never_refused_for_a_free_pool(self):
+        """The other rule FREEAI was written for: a free, may-train public pool
+        may never serve a privacy=sensitive card, route-level and with a `privacy:`
+        reason. AO-MIMO-D1201 (operator answer 3) deleted it — `trains_on_prompts`
+        and the free tier stay registry data, and the route class a card gets is
+        what its own fields say. So both cards now see one answer, including for
+        the L3 free band this used to refuse."""
         registry = json.loads(json.dumps(self.registry))
         registry["routes"]["freeai-privacy-probe"] = {
             "id": "freeai-privacy-probe", "class": "cheap",
             "strategy": "priority", "legs": ["free_ai/qwen7b"]}
-        survivors, removed = r.filter_routes(
-            card, {"need_tokens": 1000}, self.state(), registry, {})
-        self.assertNotIn("freeai-privacy-probe", survivors)
-        self.assertIn("freeai-privacy-probe", removed)
-        self.assertIn("privacy: free_ai/qwen7b",
-                      " ".join(removed["freeai-privacy-probe"]))
-        # and today's L3 free band is refused for the same class of reason
-        # (every leg is a free pool — PRIV: "Free first, private never"):
-        self.assertNotIn("l3-driver-free-only", survivors)
-        self.assertIn("l3-driver-free-only", removed)
-        self.assertIn("privacy:", " ".join(removed["l3-driver-free-only"]))
+        feats, state = {"need_tokens": 1000}, self.state()
+        public = r.filter_routes({"kind": "review", "privacy": "public"},
+                                 feats, state, registry, {})
+        sensitive = r.filter_routes({"kind": "review", "privacy": "sensitive"},
+                                    feats, state, registry, {})
+        self.assertEqual(sensitive[0], public[0])
+        self.assertEqual(sensitive[1], public[1])
+        for route_id in ("freeai-privacy-probe", "l3-driver-free-only"):
+            self.assertIn(route_id, sensitive[0], route_id)
+            self.assertFalse([x for x in sensitive[1].get(route_id, [])
+                              if x.startswith("privacy:")], route_id)
 
 
 class ReviewerSelectionTests(unittest.TestCase):
@@ -3323,24 +3312,32 @@ class ReviewerSelectionTests(unittest.TestCase):
         self.assertIn(self.FUTURE, qoder["reasons"][0])
         self.assertTrue(qoder["waiting"])
 
-    # --- privacy -----------------------------------------------------------
+    # --- privacy: recorded, never a filter (AO-MIMO-D1201) ------------------
 
-    def test_a_training_reviewer_never_takes_sensitive_work(self):
-        # Muse trains by contributor contract: privacy=sensitive must skip it
-        # even though it is the head of the list and cross-family.
-        result = self.pick("qwen", privacy="sensitive")
-        self.assertEqual(result["reviewer"]["family"], "google")
-        meta = result["skipped"][0]
-        self.assertIn("privacy", meta["reasons"][0])
-        self.assertFalse(meta["waiting"])
+    def test_a_training_reviewer_takes_sensitive_work_like_any_other(self):
+        """The walk used to skip Muse — it trains by contributor contract — even
+        though it headed the list and was cross-family, and landed on google.
+        `_reviewer_rejections` still takes `privacy` and reads nothing from it, so
+        a sensitive card gets the head answer the public card gets and no rejection
+        names privacy."""
+        sensitive = self.pick("qwen", privacy="sensitive")
+        public = self.pick("qwen", privacy="public")
+        self.assertEqual(sensitive["reviewer"], public["reviewer"])
+        self.assertEqual(sensitive["skipped"], public["skipped"])
+        self.assertEqual(sensitive["reviewer"]["family"], "meta")
+        for entry in sensitive["skipped"]:
+            self.assertFalse([reason for reason in entry["reasons"]
+                              if "privacy" in reason], entry)
 
-    def test_a_legless_reviewer_fails_closed_on_sensitive_work(self):
-        # No leg means nothing to check training against, and "unproven" is not
-        # "safe" for a private prompt.
-        result = self.pick("meta", privacy="sensitive",
-                           client_state=self.state("opencode", "gemini"))
-        qoder = [s for s in result["skipped"] if s["client"] == "qoder"][0]
-        self.assertIn("no registry leg", qoder["reasons"][0])
+    def test_privacy_moves_no_reviewer_for_a_legless_candidate(self):
+        # The fail-closed half used to be the point: no leg means nothing to check
+        # training against, so a legless reviewer was refused a private prompt. It
+        # is refused for whatever it is actually short of now, and the card's
+        # privacy is not among the reasons — the two walks are one answer.
+        kwargs = dict(client_state=self.state("opencode", "gemini"))
+        sensitive = self.pick("meta", privacy="sensitive", **kwargs)
+        public = self.pick("meta", privacy="public", **kwargs)
+        self.assertEqual(sensitive, public)
 
     # --- first-pass-only ---------------------------------------------------
 
@@ -3493,13 +3490,21 @@ class PlanReviewCardTests(unittest.TestCase):
         # T0-PAID-4 Q1 (D-212/D-219): a paid entry must not review a qwen card
         # while a free entry is usable -- the free google reviewer takes it,
         # which is also where the D657-D2 list now leads (its head is free).
+        # D-1181 (AO-MIMO-V26, 2026-10-12): both google providers are switched
+        # off, so the chain's first *servable* free row is the next one down --
+        # the meta contributor seat. The rule is untouched (free still beats the
+        # paid deepseek row); only which row the data answers changed.
         review = self.plan(author="qwen")["review"]
         self.assertEqual(review["author_family"], "qwen")
-        self.assertEqual(review["reviewer"]["family"], "google")
-        self.assertEqual(review["reviewer"]["client"], "gemini")
-        self.assertIn("gemini-3.8-flash", review["reviewer"]["model"])
+        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["client"], "opencode")
+        self.assertIn("muse-spark-1.3-contributor-free",
+                      review["reviewer"]["model"])
         self.assertIsNot(review["reviewer"].get("paid"), True)
         self.assertEqual(review["state"], "resolved")
+        self.assertIn("unavailable", [row for row in review["skipped"]
+                                      if row["family"] == "google"][0]["reasons"],
+                      "the google head is off, not silently absent")
 
     def test_the_reason_says_who_authored_it(self):
         self.assertIn("author qwen", self.plan(author="qwen")["review"]["reason"])
@@ -3525,13 +3530,17 @@ class PlanReviewCardTests(unittest.TestCase):
         # survives and only the `review` guard is under test.
         self.assertIsNone(self.plan(kind="research", author="qwen")["review"])
 
-    def test_sensitive_work_never_lands_on_the_training_reviewer(self):
-        # The operator's fixed rule: Muse trains, so a privacy=sensitive card
-        # must be reviewed by something that does not.
-        result = r.reviewer_for("qwen", self.registry, self.state(), self.NOW,
-                                risk="normal", privacy="sensitive")
-        if result["reviewer"] is not None:
-            self.assertNotEqual(result["reviewer"]["family"], "meta")
+    def test_privacy_changes_who_reviews_on_the_real_registry(self):
+        """AO-MIMO-D1201 (operator answer 3) replaced the fixed rule this pinned
+        ("Muse trains, so a privacy=sensitive card must be reviewed by something
+        that does not"). On the shipped registry the same walk answers for both
+        cards — including the family it used to dodge."""
+        for risk in ("normal", "high"):
+            sensitive = r.reviewer_for("qwen", self.registry, self.state(), self.NOW,
+                                       risk=risk, privacy="sensitive")
+            public = r.reviewer_for("qwen", self.registry, self.state(), self.NOW,
+                                    risk=risk, privacy="public")
+            self.assertEqual(sensitive, public, risk)
 
     def ghost_review_plan(self, registry):
         card = {"kind": "review", "mode": "balanced", "risk": "normal",
@@ -3553,7 +3562,9 @@ class PlanReviewCardTests(unittest.TestCase):
         plan = self.ghost_review_plan(reg)
         review = plan["review"]
         self.assertIsNotNone(review["reviewer"])
-        self.assertEqual(review["reviewer"]["family"], "google")
+        # D-1181 (2026-10-12): the chain's usable head is the free meta row (both
+        # google providers are off), so that is the row a ghost must not displace.
+        self.assertEqual(review["reviewer"]["family"], "meta")
         ghost_rows = [s for s in review["skipped"]
                       if s["model"] == "ghost-model"]
         self.assertTrue(ghost_rows, review["skipped"])
@@ -3574,7 +3585,10 @@ class PlanReviewCardTests(unittest.TestCase):
         plan = self.ghost_review_plan(reg)
         review = plan["review"]
         self.assertIsNotNone(review["reviewer"])
-        self.assertEqual(review["reviewer"]["family"], "google")
+        # D-1181 (2026-10-12): with both google providers off, the usable head of
+        # the reviewer chain is the free meta row -- the ghost is still refused and
+        # the walk still lands on that row, whether it sits before or after it.
+        self.assertEqual(review["reviewer"]["family"], "meta")
         ghost_rows = [s for s in review["skipped"]
                       if s["model"] == "ghost-model"]
         self.assertTrue(ghost_rows, review["skipped"])
@@ -4398,6 +4412,11 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         # the cached credit tail — so the same card is pinned against the route
         # that still declares a Claude leg (opus-5-5), and l2-orchestrator is
         # pinned to hold nothing because it names nothing.
+        # D-1181 (AO-MIMO-V26, 2026-10-12): providers.vertex_ai is switched off,
+        # so the route's vertex tail leg no longer reaches `kept` -- it is
+        # skipped as `unavailable`, which is the same answer for a card with the
+        # orchestrator env set and for one without. The fact under test (no leg
+        # of this route is held back by the Claude budget gate) is unchanged.
         on = self.agy_servable(self.on_registry())
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in on["clients"]}
@@ -4407,9 +4426,11 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
         self.assertIn(("bazaarlink", "deepseek/deepseek-v4-flash-0731free:free"),
                       kept)
+        self.assertEqual([leg for leg, reasons in skipped.items()
+                          if any(x.startswith("unavailable") for x in reasons)],
+                         ["vertex/gemini-3.8-flash"])
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
@@ -4557,14 +4578,22 @@ class ComboFallthroughTests(unittest.TestCase):
     against a status table this test supplies.
     """
 
-    ROUTES = ("l1-orchestrator", "l1-orchestrator-free-only", "l2-worker",
-              "l2-worker-free-only", "l3-driver", "l3-driver-free-only")
+    # The agentic combo set is the combo contract's own tuple: one reading of
+    # "which combos must carry an agentic card", not a second copy here.
+    ROUTES = cc.AGENTIC_ROUTES
 
     # CIGREEN-REWORK1 (Sonnet seat; expectation moved by 06d0e714): D-TORDER-2
-    # accepts exactly this route as single-provider. Branch on the ROUTE ID,
-    # never on leg count, so truncating any other route to one leg still fails
-    # the multi-provider pins below instead of passing as "single-provider".
-    SINGLE_PROVIDER_EXEMPT = {"l1-orchestrator-free-only"}
+    # accepts a named set as single-provider. Since AO-MIMO-D1201 that set IS
+    # the contract's exemption table, so it is DERIVED here — an exemption added
+    # on one side of the registry cannot silently widen the pins on the other.
+    # l1-orchestrator joined it when vertex_ai and google_ai_studio stayed
+    # available:false (operator answer 1): its combo renders ONE servable leg
+    # while the row still DECLARES the vertex leg.
+    # Branch on the ROUTE ID, never on leg count, so truncating any other route
+    # to one leg still fails the multi-provider pins below instead of passing as
+    # "single-provider"; `assert_exempt` then pins the other half of that
+    # bijection, so an exemption that stops being true fails loudly too.
+    SINGLE_PROVIDER_EXEMPT = frozenset(cc.SINGLE_PROVIDER_EXEMPTIONS)
 
     @classmethod
     def setUpClass(cls):
@@ -4582,6 +4611,53 @@ class ComboFallthroughTests(unittest.TestCase):
                 return leg
         raise AssertionError("%s renders %s from no leg" % (route_id, ref))
 
+    def servable_providers(self, route_id):
+        """This route's provider set AS THE GATEWAY SEES IT, in leg order.
+        `gateway_legs` is the render's own availability filter, so a declared leg
+        whose provider is available:false is absent here — which is exactly what
+        made l1-orchestrator single-provider under AO-MIMO-D1201."""
+        provs = []
+        for leg in registry_tool.gateway_legs(self.reg["routes"][route_id], self.reg):
+            pid, _ = registry_tool.resolve_leg(leg, self.reg)
+            if pid not in provs:
+                provs.append(pid)
+        return provs
+
+    def assert_exempt(self, route_id):
+        """The exempt branch's shared pins: the exemption means "one provider
+        SERVES", not "one leg was written". So pin (i) the render is one leg and
+        one provider, (ii) every leg the row declares beyond the rendered one sits
+        on a provider that is deliberately off, so the two-provider chain is one
+        registry flag away and documented rather than deleted, and (iii) the
+        route's own `$comment` carries the note phrases rule (e) requires — the
+        exemption and its stated reason stay together or this fails."""
+        combo = self.combos[route_id]
+        self.assertEqual(len(combo["models"]), 1,
+                         "%s: the exemption goes stale if this combo grows a "
+                         "second leg" % route_id)
+        self.assertEqual(len({ref.split("/", 1)[0] for ref in combo["models"]}), 1,
+                         "%s: the exemption goes stale if this combo grows a "
+                         "second prefix" % route_id)
+        self.assertEqual(len(self.servable_providers(route_id)), 1,
+                         "%s: an exempt route must serve exactly one provider"
+                         % route_id)
+        rendered = {registry_tool.gateway_ref(leg, self.reg)
+                    for leg in combo["models"]}
+        for leg in self.reg["routes"][route_id]["legs"]:
+            if registry_tool.gateway_ref(leg, self.reg) in rendered:
+                continue
+            pid, _ = registry_tool.resolve_leg(leg, self.reg)
+            self.assertIs(self.reg["providers"][pid].get("available"), False,
+                          "%s: the extra declared leg %s runs on %s, which is "
+                          "servable — so this route is no longer single-provider "
+                          "and the exemption is stale" % (route_id, leg, pid))
+        note = (self.reg["routes"][route_id].get("$comment") or "")
+        missing = [ph for ph in cc.REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES
+                   if ph not in note]
+        self.assertFalse(missing,
+                         "%s: exempt single-provider without the note phrases %s"
+                         % (route_id, missing))
+
     @staticmethod
     def fake_priority_walk(models, statuses):
         """OmniRoute's priority strategy: try each model in order and take the
@@ -4597,24 +4673,17 @@ class ComboFallthroughTests(unittest.TestCase):
         # 429 there has nowhere to fall and fail-closes to None). Multi-leg
         # combos still fall through to another provider.
         # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
-        # by route id, not len(combo["models"]) == 1, and the exempt route pins
-        # its single leg/single prefix so the exemption goes stale loudly.
+        # by route id, not len(combo["models"]) == 1; since AO-MIMO-D1201 that
+        # set is the combo contract's table (l1-orchestrator joined it — vertex
+        # serves nothing), and an exempt route pins "one provider SERVES, the
+        # rest are flagged off" so the exemption goes stale loudly either way.
         for route_id in self.ROUTES:
             combo = self.combos[route_id]
             head = combo["models"][0]
             chosen = self.fake_priority_walk(
                 combo["models"], {head.split("/", 1)[0]: 429})
             if route_id in self.SINGLE_PROVIDER_EXEMPT:
-                self.assertEqual(len(self.reg["routes"][route_id]["legs"]), 1,
-                                  "%s: the exemption goes stale if this route "
-                                  "grows a second leg" % route_id)
-                self.assertEqual(len(combo["models"]), 1,
-                                  "%s: the exemption goes stale if this combo "
-                                  "grows a second leg" % route_id)
-                self.assertEqual(len({ref.split("/", 1)[0]
-                                      for ref in combo["models"]}), 1,
-                                  "%s: the exemption goes stale if this combo "
-                                  "grows a second prefix" % route_id)
+                self.assert_exempt(route_id)
                 self.assertIsNone(chosen,
                                   "%s: a single-provider combo must "
                                   "fail closed, not pick the 429ing leg"
@@ -4647,13 +4716,7 @@ class ComboFallthroughTests(unittest.TestCase):
                 if prefix not in prefixes:
                     prefixes.append(prefix)
             if route_id in self.SINGLE_PROVIDER_EXEMPT:
-                self.assertEqual(len(combo["models"]), 1,
-                                  "%s: the exemption goes stale if this combo "
-                                  "grows a second leg" % route_id)
-                self.assertEqual(
-                    prefixes, [prefixes[0]],
-                    "%s: the exemption goes stale if this combo grows a "
-                    "second prefix" % route_id)
+                self.assert_exempt(route_id)
                 self.assertIsNone(
                     self.fake_priority_walk(
                         combo["models"], {prefixes[0]: 429}), route_id)
@@ -4661,6 +4724,9 @@ class ComboFallthroughTests(unittest.TestCase):
             self.assertGreater(len(combo["models"]), 1,
                                 "%s: only the exempt single-provider route "
                                 "may render one leg" % route_id)
+            self.assertGreaterEqual(len(self.servable_providers(route_id)), 2,
+                                    "%s: serves %s, so nothing to fall to"
+                                    % (route_id, self.servable_providers(route_id)))
             self.assertGreaterEqual(len(prefixes), 2,
                                     "%s: %s has no second provider to fall to"
                                     % (route_id, combo["models"]))
@@ -4695,8 +4761,9 @@ class ComboFallthroughTests(unittest.TestCase):
         # leg -- while priced/context-fit still read the live registry. The
         # accepted single-provider combo (06d0e714) pins exactly one usable leg.
         # CIGREEN-REWORK1 (Sonnet seat): the exemption is SINGLE_PROVIDER_EXEMPT
-        # by route id, not len(combo["models"]) == 1, and the exempt route pins
-        # its single leg/single prefix so the exemption goes stale loudly.
+        # by route id, not len(combo["models"]) == 1; since AO-MIMO-D1201 the set
+        # is derived from the combo contract's table and pins one SERVING
+        # provider (declared extras flagged off), so it goes stale loudly.
         proven = {"legs": {}}
         for route_id in self.ROUTES:
             for ref in self.combos[route_id]["models"]:
@@ -4729,12 +4796,7 @@ class ComboFallthroughTests(unittest.TestCase):
                     continue
                 usable.append(ref)
             if route_id in self.SINGLE_PROVIDER_EXEMPT:
-                self.assertEqual(len(self.reg["routes"][route_id]["legs"]), 1,
-                                  "%s: the exemption goes stale if this route "
-                                  "grows a second leg" % route_id)
-                self.assertEqual(len(combo["models"]), 1,
-                                  "%s: the exemption goes stale if this combo "
-                                  "grows a second leg" % route_id)
+                self.assert_exempt(route_id)
                 self.assertEqual(
                     usable, combo["models"],
                     "%s: the single-provider combo's one leg must stay "

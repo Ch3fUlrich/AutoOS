@@ -97,11 +97,14 @@ class RealRegistryTests(unittest.TestCase):
             cwd=str(ROOT), capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        # PRIV2: any privacy_exemption_lines() "info:" line(s) print first
-        # (l1-orchestrator-clean today), then the ok line, always last.
+        # PRIV2 printed any privacy_exemption_lines() "info:" lines first; since
+        # AO-MIMO-D1201 the exemption printer is gone with the route class, so
+        # only the ok line remains — the pattern keeps the (info: .*)* half
+        # because a future rule that DOES report by line must still print first.
         self.assertRegex(
             proc.stdout,
             r"^(info: .*\n)*ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
+        self.assertNotIn("info:", proc.stdout)
 
     def test_cli_validate_succeeds(self):
         proc = subprocess.run(
@@ -246,9 +249,9 @@ class RuleOneLegResolutionTests(unittest.TestCase):
 
     def test_unknown_leg_is_flagged(self):
         reg = mutated()
-        reg["routes"]["l3-driver-clean"]["legs"].append("ghost-provider/ghost-model")
+        reg["routes"]["l3-driver"]["legs"].append("ghost-provider/ghost-model")
         problems = registry.check_registry(reg)
-        self.assertTrue(any("l3-driver-clean" in p and "ghost-provider/ghost-model" in p
+        self.assertTrue(any("l3-driver" in p and "ghost-provider/ghost-model" in p
                             for p in problems), problems)
 
 
@@ -274,87 +277,69 @@ class RuleTwoIdUniquenessTests(unittest.TestCase):
         self.assertFalse(any("duplicate" in p and "gemini" in p for p in problems), problems)
 
 
-class RuleThreePrivacyTests(unittest.TestCase):
-    """Rule 3: -clean routes only use available legs whose provider does not train.
+class RuleThreeCleanIdTests(unittest.TestCase):
+    """Rule 3 (AO-MIMO-D1201, 2026-10-12): no route id ends in `-clean`.
 
-    MISTRALFIX (2026-09-28) re-derived the leg these tests dirty: the route's
-    mistral leg is gone (0 rpm on the plan), so they now flip the provider of
-    the leg that actually heads `l2-worker-clean` on this base —
-    deepseek/deepseek-flash — which is the head the privacy rule exists to keep
-    clean.
+    The rule used to be the opposite shape: it read every `-clean` route's legs
+    and failed the registry when one carried a training or free-pool provider,
+    with an exemption table for the route that could not be made private-safe.
+    Operator answer 2 dropped the route class — privacy-sensitive work rides the
+    normal routes — so what is left to check is that the class does not come
+    back: the id is the feature, and a `-clean` id in a registry no gate honours
+    is a route that promises privacy nobody enforces.
 
-    D657-D2 (2026-10-08) re-cut the chains: every `-clean` route now heads
-    `vertex/gemini-3.8-flash`, whose leg prefix is that provider's omniroute_id,
-    not its registry key (`vertex_ai`). The leg is therefore resolved with
-    `registry.resolve_leg()` rather than split on the slash — dirtying a
-    provider row that does not exist would test nothing.
+    `private_safe()` and the per-provider `trains_on_prompts` data STAY
+    (answer 3) — the predicate and its evidence tests are PrivateSafeTests and
+    FailClosedPrivateSafeTests below, which is where that half of the old rule 3
+    now lives. Nothing in the checker consults them for routing any more, which
+    is the second thing this class pins.
     """
 
-    def setUp(self):
+    def test_a_clean_route_id_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["l2-worker-clean"] = {
+            "context": "128k",
+            "legs": [reg["routes"]["l2-worker"]["legs"][0]],
+        }
+        problems = registry.check_registry(reg)
+        hits = [p for p in problems if "l2-worker-clean" in p]
+        self.assertTrue(hits, problems)
+        self.assertTrue(any("-clean" in p and "AO-MIMO-D1201" in p for p in hits),
+                        hits)
+
+    def test_the_real_registry_has_no_clean_route(self):
         reg = load_registry()
-        self.leg = reg["routes"]["l2-worker-clean"]["legs"][0]
-        self.provider, self.model = registry.resolve_leg(self.leg, reg)
+        self.assertEqual([rid for rid in reg["routes"] if rid.endswith("-clean")],
+                         [], "a dropped route id came back")
 
-    def test_clean_route_with_a_training_leg_is_flagged(self):
-        reg = mutated()
-        reg["providers"][self.provider]["trains_on_prompts"] = True
-        problems = registry.check_registry(reg)
-        self.assertIn("privacy: l2-worker-clean leg %s trains on prompts"
-                      % self.leg, problems)
+    def test_the_exemption_table_left_with_the_class(self):
+        # A half-removed gate is the defect this pins: if CLEAN_ROUTE_EXEMPTIONS
+        # or its `info:` printer survived, `check` would keep printing an
+        # exemption for a route class that can no longer exist.
+        self.assertFalse(hasattr(registry, "CLEAN_ROUTE_EXEMPTIONS"),
+                         "the clean-route exemption table survived")
+        self.assertFalse(hasattr(registry, "privacy_exemption_lines"),
+                         "the clean-route exemption printer survived")
 
-    def test_allow_training_does_not_exempt_the_route(self):
-        # review-a3: spec 3.1 has no allow_training escape; a clean route that
-        # carries one is still checked (fail closed).
-        reg = mutated()
-        reg["providers"][self.provider]["trains_on_prompts"] = True
-        reg["routes"]["l2-worker-clean"]["allow_training"] = True
+    def test_a_training_leg_on_a_normal_route_is_no_problem_of_the_checker(self):
+        # The old rule 3 failed the registry over a leg whose provider trains.
+        # Under answer 3 that is DATA on a route that serves: the checker stays
+        # silent, and the flag still reads through private_safe() for anyone who
+        # asks. A credit-tier provider is deliberately not the exemplar here —
+        # its cited-`privacy`-block evidence check (rule 3b) is a different rule
+        # and stays enforced, so pick a paid leg.
+        reg = load_registry()
+        leg = next(leg for route in reg["routes"].values()
+                   for leg in route.get("legs") or []
+                   if (reg["providers"].get(
+                       registry.resolve_leg(leg, reg)[0], {}) or {}).get("tier")
+                   == "paid")
+        provider, _ = registry.resolve_leg(leg, reg)
+        reg["providers"][provider]["trains_on_prompts"] = True
+        self.assertFalse(registry.private_safe(provider, "x", reg)[0])
         problems = registry.check_registry(reg)
-        self.assertTrue(any("privacy: l2-worker-clean" in p for p in problems), problems)
-
-    def test_unavailable_leg_of_a_clean_route_is_still_checked(self):
-        # PRIV2, 2026-09-26 (supersedes the old review-a3 "not checked"
-        # behaviour): the gateway does not consult unavailable_legs/
-        # available:false, so rule 3 must not either. D657-D2 2026-10-08: the
-        # clean routes' head is now vertex/gemini-3.8-flash (deepseek/deepseek-
-        # flash left every chain under spec SS8), so gate the route's own head.
-        reg = mutated()
-        reg["providers"][self.provider]["trains_on_prompts"] = True
-        reg["routes"]["l2-worker-clean"].setdefault("unavailable_legs", {})[
-            self.leg] = {"available": False}
-        problems = registry.check_registry(reg)
-        self.assertTrue(
-            any("privacy: l2-worker-clean" in p
-                and self.leg in p
-                for p in problems), problems)
-
-    def test_unknown_trains_on_prompts_is_flagged(self):
-        # review-a3: a null/missing trains_on_prompts is unverified, not clean.
-        reg = mutated()
-        reg["providers"][self.provider]["trains_on_prompts"] = None
-        problems = registry.check_registry(reg)
-        self.assertTrue(any("privacy: l2-worker-clean" in p for p in problems), problems)
-
-    def test_clean_route_with_a_free_tier_leg_is_flagged(self):
-        # PRIV brief 2026-09-26: a free-tier provider is never private-safe,
-        # even one whose own trains_on_prompts is false (the found bug: a
-        # free pool was treated as "clean" because only trains_on_prompts
-        # was checked, never tier).
-        reg = mutated()
-        reg["providers"][self.provider]["tier"] = "free"
-        problems = registry.check_registry(reg)
-        self.assertTrue(
-            any("privacy: l2-worker-clean" in p and self.leg in p
-                for p in problems), problems)
-
-    def test_clean_route_with_a_training_model_override_is_flagged(self):
-        # A model-level trains_on_prompts: true overrides an otherwise-clean
-        # paid provider (mistral-code-latest's real-world case).
-        reg = mutated()
-        reg["models"][self.model]["trains_on_prompts"] = True
-        problems = registry.check_registry(reg)
-        self.assertTrue(
-            any("privacy: l2-worker-clean" in p and self.leg in p
-                for p in problems), problems)
+        self.assertEqual([p for p in problems if "trains on prompts" in p], [],
+                         problems)
 
 
 class PrivateSafeTests(unittest.TestCase):
@@ -651,52 +636,6 @@ class FailClosedPrivateSafeTests(unittest.TestCase):
         self.assertTrue(safe, reason)
 
 
-class CleanRouteExemptionTests(unittest.TestCase):
-    """PRIV2 brief 2026-09-26: rule 3 checks every leg of a -clean route,
-    including one flagged in unavailable_legs -- the OmniRoute gateway does
-    not consult that registry-only flag, and combos.json/apply.sh still
-    push the leg verbatim (tests/run-tests.sh's own "apply --dry-run" /
-    "provider registry drives apply" tests). The one documented exception is
-    registry.CLEAN_ROUTE_EXEMPTIONS -- l1-orchestrator-clean, which
-    deliberately carries the training OpenRouter contributor leg (the
-    spawner requires --allow-training to reach it) -- reported by
-    `check`/`validate` as an info line, never silently skipped and never a
-    check_registry() problem."""
-
-    def test_unavailable_leg_of_a_non_exempt_clean_route_is_now_checked(self):
-        # D657-D2 2026-10-08: l2-worker-clean heads vertex/gemini-3.8-flash, so
-        # dirty that leg's own provider row (registry key `vertex_ai`).
-        reg = mutated()
-        leg = reg["routes"]["l2-worker-clean"]["legs"][0]
-        provider, _model = registry.resolve_leg(leg, reg)
-        reg["providers"][provider]["trains_on_prompts"] = True
-        problems = registry.check_registry(reg)
-        self.assertTrue(
-            any("privacy: l2-worker-clean" in p and leg in p
-                for p in problems), problems)
-
-    def test_t1_orchestrator_clean_is_in_the_exemption_table(self):
-        self.assertIn("l1-orchestrator-clean", registry.CLEAN_ROUTE_EXEMPTIONS)
-
-    def test_t1_orchestrator_clean_training_leg_is_not_a_check_registry_problem(self):
-        problems = registry.check_registry(load_registry())
-        self.assertFalse(any("l1-orchestrator-clean" in p for p in problems), problems)
-
-    def test_privacy_exemption_lines_names_the_route_and_a_reason(self):
-        lines = registry.privacy_exemption_lines(load_registry())
-        self.assertTrue(
-            any("l1-orchestrator-clean" in line and line.startswith("info:")
-                for line in lines), lines)
-
-    def test_check_cli_prints_the_exemption_info_line_and_still_exits_zero(self):
-        proc = subprocess.run(
-            [sys.executable, str(REGISTRY_TOOL), "check"],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("l1-orchestrator-clean", proc.stdout)
-        self.assertIn("info:", proc.stdout)
-        self.assertIn("ok: registry", proc.stdout)
 
 
 class ReviewA3Tests(unittest.TestCase):
@@ -704,7 +643,7 @@ class ReviewA3Tests(unittest.TestCase):
 
     def test_route_id_colliding_with_a_provider_is_flagged(self):
         reg = mutated()
-        route = copy.deepcopy(reg["routes"]["l2-worker-clean"])
+        route = copy.deepcopy(reg["routes"]["l2-worker"])
         route["id"] = "mistral"
         reg["routes"]["mistral"] = route
         self.assertTrue(any(p.startswith("duplicate id: mistral")
@@ -717,7 +656,7 @@ class ReviewA3Tests(unittest.TestCase):
 
     def test_route_named_after_a_model_it_does_not_serve_is_flagged(self):
         reg = mutated()
-        route = copy.deepcopy(reg["routes"]["l2-worker-clean"])
+        route = copy.deepcopy(reg["routes"]["l2-worker"])
         route["id"] = "claude-opus-4-6"
         reg["routes"]["claude-opus-4-6"] = route
         self.assertTrue(any(p.startswith("duplicate id: claude-opus-4-6")
@@ -725,9 +664,9 @@ class ReviewA3Tests(unittest.TestCase):
 
     def test_unresolved_unavailable_leg_is_flagged(self):
         reg = mutated()
-        reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"]["nope/nothing"] = {
+        reg["routes"]["opus-5-5"]["unavailable_legs"]["nope/nothing"] = {
             "available": False}
-        self.assertIn("unresolved leg: routes.l1-orchestrator-clean leg nope/nothing",
+        self.assertIn("unresolved leg: routes.opus-5-5 leg nope/nothing",
                       registry.check_registry(reg))
 
     def test_single_label_host_is_private(self):
@@ -878,16 +817,16 @@ class RuleSevenUnavailableUntilTests(unittest.TestCase):
                       problems)
 
     def test_an_unparsable_until_on_an_unavailable_leg_is_flagged(self):
-        # D657-D2 2026-10-08: the committed registry's remaining leg gates are
-        # on the routes that still declare a gated tail; l1-orchestrator-clean
-        # keeps its contributor tail gated, so dirty that entry.
+        # AO-MIMO-D1201: the exemplar moved with the deleted route. The rule is
+        # about a gated tail, and spark-1.3-contributor still declares one (the
+        # client-bound Zen leg), so dirty that entry.
         reg = mutated()
-        reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
-            "openrouter/meta/muse-spark-1.3-contributor"]["unavailable_until"] = "2026-13-01"
+        reg["routes"]["spark-1.3-contributor"]["unavailable_legs"][
+            "opencode-zen/muse-spark-1.3-contributor-free"]["unavailable_until"] = "2026-13-01"
         problems = registry.check_registry(reg)
         self.assertTrue(any(p.startswith(
-            "bad unavailable_until: routes.l1-orchestrator-clean.unavailable_legs."
-            "openrouter/meta/muse-spark-1.3-contributor") for p in problems), problems)
+            "bad unavailable_until: routes.spark-1.3-contributor.unavailable_legs."
+            "opencode-zen/muse-spark-1.3-contributor-free") for p in problems), problems)
 
     def test_a_non_string_until_is_flagged(self):
         reg = mutated()
@@ -978,17 +917,17 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
     def test_missing_available_on_unavailable_leg_is_flagged(self):
         reg = mutated()
-        # D657-D2 2026-10-08: same gate as the rule-7 fixture — the route that
-        # still declares a gated tail.
-        leg = reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
-            "openrouter/meta/muse-spark-1.3-contributor"]
+        # AO-MIMO-D1201: same moved exemplar as the rule-7 fixture — a route
+        # that still declares a gated tail.
+        leg = reg["routes"]["spark-1.3-contributor"]["unavailable_legs"][
+            "opencode-zen/muse-spark-1.3-contributor-free"]
         del leg["available"]
         leg["unavailable_until"] = "2026-10-01T09:05:00Z"
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("entry with unavailable_until but no available: false: "
-                "routes.l1-orchestrator-clean.unavailable_legs."
-                "openrouter/meta/muse-spark-1.3-contributor" in p
+                "routes.spark-1.3-contributor.unavailable_legs."
+                "opencode-zen/muse-spark-1.3-contributor-free" in p
                 for p in problems),
             problems)
 
@@ -1623,8 +1562,8 @@ class FreeAiProviderTests(unittest.TestCase):
     """BRIEF FREEAI (2026-09-27): Free.ai joins as the free provider `free_ai`
     with model `qwen7b`, wired as the LAST free leg of both zero-spend routes
     so `l3-driver-free-only` serves again. `free_ai` is a public pool whose
-    terms allow training on prompts, so it is never private-safe and never
-    enters a -clean route.
+    terms allow training on prompts, so it is never private-safe (the data
+    `private_safe()` reads) and rides no chain.
 
     D657-D2 (2026-10-08) took it out of every chain: probe D-657 got the ack
     back 200 on both gateways but the tool call never landed and its cache is
@@ -1692,32 +1631,39 @@ class FreeAiProviderTests(unittest.TestCase):
         gateways with a documented cache, and spec SS8's paid-deepseek ban took
         the old tail out, so the vertex leg is now the last leg a real request
         can fall through to.
-        MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg: `xiaomi-mimo/
-        mimo-v2.6-pro` is a `subscription` leg, contract rule (b) ranks
-        subscription with paid (tools/combo-contract.py TIER_ORDER) and
-        tools/autoos_resolver.py holds a non-free tier back as a last resort
-        while a free/trial/credit leg is healthy, so vertex stays the last
-        CREDIT leg and the subscription tail follows it."""
+        MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg: a `xiaomi-mimo/`
+        leg is a `subscription` leg, contract rule (b) ranks subscription with paid
+        (tools/combo-contract.py TIER_ORDER) and tools/autoos_resolver.py holds a
+        non-free tier back as a last resort while a free/trial/credit leg is healthy,
+        so vertex stays the last CREDIT leg and the subscription tail follows it.
+
+        AO-MIMO-V26 (2026-10-12) keeps that shape and changes two facts: the tail id
+        is `mimo-v2.6-pro` (the v2.5 chat ids retire 2026-10-21), and D-1181's
+        `providers.vertex_ai.available: false` takes the vertex leg out of what the
+        gateway can serve, so the subscription leg is now the last LIVE leg — the
+        declared order is unchanged, the served one lost its credit rung."""
         route = self.reg["routes"]["l2-worker"]
-        self.assertEqual(live_legs(self.reg, "l2-worker")[-2:],
+        self.assertEqual(route["legs"][-2:],
                          ["vertex/gemini-3.8-flash", "xiaomi-mimo/mimo-v2.6-pro"])
+        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
+                         "xiaomi-mimo/mimo-v2.6-pro")
         legs = route["legs"]
         for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
                      "ovhcloud/gpt-oss-120b",
                      "meta_api/muse-spark-1.3-contributor"):
             self.assertNotIn(gone, legs, gone)
 
-    def test_no_clean_route_carries_free_ai(self):
-        # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
-        # and its rendered omniroute_id (free-ai/) - so a regression that emits
-        # either into a -clean route is caught.
+    def test_no_route_carries_free_ai_in_either_spelling(self):
+        # PROV finding 11 read BOTH spellings - the registry leg (free_ai/) and
+        # its rendered omniroute_id (free-ai/) - because the promise was that a
+        # training pool never enters a privacy route. AO-MIMO-D1201 removed the
+        # privacy routes, so the same promise now reads over the whole registry:
+        # D657-D2 took free_ai out of every chain, and nothing puts it back.
         for route_id, route in self.reg["routes"].items():
-            if not route_id.endswith("-clean"):
-                continue
             self.assertFalse(
                 [leg for leg in route.get("legs") or []
                  if leg.startswith(("free_ai/", "free-ai/"))],
-                "clean route %s carries free_ai" % route_id)
+                "route %s carries free_ai" % route_id)
 
     def test_gateway_legs_drop_free_ai_from_the_free_only_routes(self):
         # D657-D2 2026-10-08: the free-only chains are now the probe-acked free
@@ -1746,15 +1692,17 @@ class MetaApiProviderTests(unittest.TestCase):
     spark-1.3-contributor; on the tier route l1-orchestrator it follows the free
     band (FREEKEYS-2 spend order, see test_on_t1_it_follows_the_free_band).
     It trains on prompts by
-    contributor contract, so it is never private-safe and never enters a
-    -clean route; on l2-worker/l3-driver it is a paid escalation placed AFTER
+    contributor contract, so it is never private-safe (the data
+    `private_safe()` reads); on l2-worker/l3-driver it is a paid escalation
+    placed AFTER
     that route's free legs (the trailing T2FREE stopgap free leg on l2-worker
     excepted — it is last on purpose, see FreeAiProviderTests).
 
     D657-D2 (2026-10-08) closes that description with spec combo-v2 SS8: no paid
     muse rides a chain, only the `-free` muse ids may, and probe D-657 left even
     those unproved. The leg is therefore *declared but gated* on
-    l1-orchestrator-clean and spark-1.3-contributor, and `l1-orchestrator-paid`
+    spark-1.3-contributor (l1-orchestrator-clean carried the openrouter copy
+    until AO-MIMO-D1201 deleted the -clean class), and `l1-orchestrator-paid`
     carries no legs at all; the provider row and its transport stay for a
     re-probe."""
 
@@ -1831,9 +1779,8 @@ class MetaApiProviderTests(unittest.TestCase):
     def test_the_leg_is_declared_only_where_it_is_gated(self):
         # D657-D2 2026-10-08 (spec SS8): the paid leg heads no chain. The meta-api
         # spelling survives in exactly one route's `legs`, purely as a gated tail,
-        # and it is gated, so nothing renders it. (l1-orchestrator-clean declares
-        # the *openrouter* copy of the contributor, also gated — the exemption
-        # table names that one.)
+        # and it is gated, so nothing renders it. (The `-clean` routes that used
+        # to declare the *openrouter* copy are gone — AO-MIMO-D1201.)
         routes = self.reg["routes"]
         listing = sorted(rid for rid, route in routes.items()
                          if self.LEG in (route.get("legs") or []))
@@ -1871,14 +1818,17 @@ class MetaApiProviderTests(unittest.TestCase):
             self.assertNotIn(self.LEG, serving, route_id)
             self.assertTrue(serving, route_id)
 
-    def test_no_clean_route_carries_the_leg(self):
+    def test_the_training_leg_renders_on_no_route(self):
+        # The -clean routes this screened are gone (AO-MIMO-D1201), so the same
+        # promise reads where it actually bites: the contributor leg trains, so
+        # the gateway must never be handed it. spark-1.3-contributor may still
+        # DECLARE it gated (test_the_leg_is_declared_only_where_it_is_gated); no
+        # route may SERVE it.
         for route_id, route in self.reg["routes"].items():
-            if not route_id.endswith("-clean"):
-                continue
             self.assertFalse(
-                [leg for leg in route.get("legs") or []
+                [leg for leg in registry.gateway_legs(route, self.reg)
                  if leg.startswith(("meta_api/", "meta/"))],
-                "clean route %s carries the contributor leg" % route_id)
+                "route %s serves the contributor leg" % route_id)
 
     def test_it_is_never_private_safe(self):
         safe, reason = registry.private_safe("meta_api", "muse-spark-1.3-contributor",
@@ -2239,7 +2189,7 @@ class DeepSeekBackTests(unittest.TestCase):
 
     These are written against the registry the renders read from, so a second
     writer who flips the flag back off fails here rather than silently shipping
-    combos.json without the head of the -clean routes.
+    combos.json without the deepseek head the normal routes carry.
     """
 
     #: The rung list every laddered deepseek model must keep, verbatim.
@@ -2304,45 +2254,76 @@ class DeepSeekBackTests(unittest.TestCase):
         # not name.
         reg = self.reg
         self.assertIs(reg["providers"]["openrouter"]["available"], True)
-        # TORDER-OR 2026-10-01 (no credits -> :free only): only t1-clean keeps
-        # declared+gated paid leg (so it stays omitted); all others removed.
-        for rid, leg in (("l1-orchestrator-clean", "openrouter/meta/muse-spark-1.3-contributor"),):
-            entry = reg["routes"][rid].get("unavailable_legs", {}).get(leg)
-            self.assertIsInstance(entry, dict, (rid, leg))
+        # TORDER-OR 2026-10-01 (no credits -> :free only): every paid BYOK leg
+        # is off every chain. AO-MIMO-D1201 (2026-10-12) removed the -clean
+        # routes with the class, so the surviving chains are the whole list; the
+        # one that used to stay declared-and-gated so its route rendered OMITTED
+        # has no route to be gated on any more.
         for rid, leg in (("l2-worker", "openrouter/deepseek/deepseek-v4.1-flash"),
                          ("l2-orchestrator", "openrouter/deepseek/deepseek-v4.1-flash"),
-                         ("l2-worker-clean", "openrouter/deepseek/deepseek-v4.1-flash"),
                          ("l1-orchestrator", "openrouter/meta/muse-spark-1.3-contributor"),
                          ("spark-1.3-contributor", "openrouter/meta/muse-spark-1.3-contributor"),
                          ("gemini-3.8-flash", "openrouter/google/gemini-3.8-flash")):
             self.assertNotIn(leg, reg["routes"][rid].get("legs") or [], (rid, leg))
-            self.assertIs(entry["available"], False, (rid, leg))
         # and the ':free' legs are allowed
         self.assertFalse(registry.leg_denied(
             "openrouter/qwen/qwen3.8-27b:free", reg))
 
     def test_deepseek_legs_are_no_longer_gated_by_the_provider(self):
+        # The provider-level blanket flag is gone, so a deepseek leg on a route
+        # that declares one reads as available; the route still free to name it
+        # is deepseek-v4.1-flash's own (the exemplar moved off the -clean twin
+        # with the class).
+        # The blanket provider-level flag is gone: a route that declares the
+        # native leg and gates nothing of its own reads that leg as available.
+        # No live route declares it (SS8 struck paid deepseek from every chain),
+        # so the route shape is built here instead of borrowed — the thing under
+        # test is the provider row, not one route's leg list.
         reg = self.reg
         self.assertFalse(
             registry._leg_is_unavailable("deepseek/deepseek-flash",
-                                         reg["routes"]["l2-worker-clean"], reg))
+                                         {"legs": ["deepseek/deepseek-flash"]},
+                                         reg))
 
-    def test_the_clean_twins_close_with_the_private_safe_leg(self):
-        # L1-CLEAN (2026-10-01) put the native DeepSeek leg last as the paid
-        # fallback. SS8 (D657-D2 2026-10-08) bans paid DeepSeek from every chain,
-        # so the -clean twins now render exactly the one leg that is both
-        # private-safe and probe-acked. The render, not the registry list, is
-        # what the gateway serves.
-        rendered = {c["name"]: c for c in
-                    registry.render_omniroute(self.reg)["combos"]}
-        for name in ("l1-orchestrator-clean", "l2-orchestrator-clean",
-                     "l2-worker-clean", "l3-driver-clean",
-                     "l3-implementer-clean", "l3-researcher-clean"):
-            self.assertEqual(rendered[name]["models"],
-                             ["vertex/gemini-3.8-flash"], name)
+    def test_a_route_with_nothing_servable_renders_omitted(self):
+        # SS8 (D657-D2 2026-10-08) banned paid DeepSeek from every chain, and
+        # D-1181 (2026-10-12) turned providers.vertex_ai off — the two verdicts
+        # meet on the routes whose only declared legs are gated, which render as
+        # OMITTED. That is the designed fate of a route with no gateway-servable
+        # leg (tools/registry.py gateway_legs/servable_route_ids), not a defect,
+        # and it is pinned as an omission on purpose: re-enabling vertex must
+        # bring the same render back, and nothing else.
+        #
+        # The -clean twins used to be this test's exemplars; AO-MIMO-D1201
+        # deleted the class, so what is checked here is (i) the shape — declared
+        # legs, nothing servable, absent from the combos, named in `omitted` —
+        # on the route that still has it, and (ii) that no class member survived
+        # anywhere the render could pick up.
+        reg = self.reg
+        render = registry.render_omniroute(reg)
+        rendered = {c["name"]: c for c in render["combos"]}
+        omitted = set(render["omitted"])
+        starved = "deepseek-v4.1-flash"
+        route = reg["routes"][starved]
+        self.assertTrue(route["legs"], starved)
+        self.assertEqual(registry.gateway_legs(route, reg), [], starved)
+        self.assertNotIn(starved, rendered, starved)
+        self.assertIn(starved, omitted, starved)
+        # (ii) the dropped class: absent from the registry, so absent from every
+        # render derived from it — and retired, so `apply` prunes a live combo
+        # someone still holds instead of leaving a route nobody can route to
+        # servable.
+        self.assertEqual([rid for rid in reg["routes"] if rid.endswith("-clean")],
+                         [], "a -clean route came back")
+        for clean_id in ("l1-orchestrator-clean", "l2-orchestrator-clean",
+                         "l2-worker-clean", "l3-driver-clean",
+                         "l3-implementer-clean", "l3-researcher-clean"):
+            self.assertNotIn(clean_id, rendered, clean_id)
+            self.assertIn(clean_id, registry.OMNIROUTE_RETIRED_IDS, clean_id)
         served = [model for combo in rendered.values()
                   for model in combo["models"]]
         self.assertNotIn("deepseek/deepseek-flash", served)
+        self.assertFalse([m for m in served if m.endswith("-clean")], served)
 
     def test_the_deepseek_route_is_gated_out_of_every_surface(self):
         # The route whose ONLY served leg was deepseek/* failed closed during the
@@ -2358,12 +2339,14 @@ class DeepSeekBackTests(unittest.TestCase):
 
     def test_models_doc_no_longers_lists_the_paid_deepseek_leg(self):
         # The leg DSBACK un-struck is gone from the chain the doc prints, so the
-        # row cannot promise it to a reader any more.
+        # row cannot promise it to a reader any more. The -clean twin this read
+        # went with the class (AO-MIMO-D1201); l2-worker is the route that
+        # declares the paid deepseek tail today.
         rows = [r for r in registry.render_models_doc(self.reg).splitlines()
-                if "l2-worker-clean" in r]
+                if "`l2-worker`" in r]
         self.assertTrue(rows)
         for row in rows:
-            self.assertNotIn("deepseek-flash", row)
+            self.assertNotIn("→ deepseek `deepseek-flash`", row.replace("~~", ""))
             self.assertIn("gemini-3.8-flash", row)
 
     def test_real_registry_passes_check_after_the_flip(self):
@@ -2776,17 +2759,19 @@ class MistralPlanLimitsTests(unittest.TestCase):
             self.assertNotIn("mistral/mistral-small-latest",
                              route.get("legs") or [], route_id)
 
-    def test_the_clean_twins_keep_no_paid_deepseek_tail(self):
+    def test_the_paid_deepseek_tail_renders_on_no_chain(self):
         # L1-CLEAN (2026-10-01) kept the native DeepSeek leg live as the last paid
-        # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
-        # chain, so the -clean twins are now the single probe-acked, private-safe
-        # leg -- and it is live, which is what the route-liveness invariant needs.
-        for route_id in ("l2-worker-clean", "l3-driver-clean"):
-            self.assertEqual(self.reg["routes"][route_id]["legs"],
-                             ["vertex/gemini-3.8-flash"], route_id)
-            self.assertTrue(live_legs(self.reg, route_id), route_id)
+        # fallback of the -clean twins. SS8 (D657-D2 2026-10-08) banned paid
+        # deepseek from every chain, and AO-MIMO-D1201 (2026-10-12) deleted the
+        # twins themselves — so the promise no longer reads on two route ids, it
+        # reads registry-wide: one route still DECLARES the leg (its own seat,
+        # gated), and no route anywhere SERVES it.
+        for route_id, route in self.reg["routes"].items():
             self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(self.reg, route_id), route_id)
+                             registry.gateway_legs(route, self.reg), route_id)
+        declared = sorted(rid for rid, route in self.reg["routes"].items()
+                          if "deepseek/deepseek-flash" in (route.get("legs") or []))
+        self.assertEqual(declared, ["deepseek-v4.1-flash"])
 
     def test_t3_driver_heads_with_the_free_band(self):
         # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
@@ -2814,6 +2799,7 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # MIMO 2026-10-12 (AO-MIMO-WIRING): vertex is no longer the closing leg —
         # the subscription tail follows it (rule (b) ranks subscription with paid).
         self.assertEqual(legs[-2], "vertex/gemini-3.8-flash")
+        # AO-MIMO-V26: the tail id is the v2.6 flash (the v2.5 chat ids retire 2026-10-21).
         self.assertEqual(legs[-1], "xiaomi-mimo/mimo-v2.6-flash")
 
     # -- the invariant ------------------------------------------------------
@@ -2852,53 +2838,32 @@ class MistralReplaceTests(unittest.TestCase):
 
     GATEWAY_SOURCE = ("L1-routing gateway probe 2026-09-28T11:5xZ "
                       "(MISTRALREPL.probe.jsonl)")
-    CLEAN_TWINS = ("l2-worker-clean", "l3-driver-clean")
-
     @property
     def reg(self):
         return load_registry()
 
-    # -- the replacement leg in the twins the brief names --------------------
+    # -- the replacement leg the brief named -------------------------------
 
-    def test_the_clean_twins_do_not_carry_mistral_code(self):
-        """BRIEF MISTRALFIX2 step 1 asks for mistral/mistral-code-latest at the
-        position mistral-small held in l2-worker-clean / l3-driver-clean, and for
-        each twin to have two live legs. Measured 2026-09-28 in this sandbox:
-        that leg cannot be added — `python3 tools/registry.py validate` exits 1
-        with 'privacy: <route> leg mistral/mistral-code-latest model trains on
-        prompts' for both twins (spec 3.1 rule 3 / `private_safe`: the model
-        record carries `trains_on_prompts: true`, its free pool trains). These
-        are the routes a `privacy=sensitive` card lands on (tests/test_autoos_
-        spawner.py), so the swap would send private prompts to a training pool —
-        and `tests/linux/33-documentation.sh` independently bans `mistral/
-        mistral-code` in any `-clean` combo. So the twins keep MISTRALFIX's legs
-        and one live leg each, and the operator's replacement lands as the
-        registered tested alternative (codestral) plus the probe record. This
-        test is the guard: a later lane that adds the leg fails here rather than
-        silently shipping a training leg into a no-training route.
+    def test_mistral_code_is_training_and_rides_no_chain(self):
+        """BRIEF MISTRALFIX2 step 1 asked for mistral/mistral-code-latest at the
+        position mistral-small held in the two `-clean` worker/driver routes.
+        Measured 2026-09-28 in this sandbox: the leg cannot be added there — the
+        model record carries `trains_on_prompts: true` (its free pool trains), so
+        `private_safe()` refuses it and the old rule 3 failed the registry over
+        it. Those routes are gone (AO-MIMO-D1201), which is exactly why this
+        guard got *wider* rather than deleted: a training leg now has no
+        no-training route to keep it off, so the promise is pinned as absence
+        from every chain plus the data claim that made it refuse-able. The
+        operator's replacement landed as the registered tested alternative
+        (codestral) plus the probe record.
         """
         reg = self.reg
         for route_id, route in reg["routes"].items():
-            if route_id.endswith("-clean") and \
-                    route_id not in registry.CLEAN_ROUTE_EXEMPTIONS:
-                self.assertNotIn("mistral/mistral-code-latest",
-                                 route.get("legs") or [], route_id)
-        for route_id in self.CLEAN_TWINS:
-            safe, reason = registry.private_safe("mistral", "mistral-code-latest",
-                                                 reg)
-            self.assertFalse(safe, route_id)
-            self.assertEqual(reason, "model trains on prompts", route_id)
-
-    def test_the_clean_twins_still_live_without_the_deepseek_tail(self):
-        # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
-        # twins. They still serve -- one leg each, the probe-acked private-safe
-        # vertex row -- which is what the route-liveness invariant needs.
-        reg = self.reg
-        for route_id in self.CLEAN_TWINS:
-            self.assertEqual(live_legs(reg, route_id),
-                             ["vertex/gemini-3.8-flash"], route_id)
-            self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(reg, route_id), route_id)
+            self.assertNotIn("mistral/mistral-code-latest",
+                             registry.gateway_legs(route, reg), route_id)
+        safe, reason = registry.private_safe("mistral", "mistral-code-latest", reg)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "model trains on prompts")
 
     # -- the registered tested alternative ----------------------------------
 
@@ -2911,9 +2876,10 @@ class MistralReplaceTests(unittest.TestCase):
         self.assertIn("codestral-latest", self.reg["models"])
 
     def test_codestral_counts_as_training_until_sourced(self):
-        # Operator 2026-09-28T12:0xZ: "Mistral trains -> never in -clean tiers".
-        # Nobody sourced that codestral does NOT train, so the record says it
-        # does and private_safe() keeps it out of every -clean route.
+        # Operator 2026-09-28T12:0xZ: "Mistral trains". Nobody sourced that
+        # codestral does NOT train, so the record says it does, and
+        # private_safe() — still data, still fail-closed after AO-MIMO-D1201 —
+        # answers no for it.
         self.assertIs(self.reg["models"]["codestral-latest"].get("trains_on_prompts"), True)
         safe, reason = registry.private_safe("mistral", "codestral-latest", self.reg)
         self.assertFalse(safe)
@@ -3607,11 +3573,22 @@ class ComboCrossProviderTests(unittest.TestCase):
         # the skip is lifted: the route now answers with two providers.
         # l1-orchestrator-free-only is L0 ACCEPT single-provider (see
         # test_t1_free_only_single_provider_exemption below), not skipped here.
+        # D-1181 (operator 2026-10-12) re-suspends l1-orchestrator: its second
+        # provider was the vertex credit leg, and `providers.vertex_ai.available:
+        # false` takes it out of every render, so the route has one servable
+        # provider until the grant comes back. Suspended loudly, not silently: the
+        # leg stays declared, which is what the companion assert below pins, and
+        # tools/combo-contract.py rule (e) still fails the combo (reported).
         for route_id in AGENTIC_TIER_ROUTES:
             if route_id == "l1-orchestrator-free-only":
                 continue  # asserted in exemption test, not silently passed
             providers = {registry.resolve_leg(leg, self.reg)[0]
                          for leg in usable_legs(self.reg, route_id)}
+            if route_id == "l1-orchestrator":
+                self.assertEqual(providers, {"bazaarlink"}, route_id)
+                self.assertIn("vertex/gemini-3.8-flash",
+                              self.reg["routes"][route_id]["legs"], route_id)
+                continue
             self.assertGreaterEqual(
                 len(providers), 2,
                 "%s has %d usable free/priced provider(s) (%s): a card routed "
@@ -3651,23 +3628,32 @@ class ComboCrossProviderTests(unittest.TestCase):
     # context fitting the route's declared need), the bands are these; each
     # shortfall names its cause instead of a floor the registry no longer
     # supports. Shortfall != defect — inventing a leg to reach 3 would be.
+    # D-1181 (operator 2026-10-12) turns `providers.vertex_ai.available` off, and the
+    # vertex leg is the credit rung of every band below: each count is one lower than
+    # it was, and re-enabling the grant raises it again with no edit here.
     USABLE_LEG_BAND = {
         # the gemini AI-Studio leg 401s on both gateways and free-ai's tool call
         # never landed, so the free band keeps one leg and stays exempt above.
         "l1-orchestrator-free-only": 1,
         # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
         # second providers are all either paid (banned from a free-only band) or
-        # unproven, so two is what passes.
-        "l1-orchestrator": 2,
+        # unproven, so two is what passes. D-1181 takes the vertex leg out of the
+        # render, so this band is one leg deep until the grant comes back -- the
+        # leg stays DECLARED, which is what keeps the two-provider shape restorable.
+        "l1-orchestrator": 1,
         # the openrouter :free legs top out at 262144 < the route's 1M need, so
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
-        # MIMO 2026-10-12 (AO-MIMO-WIRING): +1 each — the subscription legs are
-        # tool_calls proven and 1M, so the resolver counts them in the band.
-        "l2-worker": 4,
-        "l3-driver": 11,
+        # MIMO 2026-10-12 (AO-MIMO-WIRING): the subscription legs are tool_calls
+        # proven and 1M, so the resolver counts them in the band.
+        "l2-worker": 3,
+        "l3-driver": 10,
         "l3-driver-free-only": 9,
     }
+
+    # The bands allowed to sit below two legs: the named single-provider exemption,
+    # and l1-orchestrator for as long as D-1181 holds vertex off.
+    SUB_TWO_BANDS = ("l1-orchestrator-free-only", "l1-orchestrator")
 
     def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
         """TORDER D-TORDER-2 wanted three fallbacks per agentic tier. D657-D2
@@ -3681,10 +3667,16 @@ class ComboCrossProviderTests(unittest.TestCase):
                 len(usable), count,
                 "%s plans %d usable leg(s) (%s), expected %d"
                 % (route_id, len(usable), usable, count))
-            if route_id != "l1-orchestrator-free-only":
-                # the named single-provider exemption is the one route allowed
-                # below two; every other band must still reach a fallback.
+            if route_id not in self.SUB_TWO_BANDS:
+                # the named exemption and the D-1181 suspension are the only routes
+                # allowed below two; every other band must still reach a fallback.
                 self.assertGreaterEqual(len(usable), 2, route_id)
+            if route_id == "l1-orchestrator":
+                # the suspension is dated, not a redesign: the credit leg it waits
+                # on is still the second declared leg of the route.
+                self.assertEqual(self.reg["routes"][route_id]["legs"],
+                                 ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                  "vertex/gemini-3.8-flash"], route_id)
 
     def test_a_new_free_leg_never_trails_a_paid_leg(self):
         # The band order the brief asks for: free -> credit -> paid. A new free
@@ -3742,15 +3734,30 @@ class ComboCrossProviderTests(unittest.TestCase):
                 entry["$comment"] = "gated"
         self.assertTrue(problems(mutated), "an unreasoned credit gate passed")
 
-    def test_no_new_free_leg_enters_a_clean_route(self):
-        # Rule 3: these providers' trains_on_prompts is null (unverified), which
-        # private_safe() fails closed on. A -clean route is where a
-        # privacy=sensitive card lands, so none of them may ever be a leg of one.
-        for route_id, route in self.reg["routes"].items():
-            if not route_id.endswith("-clean"):
-                continue
-            for leg in NEW_FREE_LEGS:
-                self.assertNotIn(leg, route.get("legs") or [], route_id)
+    def test_the_new_free_legs_are_still_unverified_data(self):
+        # PROV finding 11 kept these legs out of every `-clean` route because
+        # their provider's trains_on_prompts is null (never read the vendor's
+        # terms) and private_safe() fails closed on that. AO-MIMO-D1201
+        # (2026-10-12, operator answers 2 and 3) deleted the `-clean` class and
+        # every gate that consulted the predicate, so the old loop here iterated
+        # over zero routes — a guard that bites on nothing. What is left to pin
+        # is the DATA the finding rested on: the verdict is still unverified, and
+        # the predicate that read it still answers "would this train on my
+        # prompts?" with a refusal, so an operator or a doc asking that question
+        # gets the same honest answer the route class used to enforce.
+        self.assertNotEqual(set(NEW_FREE_LEGS), set(),
+                            "the pin below has no legs to read")
+        for leg in NEW_FREE_LEGS:
+            provider_id, model_id = registry.resolve_leg(leg, self.reg)
+            provider = self.reg["providers"][provider_id]
+            self.assertIsNot(provider.get("trains_on_prompts"), False,
+                             "%s: %s reads as verified non-training now — the "
+                             "unverified verdict finding 11 relied on changed, "
+                             "so this pin needs re-reading against the vendor" %
+                             (leg, provider_id))
+            safe, reason = registry.private_safe(provider_id, model_id, self.reg)
+            self.assertFalse(safe, leg)
+            self.assertTrue(reason, leg)
 
     def test_the_usable_legs_carry_the_route_promise(self):
         """FREEKEYS-2c (rev-freekeys2 finding 2): a usable-legs count is only
@@ -3774,7 +3781,10 @@ class ComboCrossProviderTests(unittest.TestCase):
         # promise, head and paid tail included.
         self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
         self.assertIn("cohere/command-a-plus-05-2026", after)
-        self.assertIn("vertex/gemini-3.8-flash", after)
+        # D-1181 (2026-10-12): vertex_ai is off, so the credit leg this assertion
+        # used to name is no longer counted; the subscription tail AO-MIMO-V26 put
+        # in its place carries the same promise (1M, tool_calls proven).
+        self.assertIn("xiaomi-mimo/mimo-v2.6-flash", after)
         self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
@@ -3924,9 +3934,15 @@ class ComboContractTests(unittest.TestCase):
 
 
 class CleanTierEvidenceTests(unittest.TestCase):
-    """L1-CLEAN (2026-10-01): the trial-credit providers a privacy=sensitive
-    route may now use must PROVE no-training with cited evidence. A bare
-    trains_on_prompts: false with no evidence is the defect this guards."""
+    """L1-CLEAN (2026-10-01): a trial-credit provider that claims no-training
+    must PROVE it with cited evidence. A bare trains_on_prompts: false with no
+    evidence is the defect this guards.
+
+    AO-MIMO-D1201 (2026-10-12) dropped the `-clean` route class, so nothing
+    ROUTES on this evidence any more — but answer 3 keeps the per-provider
+    `privacy` block and `private_safe()` as DATA, and rule 3b keeps checking
+    that a claim is cited. What is checked here is the honesty of the record,
+    not a routing gate."""
 
     @classmethod
     def setUpClass(cls):
@@ -3980,33 +3996,22 @@ class CleanTierEvidenceTests(unittest.TestCase):
             problems)
 
 
-class CleanTierRouteTests(unittest.TestCase):
-    """L2-CLEAN (2026-10-01): privacy=sensitive routes lead with the trial
-    credits (ovh + vertex), span >= 2 families, and end on paid deepseek.
-    PRIVACY 2026-10-05 (operator): the sensitive-capable set is narrowed to
-    the -clean worker routes only - privacy sensitive means only what is
-    risky to share (credentials and the like), nearly all projects are not
-    privacy sensitive, so l2-orchestrator is no longer pinned to the trial
-    legs and may carry the antigravity claude head (a privacy=sensitive CARD
-    is still filtered per-leg at routing time via private_safe).
-    D657-D2 (2026-10-08) supersedes both the trial-credit lead and the paid
-    deepseek tail: every OVH row 404s on both probe gateways (ack fail, so the
-    leg is omitted until a re-probe returns 200), the antigravity claude head
-    is 429 and agy is never a head, and spec SS8 bans a paid deepseek leg. What
-    survives both rules is the vertex credit, so a clean chain today is that one
-    leg - which is why the tail pin below asserts the *absence* of the banned
-    legs rather than a band the probes never confirmed.
-    OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) is the re-probe that rule
-    asked for and reopens the OVH half of it: gpt-oss-120b, Qwen3.8-27B and
-    Qwen3.5-397B-A17B answer 200 again, so the provider is available and OVH
-    rides - as an L3 leg only (OVH documents no prompt caching, so no l0-/l1-/l2-
-    chain may carry it and no -clean chain does), in the credit band's trial
-    position ahead of the vertex tail, never consecutive with another OVH leg.
-    The clean chains this class owns are unchanged: the vertex credit leg alone."""
+class TrialBandRouteTests(unittest.TestCase):
+    """The trial-credit band and the orchestrator tier, read off the registry the
+    renders consume.
+
+    This class was CleanTierRouteTests and owned the `-clean` chains: lead on the
+    caching vertex credit, span >= 2 families, close on a probe-acked leg, never
+    carry a training or free-pool provider. AO-MIMO-D1201 (2026-10-12, operator
+    answer 2) deleted that route class, so the chain pins left with it — what
+    stays is what the same legs promise to the NORMAL routes, which is where the
+    class name now points. The privacy promise those tests encoded did not
+    disappear into nothing: it moved to the stated policy in docs/models.md
+    (secrets stay out of the task text), and `trains_on_prompts` /
+    `private_safe()` stay as data (CleanTierEvidenceTests, PrivateSafeTests)."""
 
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
-    SENSITIVE = ("l2-worker-clean", "l3-driver-clean")
     TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
 
     @classmethod
@@ -4017,23 +4022,6 @@ class CleanTierRouteTests(unittest.TestCase):
         pid, mid = registry.resolve_leg(leg, self.reg)
         self.assertIs(self.reg["providers"][pid].get("trains_on_prompts"), False, leg)
         return pid, mid
-
-    def test_every_clean_route_leg_trains_nothing(self):
-        for rid in ("l2-worker-clean", "l3-driver-clean"):
-            for leg in self.reg["routes"][rid]["legs"]:
-                self._leg(leg)
-
-    def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
-        # D657-D2: the ovhcloud legs 404'd out of every chain (probe ack fail on
-        # both gateways), so the vertex credit leads and closes. OVH-REPROBE
-        # 2026-10-08 brought them back one layer up: an OVH leg rides L3 chains
-        # only, never a -clean or l0-/l1-/l2- chain (no documented cache). A clean
-        # route may never fall back onto a leg that trains on prompts.
-        for rid in self.SENSITIVE:
-            legs = self.reg["routes"][rid]["legs"]
-            self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
-            self.assertNotIn("ovhcloud/gpt-oss-120b", legs, rid)
-            self.assertNotIn("ovhcloud/Qwen3.8-27B", legs, rid)
 
     def test_t2_orchestrator_is_1m_caching_with_the_free_head(self):
         # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
@@ -4052,33 +4040,14 @@ class CleanTierRouteTests(unittest.TestCase):
         self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
         self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
 
-    def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
-        # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
-        # paid deepseek, no paid meta muse), so the closing leg is the vertex
-        # credit and the banned tail is asserted absent instead of pinned last.
-        for rid in self.SENSITIVE:
-            legs = self.reg["routes"][rid]["legs"]
-            self.assertEqual(legs[-1], "vertex/gemini-3.8-flash", rid)
-            for banned in ("deepseek/deepseek-flash",
-                           "antigravity/claude-sonnet-5-5-medium"):
-                self.assertNotIn(banned, legs, "%s carries the SS8-banned %s"
-                                 % (rid, banned))
-            for leg in legs:
-                self._leg(leg)
-
-    def test_clean_trial_legs_span_at_least_two_families(self):
-        # D657-D2 serves only the vertex leg on a clean chain, so this pins the
-        # REGISTERED trial band - the two families a re-probe 200 would put back
-        # on the lead, which is what the >=2-family promise needs to survive.
+    def test_the_trial_band_spans_at_least_two_families(self):
+        # The -clean chains that led with these legs are gone (AO-MIMO-D1201), so
+        # this pins the REGISTERED trial band itself - the two families a re-probe
+        # 200 puts back on an L3 lead, which is what the >=2-family promise needs
+        # to survive a chain change.
         families = {self.reg["models"][self._leg(leg)[1]]["family"]
                     for leg in self.TRIAL_LEGS}
         self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
-
-    def test_no_banned_provider_serves_a_sensitive_route(self):
-        banned = ("google_ai_studio/", "openrouter/", "opencode-zen/", "gemini/")
-        for rid in self.SENSITIVE:
-            for leg in self.reg["routes"][rid]["legs"]:
-                self.assertFalse(leg.startswith(banned), (rid, leg))
 
     def test_ovh_legs_ride_l3_chains_only_after_the_reprobe(self):
         """L2-CLEAN kept ovhcloud/Qwen3-Coder-30B-A3B-Instruct in l2-worker and
@@ -4150,11 +4119,10 @@ class CleanTierRouteTests(unittest.TestCase):
             [leg for leg in routes["l3-implementer"]["legs"] if leg.startswith("ovhcloud/")],
             "both L3 chains carry the same OVH id: one grant, not two seats")
 
-        # every -clean route stays off the grant, cached-tail or not.
-        for rid, route in routes.items():
-            if rid.endswith("-clean"):
-                for leg in route.get("legs") or []:
-                    self.assertFalse(leg.startswith("ovhcloud/"), rid)
+        # and the grant never rides a privacy-class route, because there is no
+        # privacy-class route any more (AO-MIMO-D1201 deleted the -clean ids;
+        # rule 3 keeps them from coming back).
+        self.assertEqual([rid for rid in routes if rid.endswith("-clean")], [])
 
         # the unpriced id keeps its own operator-facing seat, gated per leg so
         # nothing renders it; the retired one has no seat at all.
@@ -4486,10 +4454,14 @@ class ResolveLegFoldTests(unittest.TestCase):
 
 
 class CleanCreditHeadPricedTests(unittest.TestCase):
-    """T1-CLEAN-4, out-of-scope pin (2026-10-01): the clean routes' credit HEAD
-    legs are unpriced right now, which is the state the resolver refuses them
-    for. Pinned so the CREDIT lane's change is a visible diff, not a surprise.
-    Priced by T1-CREDIT provider_prices at train integration."""
+    """T1-CLEAN-4, out-of-scope pin (2026-10-01): these two credit HEAD legs are
+    unpriced right now, which is the state the resolver refuses them for. Pinned
+    so the CREDIT lane's change is a visible diff, not a surprise. Priced by
+    T1-CREDIT provider_prices at train integration.
+
+    They were written as the clean routes' heads; AO-MIMO-D1201 deleted that
+    class, and the same two legs ride the NORMAL L3 chains (l3-driver,
+    l3-implementer), so the pin is about the legs, wherever they are declared."""
 
     def test_the_clean_credit_head_legs_are_unpriced_today(self):
         reg = load_registry()
@@ -4578,13 +4550,14 @@ PROMPT_CACHE_D657 = {model_id: value
                      for model_id in ids}
 
 # AO-MIMO-WIRING (2026-10-12) is a SECOND provenance, not an extension of the
-# D-657 TSV: two MiMo chat ids measured through the OmniRoute gateway the same
-# day the provider was wired. Kept apart from the D657 table on purpose — a row
-# this lane never probed must not read as if it came out of that probe's data.
-# AO-MIMO-V26 (same day): the v2.5 chat ids retire 2026-10-21 and are not wired; the
-# two v2.6 chat ids answer cached_tokens on the second identical call (1792 of 1917 /
-# 1856 of 1917).
-PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true", "mimo-v2.6-flash": "true"}
+# D-657 TSV: MiMo ids measured through the OmniRoute gateway the same day the
+# provider was wired. Kept apart from the D657 table on purpose — a row this lane
+# never probed must not read as if it came out of that probe's data.
+# AO-MIMO-V26 (same day) re-names the set: the two v2.5 chat ids retire 2026-10-21
+# and their rows are gone, the two v2.6 chat ids answer cached_tokens on the
+# second identical call (1792 of 1917 / 1856 of 1917), (no v2.5 row is wired).
+PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true",
+                           "mimo-v2.6-flash": "true"}
 PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
 # The source string must name the measurement event that set the verdict, so
 # each accepted provenance is one dated event.
@@ -4616,7 +4589,7 @@ class PromptCacheFieldTests(unittest.TestCase):
         """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
         leg resolved to, at the verdict its TSV cells add up to - no invented
         row, no verdict for a leg the probe never answered.
-        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: two rows
+        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: three rows
         from a gateway smoke the D-657 TSV never saw. The set is still closed —
         a verdict with no measurement behind it is what this test refuses."""
         reg = load_registry()

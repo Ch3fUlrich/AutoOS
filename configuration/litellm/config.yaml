@@ -67,8 +67,6 @@ model_list:
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l2-worker
 
-  # ── l2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
-
   # ── l2-worker-free-only: zero spend ────────────────────────────────────────
   # Mirror of the registry route MINUS the gateway-only legs (antigravity/cc
   # carry no LiteLLM transport). The groq/cerebras/sambanova gpt-oss legs are
@@ -150,8 +148,6 @@ model_list:
       api_key: os.environ/XIAOMI_MIMO_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver
-
-  # ── l3-driver-clean: gateway-only legs stripped ────────────────────────────
 
   # ── l3-driver-free-only: zero spend ────────────────────────────────────────
   # Mirror of registry routes.l3-driver-free-only MINUS the gateway-only legs.

@@ -43,9 +43,11 @@ if it "the OpenHands template carries the LiteLLM provider prefix"; then    # Ev
     ok=1
     grep -q 'model = "openai/l1-orchestrator"' configuration/openhands/config.toml || ok=0
     grep -q 'model = "openai/l3-driver"' configuration/openhands/config.toml || ok=0
-    # PROVFIX3 finding 6: l1-orchestrator-clean must NOT come back — the combo is
-    # omitted (DSMAX 2026-09-27) and apply.sh prunes it, so the profile 404s.
-    if grep -q 'openai/l1-orchestrator-clean' configuration/openhands/config.toml; then ok=0; fi
+    # No `-clean` model may come back: AO-MIMO-D1201 (2026-10-12, operator
+    # answer 2) dropped the class, and before that PROVFIX3 finding 6 had already
+    # pruned l1-orchestrator-clean — apply.sh prunes an omitted combo from the
+    # gateway, so a profile for one 404s.
+    if grep -qE 'openai/[A-Za-z0-9._-]*-clean' configuration/openhands/config.toml; then ok=0; fi
     if [[ -n "$bad" ]]; then fail "model lines without the openai/ prefix: $bad"
     elif (( ok )); then pass
     else fail "template is missing the expected tier models"; fi
@@ -2516,11 +2518,13 @@ fi
 
 if it "openhands template has tiers and no secrets"; then
     ok=1
-    # l1-orchestrator-clean deliberately absent (PROVFIX3 finding 6 — its combo is
-    # pruned, so the table would 404); the previous test asserts it stays gone.
-    for s in '\[llm\]' '\[llm.l1-orchestrator\]' '\[llm.l2-worker\]' '\[llm.l3-driver\]' '\[llm.l2-worker-clean\]' '\[llm.l3-driver-clean\]' '\[llm.t4-rag\]' '\[llm.litellm-l1-orchestrator\]' '\[llm.litellm-l2-worker\]' '\[llm.litellm-l3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
+    # No `-clean` table belongs here (AO-MIMO-D1201, 2026-10-12: the class is
+    # dropped; PROVFIX3 finding 6 had already pruned l1-orchestrator-clean). The
+    # grep below asserts the whole class stays gone.
+    for s in '\[llm\]' '\[llm.l1-orchestrator\]' '\[llm.l2-worker\]' '\[llm.l3-driver\]' '\[llm.t4-rag\]' '\[llm.litellm-l1-orchestrator\]' '\[llm.litellm-l2-worker\]' '\[llm.litellm-l3-driver\]' '\[llm.draft_editor\]' '\[agent.CodeActAgent\]'; do
         grep -q "$s" configuration/openhands/config.toml || { ok=0; echo "missing: $s" >&2; }
     done
+    grep -qE '\[llm\.[A-Za-z0-9._-]*-clean\]' configuration/openhands/config.toml && { ok=0; echo "a -clean OpenHands table came back" >&2; }
     grep -q 'host.docker.internal:20128' configuration/openhands/config.toml || ok=0
     grep -qE 'sk-[A-Za-z0-9]{10,}' configuration/openhands/config.toml && ok=0
     grep -q 'api_key = ""' configuration/openhands/config.toml || ok=0

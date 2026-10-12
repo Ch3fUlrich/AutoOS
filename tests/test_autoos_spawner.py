@@ -365,25 +365,38 @@ class RoutingTableTests(unittest.TestCase):
                     continue
                 self.assertIn(combo, routing.ALL_COMBOS, (values, allow))
 
-    def test_sensitive_implement_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive"), "l2-worker-clean")
+    # AO-MIMO-D1201 (2026-10-12, operator answer 2/3): privacy is not a filter.
+    # A sensitive card gets the combo its role/complexity/ctx bucket names, the
+    # same one a public card gets — these are the positive tests the drop needs.
 
-    def test_sensitive_hard_is_t2_worker_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="free-ok"), "l2-worker-clean")
+    def test_sensitive_implement_is_t2_worker(self):
+        self.assertEqual(self.pick(privacy="sensitive"), "l2-worker")
 
-    def test_sensitive_review_is_t3_driver_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", role="review"), "l3-driver-clean")
+    def test_sensitive_hard_is_t1_orchestrator(self):
+        self.assertEqual(self.pick(privacy="sensitive", complexity="hard", spend="free-ok"),
+                         "l1-orchestrator")
 
-    def test_sensitive_trivial_is_t3_driver_clean(self):
-        self.assertEqual(self.pick(privacy="sensitive", complexity="trivial"), "l3-driver-clean")
+    def test_sensitive_review_is_t3_driver(self):
+        self.assertEqual(self.pick(privacy="sensitive", role="review"), "l3-driver")
 
-    def test_sensitive_1m_has_no_route_and_says_what_to_do(self):
-        with self.assertRaises(routing.NoRoute) as ctx:
-            routing.select_combo({"privacy": "sensitive", "ctx": "1m"})
-        msg = str(ctx.exception)
-        self.assertIn("l2-worker-clean", msg)
-        self.assertIn("128k", msg)
-        self.assertNotIn("--allow-training", msg)
+    def test_sensitive_trivial_is_t3_driver(self):
+        self.assertEqual(self.pick(privacy="sensitive", complexity="trivial"), "l3-driver")
+
+    def test_sensitive_1m_is_t1_orchestrator(self):
+        # The one card that used to fail closed (no gateway leg served
+        # privacy=sensitive at 1M) now resolves to the normal 1M combo.
+        combo, reason = routing.select_combo({"privacy": "sensitive", "ctx": "1m"})
+        self.assertEqual(combo, "l1-orchestrator")
+        self.assertEqual(reason, "public-1m")
+
+    def test_sensitive_and_public_cards_agree_for_every_bucket(self):
+        import itertools
+        fields = ("role", "complexity", "ctx", "spend")
+        for values in itertools.product(*(routing.CARD_VALUES[f] for f in fields)):
+            card = dict(zip(fields, values))
+            public = routing.select_combo(dict(card, privacy="public"))
+            sensitive = routing.select_combo(dict(card, privacy="sensitive"))
+            self.assertEqual(public, sensitive, card)
 
 
 class RoutingBoundaryTests(unittest.TestCase):
@@ -448,17 +461,23 @@ class RoutingBoundaryTests(unittest.TestCase):
         # T1FREE 2026-09-27: l1-orchestrator serves public-strong again.
         self.assertEqual(routing.select_combo({"role": "review", "complexity": "hard"})[0], "l1-orchestrator")
 
-    def test_sensitive_orchestrate_128k_is_t2_worker_clean(self):
-        self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0], "l2-worker-clean")
+    def test_sensitive_orchestrate_128k_is_t1_orchestrator(self):
+        # AO-MIMO-D1201: orchestrate is strong, and strong is strong for a
+        # sensitive card too — privacy no longer reroutes anything.
+        self.assertEqual(routing.select_combo({"privacy": "sensitive", "role": "orchestrate"})[0],
+                         "l1-orchestrator")
 
-    def test_allow_training_no_longer_opens_sensitive_1m(self):
-        # Compatibility flag, inert since DSMAX 2026-09-27: there is no
-        # trainable 1M gateway leg left for it to unlock.
-        with self.assertRaises(routing.NoRoute):
-            routing.select_combo({"privacy": "sensitive", "ctx": "1m"}, allow_training=True)
+    def test_allow_training_is_inert_on_sensitive_1m(self):
+        # AO-MIMO-D1201: the flag stays accepted and changes nothing, including
+        # for the card it used to refuse (there is no clean route left to unlock
+        # and none to withhold).
+        card = {"privacy": "sensitive", "ctx": "1m"}
+        self.assertEqual(routing.select_combo(card, allow_training=False),
+                         routing.select_combo(card, allow_training=True))
+        self.assertEqual(routing.select_combo(card)[0], "l1-orchestrator")
 
     def test_allow_training_changes_nothing_else(self):
-        self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "l2-worker-clean")
+        self.assertEqual(routing.select_combo({"privacy": "sensitive"}, allow_training=True)[0], "l2-worker")
 
     def test_parse_card_reads_key_value_pairs(self):
         self.assertEqual(routing.parse_card("role=review, privacy=sensitive"),
@@ -640,10 +659,17 @@ class ClientCommandTests(unittest.TestCase):
         self.assertEqual(load_agent().DEFAULT_FREE_MODEL,
                          "opencode/muse-spark-1.3-contributor-free")
 
-    def test_qoder_is_refused_for_sensitive_work(self):
+    def test_qoder_runs_a_sensitive_card_like_any_other(self):
+        """AO-MIMO-D1201 (operator answer 3): the promo client no longer refuses
+        privacy=sensitive. It used to answer "public work only"; privacy is a card
+        field that routes nothing, so the same card now plans a run. Keeping a
+        secret off a model leg is the stated policy in docs/models.md, not a
+        client gate."""
         r = plan_of("--client", "qoder", "--card", "privacy=sensitive", "t")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("public", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("reason=public-default", r.stdout)
+        self.assertIn("would run: qodercli", r.stdout)
+        self.assertNotIn("may keep prompts", r.stderr)
 
     def test_qoder_public_runs_print_mode(self):
         # qodercli 1.1.63 knows only bypass_permissions|dont_ask|auto; the old
@@ -687,25 +713,42 @@ class ClientCommandTests(unittest.TestCase):
         self.assertNotIn("Qwen3.8-Flash", r.stdout)
 
     def test_opencode_card_maps_combo_to_its_tier_agent(self):
+        # AO-MIMO-D1201: a sensitive review card gets the review combo, the same
+        # one the public card gets — privacy routes nothing.
         r = plan_of("--card", "role=review,privacy=sensitive", "t")
-        self.assertIn("--agent t3-reviewer --model omniroute/l3-driver-clean ", r.stdout)
+        self.assertIn("--agent t3-reviewer --model omniroute/l3-driver ", r.stdout)
 
     def test_the_route_is_printed_with_reason_and_version(self):
         r = plan_of("--card", "role=review", "t")
         self.assertIn("route: l3-driver reason=", r.stdout)
         self.assertIn("routing=" + routing.ROUTING_VERSION, r.stdout)
 
-    def test_sensitive_1m_fails_closed_with_next_steps(self):
+    def test_sensitive_1m_plans_the_1m_orchestrator(self):
+        # The card that used to fail closed with a "128k" next-step message now
+        # resolves to the normal 1M combo (AO-MIMO-D1201, operator answer 3).
         r = plan_of("--card", "privacy=sensitive,ctx=1m", "t")
-        self.assertEqual(r.returncode, 2)
-        self.assertIn("128k", r.stderr)
-        self.assertNotIn("--allow-training", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("route: l1-orchestrator", r.stdout)
 
     def test_tier_and_card_together_are_refused(self):
         self.assertEqual(plan_of("--tier", "2", "--card", "role=review", "t").returncode, 2)
 
-    def test_clean_with_card_is_refused(self):
-        self.assertEqual(plan_of("--clean", "--card", "role=review", "t").returncode, 2)
+    def test_clean_with_card_is_a_no_op_and_says_so(self):
+        # AO-MIMO-D1201: --clean used to be refused against --card (it rewrote the
+        # card's combo to its `-clean` twin). The flag stays accepted for lanes
+        # that still pass it, runs the card's own combo, and prints one notice —
+        # a no-op on a flag that used to change the chain must not be silent.
+        r = plan_of("--clean", "--card", "role=review", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("route: l3-driver", r.stdout)
+        self.assertIn("no-op", r.stderr)
+        self.assertIn("AO-MIMO-D1201", r.stderr)
+
+    def test_clean_with_tier_runs_that_tier_normally(self):
+        r = plan_of("--clean", "--tier", "2", "t")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--model omniroute/l2-orchestrator ", r.stdout)
+        self.assertIn("no-op", r.stderr)
 
     def test_no_plan_prints_the_key(self):
         env = clean_env(AUTOOS_OMNIROUTE_KEY="never-print-this-key")
@@ -781,9 +824,8 @@ class ClientCapabilityTests(unittest.TestCase):
     def test_absent_empty_and_defaults_only_cards_need_nothing(self):
         # v1's defaults make every absent card role=implement, but only an
         # explicitly named editing kind/role is a write request: privacy=sensitive
-        # alone (or an empty card) must not be gated, or qoder's own promo
-        # refusal (test_qoder_is_refused_for_sensitive_work) would be shadowed
-        # by the capability message instead of printing "public".
+        # alone (or an empty card) must not be gated, or the capability message
+        # would shadow whatever the card's own routing says.
         for card in (None, "", "   ", "privacy=sensitive", "complexity=hard", "ctx=1m"):
             with self.subTest(card=card):
                 self.assertEqual(self.agent.required_capabilities(_cap_args(card=card)), (), card)
@@ -1227,9 +1269,9 @@ class McpToolTests(unittest.TestCase):
             os.umask(old)
 
     def test_refusals_come_back_synchronously(self):
-        self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}}))
+        self.assertIn("error", mcp_server.spawn({"task": "t", "tier": 3, "card": {"role": "review"}}))
         self.assertIn("error", mcp_server.spawn({"task": "t", "card": {"bogus": "x"}}))
-        self.assertIn("error", mcp_server.spawn({"task": "t", "client": "qoder", "card": {"privacy": "sensitive"}}))
+        self.assertIn("error", mcp_server.spawn({"task": "t", "client": "qoder", "card": {"privacy": "secret"}}))
         self.assertIn("error", mcp_server.spawn({"task": ""}))
         self.assertIn("error", mcp_server.spawn({"task": "t", "client": "nope"}))
         self.assertEqual(mcp_server.status()["runs"], [])
@@ -1579,11 +1621,11 @@ class McpToolTests(unittest.TestCase):
         refusal path: card/route (build_argv), empty task, unknown client,
         bad cwd, and a request only the CLI's own dry run refuses."""
         refusals = (
-            {"task": "t", "card": {"privacy": "sensitive", "ctx": "1m"}},
+            {"task": "t", "tier": 3, "card": {"role": "review"}},
             {"task": ""},
             {"task": "t", "client": "nope"},
             {"task": "t", "cwd": os.path.join(self.tmp, "no-such-dir")},
-            {"task": "t", "client": "qoder", "card": {"privacy": "sensitive"}},
+            {"task": "t", "model": "omniroute/l2-worker-clean"},
         )
         for req in refusals:
             out = mcp_server.spawn(req)
@@ -4624,7 +4666,10 @@ class CardV2Tests(unittest.TestCase):
         cases = [
             ({}, ("l2-worker", "public-default")),
             ({"role": "review"}, ("l3-driver", "public-light")),
-            ({"privacy": "sensitive"}, ("l2-worker-clean", "sensitive")),
+            # AO-MIMO-D1201: privacy is a field, not a filter — the sensitive row
+            # is the row above it with `privacy` added, and no `-clean` combo
+            # exists to route to any more.
+            ({"privacy": "sensitive"}, ("l2-worker", "public-default")),
             ({"complexity": "hard"}, ("l1-orchestrator", "public-strong")),
             ({"ctx": "1m", "role": "orchestrate"}, ("l1-orchestrator", "public-1m")),
         ]
@@ -5062,11 +5107,13 @@ class RunCardV2Tests(unittest.TestCase):
 
 
 class ModelOverridePrivacyTests(unittest.TestCase):
-    """PRIV3 (review-priv, qoder 2026-09-26): an explicit --model replaced a
-    sensitive card's -clean combo with no privacy re-check, so
-    `--card privacy=sensitive --model omniroute/l3-driver` ran private work on
-    the mistral-code free pool. Every leg the gateway serves for the chosen
-    combo must be private-safe (tools/registry.py private_safe)."""
+    """AO-MIMO-D1201 (2026-10-12, operator answer 3) replaced PRIV3
+    (review-priv, qoder 2026-09-26). PRIV3 re-checked every leg of an explicit
+    --model against tools/registry.py private_safe for a privacy=sensitive card,
+    because the `-clean` twins it refused towards were the only answer that card
+    got. Those combos are dropped and privacy filters nothing, so what this class
+    pins now is that those same calls plan a run, and that a leftover `-clean`
+    pin is refused for the one remaining reason: nothing declares it any more."""
 
     def setUp(self):
         self.agent = load_agent()
@@ -5088,57 +5135,64 @@ class ModelOverridePrivacyTests(unittest.TestCase):
             rc = self.agent.cmd_run(ns, self.cfg())
         return rc, out.getvalue(), err.getvalue()
 
-    def test_sensitive_card_with_a_free_pool_model_is_refused(self):
+    def test_sensitive_card_with_a_free_pool_model_runs(self):
+        # The exact call PRIV3 refused: private work aimed at the free pool.
         rc, out, err = self.run_cmd(model="omniroute/l3-driver")
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("privacy", err)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("--model omniroute/l3-driver ", out)
 
-    def test_sensitive_card_with_a_clean_model_runs(self):
+    def test_a_clean_model_pin_is_refused_because_nothing_declares_it(self):
         rc, out, err = self.run_cmd(model="omniroute/l2-worker-clean")
-        self.assertEqual(rc, 0, err)
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("not declared in opencode.jsonc", err)
 
-    def test_clean_tier_maps_a_free_pool_model_to_its_clean_twin(self):
-        # --tier --clean already resolves an override to its -clean twin
-        # (resolve_model), so the PRIV3 check sees a private-safe combo.
+    def test_clean_tier_is_a_no_op_and_keeps_the_override(self):
+        # --clean used to rewrite the combo (and the pinned model) to its -clean
+        # twin; it is accepted, changes nothing, and says so in one line.
         rc, out, err = self.run_cmd(card=None, tier=2, clean=True, model="omniroute/l3-driver")
         self.assertEqual(rc, 0, err)
-        self.assertIn("route: l3-driver-clean", out)
+        self.assertIn("route: l3-driver ", out)
+        self.assertIn("no-op", err)
 
-    def test_v2_sensitive_card_with_a_free_pool_model_is_refused(self):
-        plan = {"route": "l3-driver-clean", "state": "ready", "reason": "stub",
+    def test_v2_sensitive_card_with_a_free_pool_model_runs(self):
+        plan = {"route": "l3-driver", "state": "ready", "reason": "stub",
                 "bucket": "S1", "defer_until": None}
         with mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: plan), \
                 mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}):
             rc, out, err = self.run_cmd(card="kind=review,paths=tools/registry.py,privacy=sensitive",
                                         model="omniroute/l3-driver")
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("privacy", err)
+        self.assertEqual(rc, 0, out + err)
 
-    def test_sensitive_card_with_free_is_refused(self):
-        # close-priv 2026-09-26: --free swapped a sensitive card's -clean combo
-        # for the promo model (now opencode/muse-spark-1.3-contributor-free,
-        # may train on prompts).
+    def test_sensitive_card_with_free_runs_the_promo_model(self):
+        # close-priv 2026-09-26 refused --free for a sensitive card because the
+        # promo model may train on prompts. AO-MIMO-D1201 dropped that gate with
+        # the rest: `--free` is the operator's budget choice, and keeping a
+        # secret out of the task text is the policy (docs/models.md).
         for card in ("privacy=sensitive", "kind=review,paths=tools/registry.py,privacy=sensitive"):
             with mock.patch.object(self.agent.measure_mod, "client_state", lambda *a, **k: {}), \
                     mock.patch.object(self.agent, "route_plan_for", lambda *a, **k: {
-                        "route": "l3-driver-clean", "state": "ready", "reason": "stub",
+                        "route": "l3-driver", "state": "ready", "reason": "stub",
                         "bucket": "S1", "defer_until": None}):
                 rc, out, err = self.run_cmd(card=card, free=True)
-            self.assertEqual(rc, 2, card + out + err)
-            self.assertIn("privacy", err)
-            self.assertNotIn("muse-spark", out)
+            self.assertEqual(rc, 0, card + out + err)
+            self.assertIn(self.agent.DEFAULT_FREE_MODEL, out)
 
     def test_public_card_with_any_model_is_not_checked(self):
         rc, out, err = self.run_cmd(card="privacy=public", model="omniroute/l3-driver")
         self.assertEqual(rc, 0, err)
 
-    def test_allow_training_no_longer_opens_the_sensitive_1m_route(self):
-        # Compatibility flag, inert since DSMAX 2026-09-27: the card fails
-        # closed before the explicit --model is even considered.
+    def test_allow_training_is_inert_on_the_1m_card(self):
+        # The card that used to fail closed before --model was even read now
+        # resolves to the normal 1M combo, flag or no flag.
         rc, out, err = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=True,
-                                    model="omniroute/l2-worker-clean")
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("128k", err)
+                                    model="omniroute/l1-orchestrator")
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("route: l1-orchestrator", out)
+        # The flag is inert: the same card with and without it names one combo.
+        plain = self.run_cmd(card="privacy=sensitive,ctx=1m", allow_training=False,
+                             model="omniroute/l1-orchestrator")
+        self.assertEqual(plain[0], 0, plain[1] + plain[2])
+        self.assertEqual(plain[1].split("\n")[0], out.split("\n")[0])
 
 
 class RunCardV2AcceptanceTests(unittest.TestCase):
@@ -5162,42 +5216,44 @@ class RunCardV2AcceptanceTests(unittest.TestCase):
 
 
 class RunCardV2PrivacyTests(unittest.TestCase):
-    """RUNV2 brief step 4: a sensitive v2 card must never resolve to a route
-    with an unsafe serving leg. Originally pinned to "-clean"-suffixed combo
-    names (the only privacy-safe routes that existed then); Q1 2026-09-26
-    added genuinely private-safe pinned routes with no "-clean" suffix
-    (cheaperinference/glm-5.2: paid tier, trains_on_prompts false, confirmed
-    - see catalog/ai-registry.json providers.cheapinference's own $comment),
-    so the naming-based check is replaced by the actual safety predicate
-    (tools/registry.py private_safe) every serving leg must satisfy - the
-    same property tests/test_autoos_resolver.py's
-    test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg
-    already pins at the raw resolver level. Exercises the real registry +
-    overlay end to end (client state is faked so it never shells out); skips
-    itself when the resolver has no route at all for this card on this
-    host's data, rather than asserting a route exists (that is the other
-    lane's privacy filter to prove, not RUNV2's)."""
+    """AO-MIMO-D1201 (2026-10-12, operator answer 3) rewrote RUNV2 brief step 4.
 
-    def test_sensitive_v2_card_only_ever_yields_a_private_safe_route(self):
+    It pinned that a privacy=sensitive v2 card never resolves to a route whose
+    serving legs are not ``registry.private_safe`` — the property the resolver's
+    own privacy filter enforced. That filter is gone (see
+    tests/test_autoos_resolver.py), so what this class pins on the real registry
+    and overlay end to end is the new contract: the sensitive card resolves to the
+    route the same public card resolves to, and no route id in the plan carries the
+    dropped ``-clean`` suffix. Client state is faked so it never shells out."""
+
+    def _plan(self, card):
         agent = load_agent()
-        registry = json.loads((ROOT / "catalog" / "ai-registry.json")
-                              .read_text(encoding="utf-8"))
+        registry = json.loads((ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
         overlay, _ = agent.load_measured_overlay()
-        track_record = agent.track.load(agent.TRACK_RECORD)
-        result = agent.route_plan_for(
-            "kind=review,paths=tools/registry.py,privacy=sensitive", "", str(ROOT),
-            agent.DEFAULT_ORCHESTRATOR_MODEL,
+        return agent.route_plan_for(
+            card, "", str(ROOT), agent.DEFAULT_ORCHESTRATOR_MODEL,
             datetime.datetime.now(datetime.timezone.utc), registry, overlay,
-            track_record, _fake_client_state())
+            agent.track.load(agent.TRACK_RECORD), _fake_client_state()), registry
+
+    def test_sensitive_v2_card_resolves_where_the_public_one_does(self):
+        result, registry = self._plan("kind=review,paths=tools/registry.py,privacy=sensitive")
         if result["route"] is None:
-            self.skipTest("no route survives for a sensitive card on this host's "
+            self.skipTest("no route survives for this card on this host's "
                           "registry/overlay (%s)" % result["reason"])
-        route = registry["routes"][result["route"]]
-        for provider_id, model_id in resolver.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
-            self.assertTrue(
-                safe, "sensitive card routed to %r, leg %s/%s is not private-safe: %s"
-                     % (result["route"], provider_id, model_id, reason))
+        self.assertFalse(result["route"].endswith("-clean"),
+                         "the -clean route class was dropped by AO-MIMO-D1201")
+        self.assertIn(result["route"], registry["routes"])
+        public, _ = self._plan("kind=review,paths=tools/registry.py")
+        self.assertEqual(result["route"], public["route"],
+                         "privacy is recorded on the card, it filters nothing")
+
+    def test_no_route_of_the_real_registry_is_named_privately(self):
+        registry = json.loads((ROOT / "catalog" / "ai-registry.json").read_text(encoding="utf-8"))
+        self.assertFalse([rid for rid in registry["routes"] if rid.endswith("-clean")],
+                         "a -clean route id came back after AO-MIMO-D1201 dropped the class")
+        for rid, route in registry["routes"].items():
+            for leg in (route.get("legs") or []) + list((route.get("unavailable_legs") or {})):
+                self.assertFalse(leg.endswith("-clean"), (rid, leg))
 
 
 class McpRouteTests(unittest.TestCase):
@@ -8603,27 +8659,25 @@ class ReviewerGateTests(unittest.TestCase):
         self.assertEqual(review["state"], "resolved")
         self.assertEqual(review["reviewer"]["family"], "meta")
 
-    def test_a_sensitive_card_walks_past_the_training_reviewer(self):
-        # CIGREEN: expectation moved by 9a7ebd1b (the walk now surfaces EVERY
-        # rejection in registry order; the legless-privacy fail-closed rule in
-        # _reviewer_rejections predates it): privacy=sensitive rejects muse
-        # (muse_api trains on prompts) AND the two legless entries -- qwen (also
-        # same-family here) and haiku ("privacy: no registry leg to check
-        # training against": unknown is not safe). The intent stands: the walk
-        # passes the training reviewer and lands cross-family on gem-flash,
-        # whose gem_api leg does not train.
-        route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
-                                "paths=tools/registry.py")
-        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
-        skipped = route["review_plan"]["skipped"]
-        self.assertEqual([s["model"] for s in skipped],
-                         ["omniroute/muse", "qwen3.8-flash", "haiku"])
-        for entry in skipped:
-            self.assertTrue([r for r in entry["reasons"] if r.startswith("privacy:")],
-                            "every skipped entry must name privacy, not just "
-                            "availability: %r" % (entry,))
-        self.assertTrue([r for r in skipped[0]["reasons"] if r.startswith("privacy:")],
-                        "the reason must name privacy, not availability")
+    def test_a_sensitive_card_resolves_the_same_reviewer_as_a_public_one(self):
+        """AO-MIMO-D1201 (operator answer 3) dropped the reviewer privacy walk.
+        It used to reject every reviewer whose legs were not private_safe — a
+        training reviewer, and the legless ones fail-closed — so a sensitive
+        review landed on a different family than the same public card. `_reviewer_
+        rejections` still takes `privacy` and reads nothing from it, so the two
+        cards answer alike, and no rejection names privacy any more."""
+        sensitive = self.route(card="kind=review,author=qwen,privacy=sensitive,"
+                                    "paths=tools/registry.py")["review_plan"]
+        public = self.route(card="kind=review,author=qwen,"
+                                 "paths=tools/registry.py")["review_plan"]
+        self.assertEqual(sensitive["reviewer"], public["reviewer"])
+        self.assertEqual([s["model"] for s in sensitive["skipped"]],
+                         [s["model"] for s in public["skipped"]])
+        self.assertEqual(sensitive["skipped"][0]["model"], "qwen3.8-flash")
+        self.assertIn("same family as author (qwen)", sensitive["skipped"][0]["reasons"])
+        for entry in sensitive["skipped"]:
+            self.assertFalse([r for r in entry["reasons"] if r.startswith("privacy:")],
+                             "privacy rejects nothing now: %r" % (entry,))
 
     def test_the_author_never_changes_the_route_the_resolver_picks(self):
         with_author = self.route()
@@ -9234,16 +9288,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # --- 3: the provider benched is the provider that served ------------------
 
     def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
-        # 'vertex' is vertex_ai's omniroute_id and how a route declares the leg;
-        # 'opencode-zen' is zen's. A raw prefix lookup finds neither. FREEWIRE
+        # 'xiaomi-mimo' is xiaomi_mimo's omniroute_id and how a route declares the
+        # leg; 'opencode-zen' is zen's. A raw prefix lookup finds neither. FREEWIRE
         # 2026-09-30: the gemini/google_ai_studio example was replaced because
         # google_ai_studio is now provider-unavailable (so its leg attributes to
-        # no live provider at all).
+        # no live provider at all) — which is where vertex/vertex_ai stands since
+        # 4d3d541f, so the alias example moved to a live provider.
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
-                self.registry, ["vertex/gemini-3.8-flash"]),
-            "vertex_ai")
+                self.registry, ["xiaomi-mimo/mimo-v2.6-pro"]),
+            "xiaomi_mimo")
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
@@ -9274,18 +9329,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
         self.assertEqual(list(self.state()["providers"]), ["openrouter"])
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
-        # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
-        # the trial-first clean routes): l2-worker-clean HAS a gemini leg now,
-        # vertex/gemini-3.8-flash serves gemini-3.8-flash alone, and naming it
-        # correctly benches vertex_ai. The intent stands -- naming a model the
-        # route does not serve falls back to the first live leg, as an unnamed
-        # stop does -- pinned here on gemini-3.7-flash-high, which no clean leg
-        # serves. The fallback leg is registry data, so the expectation is read
-        # from it rather than pinned to one provider's name (DSBACK 2026-09-28
-        # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
-        # it to the ovhcloud head leg; D657-D2 leaves the clean chain a single
-        # vertex leg, so the head leg IS the answer and stays derived).
-        legs = self.registry["routes"]["l2-worker-clean"]["legs"]
+        # AO-MIMO-D1201: this read `l2-worker-clean`, the privacy twin whose
+        # vertex leg made the named/unnamed pair interesting. The route it refused
+        # towards is dropped, so the same property is measured on the normal
+        # l2-worker chain. The intent stands -- naming a model the route does not
+        # serve falls back to the first live leg, as an unnamed stop does -- pinned
+        # here on gemini-3.7-flash-high, which no l2-worker leg serves. The
+        # fallback leg is registry data, so the expectation is read from it rather
+        # than pinned to one provider's name (DSBACK 2026-09-28 moved it from
+        # opencode-zen/… to deepseek/deepseek-flash; D657-D2 made the head leg the
+        # answer, and it stays derived).
+        legs = self.registry["routes"]["l2-worker"]["legs"]
         named = self.agent.stop_provider_id(
             "Error: [429] All credentials for model gemini-3.7-flash-high are "
             "cooling down (reset after 37s)", self.registry, legs)
@@ -9543,16 +9597,17 @@ class TierSeatContextTests(unittest.TestCase):
             "spec combo-v2 §8: the L2 seat takes %s context, below the 600k "
             "floor" % cap)
 
-    def test_a_clean_run_of_the_tier_2_seat_keeps_the_floor(self):
-        # --clean re-spells the seat route with the -clean suffix; the privacy
-        # twin has to answer at the same context or the floor is only met by
-        # runs that do not care about privacy.
-        _model, route = self.seat(2)
-        clean = "omniroute/%s-clean" % route
-        self.assertIn(clean, self.agent.declared_models(self.cfg),
-                      "the -clean twin of the tier-2 seat is not declared")
-        self.assertEqual(self.agent.resolve_model(self.cfg, 2, True, None), clean)
-        self.assertGreaterEqual(self.cap_of(route + "-clean"), self.L2_MIN_CTX)
+    def test_a_clean_run_of_the_tier_2_seat_is_the_seat(self):
+        """AO-MIMO-D1201 (operator answer 3): `--clean` no longer re-spells the
+        seat route with the `-clean` suffix — the privacy twins were dropped, so
+        the flag is accepted and answers the normal seat. It stays a floor check
+        in the other direction: a seat that met 600k publicly still meets it for a
+        private run, because it is the same seat."""
+        model, route = self.seat(2)
+        self.assertEqual(self.agent.resolve_model(self.cfg, 2, True, None), model)
+        self.assertNotIn("omniroute/%s-clean" % route, self.agent.declared_models(self.cfg),
+                         "the dropped -clean twin is declared again")
+        self.assertGreaterEqual(self.cap_of(route), self.L2_MIN_CTX)
 
     def test_the_tier_2_seat_is_not_a_route_the_contract_clamps(self):
         # Why the seat moved instead of the combo: rule (d) pins the t2/t3
@@ -16931,17 +16986,20 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
                                         plan)[0])
 
     def test_a_clean_plan_with_a_claude_model_is_refused(self):
-        # --clean rewrites the spelling (`<route>-clean`) between the resolution
-        # the early gate read and the argv the client receives. The last-mile gate
-        # prices what the launch carries, so the clean variant of a Claude route is
-        # a Claude spend even though no earlier value named one.
+        # CLAUDEBUDGET-d item 2 (the last mile prices what the launch carries) —
+        # AO-MIMO-D1201 moved its mechanism, not its claim. This used to prove it
+        # through `--clean`, which rewrote the spelling to `<route>-clean` between
+        # the resolution the early gate read and the argv the client receives; the
+        # flag is a no-op now, so the Claude name reaches the argv unchanged and
+        # the gate still refuses what it reads there.
         args = self.args(tier=2, clean=True, model="omniroute/claude-route", card=None)
         plan = self.agent.build_plan(args, self.cfg())
         argv = plan["cmd"][plan["cmd"].index("--model") + 1]
-        self.assertEqual(argv, "omniroute/claude-route-clean")
+        self.assertEqual(argv, "omniroute/claude-route")
+        self.assertFalse(argv.endswith("-clean"), "--clean rewrites nothing")
         refusal, note = self.last_mile(args, plan)
         self.assertIsNotNone(refusal, note)
-        self.assertIn("claude-route-clean", refusal)
+        self.assertIn("claude-route", refusal)
 
     # --- item A: the MCP spawn path reaches the same gate ----------------------
 
@@ -24225,7 +24283,8 @@ class HandEntryPricingTests(unittest.TestCase):
     """D5 (lane trial-direct, 2026-10-01): an opencode.jsonc hand entry is a direct
     passthrough, not a combo, and the budget gate benched every one of them —
     `cannot be priced -- the model ... is no route the registry carries` — so a
-    `--model omniroute/vertex-3.8-flash` spawn was refused while the budget was on.
+    `--model omniroute/ovh-direct-gpt-oss-120b` spawn was refused while the budget
+    was on.
     The name is priceable after all: its modelID is a `<gateway provider>/<model>`
     leg, and `registry_ref()` turns the gateway spelling back into the registry leg
     whose model row says what family answers. An id that resolves to nothing is
@@ -24242,8 +24301,11 @@ class HandEntryPricingTests(unittest.TestCase):
     def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
         # OVHCODER-DROP 2026-10-08: ovh-direct-qwen3-coder-30b left the list
         # with the model (OVH answers 404 for Qwen3-Coder-30B-A3B-Instruct).
-        for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3.8-27b"):
+        # AO-MIMO-D1201 s1 follow-up: the vertex-* hand seats left the list too —
+        # NoVertexSeatTests pins that they are gone.
+        for name in ("omniroute/ovh-direct-gpt-oss-120b",
+                     "omniroute/ovh-direct-qwen3.8-27b",
+                     "omniroute/deepinfra-mimo-v2.6-flash"):
             self.assertIs(self.spends(name), False, name)
 
     def test_hand_entry_leg_is_the_registry_spelling_of_the_modelid(self):
@@ -24253,9 +24315,9 @@ class HandEntryPricingTests(unittest.TestCase):
         self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-gpt-oss-120b",
                                                    SHIPPED_REGISTRY, self.cfg),
                          "ovhcloud/gpt-oss-120b")
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.8-flash",
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-qwen3.8-27b",
                                                    SHIPPED_REGISTRY, self.cfg),
-                         "vertex/gemini-3.8-flash")
+                         "ovhcloud/Qwen3.8-27B")
 
     def test_a_managed_region_entry_is_not_read_as_a_hand_entry(self):
         # Its modelID is the route id itself, so the passthrough shape is absent
@@ -24268,38 +24330,15 @@ class HandEntryPricingTests(unittest.TestCase):
 
     def test_a_hand_entry_whose_modelid_has_no_registry_row_is_refused(self):
         # Until a registry model row describes the leg, nothing can say what
-        # answers, so the name is refused rather than assumed free. RWP1 gave the
-        # shipped vertex-3.6/3.7-flash ids their rows, so the unrowed case is
-        # synthesised here — the guard must keep firing on it.
+        # answers, so the name is refused rather than assumed free (D5). RWP1 gave
+        # the vertex-3.6/3.7-flash hand entries rows for exactly this reason; those
+        # seats and their rows are gone (AO-MIMO-D1201 s1 follow-up), so the
+        # unrowed case stays synthesised here — the guard must keep firing on it.
         cfg = {"providers": {"omniroute": {"models": {
-            "vertex-9.9-flash": {"modelID": "vertex/gemini-9.9-flash"}}}}}
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-9.9-flash",
+            "ovh-9.9-model": {"modelID": "ovh/Qwen3.9-99B"}}}}}
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-9.9-model",
                                                    SHIPPED_REGISTRY, cfg), "")
-        self.assertIsNone(self.spends("omniroute/vertex-9.9-flash", cfg))
-
-    def test_the_3_6_and_3_7_hand_ids_resolve_to_their_vertex_leg(self):
-        # RWP1: the hand entries shipped in 48f0ac21 could not be priced because
-        # no `models.gemini-3.6-flash` / `models.gemini-3.7-flash` row existed for
-        # the modelID to resolve against. The leg spelling is the provider's
-        # omniroute_id plus the model key.
-        for name, leg in (("omniroute/vertex-3.6-flash", "vertex/gemini-3.6-flash"),
-                          ("omniroute/vertex-3.7-flash", "vertex/gemini-3.7-flash")):
-            self.assertEqual(self.agent.hand_entry_leg(name, SHIPPED_REGISTRY, self.cfg),
-                             leg, name)
-
-    def test_the_3_6_and_3_7_hand_ids_are_priced_and_not_claude(self):
-        for name in ("omniroute/vertex-3.6-flash", "omniroute/vertex-3.7-flash"):
-            self.assertIs(self.spends(name), False, name)
-
-    def test_the_3_6_and_3_7_hand_legs_are_credit_tier_legs(self):
-        # The price the gate reads them at is the provider's trial credit, not a
-        # per-token figure — providers.vertex_ai.tier says which.
-        for leg in ("vertex/gemini-3.6-flash", "vertex/gemini-3.7-flash"):
-            provider_id, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
-            self.assertEqual(provider_id, "vertex_ai", leg)
-            self.assertEqual(SHIPPED_REGISTRY["providers"][provider_id]["tier"],
-                             "credit", leg)
-            self.assertIn(model_id, SHIPPED_REGISTRY["models"], leg)
+        self.assertIsNone(self.spends("omniroute/ovh-9.9-model", cfg))
 
     def test_a_hand_entry_on_an_anthropic_leg_is_claude(self):
         cfg = {"providers": {"omniroute": {"models": {
@@ -24324,11 +24363,137 @@ class HandEntryPricingTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIs(self.spends("omniroute/ovh-direct-gpt-oss-120b"), False)
 
-    def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
-        # The same door, on the id whose registry row RWP1 adds.
-        r = run_agent("run", "--model", "omniroute/vertex-3.6-flash",
-                      "--dry-run", "--card", "role=implement", "reply with exactly: ack")
-        self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+
+class NoVertexSeatTests(unittest.TestCase):
+    """AO-MIMO-D1201 s1 follow-up (2026-10-12): Vertex and Google AI Studio are off
+    everywhere, and a review seat found the hole — `vertex-3.8-flash`,
+    `vertex-3.7-flash` and `vertex-3.6-flash` were still declared as opencode.jsonc
+    hand entries, so `run --card privacy=sensitive --model
+    omniroute/vertex-3.8-flash --dry-run t` planned a run on a Vertex leg. The three
+    entries are gone and so are the registry model rows that existed only to price
+    them. Three guards keep it that way: (a) the config declares no such `modelID`,
+    (b) the spawn door refuses the pin on every spelling, for a sensitive card and a
+    public one, (c) the registry offers the resolver nothing to serve there.
+    """
+
+    # the ids a caller could type, hand entry and gateway spellings alike
+    PIN_NAMES = ("omniroute/vertex-3.8-flash", "omniroute/vertex-3.7-flash",
+                 "omniroute/vertex-3.6-flash", "omniroute/vertex-flash",
+                 "vertex-3.8-flash", "vertex/gemini-3.8-flash")
+    ENTRY_NAMES = ("vertex-3.8-flash", "vertex-3.7-flash", "vertex-3.6-flash",
+                   "vertex-flash")
+    OFF_MODEL_ID_PREFIXES = ("vertex/", "google_ai_studio/", "gemini/")
+    OFF_PROVIDER_IDS = ("vertex_ai", "google_ai_studio")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+
+    def models_of(self, cfg):
+        """{provider: {entry: modelID}} for every model the config declares."""
+        out = {}
+        for pname, prov in (cfg.get("providers") or {}).items():
+            if not isinstance(prov, dict):
+                continue
+            for name, entry in (prov.get("models") or {}).items():
+                model_id = entry.get("modelID") if isinstance(entry, dict) else None
+                out.setdefault(pname, {})[name] = str(model_id or "")
+        return out
+
+    # ---- (a) the config declares no Vertex / AI Studio passthrough ----
+
+    def test_no_model_id_starts_with_a_vertex_or_ai_studio_provider(self):
+        offenders = ["%s.%s -> %s" % (pname, name, model_id)
+                     for pname, entries in self.models_of(self.cfg).items()
+                     for name, model_id in entries.items()
+                     if model_id.startswith(self.OFF_MODEL_ID_PREFIXES)]
+        self.assertEqual(offenders, [], "\n".join(offenders))
+
+    def test_the_vertex_hand_entries_are_gone_from_the_config(self):
+        for pname, entries in self.models_of(self.cfg).items():
+            for name in entries:
+                self.assertNotIn("vertex", name.lower(), "%s.%s" % (pname, name))
+        for name in self.ENTRY_NAMES:
+            self.assertNotIn(name, self.cfg["providers"]["omniroute"]["models"], name)
+
+    # ---- (b) the spawn door refuses the pin, sensitive card and public card ----
+
+    def test_a_vertex_pin_is_refused_as_undeclared(self):
+        for model in self.PIN_NAMES:
+            for card in ("privacy=sensitive", "role=implement"):
+                r = run_agent("run", "--model", model, "--dry-run",
+                              "--card", card, "t")
+                where = "%s / --card %s" % (model, card)
+                self.assertEqual(r.returncode, 2, where + ": " + r.stderr)
+                self.assertIn("not declared in opencode.jsonc providers",
+                              r.stderr, where)
+                self.assertNotIn("would run:", r.stdout, where + r.stdout)
+
+    def test_a_removed_hand_entry_prices_as_nothing(self):
+        # The budget gate's D5 reading: an id that resolves to nothing is never
+        # assumed free. With the entry deleted, the modelID/leg lookups come back
+        # empty and the spend answer for the *name* is None (refused), not False
+        # (priced). The bare-leg spelling is a different string — the registry does
+        # price a leg, and what closes that door is the config membership the test
+        # above pins, not a missing model row.
+        for model in self.PIN_NAMES:
+            self.assertEqual(self.agent.hand_entry_model_id(model, self.cfg), "",
+                             model)
+            self.assertEqual(
+                self.agent.hand_entry_leg(model, SHIPPED_REGISTRY, self.cfg), "",
+                model)
+        for model in ("omniroute/vertex-3.8-flash", "omniroute/vertex-3.7-flash",
+                      "omniroute/vertex-3.6-flash", "omniroute/vertex-flash",
+                      "vertex-3.8-flash"):
+            self.assertIsNone(
+                self.agent.spawn_spends_claude("opencode", model, SHIPPED_REGISTRY,
+                                               "--model", self.cfg), model)
+            self.assertFalse(model.split("/", 1)[-1]
+                             in self.cfg["providers"]["omniroute"]["models"], model)
+
+    # ---- (c) the registry and resolver reach Vertex nowhere ----
+
+    def test_no_registry_provider_row_those_ids_resolve_to_is_available(self):
+        for pid in self.OFF_PROVIDER_IDS:
+            row = SHIPPED_REGISTRY["providers"].get(pid)
+            if row is None:
+                continue
+            self.assertIsNot(row.get("available"), True, pid)
+
+    def test_the_resolver_serves_no_leg_through_a_vertex_or_ai_studio_provider(self):
+        # serving_legs is the resolver's own availability reading — it is what
+        # dropped every vertex leg when D-1201 set the providers unavailable.
+        for rid, route in SHIPPED_REGISTRY["routes"].items():
+            for provider_id, model_id in resolver.serving_legs(route,
+                                                               SHIPPED_REGISTRY):
+                self.assertNotIn(provider_id, self.OFF_PROVIDER_IDS,
+                                 "%s serves %s/%s" % (rid, provider_id, model_id))
+
+    def test_a_route_that_declares_only_vertex_legs_is_neither_shipped_nor_pinnable(self):
+        # The registry still carries a vertex leg in combo data (the operator prunes
+        # that), so the guard is on what a caller can actually reach: a route whose
+        # legs are ALL vertex/AI Studio renders no combo and is not declared in
+        # opencode.jsonc, which is the door `resolve_model` checks before any argv.
+        shipped = {c.get("name") for c in json.loads(
+            (ROOT / "configuration" / "omniroute" / "combos.json")
+            .read_text(encoding="utf-8")).get("combos") or []}
+        declared = set(self.cfg["providers"]["omniroute"]["models"])
+        for rid, route in SHIPPED_REGISTRY["routes"].items():
+            legs = route.get("legs") or []
+            if not legs:
+                continue
+            off = [leg for leg in legs
+                   if registry_tool.resolve_leg(leg, SHIPPED_REGISTRY)[0]
+                   in self.OFF_PROVIDER_IDS]
+            if len(off) != len(legs):
+                continue
+            self.assertNotIn(rid, shipped, rid)
+            self.assertNotIn(rid, declared, rid)
+            self.assertEqual(resolver.serving_legs(route, SHIPPED_REGISTRY), [], rid)
+
+    def test_the_model_rows_that_only_served_the_vertex_seats_are_gone(self):
+        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
+            self.assertNotIn(model_id, SHIPPED_REGISTRY["models"], model_id)
 
 
 class DirectSeatHandEntriesTests(unittest.TestCase):
@@ -24336,7 +24501,7 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
     seat or provider, with no combo and no fall-through, for the four doors the
     operator named - agy Gemini 3.8 Flash, agy Claude Sonnet 5.5, native DeepSeek
     Flash and Meta Muse Spark. Each is an opencode.jsonc hand entry (the
-    vertex-3.8-flash precedent), so the budget gate prices it through its modelID
+    ovh-direct-* precedent), so the budget gate prices it through its modelID
     leg: the registry must carry a row for what answers, and the entry's limits
     must be that row's, not a guess. The agy gateway spells the effort INTO the
     id (`agy/gemini-3.8-flash-high`, measured live 2026-10-06; there is no bare
@@ -24405,67 +24570,6 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
         self.assertEqual(rows["claude-sonnet-5-5-high"]["effort_ladder"], ["high"])
         self.assertEqual(rows["gemini-3.8-flash-high"]["family"], "google")
         self.assertEqual(rows["gemini-3.8-flash-high"]["effort_ladder"], ["high"])
-
-
-class VertexFlashRegistryRowsTests(unittest.TestCase):
-    """RWP1 (lane trial-direct, 2026-10-01): `models.gemini-3.6-flash` and
-    `models.gemini-3.7-flash` are the registry half of the `vertex-3.6-flash` /
-    `vertex-3.7-flash` hand entries shipped in 48f0ac21. A hand entry passes its
-    modelID to the gateway verbatim, so with no row for the model behind
-    `vertex/gemini-3.<6,7>-flash` the spawn gate could say nothing about what
-    answers and refused the run. The rows are shaped like the `gemini-3.8-flash`
-    head they sit beside. RWP1 left their price unpriced (no source reachable from
-    that lane); the 2026-10-02 pass cites the Vertex list price per each row's
-    `price_source`, and `tool_calls` stays unproven — no leg probe was run."""
-
-    FLASH = ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
-
-    def setUp(self):
-        self.agent = load_agent()
-        self.models = SHIPPED_REGISTRY["models"]
-
-    def test_exactly_the_three_flash_vertex_ids_are_in_the_registry(self):
-        for model_id in self.FLASH:
-            self.assertIn(model_id, self.models, model_id)
-
-    def test_the_three_flash_vertex_ids_pass_gemini_model_allowed(self):
-        # D-255 allows 3.6 / 3.7 / 3.8 Flash; the row's existence must not read as
-        # a ban, in either the leg or the bare-model spelling.
-        for model_id in self.FLASH:
-            for ref in (model_id, "vertex/" + model_id, "vertex-gemini"
-                        + model_id[len("gemini"):]):
-                self.assertTrue(self.agent.gemini_model_allowed(ref), ref)
-
-    def test_the_two_new_rows_are_shaped_like_the_3_8_head(self):
-        head = self.models["gemini-3.8-flash"]
-        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
-            row = self.models[model_id]
-            self.assertEqual(row["id"], model_id)
-            self.assertEqual(row["family"], "google", model_id)
-            self.assertEqual(row["tool_calls"], "unproven", model_id)
-            self.assertTrue(row["reasoning"], model_id)
-            self.assertEqual(row["effort_ladder"], head["effort_ladder"], model_id)
-            # Never larger than the 3.8 head they were copied from.
-            self.assertLessEqual(row["context_advertised"],
-                                 head["context_advertised"], model_id)
-            self.assertLessEqual(row["output_max"], head["output_max"], model_id)
-
-    def test_the_two_new_rows_carry_the_cited_vertex_list_price(self):
-        # TRIAL-DIRECT final docs pass (2026-10-02): the Vertex price was sourced,
-        # so the 0.0 unpriced form RWP1 left here is gone. Pinned to the cited
-        # list price and its dated price_source, never to a guessed figure.
-        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
-            row = self.models[model_id]
-            self.assertEqual((row["price_in"], row["price_out"], row["price_cache_read"]),
-                             (1.5e-06, 7.5e-06, 1.5e-07), model_id)
-            self.assertIn("vertex-ai/generative-ai/pricing", row["price_source"], model_id)
-            self.assertIn("accessed 2026-10-02", row["price_source"], model_id)
-            comment = row["$comment"].lower()
-            self.assertNotIn("price not sourced", comment, model_id)
-            self.assertIn("tool_calls stay unproven", comment, model_id)
-
-    def test_the_shipped_registry_still_validates(self):
-        self.assertEqual(registry_tool.check_registry(SHIPPED_REGISTRY), [])
 
 
 class GeminiAllowListTests(unittest.TestCase):
@@ -24560,9 +24664,17 @@ class GeminiAllowListTests(unittest.TestCase):
                                                         "vertex-2.5", cfg))
 
     def test_an_allowed_hand_entry_is_not_refused(self):
-        self.assertEqual(self.refusal("omniroute/vertex-3.8-flash", "vertex-3.8-flash"), "")
-        self.assertEqual(self.refusal("omniroute/ovh-direct-gpt-oss-120b",
-                                      "ovh-direct-gpt-oss-120b"), "")
+        # AO-MIMO-D1201 s1 follow-up: the vertex-* hand seats are gone from
+        # opencode.jsonc, so the allowed half of this pin is on entries the
+        # config still declares — the non-Gemini passthroughs and the on-list
+        # agy Gemini 3.8 Flash seat.
+        for model, entry in (("omniroute/ovh-direct-gpt-oss-120b",
+                              "ovh-direct-gpt-oss-120b"),
+                             ("omniroute/deepinfra-mimo-v2.6-flash",
+                              "deepinfra-mimo-v2.6-flash"),
+                             ("omniroute/agy-gemini-3.8-flash",
+                              "agy-gemini-3.8-flash")):
+            self.assertEqual(self.refusal(model, entry), "", model)
 
     def test_an_explicit_combo_with_some_off_list_legs_is_allowed(self):
         # RWP2 S1 regression: `--model omniroute/l2-worker` is the same route a
@@ -24617,12 +24729,14 @@ class GeminiAllowListTests(unittest.TestCase):
 
 
 class SensitiveHandEntryPrivacyTests(unittest.TestCase):
-    """D3: ovhcloud's `trains_on_prompts` is verified false on main (CIGREEN:
-    587f465e) -- so a privacy=sensitive card may land on an `ovh-direct-*`
-    hand entry only through that cited verification. The existing PRIV3 door
-    already covers a name that is no registry route: nothing proves it
-    private-safe. This pins that the door holds for the ovh-direct ids too,
-    against the real opencode.jsonc rather than a synthetic one."""
+    """AO-MIMO-D1201 (2026-10-12, operator answer 3) rewrote D3.
+
+    D3 pinned the PRIV3 door on a hand entry: a privacy=sensitive card aimed at an
+    `ovh-direct-*` name that is no registry route was refused because nothing
+    proved it private_safe. That door read `registry.private_safe`, which stays in
+    the registry as DATA (a provider's cited `trains_on_prompts` verdict) and gates
+    nothing. Against the real opencode.jsonc these tests now pin both halves: the
+    data answer is unchanged, and the same run the door refused plans."""
 
     def setUp(self):
         self.agent = load_agent()
@@ -24649,12 +24763,15 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
             rc = self.agent.cmd_run(ns, self.cfg)
         return rc, out.getvalue(), err.getvalue()
 
-    def test_sensitive_card_on_an_ovh_direct_hand_entry_is_refused(self):
+    def test_sensitive_card_on_an_ovh_direct_hand_entry_runs(self):
+        # The refused call, now answered: a hand entry is a model pin, and privacy
+        # asks nothing of a pin any more.
         for name in ("omniroute/ovh-direct-gpt-oss-120b",
                      "omniroute/ovh-direct-qwen3.8-27b"):
             rc, out, err = self.run_cmd(name)
-            self.assertEqual(rc, 2, name + out + err)
-            self.assertIn("privacy", err, name)
+            self.assertEqual(rc, 0, name + out + err)
+            self.assertIn("would run:", out)
+            self.assertNotIn("privacy", err, name)
 
     def test_the_ovh_provider_is_still_unverified(self):
         # CIGREEN: expectation moved by 35148c5c (L1-CLEAN D1+D2, part of the
@@ -24683,15 +24800,16 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
         rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
         self.assertEqual(rc, 0, out + err)
 
-    def test_a_null_trains_provider_is_still_refused(self):
-        # CIGREEN companion to the test above (same 35148c5c/587f465e move):
-        # the fail-closed half. A registry copy with ovhcloud's own
-        # verification stripped (flag back to null, privacy block removed) is
-        # refused by private_safe AND by a sensitive run aimed at its route
-        # (rc 2) -- unknown is unsafe, and removing the citation closes the
-        # door the citation opened. api_airforce ships in exactly that
-        # unverified state (trains_on_prompts null), pinned here as the live
-        # example.
+    def test_a_null_trains_provider_is_still_unsafe_data_but_never_refused(self):
+        # CIGREEN companion to the test above, kept for its data half only. A
+        # registry copy with ovhcloud's own verification stripped (flag back to
+        # null, privacy block removed) still answers private_safe False -- unknown
+        # is unsafe as a statement about the provider, and api_airforce ships in
+        # exactly that unverified state (trains_on_prompts null), pinned here as
+        # the live example. What changed at AO-MIMO-D1201 is that no run reads it:
+        # the same sensitive run that used to exit 2 plans. The privacy evidence a
+        # citation carries is still registry-checked (tools/registry.py rule 3b):
+        # a leg that CLAIMS it trains on nothing must cite the terms that say so.
         import copy
         self.assertIsNone(
             SHIPPED_REGISTRY["providers"]["api_airforce"].get("trains_on_prompts"))
@@ -24705,8 +24823,8 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
         with mock.patch.object(agent, "load_registry", lambda path: neutered), \
                 mock.patch.object(agent, "load_live_registry", lambda *a, **k: neutered):
             rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
-        self.assertEqual(rc, 2, out + err)
-        self.assertIn("privacy", err)
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("privacy", err)
 
 
 
@@ -24727,10 +24845,10 @@ class GeminiSideModelPinTests(unittest.TestCase):
         return clients.gemini_side_model_env(name, model)
 
     def test_only_gemini_is_pinned_and_only_with_a_model(self):
-        self.assertEqual(self.pin("gemini", "vertex-3.8-flash"),
-                         {"GEMINI_MODEL": "vertex-3.8-flash"})
+        self.assertEqual(self.pin("gemini", "ovh-direct-gpt-oss-120b"),
+                         {"GEMINI_MODEL": "ovh-direct-gpt-oss-120b"})
         for name in ("qwen", "opencode", "codex"):
-            self.assertEqual(self.pin(name, "vertex-3.8-flash"), {}, name)
+            self.assertEqual(self.pin(name, "ovh-direct-gpt-oss-120b"), {}, name)
         self.assertEqual(self.pin("gemini", None), {})
         self.assertEqual(self.pin("gemini", ""), {})
 
@@ -24740,7 +24858,7 @@ class GeminiSideModelPinTests(unittest.TestCase):
         self.assertTrue(self.agent._plan_env_passed("GEMINI_MODEL"))
 
     def generated_env(self, client):
-        r = run_agent("run", "--client", client, "--model", "omniroute/vertex-3.8-flash",
+        r = run_agent("run", "--client", client, "--model", "omniroute/ovh-direct-gpt-oss-120b",
                       "--dry-run", "--card", "role=implement", "t")
         self.assertEqual(r.returncode, 0, r.stderr)
         return r.stdout
@@ -24785,7 +24903,7 @@ class GeminiSideModelPinTests(unittest.TestCase):
                 mock.patch.dict(os.environ, env_extra or {}), \
                 contextlib.redirect_stdout(buf):
             rc = agent.main(["run", "--client", "gemini",
-                             "--model", "omniroute/vertex-3.8-flash",
+                             "--model", "omniroute/ovh-direct-gpt-oss-120b",
                              "--dry-run", "--card", "role=implement", "t"])
         out = buf.getvalue()
         self.assertEqual(rc, 0, out)
@@ -24800,7 +24918,7 @@ class GeminiSideModelPinTests(unittest.TestCase):
         # exists so an internal side call can name no other leg.
         flag, pinned = self.plan_flag_and_pin()
         self.assertEqual(pinned, flag)
-        self.assertEqual(pinned, "vertex-3.8-flash")
+        self.assertEqual(pinned, "ovh-direct-gpt-oss-120b")
 
     def test_an_explicit_GEMINI_MODEL_in_the_spawner_env_does_not_reach_the_child(self):
         # G3 (RWP3): the overwrite is the point. A caller-set GEMINI_MODEL is

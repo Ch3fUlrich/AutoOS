@@ -42,12 +42,15 @@
     "them in this order, removing lower-ranked AutoOS profiles to make room",
     "and deleting retired ones. The top 10: the t1 -> t2 -> t3 hierarchy",
     "(t1 first: it seeds the app settings and every agent profile's",
-    "llm_profile_ref), l2-orchestrator (small-scope orchestration), the",
-    "no-training -clean worker and driver (t1-clean's leg trains, so these two",
-    "are the privacy picks), t4-rag (grounded QA - nothing else does it),",
+    "llm_profile_ref), l2-orchestrator (small-scope orchestration),",
+    "t4-rag (grounded QA - nothing else does it),",
     "opus-4-6 (frontier reasoning), gemini-3.8-flash (fast, free-first) and",
-    "l2-worker-free-only (zero spend). Below the line: deepseek (already a",
-    "t2 leg), t3-free-only, t1-clean and spark (MUSEAPI 2026-09-27: spark and",
+    "l2-worker-free-only (zero spend). The no-training clean worker and driver",
+    "that used to hold two of these ranks are gone: AO-MIMO-D1201 (2026-10-12,",
+    "operator answer 2) dropped the -clean route class, so privacy-sensitive",
+    "work rides the normal tiers and a secret stays off a leg by not being put",
+    "in the task text. Below the line: deepseek (already a",
+    "t2 leg), t3-free-only and spark (MUSEAPI 2026-09-27: spark and",
     "t1 share the meta_api contributor leg, which answers, plus the zen",
     "promo the gateway 403s), the direct",
     "OpenRouter spark (needs its own key; OpenHands pins one effort, so the",
@@ -144,31 +147,10 @@
       "reasoning": true
     },
     {
-      "id": "omniroute-l2-worker-clean",
-      "model": "openai/l2-worker-clean",
-      "max_input_tokens": 128000,
-      "max_output_tokens": 32768,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-l3-driver-clean",
-      "model": "openai/l3-driver-clean",
-      "max_input_tokens": 128000,
-      "max_output_tokens": 16384,
-      "reasoning": false
-    },
-    {
       "id": "omniroute-t4-rag",
       "model": "openai/t4-rag",
       "max_input_tokens": 131072,
       "max_output_tokens": 4096,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-gemini-3.8-flash",
-      "model": "openai/gemini-3.8-flash",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 65536,
       "reasoning": false
     },
     {
@@ -184,13 +166,6 @@
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
-    },
-    {
-      "id": "omniroute-l1-orchestrator-clean",
-      "model": "openai/l1-orchestrator-clean",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
     },
     {
       "id": "litellm-l1-orchestrator",

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  // Repo default: OmniRoute on :20128 (docs/models.md). l1-orchestrator/2/3 and their
-  // -clean variants are combos created by configuration/omniroute/apply.*
+  // Repo default: OmniRoute on :20128 (docs/models.md). l1-orchestrator/2/3
+  // are combos created by configuration/omniroute/apply.*
   // (priority chains: free legs first, allowed paid legs after). The paid
   // overflow legs already cover every provider with money on it: cerebras
   // + sambanova ($10 credit each) as gpt-oss/qwen overflow in l2-worker/l3-driver,
@@ -22,9 +22,12 @@
   // trains); a sensitive 1M card still fails closed. Role labels (display
   // only — the l1-orchestrator/2/3 ids are a contract and never change):
   // l1-orchestrator = orchestrator, l2-worker = smart-reasoning-128k,
-  // l3-driver = cheap-driver-128k. "-clean" excludes every model/plan that
-  // trains on prompts — pick it for sensitive data. auto/* stays as a
-  // zero-setup bootstrap that always resolves.
+  // l3-driver = cheap-driver-128k. AO-MIMO-D1201 (2026-10-12, operator answer 2)
+  // dropped the "-clean" route class: there is no twin to pick for sensitive
+  // data, private work rides these same tiers, and what keeps a secret off a
+  // model leg is the task text, not the route (docs/models.md). That sentence's
+  // l1-orchestrator-clean is a retired id now, not an omitted one. auto/* stays as
+  // a zero-setup bootstrap that always resolves.
   // Effort: `variants` arrays below are rendered from each route's first-leg
   // effort_ladder in catalog/ai-registry.json by tools/sync-ide-models.py
   // (opencode v2.0.16 array form; see docs/models.md "Effort levels").
@@ -128,8 +131,9 @@
       // cap at 262144 anyway, so raising the declaration would be a lie the gateway
       // would bounce). It names `l2-orchestrator`, the L2 orchestration route the
       // contract does not clamp: legs bazaarlink deepseek + vertex gemini, both
-      // 1M-advertised, clamp 1048576. `--clean` follows the same route to its
-      // -clean twin (vertex only, 1M). Pinned by TierSeatContextTests.
+      // 1M-advertised, clamp 1048576. `--clean` is a no-op here since
+      // AO-MIMO-D1201 (2026-10-12): it resolves to this same route, there is no
+      // -clean twin to swap to. Pinned by TierSeatContextTests.
       // Scope of the fix, said plainly: a CARD-driven run takes its model from the
       // resolver's combo (`resolve_model(..., override or "omniroute/" + combo)`), so an
       // implement card still lands on `l2-worker`'s clamped route; moving the L2 *band*
@@ -468,11 +472,11 @@
       // regenerated; hand entries above START / below END are kept.
       "models": {
         // Direct provider passthrough (hand entries, kept outside the managed
-        // region). Live on the gateway since 2026-09-30: `vertex` connection
-        // registered from the vertex_ai key; ids match `omniroute models vertex`.
-        // Spawn agents with model "omniroute/vertex-flash" etc.
-        // The `ovh-direct-*` entries are the same passthrough for the OVH AI
+        // region). The `ovh-direct-*` entries are the passthrough for the OVH AI
         // Endpoints connection: ids are the gateway's `ovh/<Model>` spellings.
+        // No Vertex / Google AI Studio hand entry may be declared here: operator
+        // D-1201 holds both off everywhere, so a `vertex/*` or `google_ai_studio/*`
+        // modelID would put a pinnable seat on a provider that must stay unpinneable.
         "ovh-direct-gpt-oss-120b": {
           "modelID": "ovh/gpt-oss-120b",
           "name": "ovh-direct-gpt-oss-120b — direct OVH AI Endpoints (private-safe (T1-CLEAN, D-502); trial credit; cap per D-567)",
@@ -487,21 +491,6 @@
           "modelID": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
           "name": "deepinfra-mimo-v2.6-flash — direct DeepInfra (prepaid $5, hard stop; public work only, not private-safe)",
           "limit": { "context": 131072, "output": 16384 }
-        },
-        "vertex-3.8-flash": {
-          "modelID": "vertex/gemini-3.8-flash",
-          "name": "vertex-3.8-flash - direct Gemini 3.8 Flash (Vertex AI, no combo); trial credit; site data only after T1-CLEAN",
-          "limit": { "context": 1048576, "output": 65536 }
-        },
-        "vertex-3.7-flash": {
-          "modelID": "vertex/gemini-3.7-flash",
-          "name": "vertex-3.7-flash - direct Gemini 3.7 Flash (Vertex AI, no combo); trial credit; site data only after T1-CLEAN",
-          "limit": { "context": 1048576, "output": 65536 }
-        },
-        "vertex-3.6-flash": {
-          "modelID": "vertex/gemini-3.6-flash",
-          "name": "vertex-3.6-flash - direct Gemini 3.6 Flash (Vertex AI, no combo); trial credit; site data only after T1-CLEAN",
-          "limit": { "context": 1048576, "output": 65536 }
         },
         // DIRECTSEAT (operator 2026-10-06): pick exactly ONE model, no combo and no
         // fall-through. The agy door spells the effort into the id (there is no bare
@@ -554,16 +543,6 @@
           "name": "L1 · l1-orchestrator · 1M",
           "limit": { "context": 1000000, "output": 32768 }
         },
-        "l1-orchestrator-clean": {
-          "modelID": "l1-orchestrator-clean",
-          "name": "L1 · l1-orchestrator-clean · 1M",
-          "limit": { "context": 1000000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
-        },
         "l1-orchestrator-free-only": {
           "modelID": "l1-orchestrator-free-only",
           "name": "L1 · l1-orchestrator-free-only · 1M",
@@ -573,16 +552,6 @@
           "modelID": "l2-worker",
           "name": "L2 · l2-worker · 128k",
           "limit": { "context": 131072, "output": 32768 }
-        },
-        "l2-worker-clean": {
-          "modelID": "l2-worker-clean",
-          "name": "L2 · l2-worker-clean · 128k",
-          "limit": { "context": 128000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
         },
         "l2-worker-free-only": {
           "modelID": "l2-worker-free-only",
@@ -594,30 +563,10 @@
           "name": "L2 · l2-orchestrator · 1M",
           "limit": { "context": 1048576, "output": 32768 }
         },
-        "l2-orchestrator-clean": {
-          "modelID": "l2-orchestrator-clean",
-          "name": "L2 · l2-orchestrator-clean · 1M",
-          "limit": { "context": 1048576, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
-        },
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
           "limit": { "context": 128000, "output": 16384 }
-        },
-        "l3-driver-clean": {
-          "modelID": "l3-driver-clean",
-          "name": "L3 · l3-driver-clean · 128k",
-          "limit": { "context": 128000, "output": 16384 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
         },
         "l3-driver-free-only": {
           "modelID": "l3-driver-free-only",
@@ -629,30 +578,10 @@
           "name": "L3 · l3-implementer · 128k",
           "limit": { "context": 128000, "output": 8192 }
         },
-        "l3-implementer-clean": {
-          "modelID": "l3-implementer-clean",
-          "name": "L3 · l3-implementer-clean · 128k",
-          "limit": { "context": 128000, "output": 8192 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
-        },
         "l3-researcher": {
           "modelID": "l3-researcher",
           "name": "L3 · l3-researcher · 1M",
           "limit": { "context": 1000000, "output": 32768 }
-        },
-        "l3-researcher-clean": {
-          "modelID": "l3-researcher-clean",
-          "name": "L3 · l3-researcher-clean · 1M",
-          "limit": { "context": 1000000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
         },
         "l3-review-diff": {
           "modelID": "l3-review-diff",
@@ -684,16 +613,6 @@
           "name": "L2 · l2-researcher · 128k",
           "limit": { "context": 131072, "output": 8192 }
         },
-        "gemini-3.8-flash": {
-          "modelID": "gemini-3.8-flash",
-          "name": "Gemini 3.8 Flash · 1M (free→credit)",
-          "limit": { "context": 1048576, "output": 65536 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
-        },
         "or-nemotron-3-super-free": {
           "modelID": "or-nemotron-3-super-free",
           "name": "Nemotron-3-Super-120B via OpenRouter :free",
@@ -718,16 +637,6 @@
           "modelID": "ovh-qwen3.8-27b",
           "name": "Qwen3.8-27B via OVH (credit)",
           "limit": { "context": 128000, "output": 32768 }
-        },
-        "vertex-gemini-3.8-flash": {
-          "modelID": "vertex-gemini-3.8-flash",
-          "name": "Gemini-3.8-Flash via Vertex (credit)",
-          "limit": { "context": 1048576, "output": 65536 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
         },
         "auto/smart": {
           "modelID": "auto/smart",

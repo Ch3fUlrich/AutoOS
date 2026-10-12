@@ -214,15 +214,16 @@ fi
 # above became machine-dependent.
 if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
     keys="$(mktemp)"
-    # D657-D2: every google_ai_studio leg is gated now, so apply no longer plans
-    # a gemini row at all. `vertex` is a provider the D2 chains do ride, so the
-    # placeholder-counts-as-no-key rule is proved on a row that is still planned.
-    printf 'vertex: REPLACE_WITH_VERTEX_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    # D657-D2 gated every google_ai_studio leg and D-1201 gated vertex too, so
+    # apply plans neither row any more. `groq` is a provider the chains still
+    # ride, so the placeholder-counts-as-no-key rule is proved on a row that is
+    # still planned.
+    printf 'groq: REPLACE_WITH_GROQ_KEY\nmistral: not-a-real-key-123\n' >"$keys"
     out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
         bash configuration/omniroute/apply.sh --dry-run 2>&1)"
     rm -f "$keys"
     ok=1
-    [[ "$out" == *"vertex: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "vertex: $out" >&2; }
+    [[ "$out" == *"groq: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "groq: $out" >&2; }
     [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
     [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
     if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
@@ -5231,7 +5232,7 @@ STUB
         'http://127.0.0.1:20128/v1/models key - 200' \
         'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
         'http://127.0.0.1:20128/v1/chat/completions key l2-worker-free-only 200' \
-        'http://127.0.0.1:20128/v1/chat/completions key l2-worker-clean 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key l2-worker 200' \
         'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
 }
 # _aistack_verify_route <sandbox> <url> <auth> <body> <code>: one more route,
@@ -5264,7 +5265,7 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo l2-worker-free-only' 'combo l2-worker-clean' 'omniroute has qodercli' \
+                'combo l2-worker-free-only' 'combo l2-worker' 'omniroute has qodercli' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -5329,7 +5330,7 @@ if it "aistack: verify skips the keyed combos without a key, and the key never r
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
     [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
-    grep -q '^  ok    combo l2-worker-clean$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
+    grep -q '^  ok    combo l2-worker$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
     # A key the gateway rejects: FAIL for every combo, and still no key printed.
     rm -f "$d/curl-argv.log" "$d/curl-seen.log"
     out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
