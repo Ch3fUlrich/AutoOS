@@ -188,6 +188,7 @@ class TestWrapper(Base):
 
 
 class TestCli(Base):
+    @unittest.skipIf(os.name == "nt", "the fake systemctl is a bash script; systemd is Linux only")
     def test_real_systemctl_on_path_is_called_with_disable_now(self):
         fake = self.root / "bin"
         fake.mkdir()
