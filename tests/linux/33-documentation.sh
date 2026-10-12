@@ -976,6 +976,9 @@ fi
 
 # tools/unit_breaker.py + tools/gateway_alerts.py (P1.2): the circuit breaker around agent-starting units and the
 # provider-suspension check - fake systemctl, fixture sqlite, tmp state dirs, never the live ones.
+if it "unit_breaker: identical-failure trip, alert line, reset, status (unit tests)"; then
+    out="$(python3 tests/test_unit_breaker.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
 if it "gateway_alerts: provider suspension signals, one alert per provider per 24 h (unit tests)"; then
     out="$(python3 tests/test_gateway_alerts.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

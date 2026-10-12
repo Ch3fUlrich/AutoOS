@@ -246,3 +246,15 @@ L2 alike.
 - Write your own DONE note: chunks landed (commits), what remains, the decisions you took and why,
   and the ones left for the operator.
 - Persist durable decisions to Omnigraph (`structured-memory`). Clean up merged worktrees.
+
+## 9. Circuit breaker on every agent starter (P1.2)
+
+- A unit that starts agents must not restart forever (D-1173). Wrap its ExecStart in
+  `tools/unit_breaker.py --unit <name>.service -- <cmd>` and give it the drop-in
+  `lib/linux/systemd/user/breaker.conf.in` (`StartLimitBurst=5` in 600 s, `RestartSec=20`).
+- After 5 identical failures (exit code plus last stderr line) the unit is disabled and one
+  `BREAKER` line lands in `AUTOOS_ALERT_INBOX`. `unit_breaker.py status` lists units;
+  `unit_breaker.py reset <unit>` clears a trip after the cause is fixed.
+- Spend by lane: an empty gateway session tag shows as `key:<api key name>` in
+  `autoos_usage.py --by lane`; every client sends `x-omniroute-session-id`.
+  `tools/gateway_alerts.py` flags provider suspension signals (MiMo 401/403, "suspend").
