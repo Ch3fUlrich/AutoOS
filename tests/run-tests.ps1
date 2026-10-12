@@ -4831,7 +4831,12 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Assert-Equal $t3.model 'openai/l3-driver'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
-        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-l2-worker-clean.json')) 'clean twin missing'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-l2-worker-free-only.json')) 'free-only tier profile missing'
+        # AO-MIMO-D1201 (2026-10-12, operator answer 2): the spec lists no
+        # `-clean` tier, so the writer must not invent a profile for a dropped
+        # combo — one would point OpenHands at a gateway combo that no longer
+        # exists.
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-l2-worker-clean.json'))) 'a -clean profile came back'
         $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
         Assert-True ($null -ne $lp.profiles.'omniroute-l1-orchestrator') 't1 not published to llm_profiles'
         Assert-Equal $lp.active 'omniroute-l1-orchestrator'
@@ -4995,7 +5000,11 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     Assert-Equal $LASTEXITCODE 0 "dry run failed: $out"
     Assert-True ($out -match '--standalone --agent l2-worker --model omniroute/l2-worker ') 'l2-worker not paired with its model'
     $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String
-    Assert-True ($out -match '--model omniroute/l3-driver-clean ') 'clean twin not chosen'
+    Assert-True ($out -match '--model omniroute/l3-driver ') 'the normal combo is not chosen'
+    # AO-MIMO-D1201 (2026-10-12, operator answer 3): --clean is accepted and is a
+    # no-op that says so — silently ignoring a flag that used to change the chain
+    # is how a policy mistake becomes invisible.
+    Assert-True ($out -match 'no-op since AO-MIMO-D1201') '--clean did not name itself a no-op'
     $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
     try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }
     finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
@@ -5003,10 +5012,13 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     Assert-True ($out -notmatch 'worktree add|never-print-this-key') 'plan used a worktree or printed the key'
     # The refusal goes to stderr; under Stop, Windows PowerShell turns native
     # stderr into a terminating error (it failed CI on the windows runner).
+    # AO-MIMO-D1201 (operator answer 3): `--free --clean` used to be refused
+    # because the clean twin was a paid-only chain; with the class dropped it is
+    # a plain --free run, so it plans.
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { & $py.Source $tool run --tier 2 --free --clean --dry-run t 2>&1 | Out-Null; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 2
+    Assert-Equal $rc 0
 }
 
 Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
@@ -5691,10 +5703,10 @@ Test-Case 'opencode user config carries global gateway providers without secrets
     # Tier ids, names and windows come from catalog/ide-models.json at run
     # time (Get-AutoOSIdeModel), never as literals in the writer.
     Assert-True ($body -match "Get-AutoOSIdeModel\b.*-Surface 'opencode'") 'writer does not read catalog/ide-models.json'
-    Assert-True ($body -notmatch "'l3-driver-clean'") 'writer carries a literal tier list again'
+    Assert-True ($body -notmatch "'l3-driver'") 'writer carries a literal tier list again'
     $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
     $ids = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties['omniroute'] -and @($_.surfaces.omniroute) -contains 'opencode' } | ForEach-Object { $_.id })
-    foreach ($t in @('l1-orchestrator', 'l3-driver-clean', 'auto/smart')) {
+    foreach ($t in @('l1-orchestrator', 'l3-driver', 'auto/smart')) {
         Assert-Contains $ids $t
     }
     Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
@@ -8813,13 +8825,14 @@ Test-Case 'subagent depth config' {
 
 Test-Case 'openhands template routes tiers with no secrets' {
     $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
-    # l1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
-    # is omitted — a route with no servable leg — so apply prunes it and the
-    # profile would point at a 404. The next assertion pins it staying gone.
-    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.l2-worker-clean]', '[llm.l3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-l1-orchestrator]', '[llm.litellm-l2-worker]', '[llm.litellm-l3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+    # No `-clean` table is in this list, and none may come back: AO-MIMO-D1201
+    # (2026-10-12, operator answer 2) dropped the class, and before that
+    # PROVFIX3 finding 6 had already pruned l1-orchestrator-clean — apply prunes
+    # an omitted combo from the gateway, so a profile for one points at a 404.
+    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.t4-rag]', '[llm.litellm-l1-orchestrator]', '[llm.litellm-l2-worker]', '[llm.litellm-l3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
         Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
     }
-    Assert-True ($toml -notmatch '\[llm\.l1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'
+    Assert-True ($toml -notmatch '\[llm\.[\w.-]*-clean\]') 'a -clean OpenHands profile came back'
     Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
     Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
     Assert-True ($toml -match 'api_key = ""') 'api_key not left empty'
@@ -9955,16 +9968,17 @@ print('%s|%s|%s' % (
     $contexts = @{
         # TORDER 2026-10-01 (D-TORDER-1b, CTXFIX, MAINPIN): t1 1M-only (>=600k,
         # all 1048576, renders 1M); gemini 1M (live 1048576); opus/l2-orchestrator
-        # 1M (antigravity opus 1048576, CTXFIX); t2/t3-clean 1M (deepseek 1M,
-        # CTXFIX); t2/t3 full + free-only 128k clamp (sub-1M allowed, do not raise).
+        # 1M (antigravity opus 1048576, CTXFIX); t2/t3 full + free-only 128k clamp
+        # (sub-1M allowed, do not raise).
         'l1-orchestrator' = '1M'
         'l1-orchestrator-free-only' = '1M'
         'l1-orchestrator-paid' = '1M'
         'spark-1.3-contributor' = '1M'
         'l2-worker' = '128k'
-        'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
-        # L1-CLEAN wave 2026-10-05: the -clean routes carry the 128k credit band
-        # legs (registry surfaces declare 128000), so they clamp to 128k.
+        'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        # AO-MIMO-D1201 2026-10-12 (operator answer 2): the `-clean` routes are
+        # dropped, so their 128k credit-band keys left this map with their
+        # combos — a combo that is not rendered needs no band pinned for it.
         # 2026-10-05 operator: l2-orchestrator is 1M again (agy claude head).
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
@@ -10003,22 +10017,22 @@ print('%s|%s|%s' % (
     foreach ($kept in ($parts[0] -split ',' | Where-Object { $_ })) {
         Assert-True ($omitted -notcontains $kept) "$kept missing from combos"
     }
-    # *-clean = paid legs only: no free pool may train on private prompts.
-    # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
-    # free tier, mistral-code + qwen free pools. -contributor (trains by
-    # contract) is banned in l2-worker-clean/l3-driver-clean
-    # (l1-orchestrator-clean is omitted, see above). Direct-key legs
-    # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
-    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
-    # metered credit-tier provider (providers.ovhcloud tier credit), not a
-    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
-    $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
-    $noTrainRe = '-contributor$'
+    # No `-clean` combo may be rendered (AO-MIMO-D1201, 2026-10-12, operator
+    # answer 2). The check used to be "a clean combo carries no free leg and no
+    # -contributor (training) leg", i.e. paid legs only so no free pool could
+    # train on a private prompt; with the class dropped the private-safe
+    # requirement of that rule went with it and privacy-sensitive work rides the
+    # normal combos. What the render owes now is the absence — the six dropped
+    # ids sit in "retired" only, so apply prunes a stale gateway combo instead of
+    # leaving it aimed at a route nothing declares.
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
-        $free = @($c.models | Where-Object { $_ -match $freeRe })
-        Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
-        $train = @($c.models | Where-Object { $_ -match $noTrainRe })
-        Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
+        Assert-True ($false) "a -clean combo came back: $($c.name)"
+    }
+    foreach ($gone in @('l1-orchestrator-clean', 'l2-orchestrator-clean', 'l2-worker-clean',
+                        'l3-driver-clean', 'l3-implementer-clean', 'l3-researcher-clean')) {
+        Assert-True ($names -notcontains $gone) "$gone is a combo again"
+        Assert-True ($omitted -notcontains $gone) "$gone is omitted instead of retired"
+        Assert-True ($retired -contains $gone) "$gone missing from retired"
     }
     # *-free-only = zero paid/keyed legs: only free pools may appear (the
     # zen contributor-free promo counts as free; other opencode-zen legs bill).

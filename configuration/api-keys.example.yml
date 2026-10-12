@@ -10,8 +10,9 @@
 #   the browser UI (--serve)                shows which providers are configured
 #
 # Get each key: docs/api-keys.md. Missing keys are fine — routing skips them.
-# Free tiers that train on prompts are excluded from the *-clean combos;
-# see docs/models.md ("Sensitive data work").
+# Some free tiers train on prompts; nothing routes around that any more
+# (AO-MIMO-D1201, 2026-10-12 dropped the *-clean combos). See docs/models.md
+# ("Sensitive data work") for what to do with a secret instead.
 
 # ── Free, no card ───────────────────────────────────────────────────────────
 groq: REPLACE_WITH_GROQ_KEY
@@ -21,7 +22,7 @@ cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
 cohere: REPLACE_WITH_COHERE_KEY
 hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
 # Free.ai self-hosted pool (Qwen3-30B-A3B): 10 rpm, 30k tokens/day, may train
-# on prompts — excluded from every *-clean route.
+# on prompts — so keep private prompts out of runs that route here.
 free_ai: REPLACE_WITH_FREE_AI_KEY
 
 # ── Paid partner gateway (own key, own billing — sits between free/paid) ──

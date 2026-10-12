@@ -65,7 +65,6 @@ opencode **2.0.11** (V2) with the repo's `opencode.jsonc`:
 opencode run --model omniroute/l1-orchestrator   "Reply with exactly: ack"   -> ack
 opencode run --model omniroute/l2-worker   "Reply with exactly: ack"   -> ack
 opencode run --model omniroute/l3-driver   "Reply with exactly: ack"   -> ack
-opencode run --model omniroute/l3-driver-clean "Reply with exactly: ack" -> ack
 ```
 
 The legacy V1 CLI (`npm opencode-ai`) silently **omits** the V2 `providers`

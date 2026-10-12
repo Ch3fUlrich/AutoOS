@@ -76,8 +76,10 @@ Full walkthrough and limits: [Browser UI](docs/web-ui.md).
 
 Every agent installed here — OpenCode, Zed's agent panel, Neovim + sidekick,
 OpenHands — talks to one local router (OmniRoute on `127.0.0.1:20128`), with
-LiteLLM on `:4000` as a manual fallback. Free legs go first; the `tierN-clean`
-twins are the paid-only, no-training chains for sensitive data.
+LiteLLM on `:4000` as a manual fallback. Free legs go first, paid overflow after;
+the `-free-only` twins are the zero-spend chains. Private work takes the same tiers
+— AO-MIMO-D1201 (2026-10-12) dropped the paid-only `tierN-clean` class, and a secret
+stays off a model leg by not being put in the task text.
 
 ```powershell
 .\configuration\omniroute\apply.ps1           # register keys, build the combos

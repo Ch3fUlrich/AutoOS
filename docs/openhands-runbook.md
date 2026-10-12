@@ -16,7 +16,9 @@ read it, then continue from `docs/handoff.md` Open item 1.
   (`configuration/omniroute/combos.json`): `l1-orchestrator` = the `meta_api`
   Muse Spark contributor head with a free `gemini` fallback, `xhigh`, and a
   128k promise (a route may only advertise what its smallest servable leg
-  takes — PROVFIX3), `*-clean` = paid legs only (privacy). Full skill:
+  takes — PROVFIX3). There is no `*-clean` class any more (AO-MIMO-D1201,
+  2026-10-12): privacy-sensitive work rides these same combos, and a secret
+  stays off a model leg by not being put in the task text. Full skill:
   `.agents/skills/unattended-orchestration/unattended-orchestration.md`. Live board: `docs/tasks.md`.
 
 ## 2. Get the repo in your sandbox

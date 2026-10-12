@@ -853,8 +853,8 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
       <div class="card-body">
         <div class="legend">
           <span>Role labels explain themselves; the t1/t2/t3/t4 ids are the contract (renamed 2026-09-23).</span>
-          <span><span class="chip chip-by">-clean</span> same tier, nothing that trains on prompts</span>
           <span><span class="chip chip-by">-free-only</span> same tier, zero paid legs</span>
+          <span>Private work takes these same tiers (AO-MIMO-D1201, 2026-10-12 dropped the <span class="chip chip-by">-clean</span> class); a secret stays off a model leg by not being put in the task text.</span>
         </div>
         <div class="legend">
           <span><span class="chip chip-ok">up</span> answers on this machine</span>
@@ -863,9 +863,9 @@ a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink
         </div>
         <div class="services" id="services"><div class="svc">checking services…</div></div>
         <dl class="grid" id="routerTiers">
-          <div class="kv"><dt>l1-orchestrator · orchestrator-1M</dt><dd>1M ctx · spark-only + #high (xhigh) · sensitive: l1-orchestrator-clean (paid legs only) · zero spend: l1-orchestrator-free-only</dd></div>
-          <div class="kv"><dt>l2-worker · smart-reasoning-128k</dt><dd>≤128k ctx · gemini flash → gpt-oss → cheap-inference → deepseek → zen · sensitive: l2-worker-clean (paid only) · zero spend: l2-worker-free-only</dd></div>
-          <div class="kv"><dt>l3-driver · cheap-driver-128k</dt><dd>≤128k ctx · mistral code → qwen → cheap-inference → deepseek → zen · sensitive: l3-driver-clean (paid only) · zero spend: l3-driver-free-only</dd></div>
+          <div class="kv"><dt>l1-orchestrator · orchestrator-1M</dt><dd>1M ctx · spark-only + #high (xhigh) · zero spend: l1-orchestrator-free-only</dd></div>
+          <div class="kv"><dt>l2-worker · smart-reasoning-128k</dt><dd>≤128k ctx · gemini flash → gpt-oss → cheap-inference → deepseek → zen · zero spend: l2-worker-free-only</dd></div>
+          <div class="kv"><dt>l3-driver · cheap-driver-128k</dt><dd>≤128k ctx · mistral code → qwen → cheap-inference → deepseek → zen · zero spend: l3-driver-free-only</dd></div>
           <div class="kv"><dt>t4-rag · rag-grounded-128k</dt><dd>cohere command-a → command-r-plus · grounded QA, not reasoning</dd></div>
         </dl>
       </div>
