@@ -3166,6 +3166,8 @@ def prune_sandboxes(apply=False, min_age_hours=MIN_AGE_HOURS_DEFAULT, roots=None
                 freed = sum(delete_tree(nm, root_fd) for nm in rec["dirs"])
                 if rec["toolhome"]:
                     freed += delete_tree(rec["toolhome"], root_fd)
+                if base:
+                    delete_qoder_projects(os.path.join(path, base))
                 results.append((run_id, path, freed // _MIB, "pruned", "ended and aged"))
         finally:
             os.close(root_fd)
@@ -12073,11 +12075,27 @@ JAIL_WRAPPER = "landlock_exec.py"
 #                  (the worker's own tool call) that asks for its `/proc/self` is
 #                  denied; the client itself works.
 #   home_ro        directories under the run's `$HOME`, read-only, that a
-#                  own-account client authenticates from. qoder's journal
-#                  (`~/.qoder/projects`, what FAMILYFENCE reads) is deliberately
-#                  NOT writable from inside the jail: a worker that could plant a
-#                  transcript there could choose who reviews it. The honest cost
-#                  is `writer: unresolved` for a jailed qoder run.
+#                  own-account client authenticates from.
+#   home_rw_slug   the components under the run's `$HOME` that name the PARENT of
+#                  a per-run directory this client must write during startup, where
+#                  the leaf is the run's own `cwd` with every path separator turned
+#                  into `-` (`sandbox_slug_dir`). qoder keeps its real `$HOME` (only
+#                  a gateway client is re-homed to the toolhome), and it writes its
+#                  per-project session transcript to `~/.qoder/projects/<slug>/<id>`
+#                  at startup — measured EACCES on the jailed canary (run
+#                  20261012-042616-…-canary-0aa1e8), which killed the client before
+#                  it ever answered. The grant is the narrowest directory that fixes
+#                  it: the ONE per-run slug dir, never all of `~/.qoder` and never
+#                  `~/.qoder/projects` (which is every other run's journal). Because
+#                  `~/.qoder` stays read-only, a jailed worker can still only write
+#                  transcripts for ITS OWN cwd — it cannot plant a transcript under
+#                  another run's slug to pick who reviews it (FAMILYFENCE). Landlock
+#                  only governs a directory that exists when the ruleset is built,
+#                  so the spawner `mkdir -p` this dir (0700) at the launch site
+#                  before wrapping the client — see `provision_runtime_dir`.
+#                  LIMIT: the transcript is the client's own session journal; a
+#                  jailed worker CAN edit its own run's transcript, so a jailed
+#                  qoder's FAMILYFENCE `writer:` is untrustworthy by construction.
 #   ungrantable    a path this client needs that NO grant may name — the jail is
 #                  therefore not offered to it (see `jail_gate`: a private lane is
 #                  refused, a public one runs as it did before this mechanism).
@@ -12093,7 +12111,7 @@ JAIL_RO_BY_CLIENT = {
         "home_ro": (),
     },
     "opencode": {"proc_self": True},
-    "qodercli": {"home_ro": (".qoder",)},
+    "qodercli": {"home_ro": (".qoder",), "home_rw_slug": (".qoder", "projects")},
     "agy": {"tree": 1},
     "claude": {"ungrantable": os.path.join("~", ".claude")},
 }
@@ -12210,14 +12228,37 @@ def jail_tree(prog: str, cap: int, home: str) -> list:
     return out
 
 
+def sandbox_slug_dir(home: str, parts, cwd: str) -> str | None:
+    """`$HOME/<parts>/<cwd with separators as '-'>`, or None.
+
+    The leaf is how qoder keys its per-project transcript: the run's own working
+    directory with every path separator replaced by `-` — the exact slug in the
+    startup EACCES (`~/.qoder/projects/-home-…-<repo>-<run id>`). Because the cwd
+    carries the run id, the directory is unique to one run. One function so the
+    grant and the pre-jail `mkdir` cannot disagree about the path.
+    """
+    if not parts or not cwd:
+        return None
+    return os.path.join(str(home), *parts, str(cwd).replace(os.sep, "-"))
+
+
+def jail_home_rw_dirs(entry: dict, home: str, cwd: str) -> list:
+    """The per-run writable directories this client's entry names (may be empty)."""
+    path = sandbox_slug_dir(home, entry.get("home_rw_slug"), cwd)
+    return [path] if path else []
+
+
 def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     """{rw, ro, ro_file} this launch needs, as absolute paths.
 
     The writable world is the sandbox and nothing else: the clone, its two private
     siblings (`SANDBOX_PRIVATE_SUFFIXES`), the per-run XDG dirs the plan points the
-    client at, and `/dev`. The readable world is the table plus the program's own
-    install tree. A path that does not exist is skipped by the wrapper, so an
-    optional sibling costs nothing.
+    client at, `/dev`, and any per-run directory an own-account client must write at
+    startup (`home_rw_slug` — qoder's own `~/.qoder/projects/<slug>`). The readable
+    world is the table plus the program's own install tree. A path that does not exist
+    is skipped by the wrapper, so an optional sibling costs nothing — and the client's
+    per-run home dir is provisioned by the launcher before this argv execs, never
+    created here (a dry run touches the filesystem for nothing).
     """
     entry = entry or jail_client_entry(cmd)
     home = env.get("HOME") or os.path.expanduser("~")
@@ -12240,6 +12281,7 @@ def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
         ro.append("/proc/self")
     rw = ([cwd, toolhome_dir(cwd), cwd + OPENCODE_DATA_SUFFIX]
           + list(entry.get("rw") or []))
+    rw += jail_home_rw_dirs(entry, home, cwd)
     rw += [env[name] for name in JAIL_ENV_RW if env.get(name)]
     return {"rw": jail_admissible(jail_unique([str(p) for p in rw]), protected),
             "ro": jail_admissible(jail_unique([str(p) for p in ro]), protected),
@@ -12355,6 +12397,57 @@ def jail_line(jail: dict) -> str:
                                 jail.get("reason") or "-",
                                 " [%s]" % jail["override"]
                                 if jail.get("override") else "")
+
+
+def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:
+    """Create, 0700, the per-run directories the jail is about to grant rw to.
+
+    Landlock only governs a directory that already exists when the ruleset is built,
+    so a `home_rw_slug` grant on a not-yet-created path would be silently skipped by
+    the wrapper and the client would die on the same EACCES the grant was meant to
+    clear. Provisioning is the launcher's job and happens ONLY here, at the real
+    launch — never in `jail_grants`, so a `--dry-run` plan still writes nothing.
+    Reuses `provision_runtime_dir`, which refuses to follow a symlink or tighten a
+    directory owned by another uid.
+    """
+    if jail.get("path") != "landlock":
+        return
+    home = env.get("HOME") or os.path.expanduser("~")
+    entry = jail_client_entry(cmd)
+    for path in jail_home_rw_dirs(entry, home, cwd):
+        provision_runtime_dir(path)
+
+
+def delete_qoder_projects(sandbox_path: str, home: str | None = None) -> int:
+    """Remove this ended run's transcript dir under `$HOME/.qoder/projects`, if any.
+
+    The mirror of `jail_provision` (P1e): the launcher created
+    `~/.qoder/projects/<slug>` so a jailed qoder could write its journal; when the
+    sandbox is pruned the directory goes with it. Guarded the same way — a symlink,
+    a non-directory, a directory of another uid, or anything that is not a DIRECT
+    child of `~/.qoder/projects` is left alone, so a stale or hostile slug can never
+    turn this into a write outside the journal. Never raises past the prune's rc: a
+    cleanup that fails is one less directory, not a different exit code.
+    """
+    parts = JAIL_RO_BY_CLIENT.get("qodercli", {}).get("home_rw_slug")
+    if not parts:
+        return 0
+    home = os.path.expanduser("~") if home is None else home
+    projects = os.path.join(home, *parts)
+    target = sandbox_slug_dir(home, parts, sandbox_path)
+    if not target or os.path.dirname(target) != projects:
+        return 0
+    try:
+        st = os.lstat(target)
+    except OSError:
+        return 0
+    if _provision_path_usable(st, target, "it") is not None:
+        return 0
+    try:
+        shutil.rmtree(target)
+        return 1
+    except OSError:
+        return 0
 
 
 def jailed_argv(cwd: str, cmd, env: dict, jail: dict) -> list:
@@ -12789,6 +12882,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # other), so `systemd-run … -- python3 landlock_exec.py … -- <client>` is the
     # shape both `cancel` and the jail were built for.
     jail = jail_decision(cwd, cmd, env, isolated)
+    jail_provision(cwd, cmd, env, jail)
     cmd = jailed_argv(cwd, cmd, env, jail)
     if jail["path"] == "landlock":
         print("autoos-agent: client runs jailed (landlock abi %s)" % jail["abi"],

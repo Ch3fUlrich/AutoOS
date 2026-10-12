@@ -91,6 +91,13 @@ probe("tmp_write", lambda: write(cfg["tmp_canary_write"]))
 probe("outside_read", lambda: read(cfg["outside_canary_file"]))
 probe("sandbox_write", lambda: write(os.path.join(cfg["sandbox"], "inside.txt")))
 probe("toolhome_write", lambda: write(os.path.join(cfg["toolhome"], "cache.txt")))
+# P1e: a jailed qoder must be able to write ITS OWN per-run projects journal (the
+# startup mkdir that killed the canary), and still be denied every OTHER run's.
+# The own dir is provisioned by the launcher, so writing its session file models the
+# startup; the foreign probe models qoder mkdir-ing a DIFFERENT run's slug dir.
+probe("qoder_journal_own",
+      lambda: write(os.path.join(cfg["qoder_own_dir"], "session.jsonl")))
+probe("qoder_journal_foreign", lambda: os.makedirs(cfg["qoder_foreign_dir"]))
 
 
 def git_status():
@@ -268,6 +275,9 @@ class JailLiveTests(unittest.TestCase):
         return tcp
 
     def _cfg(self, tcp):
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        own = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        foreign = os.path.join(self.home, *parts, "-home-some-other-run-sandbox")
         cfg = os.path.join(self.sandbox, "cfg.json")
         self._write(cfg, json.dumps({
             "home": self.home,
@@ -277,6 +287,7 @@ class JailLiveTests(unittest.TestCase):
             "tmp_canary_write": self.tmp_canary_write,
             "outside_canary_file": self.outside_canary,
             "sandbox": self.sandbox, "toolhome": self.toolhome,
+            "qoder_own_dir": own, "qoder_foreign_dir": foreign,
             "tcp_port": tcp.getsockname()[1],
             "abstract_name": self.abstract_name,
             "pathname_socket": self.pathname,
@@ -333,6 +344,82 @@ class JailLiveTests(unittest.TestCase):
         self.assertFalse(os.path.exists(planted),
                          "a jailed qoder run wrote into the journal the FAMILYFENCE "
                          "reader trusts: it could choose who reviews it")
+
+    def test_a_jailed_qoder_writes_its_own_journal_and_no_other_run_s(self):
+        """P1e positive control: the startup mkdir that killed the canary. A jailed
+        qoder gets ONE writable directory — its own per-run projects slug — and the
+        foreign slug (another run's journal, the FAMILYFENCE reader's trust root)
+        stays denied."""
+        rc, report = self._spawn("qodercli")
+        self.assertEqual(int(rc), 0, self.spawn_log[-3000:])
+        self.assertEqual(report.get("qoder_journal_own"), "ok", report)
+        self.assertEqual(report.get("qoder_journal_foreign"), "denied", report)
+        # the launcher provisioned the own dir before jailing, mode 0700
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        own = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        self.assertTrue(os.path.isdir(own), own)
+        self.assertEqual(os.stat(own).st_mode & 0o777, 0o700, own)
+
+    def test_qoder_rw_is_exactly_the_per_run_projects_dir(self):
+        """The plan's writable world for qoder names ONE thing under the home: the
+        per-run projects slug — never `~/.qoder`, never `~/.qoder/projects` (every
+        other run's journal), never a deny name or the shared temp."""
+        entry = agent.jail_client_entry([self._stub("qodercli")])
+        env = {"HOME": self.home}
+        grants = agent.jail_grants(self.sandbox, [self._stub("qodercli")], env, entry)
+        parts = entry["home_rw_slug"]
+        own = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        qoder_root = os.path.join(self.home, ".qoder")
+        projects = os.path.join(self.home, *parts)
+        self.assertIn(own, grants["rw"], grants)
+        self.assertNotIn(qoder_root, grants["rw"], "all of ~/.qoder is writable")
+        self.assertNotIn(projects, grants["rw"], "every run's journal is writable")
+        self.assertNotIn(self.home, grants["rw"], "the whole home is writable")
+        self.assertIn(qoder_root, grants["ro"], "qoder can no longer read its store")
+        self.assertNotIn(qoder_root, grants["ro_file"])
+        # no grant may COVER a secret: host $HOME, the shared temp, or any deny name.
+        secrets = [self.home, tempfile.gettempdir()] + [
+            os.path.join(self.home, n) for n in agent.JAIL_DENY_NAMES]
+        for kind, paths in grants.items():
+            for path in paths:
+                real = os.path.realpath(path)
+                self.assertFalse(
+                    any(f == real or f.startswith(real + os.sep) for f in secrets),
+                    "qoder grant %s=%s covers a forbidden directory (a secret is "
+                    "beneath it)" % (kind, path))
+                self.assertFalse(agent.jail_denied(path, self.home),
+                                 "qoder grant %s=%s covers the operator's files"
+                                 % (kind, path))
+
+    def test_delete_qoder_projects_prunes_only_this_runs_slug(self):
+        """The prune mirror: when a sandbox is reclaimed its own per-run projects
+        dir goes with it, but the journal directory, another run's slug and any
+        file sitting in `~/.qoder/projects` are all left alone."""
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        own = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        os.makedirs(own, mode=0o700)
+        self._write(os.path.join(own, "session.jsonl"), "mine\n")
+        foreign = os.path.join(self.home, *parts, "-home-some-other-run")
+        os.makedirs(foreign)
+        keep = os.path.join(self.home, *parts, "keep.jsonl")
+        self._write(keep, "not mine to delete\n")
+        with contextlib.redirect_stderr(io.StringIO()):
+            removed = agent.delete_qoder_projects(self.sandbox, home=self.home)
+        self.assertEqual(removed, 1)
+        self.assertFalse(os.path.exists(own), "this run's journal dir survived")
+        self.assertTrue(os.path.isdir(foreign), "another run's slug was deleted")
+        self.assertTrue(os.path.exists(keep), "the projects dir's own files went")
+
+    def test_delete_qoder_projects_refuses_a_non_directory_slug(self):
+        """A slug that is a file or a symlink is not this run's provisioned dir:
+        it is left alone rather than followed or deleted."""
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        own = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        self._write(own, "not a directory\n")
+        with contextlib.redirect_stderr(io.StringIO()):
+            removed = agent.delete_qoder_projects(self.sandbox, home=self.home)
+        self.assertEqual(removed, 0)
+        self.assertTrue(os.path.exists(own))
 
     def test_the_grant_table_never_names_an_operator_path(self):
         """Review item (b), stated once for every leg: a grant governs what is
