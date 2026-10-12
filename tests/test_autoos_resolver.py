@@ -3493,21 +3493,13 @@ class PlanReviewCardTests(unittest.TestCase):
         # T0-PAID-4 Q1 (D-212/D-219): a paid entry must not review a qwen card
         # while a free entry is usable -- the free google reviewer takes it,
         # which is also where the D657-D2 list now leads (its head is free).
-        # D-1181 (AO-MIMO-V26, 2026-10-12): both google providers are switched
-        # off, so the chain's first *servable* free row is the next one down --
-        # the meta contributor seat. The rule is untouched (free still beats the
-        # paid deepseek row); only which row the data answers changed.
         review = self.plan(author="qwen")["review"]
         self.assertEqual(review["author_family"], "qwen")
-        self.assertEqual(review["reviewer"]["family"], "meta")
-        self.assertEqual(review["reviewer"]["client"], "opencode")
-        self.assertIn("muse-spark-1.3-contributor-free",
-                      review["reviewer"]["model"])
+        self.assertEqual(review["reviewer"]["family"], "google")
+        self.assertEqual(review["reviewer"]["client"], "gemini")
+        self.assertIn("gemini-3.8-flash", review["reviewer"]["model"])
         self.assertIsNot(review["reviewer"].get("paid"), True)
         self.assertEqual(review["state"], "resolved")
-        self.assertIn("unavailable", [row for row in review["skipped"]
-                                      if row["family"] == "google"][0]["reasons"],
-                      "the google head is off, not silently absent")
 
     def test_the_reason_says_who_authored_it(self):
         self.assertIn("author qwen", self.plan(author="qwen")["review"]["reason"])
@@ -3561,9 +3553,7 @@ class PlanReviewCardTests(unittest.TestCase):
         plan = self.ghost_review_plan(reg)
         review = plan["review"]
         self.assertIsNotNone(review["reviewer"])
-        # D-1181 (2026-10-12): the chain's usable head is the free meta row (both
-        # google providers are off), so that is the row a ghost must not displace.
-        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["family"], "google")
         ghost_rows = [s for s in review["skipped"]
                       if s["model"] == "ghost-model"]
         self.assertTrue(ghost_rows, review["skipped"])
@@ -3584,10 +3574,7 @@ class PlanReviewCardTests(unittest.TestCase):
         plan = self.ghost_review_plan(reg)
         review = plan["review"]
         self.assertIsNotNone(review["reviewer"])
-        # D-1181 (2026-10-12): with both google providers off, the usable head of
-        # the reviewer chain is the free meta row -- the ghost is still refused and
-        # the walk still lands on that row, whether it sits before or after it.
-        self.assertEqual(review["reviewer"]["family"], "meta")
+        self.assertEqual(review["reviewer"]["family"], "google")
         ghost_rows = [s for s in review["skipped"]
                       if s["model"] == "ghost-model"]
         self.assertTrue(ghost_rows, review["skipped"])
@@ -4411,11 +4398,6 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
         # the cached credit tail — so the same card is pinned against the route
         # that still declares a Claude leg (opus-5-5), and l2-orchestrator is
         # pinned to hold nothing because it names nothing.
-        # D-1181 (AO-MIMO-V26, 2026-10-12): providers.vertex_ai is switched off,
-        # so the route's vertex tail leg no longer reaches `kept` -- it is
-        # skipped as `unavailable`, which is the same answer for a card with the
-        # orchestrator env set and for one without. The fact under test (no leg
-        # of this route is held back by the Claude budget gate) is unchanged.
         on = self.agy_servable(self.on_registry())
         state = {name: {"installed": True, "signed_in": True, "reason": ""}
                  for name in on["clients"]}
@@ -4425,11 +4407,9 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
+        self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
         self.assertIn(("bazaarlink", "deepseek/deepseek-v4-flash-0731free:free"),
                       kept)
-        self.assertEqual([leg for leg, reasons in skipped.items()
-                          if any(x.startswith("unavailable") for x in reasons)],
-                         ["vertex/gemini-3.8-flash"])
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])

@@ -20,6 +20,24 @@
       }
     },
     {
+      "id": "l1-orchestrator-clean",
+      "name": "L1 · l1-orchestrator-clean · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
       "id": "l1-orchestrator-paid",
       "name": "L1 · l1-orchestrator-paid · 1M",
       "context": 1000000,
@@ -61,6 +79,24 @@
           "openhands"
         ],
         "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker-clean",
+      "name": "L2 · l2-worker-clean · 128k",
+      "context": 128000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
           "opencode",
           "zed",
           "openhands"
@@ -111,6 +147,23 @@
       }
     },
     {
+      "id": "l2-orchestrator-clean",
+      "name": "L2 · l2-orchestrator-clean · 1M",
+      "context": 1048576,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
       "id": "l3-driver",
       "name": "L3 · l3-driver · 128k",
       "context": 128000,
@@ -122,6 +175,24 @@
           "openhands"
         ],
         "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-clean",
+      "name": "L3 · l3-driver-clean · 128k",
+      "context": 128000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
           "opencode",
           "zed",
           "openhands"
@@ -171,10 +242,44 @@
       }
     },
     {
+      "id": "l3-implementer-clean",
+      "name": "L3 · l3-implementer-clean · 128k",
+      "context": 128000,
+      "output": 8192,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
       "id": "l3-researcher",
       "name": "L3 · l3-researcher · 1M",
       "context": 1000000,
       "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-researcher-clean",
+      "name": "L3 · l3-researcher-clean · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -257,6 +362,24 @@
       }
     },
     {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash · 1M (free→credit)",
+      "context": 1048576,
+      "output": 65536,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
       "id": "or-nemotron-3-super-free",
       "name": "Nemotron-3-Super-120B via OpenRouter :free",
       "context": 262144,
@@ -309,6 +432,23 @@
       "name": "Qwen3.8-27B via OVH (credit)",
       "context": 128000,
       "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "vertex-gemini-3.8-flash",
+      "name": "Gemini-3.8-Flash via Vertex (credit)",
+      "context": 1048576,
+      "output": 65536,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
       "surfaces": {
         "omniroute": [
           "opencode",
