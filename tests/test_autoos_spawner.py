@@ -27455,6 +27455,219 @@ class ToolHomeCapTests(_PruneSandboxBase):
         self.assertLess(end.index("cap_toolhomes("), end.index("isolate_clone(source"),
                         "the cap must run before a new sandbox is provisioned")
 
+FAKE_ZEN = "zen-test-fake-key-0000"
+
+
+def zen_root(text):
+    """A throwaway ROOT holding `text` as configuration/api-keys.yml (None: no
+    file). Not a git repo, so key_files() stops here and no test can read the
+    host's real key."""
+    tmp = tempfile.mkdtemp(prefix="autoos-zen-keys-")
+    if text is not None:
+        os.makedirs(os.path.join(tmp, "configuration"))
+        with io.open(os.path.join(tmp, "configuration", "api-keys.yml"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(text)
+    return tmp
+
+
+def zen_cli_root():
+    """A throwaway ROOT for the CLI with its own configuration/, so the spawner
+    reads the keys file the test wrote. api-keys.yml is the one name never
+    symlinked — writing it must not reach through a link into the host's."""
+    tmp = tempfile.mkdtemp(prefix="autoos-zen-cli-")
+    for entry in os.scandir(str(ROOT)):
+        if entry.name != "configuration":
+            os.symlink(entry.path, os.path.join(tmp, entry.name))
+    os.makedirs(os.path.join(tmp, "configuration"))
+    for entry in os.scandir(os.path.join(str(ROOT), "configuration")):
+        if entry.name != "api-keys.yml":
+            os.symlink(entry.path, os.path.join(tmp, "configuration", entry.name))
+    with io.open(os.path.join(tmp, "configuration", "api-keys.yml"), "w",
+                 encoding="utf-8") as fh:
+        fh.write("zen: %s\n" % FAKE_ZEN)
+    return tmp
+
+
+class ZenKeyFileTests(unittest.TestCase):
+    """(f) zen_key(): the `zen` field read by name, and what is not a key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_the_zen_field_is_read_by_name(self):
+        root = zen_root("omniroute_server: not-the-zen-field\nzen: %s\n" % FAKE_ZEN)
+        self.addCleanup(shutil.rmtree, root, True)
+        self.assertEqual(FAKE_ZEN, self.agent.zen_key(root))
+
+    def test_a_placeholder_or_an_empty_field_reads_as_no_key(self):
+        for text in ("zen: REPLACE_WITH_ZEN_KEY\n", "zen:\n", None):
+            with self.subTest(text=text):
+                root = zen_root(text)
+                self.addCleanup(shutil.rmtree, root, True)
+                self.assertIsNone(self.agent.zen_key(root))
+
+    def test_reading_the_key_prints_nothing(self):
+        root = zen_root("zen: %s\n" % FAKE_ZEN)
+        self.addCleanup(shutil.rmtree, root, True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.agent.zen_key(root)
+        self.assertEqual("", err.getvalue())
+
+
+class WorkerEnvZenKeyTests(unittest.TestCase):
+    """(a) worker_env(..., zen_key=): the child gets OPENCODE_API_KEY only when
+    the caller hands one, and never inherits anyone else's."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.plan = {"cwd": "/tmp/sandbox", "env": {}}
+        self.base = {"PATH": "/usr/bin", "HOME": "/home/tester", "USER": "tester",
+                     "OPENCODE_API_KEY": "the-callers-own-zen-key"}
+
+    def env(self, key=None, zen=None, plan=None):
+        return self.agent.worker_env(plan or self.plan, key, base=self.base,
+                                     zen_key=zen)
+
+    def test_the_key_is_set_only_when_given(self):
+        self.assertEqual(FAKE_ZEN, self.env(zen=FAKE_ZEN)["OPENCODE_API_KEY"])
+        self.assertNotIn("OPENCODE_API_KEY", self.env())
+
+    def test_the_callers_value_is_never_inherited(self):
+        self.assertNotIn("the-callers-own-zen-key", self.env().values())
+        self.assertNotIn("the-callers-own-zen-key", self.env(zen=FAKE_ZEN).values())
+
+    def test_the_name_is_denied_so_a_plan_entry_cannot_set_it(self):
+        self.assertTrue(self.agent._worker_env_denied("OPENCODE_API_KEY"))
+        self.assertFalse(self.agent._plan_env_passed("OPENCODE_API_KEY"))
+        env = self.env(plan=dict(self.plan, env={"OPENCODE_API_KEY": "plan-value"}))
+        self.assertNotIn("OPENCODE_API_KEY", env)
+
+    def test_the_value_never_reaches_the_overlay_or_the_plan(self):
+        plan = dict(self.plan, env={"OPENCODE_CONFIG_CONTENT": json.dumps(
+            {"providers": {"omniroute": {"settings": {}}}})})
+        env = self.env(zen=FAKE_ZEN, plan=plan)
+        self.assertNotIn(FAKE_ZEN, env["OPENCODE_CONFIG_CONTENT"])
+        self.assertNotIn(FAKE_ZEN, json.dumps(plan))
+
+
+class ZenKeyPlanTests(unittest.TestCase):
+    """(c)/(d) and item 5: which plan the key is for, decided per plan."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.root = zen_root("zen: %s\n" % FAKE_ZEN)
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def zen(self, client, model, root=None):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            value = self.agent.plan_zen_key(client, model,
+                                            self.root if root is None else root)
+        return value, err.getvalue()
+
+    def test_a_free_opencode_leg_gets_the_key_and_no_warning(self):
+        value, err = self.zen("opencode", "opencode/mimo-v2.6-flash-free")
+        self.assertEqual(FAKE_ZEN, value)
+        self.assertEqual("", err)
+
+    def test_the_effort_rung_still_reads_as_a_free_leg(self):
+        self.assertEqual(FAKE_ZEN,
+                         self.zen("opencode", "opencode/mimo-v2.6-flash-free#high")[0])
+
+    def test_a_paid_or_gateway_model_never_gets_it_and_never_warns(self):
+        for model in ("opencode/gpt-5.4", "omniroute/muse", "omniroute/muse#high",
+                      "mimo-v2.6-flash-free", None):
+            with self.subTest(model=model):
+                value, err = self.zen("opencode", model)
+                self.assertIsNone(value)
+                self.assertEqual("", err)
+
+    def test_another_client_never_gets_it(self):
+        for client in ("qwen", "claude", "codex"):
+            with self.subTest(client=client):
+                self.assertIsNone(self.zen(client, "opencode/mimo-v2.6-flash-free")[0])
+
+    def test_a_free_leg_with_no_key_proceeds_anonymously_with_one_line(self):
+        keyless = zen_root(None)
+        self.addCleanup(shutil.rmtree, keyless, True)
+        value, err = self.zen("opencode", "opencode/mimo-v2.6-flash-free", keyless)
+        self.assertIsNone(value)
+        self.assertEqual("autoos-agent: no zen key in configuration/api-keys.yml "
+                         "(field zen); opencode/*-free seats may fail with "
+                         "Invalid credential\n", err)
+
+    def test_the_fallthrough_re_check_decides_from_the_plan_it_launches(self):
+        # (d) off a free leg onto a paid or gateway leg drops the key, onto a
+        # free leg it comes back — the same decision, asked per plan.
+        self.assertIsNone(self.zen("opencode", "opencode/gpt-5.4")[0])
+        self.assertIsNone(self.zen("opencode", "omniroute/muse")[0])
+        self.assertEqual(FAKE_ZEN,
+                         self.zen("opencode", "opencode/nemotron-3-ultra-free")[0])
+        src = io.open(AGENT, encoding="utf-8").read()
+        self.assertEqual(2, src.count("zen = plan_zen_key("),
+                         "both spawn sites decide from their own plan")
+        self.assertEqual(3, src.count("zen_key=zen"),
+                         "and both hand what they decided to worker_env")
+
+
+class ZenKeySpawnTests(unittest.TestCase):
+    """(b)/(e) at the CLI: the dry run names the env but never prints the value,
+    and --free pinned onto the authenticated gateway is refused before anything
+    exists."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+
+    def _dry(self, *argv, root=None):
+        env = clean_env(AUTOOS_STATE_DIR=self.state)
+        for name in ("AUTOOS_TASK_DIR", "OPENCODE_API_KEY"):
+            env.pop(name, None)
+        return run_agent("run", "--client", "opencode", *argv, "--dry-run",
+                         "reply with exactly: ack", env=env, root=root)
+
+    def test_a_free_dry_run_names_the_env_and_never_prints_the_value(self):
+        root = zen_cli_root()
+        self.addCleanup(shutil.rmtree, root, True)
+        r = self._dry("--free", "--isolate", "--lean", root=root)
+        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
+        self.assertIn("OPENCODE_API_KEY", r.stdout,
+                      "the dry run lists the env the child gets, by name")
+        self.assertNotIn(FAKE_ZEN, r.stdout + r.stderr)
+        self.assertEqual([], os.listdir(self.state))
+
+    def test_free_with_an_omniroute_model_pin_is_refused_rc_3(self):
+        r = self._dry("--free", "--model", "omniroute/muse", "--isolate")
+        self.assertEqual(3, r.returncode, r.stdout + r.stderr)
+        self.assertIn("drop --free", r.stderr)
+        self.assertIn("--free-model opencode/", r.stderr)
+        self.assertEqual([], os.listdir(self.state))
+
+    def test_free_with_an_omniroute_free_model_pin_is_refused_too(self):
+        r = self._dry("--free", "--free-model", "omniroute/muse", "--isolate")
+        self.assertEqual(3, r.returncode, r.stdout + r.stderr)
+        self.assertIn("drop --free", r.stderr)
+
+    def test_a_bare_pin_that_qualifies_onto_the_gateway_is_not_this_refusal(self):
+        # The refusal reads the pin as TYPED: a bare id the pin settlement below
+        # qualifies onto omniroute/* is the caller's provider choice, not this
+        # mistake (test_t2_record_pin owns that behaviour).
+        r = self._dry("--free", "--model", "ovh-direct-qwen3.8-27b", "--isolate")
+        self.assertNotIn("drop --free", r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
