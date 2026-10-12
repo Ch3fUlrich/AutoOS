@@ -12100,6 +12100,10 @@ JAIL_RO_BY_CLIENT = {
 # What the sandbox's own writable world is, beyond the clone and its two siblings:
 # the per-run XDG dirs the plan points the client at (its sockets, its config).
 JAIL_ENV_RW = ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME")
+# Names under the operator's real home that no grant may reach. `~/.config` is in
+# the picture because `~/.config/gh` is under it, not because it is one itself.
+JAIL_DENY_NAMES = (".claude", ".ssh", os.path.join(".config", "gh"),
+                  ".omniroute", ".aws")
 # The shebang interpreter a resolved entry point needs readable, by extension.
 JAIL_INTERPRETER = {".js": "node", ".mjs": "node", ".py": "python3"}
 JAIL_REASON_WINDOWS = "windows (AO-JAIL-WINDOWS is the separate lane)"
@@ -12122,6 +12126,46 @@ def jail_unique(paths: list) -> list:
         if path and path not in seen:
             seen.add(path)
             out.append(path)
+    return out
+
+
+def jail_denied(path: str, protected_home: str | None = None) -> bool:
+    """Would granting `path` hand the worker the operator's own files?
+
+    A Landlock rule governs everything BENEATH the directory it names, so the
+    question is never "is this path secret" but "does it contain one":
+    `~/.config` is refused because `~/.config/gh` sits under it, `/home/you`
+    because all of it does, and the shared `/tmp` because every other run's
+    scratch does. A per-run directory inside the same tree stays admissible —
+    the sandbox itself lives under the home, and refusing that would refuse the
+    jail. `protected_home` defaults to this process's own home; the RUN's HOME
+    can be the sandbox toolhome, and a fence keyed to that protects nothing.
+    """
+    home = os.path.expanduser("~") if protected_home is None else protected_home
+    real = os.path.realpath(str(path))
+    secrets = [home, tempfile.gettempdir()] + [os.path.join(home, n)
+                                               for n in JAIL_DENY_NAMES]
+    return any(secret == real or secret.startswith(real + os.sep)
+               for secret in secrets if secret)
+
+
+def jail_admissible(paths: list, protected_home: str) -> list:
+    """Drop (and name) every grant that would cover the operator's files.
+
+    The env-derived XDG dirs are the only grants a caller can bring: `worker_env`
+    pops `XDG_RUNTIME_DIR`/`XDG_CONFIG_HOME` and the plan points the rest at
+    per-run directories, but an inherited `XDG_CONFIG_HOME` would otherwise be
+    granted read-write to a worker, and that directory contains `~/.config/gh`.
+    Dropping the grant is the conservative half; saying so on stderr is the other
+    half — a jail silently narrower than the table is the defect class P1b is.
+    """
+    out = []
+    for path in paths:
+        if jail_denied(path, protected_home):
+            print("autoos-agent: refusing to grant the jail %s: it covers the "
+                  "operator's own files" % path, file=sys.stderr)
+            continue
+        out.append(path)
     return out
 
 
@@ -12177,6 +12221,7 @@ def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     """
     entry = entry or jail_client_entry(cmd)
     home = env.get("HOME") or os.path.expanduser("~")
+    protected = os.path.expanduser("~")
     argv = list(cmd)
     prog = argv[client_program_index(argv)] if argv else ""
     ro = list(entry["ro"]) + jail_tree(prog, entry["tree"], home)
@@ -12196,9 +12241,10 @@ def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     rw = ([cwd, toolhome_dir(cwd), cwd + OPENCODE_DATA_SUFFIX]
           + list(entry.get("rw") or []))
     rw += [env[name] for name in JAIL_ENV_RW if env.get(name)]
-    return {"rw": jail_unique([str(p) for p in rw]),
-            "ro": jail_unique([str(p) for p in ro]),
-            "ro_file": jail_unique([str(p) for p in entry["ro_file"]])}
+    return {"rw": jail_admissible(jail_unique([str(p) for p in rw]), protected),
+            "ro": jail_admissible(jail_unique([str(p) for p in ro]), protected),
+            "ro_file": jail_admissible(
+                jail_unique([str(p) for p in entry["ro_file"]]), protected)}
 
 
 def jail_decision(cwd: str, cmd, env: dict, isolated: bool | None = None) -> dict:
@@ -12219,7 +12265,10 @@ def jail_decision(cwd: str, cmd, env: dict, isolated: bool | None = None) -> dic
     `isolated=None` reads the disk: an --isolate sandbox always stands with its
     `.toolhome` sibling (the provisioner made it before the client starts), so the
     sibling IS the fact. A caller that must decide before the clone exists
-    (`--dry-run`, the worker record) passes `bool(plan["sandbox"])` instead.
+    (`--dry-run`, the worker record) passes `bool(plan["sandbox"])` instead — and
+    so does `run_client`, because the reverse inference is not sound: a lane
+    checkout carries a stale `.toolhome` sibling of its own and a tier-1 run in
+    the caller's tree is in-place by design, unjailed and never refusable.
     """
     abi = landlock.available()
     entry = jail_client_entry(cmd)
@@ -12660,7 +12709,7 @@ def cli_scope_unit(run_id, attempt) -> str:
 
 
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
-               run_id=None, attempt=None) -> int:
+               run_id=None, attempt=None, isolated: bool | None = None) -> int:
     """Run one client in its own process group; reap whatever it leaves behind.
 
     The client leads a session of its own on purpose — but that is exactly the
@@ -12739,7 +12788,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     # owns who can be killed, Landlock owns what can be read; neither replaces the
     # other), so `systemd-run … -- python3 landlock_exec.py … -- <client>` is the
     # shape both `cancel` and the jail were built for.
-    jail = jail_decision(cwd, cmd, env)
+    jail = jail_decision(cwd, cmd, env, isolated)
     cmd = jailed_argv(cwd, cmd, env, jail)
     if jail["path"] == "landlock":
         print("autoos-agent: client runs jailed (landlock abi %s)" % jail["abi"],
@@ -13921,9 +13970,12 @@ def cmd_run(args, cfg: dict) -> int:
                 plan["sandbox"]["path"], plan["sandbox"]["branch"]))
         # AO-OPENCODE-JAIL P1b item 4: the preview shows the argv that would ACTUALLY
         # exec — wrapper and all — because a plan line the launch does not match is
-        # the one defect this whole mechanism was written to prevent. Resolved the
-        # same way the launch resolves it; a client that is not installed keeps its
-        # bare name here and is named as missing by the pre-check below.
+        # the one defect this whole mechanism was written to prevent. The jail is
+        # DECIDED on the resolved program (the per-client grant table and the
+        # install-tree walk follow the real binary, and a `qoder` plan really starts
+        # `qodercli`); the printed client keeps the name the plan carries, because
+        # the launch has always resolved it only at `Popen` (WINSHIM) and the
+        # pre-check below names a client that is not there.
         try:
             preview_cmd = resolve_client_executable(plan["cmd"])
         except ClientMissing:
@@ -13934,7 +13986,7 @@ def cmd_run(args, cfg: dict) -> int:
                           isolated=bool(plan["sandbox"])),
             route.get("privacy", "public"), bool(getattr(args, "allow_unjailed", False)))
         print("would run: " + " ".join(shlex.quote(c) for c in
-                                       jailed_argv(plan["cwd"], preview_cmd,
+                                       jailed_argv(plan["cwd"], list(plan["cmd"]),
                                                    preview_env, jail_preview)))
         print(jail_line(jail_preview))
         print("cwd: %s" % plan["cwd"])
@@ -14290,6 +14342,10 @@ def cmd_run(args, cfg: dict) -> int:
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                                 capture=capture,
+                                # P1b: the plan knows whether this run is an --isolate
+                                # sandbox; the on-disk sibling is only the fallback for
+                                # a caller with no plan (and a lane checkout has one).
+                                isolated=bool(plan.get("sandbox")),
                                 # SB-B merge: every attempt — the first and each
                                 # fallthrough re-run — leads a new session, so every
                                 # attempt re-records its group in the runner-private

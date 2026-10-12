@@ -836,15 +836,20 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("qodercli", r.stdout)
 
+    # P1b: `would run:` is the argv that would really exec, so it now carries the
+    # resolved program path and, for a sandbox, the landlock wrapper in front of
+    # it. What these two assert is WHICH client the plan picked, so match the
+    # name anywhere on the line - true whether or not the client resolves to an
+    # absolute path on the host running the suite.
     def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
         r = plan_of("--isolate", "edit README.md")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("would run: opencode", r.stdout)
+        self.assertRegex(r.stdout, r"would run: .*\bopencode run")
 
     def test_the_no_client_default_is_still_opencode(self):
         r = plan_of("t")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("would run: opencode", r.stdout)
+        self.assertRegex(r.stdout, r"would run: .*\bopencode run")
 
 
 class ReviewFindingTests(unittest.TestCase):
@@ -1201,7 +1206,7 @@ class McpToolTests(unittest.TestCase):
         st = self.wait_done(out["id"])
         self.assertEqual(st["state"], "completed")
         text = mcp_server.result(out["id"])["text"]
-        self.assertIn("would run: opencode run --standalone --agent t3-reviewer", text)
+        self.assertRegex(text, r"would run: .*\bopencode run --standalone --agent t3-reviewer")
         self.assertIn("lean:", text)  # reviewers default to lean
 
     def test_state_lives_under_the_state_dir_agents(self):
@@ -5842,6 +5847,14 @@ class IsolateContainmentTests(unittest.TestCase):
             # the plan (see build_plan_with_fake below), because the child env is
             # an allowlist now.
             env["AUTOOS_CLAUDE_CRITICAL"] = "test: agy containment harness"
+            # AO-OPENCODE-JAIL P1b: this class measures the spawner's post-run
+            # DETECTOR, and a detector only fires for a leak that actually
+            # happened. On a Landlock kernel the jail stops the stray write
+            # before the client can commit it — which is the point of the jail,
+            # and what tests/test_landlock_spawn.py measures with a live spawn —
+            # so the class drives the wrapper's documented no-Landlock seam:
+            # same sandbox, same fake client, no kernel fence.
+            env["LANDLOCK_EXEC_FORCE_ABI0"] = "1"
             out, err = io.StringIO(), io.StringIO()
 
             # FF1 (D-106): the child env is an allowlist of the caller's, so a
@@ -5857,6 +5870,11 @@ class IsolateContainmentTests(unittest.TestCase):
                 return plan
 
             with mock.patch.dict(os.environ, env, clear=True):
+                # `available()` memoises the probe for the whole process, so the
+                # seam is read fresh here and cleared again on cleanup: no later
+                # class may inherit an ABI of 0.
+                agent.landlock._cached.clear()
+                self.addCleanup(agent.landlock._cached.clear)
                 with mock.patch.object(agent, "build_plan", build_plan_with_fake):
                     # SPAWNCAP (S2): the real registry declares headless agy with
                     # shell=false/write=false (its headless refusal evidence), but
@@ -6791,10 +6809,11 @@ def _fallthrough_run(case, route_ids, stops, clock=None, args_over=None, policy=
         return plan
 
     def fake_run_client(cmd, cwd, env, reap=True, capture=False,
-                        run_id=None, attempt=None):
+                        run_id=None, attempt=None, isolated=None):
         # `run_id`/`attempt` (SB-B merge) are what the launch records in the
         # runner-private kill store; the fake ignores the write and keeps the
-        # calls it counts.
+        # calls it counts. `isolated` (AO-OPENCODE-JAIL P1b) is the plan's own
+        # sandbox fact, which cmd_run now hands the launch.
         calls["attempts"].append(attempt)
         calls["n"] += 1
         calls["cwds"].append(cwd)
@@ -20093,6 +20112,12 @@ Options:
         env = clean_env(PATH=self.tmp + os.pathsep + "/usr/bin" + os.pathsep + "/bin",
                         AUTOOS_STATE_DIR=self.tmp, **extra)
         env.pop("AUTOOS_TASK_DIR", None)
+        # AO-OPENCODE-JAIL P1b: this class measures which ARGV reached the client
+        # process, and the stub records it to a file beside itself — outside the
+        # sandbox, where the jail now (correctly) refuses the write. The fence
+        # itself is measured live by tests/test_landlock_spawn.py; the documented
+        # no-Landlock seam keeps this class about the argv.
+        env["LANDLOCK_EXEC_FORCE_ABI0"] = "1"
         return env
 
     def test_a_real_qoder_launch_carries_the_session_id_and_the_pin(self):

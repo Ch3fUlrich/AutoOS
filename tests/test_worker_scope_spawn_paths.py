@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -304,6 +305,15 @@ class RunClientScopeLaunchTests(unittest.TestCase):
         Nothing is spawned: Popen is a recorder, os says posix, and the scope
         decision is handed in so both branches can be driven identically on any
         host the suite runs on.
+
+        The cwd is an empty temporary directory, not the checkout: `run_client`
+        jails a launch it can see is an --isolate sandbox, and it reads that fact
+        off the disk (the `<cwd>.toolhome` sibling). A lane checkout has one, a
+        CI checkout does not, and this class is about the SCOPE wrapper - which
+        argv the client reaches Popen through is the one thing that must not
+        depend on where the suite happens to run. The jail-inside-the-scope
+        composition is asserted live, with a real spawn, in
+        tests/test_landlock_spawn.py.
         """
         records = {}
 
@@ -314,6 +324,8 @@ class RunClientScopeLaunchTests(unittest.TestCase):
 
         err = io.StringIO()
         env = {"PATH": "/usr/bin:/bin", "LANG": "C"}
+        cwd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cwd, True)
         with mock.patch.object(self.agent, "os", _PosixOsProxy(os)), \
                 mock.patch.object(self.agent, "subprocess",
                                   _SubprocessProxy(subprocess, record_popen)), \
@@ -323,7 +335,7 @@ class RunClientScopeLaunchTests(unittest.TestCase):
                                   lambda run_id=None, attempt=None: dict(scope)):
             with contextlib.redirect_stderr(err):
                 rc = self.agent.run_client([sys.executable, "-c", "pass"],
-                                           str(ROOT), env, reap=False,
+                                           cwd, env, reap=False,
                                            capture=False, run_id=RUN_ID,
                                            attempt=1)
         return rc, records, err.getvalue()
