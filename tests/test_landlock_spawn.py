@@ -236,13 +236,25 @@ class JailLiveTests(unittest.TestCase):
         tcp = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         tcp.bind(("127.0.0.1", 0))
         tcp.listen(2)
-        self.addCleanup(tcp.close)
         # a round trip, not just a SYN: an accepted connection needs someone on
         # the other side, and a worker that cannot talk to the gateway on
         # loopback is a jail that broke the run rather than fenced it
         thread = threading.Thread(target=self._serve, args=(tcp,), daemon=True)
         thread.start()
-        self.addCleanup(thread.join, 5)
+
+        # shutdown, not close: a blocked accept() is not woken by closing the fd,
+        # so close-then-join still waits out the whole timeout and leaks the
+        # thread (measured 5.00 s vs 0.00 s here). One cleanup, so the order of
+        # the three cannot drift apart.
+        def _stop_listener():
+            try:
+                tcp.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            tcp.close()
+            thread.join(5)
+
+        self.addCleanup(_stop_listener)
         self.abstract_name = "\0autoos-jail-test-%d" % os.getpid()
         abstract = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         abstract.bind(self.abstract_name)
@@ -438,17 +450,22 @@ class JailLiveTests(unittest.TestCase):
         argv, launch_env = agent.worker_scope_launch(
             unit, agent.jailed_argv(self.sandbox, cmd, env, jail), env)
         self.assertEqual(os.path.basename(argv[0]), "systemd-run", argv)
-        # two `--` in the composed line: the scope's, then the jail's. The
-        # wrapper is the command AFTER the scope's `env -u … --` prologue, and
-        # the client is the last thing on it.
+        # two `--` in the composed line: the scope's, then the jail's. Between
+        # them sits the jail: `env -u NAME` strips the bus address (no `--` of
+        # its own — the `-u` pairs just end), then python3 runs the wrapper with
+        # its grants, and the client is the last thing on the line.
         dashes = [i for i, tok in enumerate(argv) if tok == "--"]
         self.assertEqual(len(dashes), 2, argv)
-        inner = argv[dashes[0] + 1:]
-        self.assertEqual(os.path.basename(inner[0]), "env", inner)
-        jailed = argv[dashes[1] + 1:]
-        self.assertEqual(os.path.basename(jailed[0]), sys.executable, argv)
+        env_at = dashes[0] + 1
+        self.assertEqual(os.path.basename(argv[env_at]), "env", argv)
+        jail_at = env_at + 1
+        while jail_at < dashes[1] and argv[jail_at] == "-u":
+            jail_at += 2
+        jailed = argv[jail_at:dashes[1]]
+        self.assertEqual(jailed[0], sys.executable, argv)
         self.assertEqual(os.path.basename(jailed[1]), agent.JAIL_WRAPPER, argv)
-        self.assertEqual(jailed[len(jailed) - len(cmd):], cmd, argv)
+        self.assertEqual(jailed[2], "--require", argv)
+        self.assertEqual(argv[dashes[1] + 1:], cmd, argv)
         out, err = io.StringIO(), io.StringIO()
         proc = subprocess.Popen(argv, cwd=self.sandbox, env=launch_env,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
