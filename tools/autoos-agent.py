@@ -106,6 +106,8 @@ Usage:
     python3 tools/autoos-agent.py heartbeat --inbox i.md --transcript s.jsonl --json
     python3 tools/autoos-agent.py ready status/<lane>.<name>.md --branch <B> --sha <SHA> \
         --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>   # both, always
+        # --cap-exception D-NNN relaxes ONLY the brief's FILES cap, bound to one
+        # committed routing row naming this --sha (AO-READY-CAP-EXCEPTION)
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
@@ -6987,6 +6989,132 @@ def read_guards_text(path):
         return None, "%s" % exc
 
 
+# AO-READY-CAP-EXCEPTION: `ready --cap-exception D-NNN` is a decision-bound, one-sha
+# relaxation of the writer brief's FILES cap, for the lane built by several writer
+# segments that no single brief can describe. The id shape, the routing dir and the
+# word-bounded id rule belong to the routing gate module, never restated here.
+CAP_EXCEPTION_LOG = "docs/decisions-log.md"
+CAP_EXCEPTION_BY = "routing-00"
+CAP_EXCEPTION_MAX_FILES = 6
+GO_GATE_RELPATH = ("infra", "mcp-servers", "scripts", "_go_gate.py")
+ROUTING_GIT_TIMEOUT = 30
+_GO_GATE = None
+
+
+def go_gate():
+    """The routing gate module, loaded from this checkout by a path computed from this
+    file's own location (`ROOT`), cached per process.
+
+    It owns `REF_RE`, `routing_dir` and `_exact_id`; loading it lazily keeps a missing
+    `infra/` tree from breaking every other command this file serves, and
+    `cap_exception_ok` turns a load failure into a refusal."""
+    global _GO_GATE
+    if _GO_GATE is None:
+        path = os.path.join(ROOT, *GO_GATE_RELPATH)
+        spec = importlib.util.spec_from_file_location("autoos_go_gate", path)
+        if spec is None or spec.loader is None:
+            raise ImportError("no import spec for %s" % path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _GO_GATE = module
+    return _GO_GATE
+
+
+def _routing_git_out(dirpath, *tail):
+    """``(stdout_text, error)`` for one read-only git call on the routing repo.
+
+    A git that cannot start, times out, exits non-zero or answers with bytes that are
+    not UTF-8 is an ``error``, never a guess -- and the caller's guess is the working
+    tree, which is exactly what this gate must not read."""
+    # subprocess-audit: read-only git plumbing, literal argv head, no shell, the
+    # from-scratch env of `_lane_worktree_git_env`, a timeout, stdin closed, strict decode.
+    try:
+        proc = subprocess.run(["git", "-C", dirpath, *tail], capture_output=True,
+                              stdin=subprocess.DEVNULL, env=_lane_worktree_git_env(),
+                              timeout=ROUTING_GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, "git %s failed: %s" % (tail[0], exc)
+    if proc.returncode != 0:
+        return None, ("git %s exited %d: %s"
+                      % (tail[0], proc.returncode,
+                         _git_out(proc.stderr, "replace").strip()))
+    try:
+        return proc.stdout.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return None, "git %s answered with bytes that are not UTF-8" % tail[0]
+
+
+def cap_exception_ok(ref, sha, env=None):
+    """``(ok, reason, routing_commit)`` -- is `--cap-exception <ref>` bound to <sha>?
+
+    The row is read from the COMMITTED tree and from nothing else: `git -C <routing
+    dir> rev-parse origin/main^{commit}` FIRST, then `git show <that commit>:
+    docs/decisions-log.md`, so the commit reported back is the very tree the row was
+    read from and the ready line can name it. The routing dir is the routing gate's own
+    answer (`_go_gate.routing_dir`: AUTOOS_ROUTING_DIR, else `$HOME/code/routing`), and
+    no failure -- no repo, no origin/main, no log, an undecodable answer -- falls back
+    to a working copy: it refuses.
+
+    One row binds one sha. The row is the ONE table line whose first cell, stripped,
+    equals `ref` exactly, so `D-82` is satisfied by neither `D-825` nor `D-82.5`, a prose
+    mention is not a row, a re-cased or padded first cell is not a row, and the same id
+    in two rows is a refusal. Its 4th cell -- the `by` of
+    `| id | project | decision | by | ... |` -- must be exactly `routing-00`, the routing
+    agent's own signature. And its text must carry the FULL 40-hex `sha`, word-bounded
+    through `_go_gate._exact_id`, so a 12-character prefix, a spelling inside a longer hex
+    run, an upper-cased sha and a sha that sits in another row all name nothing.
+
+    Everything else `ready` checks still runs; this relaxes only the FILES cap."""
+    env = os.environ if env is None else env
+    try:
+        gate = go_gate()
+    except Exception as exc:
+        return False, "cannot load the routing gate: %s" % exc, None
+    if (not isinstance(ref, str) or not ref.startswith("D-")
+            or not gate.REF_RE.match(ref)):
+        return False, "%r is not a decision id of the shape D-<n>" % (ref,), None
+    if not isinstance(sha, str) or not _FULL_SHA_RE.fullmatch(sha):
+        return False, "%r is not a full 40-hex commit id (--sha)" % (sha,), None
+    dirpath = gate.routing_dir(env)
+    if not os.path.exists(os.path.join(dirpath, ".git")):
+        return False, ("the routing repo %r is missing or is not a git checkout"
+                       % (dirpath,)), None
+    commit, error = _routing_git_out(dirpath, "rev-parse", "origin/main^{commit}")
+    if error:
+        return False, "cannot read origin/main of the routing repo: %s" % error, None
+    commit = (commit or "").strip().split("\n")[0]
+    if not _FULL_SHA_RE.fullmatch(commit):
+        return False, ("origin/main of the routing repo did not resolve to a commit id "
+                       "(read %r)" % (commit[:64],)), None
+    text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, CAP_EXCEPTION_LOG))
+    if error:
+        return False, ("cannot read %s as committed on origin/main (%s): the exception is "
+                       "bound to a committed decision, never to a working copy"
+                      % (CAP_EXCEPTION_LOG, error)), None
+    rows = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if cells[0] == ref:
+            rows.append(cells)
+    if not rows:
+        return False, ("%s names no row in %s on origin/main -- a prose mention, and a "
+                       "table line whose first cell is not exactly that id, are not rows"
+                      % (ref, CAP_EXCEPTION_LOG)), None
+    if len(rows) > 1:
+        return False, ("%s names %d rows; one row binds one sha" % (ref, len(rows))), None
+    row = rows[0]
+    if len(row) < 4 or row[3] != CAP_EXCEPTION_BY:
+        return False, ("row's by cell is %r, not %r"
+                       % (row[3] if len(row) > 3 else "", CAP_EXCEPTION_BY)), None
+    if not gate._exact_id(sha).search(" | ".join(row)):
+        return False, ("row %s does not name the full --sha %s; one row binds one sha"
+                       % (ref, sha)), None
+    return True, "", commit
+
+
 def _rejected_seat_present(text):
     """Whether a refusal could write a rejected row at all: does one entry line carry a
     `verdict=` that maps to the ledger's `rejected`.
@@ -7134,7 +7262,25 @@ def cmd_ready(args) -> int:
     `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
     privileged, installer, state-mutating, auth/access/secrets) lane is refused unless
     one counted seat says it RAN the tests or a live check (`ran=tests|live`).
-    `--dry-run` changes nothing there: it refuses the same way and writes nothing."""
+    `--dry-run` changes nothing there: it refuses the same way and writes nothing.
+
+    AO-READY-CAP-EXCEPTION: `--cap-exception D-NNN` is checked FIRST, before the brief
+    is read, and relaxes ONLY the FILES cap (see `cap_exception_ok`); the verdict and
+    the commit it was read from are said on stdout, --dry-run included."""
+    cap_ref = (getattr(args, "cap_exception", "") or "").strip()
+    cap_field = ""
+    cap_max_files = None
+    if cap_ref:
+        bound, cap_reason, routing_commit = cap_exception_ok(cap_ref, args.sha)
+        if not bound:
+            print("ready: not appended -- cap-exception %s: %s" % (cap_ref, cap_reason))
+            return 1
+        cap_field = " cap-exception=%s routing=%s" % (cap_ref, routing_commit)
+        cap_max_files = CAP_EXCEPTION_MAX_FILES
+        print("note: cap-exception %s is bound to %s by the committed routing row "
+              "(routing=%s); the FILES cap is %d counted entries, the scope fence and "
+              "every gate below still run"
+              % (cap_ref, args.sha[:12], routing_commit, CAP_EXCEPTION_MAX_FILES))
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
@@ -7196,7 +7342,7 @@ def cmd_ready(args) -> int:
     # it", and a writer that cannot be judged must not be allowed. A range the
     # reader refuses (P4b-fixes D2: `--base` not a strict ancestor of `--sha`, or
     # an empty diff) is the lane failing it -- exit 1, never exit 0.
-    guards_fields = ""
+    guards_fields = cap_field
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
     if diff_refusal is not None:
@@ -7235,7 +7381,10 @@ def cmd_ready(args) -> int:
                   file=sys.stderr)
             return 2
         try:
-            allowed = ready_guards.brief_files(brief_text)
+            # AO-READY-CAP-EXCEPTION: the relaxed cap is the ONE argument an accepted
+            # decision adds; with no flag this call is the call it always was.
+            allowed = (ready_guards.brief_files(brief_text, max_files=cap_max_files)
+                       if cap_max_files else ready_guards.brief_files(brief_text))
             violations = ready_guards.scope_fence(diff_paths, allowed)
             if violations:
                 print("ready: not appended -- writer-guards scope-fence: the diff "
@@ -7245,7 +7394,7 @@ def cmd_ready(args) -> int:
         except ready_guards.GuardError as exc:
             print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
             return 1
-        guards_fields = " guards=ok"
+        guards_fields += " guards=ok"
         if ops_required:
             if not report_arg:
                 print("ready: not appended -- writer-guards: ops lane without "
@@ -14743,6 +14892,18 @@ def _parser_ready(sub):
                               "CHECK 1-6 evidence must be present and PASS, else the lane is "
                               "refused naming what is missing, failed or input_required "
                               "(report-checks)")
+    ready_p.add_argument("--cap-exception", dest="cap_exception", metavar="D-NNN",
+                         default="",
+                         help="relax ONLY the brief's FILES cap, to %d counted entries, "
+                              "for a lane built by several writer segments (AO-READY-CAP-"
+                              "EXCEPTION). Bound to this --sha and to one COMMITTED routing "
+                              "decision: the row `| D-NNN | project | decision | routing-00 "
+                              "| ... |` must exist on origin/main of the routing repo's "
+                              "%s, signed by routing-00, and name the full --sha — one row "
+                              "binds one sha. The scope fence, both reviews, the pushed "
+                              "sha, the pre-push record and the CI gates all still run; the "
+                              "line carries cap-exception=<D-NNN> routing=<origin/main sha>"
+                              % (CAP_EXCEPTION_MAX_FILES, CAP_EXCEPTION_LOG))
     ready_p.add_argument("--base", default="origin/main",
                          help="the diff's other end for the writer-guards gate, compared at "
                              "its merge base with --sha (default: %(default)s). Must resolve "
