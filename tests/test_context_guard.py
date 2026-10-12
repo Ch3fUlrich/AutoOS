@@ -199,7 +199,7 @@ class TailRead(GuardCase):
         filler = json.dumps({"type": "user", "message": {"content": "x" * 4000}}) + "\n"
         with self.transcript.open("w") as f:
             f.write(usage_line(read=999999) + "\n")  # stale, deep in the file: must NOT be found
-            for _ in range(mb * 1024 * 1024 // len(filler)):
+            for _ in range(mb * 1024 * 1024 // len(filler) + 2):
                 f.write(filler)
             f.write(usage_line(read=235000) + "\n")
             f.write(json.dumps({"type": "user", "message": {"content": "tail"}}) + "\n")

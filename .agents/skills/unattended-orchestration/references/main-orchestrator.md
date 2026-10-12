@@ -202,6 +202,25 @@ L2 alike.
   in the brief, and tell them the same token rules.
 - The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
 
+## 6a. Context cap: automatic recycle at 250k (P1.1)
+
+- A `PostToolUse` hook, `tools/hooks/context_guard.py`, reads the last assistant turn's usage (input + cache read + cache
+  creation) from the tail of the transcript and tells the session itself:
+  - at `AUTOOS_CTX_HANDOFF` (230000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
+    `python3 tools/hooks/context_guard.py ready <handoff-path>` (and `SendMessage RECYCLE-READY <path>` to your parent if
+    your brief says so);
+  - at `AUTOOS_CTX_HARD` (250000): `HARD-CAP` -- no new work, handoff now.
+  - It re-emits at most once per +10k of growth; any error is silent (exit 0). `context_guard.py status` lists the state
+    files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
+- Install, once per host, in `~/.claude/settings.json`:
+  `"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 <repo>/tools/hooks/context_guard.py"}]}]}`
+- Safety net: the launcher exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` (the router's `bin/fleet-launch` does). Never put
+  it in a shared `settings.json`.
+- The watchdog on the router side stops and relaunches a session that is over the cap and wrote its `ready` marker.
+  A session without a launch spec, or with live children, only gets an alert.
+- Bridges on the workstation or prox run the same hook. On `HANDOFF-NOW` the bridge writes its handoff, then runs the host's
+  own self-restart task (the ebn-style scheduled restart) -- the hook never restarts anything itself.
+
 ## 7. Research grade: evidence over assertion
 
 - **A DONE note is a claim, not evidence** — verifying it yourself is R-coord-02.
