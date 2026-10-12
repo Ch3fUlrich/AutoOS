@@ -1,0 +1,1165 @@
+diff --git a/open-sse/config/providers/index.ts b/open-sse/config/providers/index.ts
+index 638df8d..82e1c57 100644
+--- a/open-sse/config/providers/index.ts
++++ b/open-sse/config/providers/index.ts
+@@ -158,6 +158,7 @@ import { novitaProvider } from "./registry/novita/index.ts";
+ import { regoloProvider } from "./registry/regolo/index.ts";
+ import { devin_desktopProvider } from "./registry/devin-desktop/index.ts";
+ import { zcodeProvider } from "./registry/zcode/index.ts";
++import { qoderAcpProvider } from "./registry/qoder-acp/index.ts";
+ import { zed_hostedProvider } from "./registry/zed-hosted/index.ts";
+ import { nanogptProvider } from "./registry/nanogpt/index.ts";
+ import { scalewayProvider } from "./registry/scaleway/index.ts";
+@@ -427,6 +428,7 @@ export const REGISTRY: Record<string, RegistryEntry> = {
+   regolo: regoloProvider,
+   "devin-desktop": devin_desktopProvider,
+   zcode: zcodeProvider,
++  "qoder-acp": qoderAcpProvider,
+   "zed-hosted": zed_hostedProvider,
+   nanogpt: nanogptProvider,
+   scaleway: scalewayProvider,
+diff --git a/open-sse/config/providers/registry/qoder-acp/index.ts b/open-sse/config/providers/registry/qoder-acp/index.ts
+new file mode 100644
+index 0000000..b230c57
+--- /dev/null
++++ b/open-sse/config/providers/registry/qoder-acp/index.ts
+@@ -0,0 +1,21 @@
++import type { RegistryEntry } from "../../shared.ts";
++
++/**
++ * Qoder CLI driven over the Agent Client Protocol (`qodercli --acp`). The agent runs
++ * locally as a subprocess; authentication stays in the user's Qoder login, or in an
++ * optional Personal Access Token that is handed to the agent through its environment.
++ * Model ids are the ones the agent itself offers in `session/new`.
++ */
++export const qoderAcpProvider: RegistryEntry = {
++  id: "qoder-acp",
++  alias: "qoacp",
++  format: "openai",
++  executor: "qoder-acp",
++  baseUrl: "acp://qoder/stdio",
++  authType: "none",
++  authHeader: "none",
++  models: [
++    { id: "efficient", name: "Qoder Efficient" },
++    { id: "qfmodel", name: "Qwen3.8-Flash (Qoder)", supportsReasoning: true },
++  ],
++};
+diff --git a/open-sse/executors/acp.ts b/open-sse/executors/acp.ts
+new file mode 100644
+index 0000000..32732cf
+--- /dev/null
++++ b/open-sse/executors/acp.ts
+@@ -0,0 +1,624 @@
++import { randomUUID } from "node:crypto";
++import { mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join, resolve } from "node:path";
++import { BaseExecutor, type ExecuteInput, type ExecutorExecuteResult } from "./base.ts";
++import { getAcpAgent, type AcpAgentSpec } from "./acpAgents.ts";
++import {
++  AcpClient,
++  AcpRpcError,
++  buildAcpChildEnv,
++  type AcpPermissionPolicy,
++  type AcpSessionUpdate,
++} from "./acpProtocol.ts";
++import { buildErrorBody, errorResponse, sanitizeErrorMessage } from "../utils/error.ts";
++
++/**
++ * Generic Agent Client Protocol executor. It starts a local coding agent that speaks
++ * ACP on stdio (see acpAgents.ts), runs one chat turn in a fresh session, and maps
++ * the agent's streamed `session/update` chunks onto an OpenAI chat completion.
++ *
++ * The agent is used as a text backend: it starts in an empty scratch directory,
++ * advertises no fs/terminal capability, gets a minimal environment, and every
++ * permission request is rejected unless the operator opts in.
++ */
++
++const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
++const DEFAULT_TURN_TIMEOUT_MS = 300_000;
++const DEFAULT_CANCEL_GRACE_MS = 2_000;
++const DEFAULT_MAX_CONCURRENT = 4;
++const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
++
++type JsonRecord = Record<string, unknown>;
++type OpenAIMsg = { role?: string; content?: unknown };
++
++export interface AcpExecutorOptions {
++  /** Override the agent binary (tests, custom install paths). */
++  command?: string;
++  /** Override the agent arguments. */
++  args?: string[];
++  /** Extra environment for the agent, on top of the minimal inherited set. */
++  env?: Record<string, string>;
++  /** Working directory for the agent. Default: a fresh empty temp dir per turn. */
++  cwd?: string;
++  permissionPolicy?: AcpPermissionPolicy;
++  /** Session mode to request (e.g. one that refuses tools); skipped if the agent lacks it. */
++  sessionMode?: string;
++  requestTimeoutMs?: number;
++  turnTimeoutMs?: number;
++  cancelGraceMs?: number;
++  maxConcurrent?: number;
++  /** Cap on text collected per turn; the turn is cancelled past it and ends as `length`. */
++  maxOutputBytes?: number;
++}
++
++const activeTurns = new Map<string, number>();
++
++function asRecord(value: unknown): JsonRecord {
++  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
++}
++
++function envNumber(name: string, fallback: number): number {
++  const parsed = Number(process.env[name]);
++  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
++}
++
++function textFromContent(content: unknown): string {
++  if (typeof content === "string") return content;
++  if (!Array.isArray(content)) return "";
++  return content
++    .map((part) => {
++      if (typeof part === "string") return part;
++      const record = asRecord(part);
++      if (record.type === "text" || record.type === "input_text" || record.type === "output_text") {
++        return typeof record.text === "string" ? record.text : "";
++      }
++      return "";
++    })
++    .join("");
++}
++
++/** Flatten an OpenAI conversation into the single text prompt of one ACP turn. */
++export function buildAcpPrompt(messages: OpenAIMsg[]): string {
++  const parts: string[] = [];
++  for (const message of messages) {
++    const text = textFromContent(message.content).trim();
++    if (!text) continue;
++    const role = String(message.role || "user");
++    const label = role === "system" ? "System" : role === "assistant" ? "Assistant" : "User";
++    parts.push(`[${label}]\n${text}`);
++  }
++  return parts.join("\n\n") || "(empty)";
++}
++
++function finishReasonFor(stopReason: unknown): string {
++  switch (stopReason) {
++    case "max_tokens":
++    case "max_turn_requests":
++      return "length";
++    case "refusal":
++      return "content_filter";
++    default:
++      return "stop";
++  }
++}
++
++function estimateTokens(text: string): number {
++  return Math.max(1, Math.ceil(text.length / 4));
++}
++
++type Usage = {
++  prompt_tokens: number;
++  completion_tokens: number;
++  total_tokens: number;
++  estimated?: true;
++};
++
++function numberOf(...values: unknown[]): number {
++  for (const value of values) if (typeof value === "number" && Number.isFinite(value)) return value;
++  return 0;
++}
++
++function usageFrom(result: JsonRecord, prompt: string, content: string): Usage {
++  const reported = asRecord(result.usage);
++  const input = numberOf(reported.inputTokens, reported.input_tokens);
++  const output = numberOf(reported.outputTokens, reported.output_tokens);
++  const total = numberOf(reported.totalTokens, reported.total_tokens, input + output);
++  if (input > 0 || output > 0 || total > 0) {
++    return { prompt_tokens: input, completion_tokens: output, total_tokens: total };
++  }
++  const promptTokens = estimateTokens(prompt);
++  const completionTokens = estimateTokens(content);
++  return {
++    prompt_tokens: promptTokens,
++    completion_tokens: completionTokens,
++    total_tokens: promptTokens + completionTokens,
++    estimated: true,
++  };
++}
++
++function abortError(): Error {
++  const error = new Error("ACP request aborted");
++  error.name = "AbortError";
++  return error;
++}
++
++class TurnTimeoutError extends Error {}
++
++function failureStatus(error: unknown): number {
++  if (error instanceof TurnTimeoutError) return 504;
++  if (
++    error instanceof AcpRpcError &&
++    error.code === -32000 &&
++    /auth|login|credential|unauthori[sz]ed/i.test(error.message)
++  )
++    return 401;
++  if (error instanceof Error && /timed out/i.test(error.message)) return 504;
++  return 502;
++}
++
++function failureMessage(error: unknown, agent: AcpAgentSpec): string {
++  if (error instanceof Error) {
++    const code = (error as NodeJS.ErrnoException).code;
++    if (code === "ENOENT" || code === "EACCES") {
++      return `ACP agent binary for ${agent.displayName} was not found or is not executable; install it or set ${agent.binEnv}.`;
++    }
++    return sanitizeErrorMessage(error.message);
++  }
++  return sanitizeErrorMessage(String(error));
++}
++
++type Outcome = { ok: true; result: JsonRecord } | { ok: false; error: unknown };
++
++/** One ACP session: owns the agent process, the scratch directory and the concurrency slot. */
++class AcpTurn {
++  content = "";
++  reasoning = "";
++  sawOutput = false;
++  aborted = false;
++  private outputBytes = 0;
++  private truncated = false;
++  /** Called with each content/reasoning delta as it arrives. */
++  emit?: (delta: JsonRecord) => void;
++  /** Called once, when the first delta arrives. */
++  onFirstOutput?: () => void;
++
++  private readonly client: AcpClient;
++  private sessionId?: string;
++  private promptInFlight = false;
++  private timedOut = false;
++  private cleanedUp = false;
++  private readonly timers: Array<ReturnType<typeof setTimeout>> = [];
++
++  constructor(
++    private readonly agent: AcpAgentSpec,
++    private readonly options: AcpExecutorOptions,
++    private readonly input: ExecuteInput,
++    private readonly cwd: string,
++    private readonly scratch: string | undefined,
++    private readonly cancelGraceMs: number,
++    private readonly requestTimeoutMs: number
++  ) {
++    this.client = new AcpClient({
++      command: options.command ?? process.env[agent.binEnv] ?? agent.command,
++      args: options.args ?? agent.args,
++      cwd,
++      env: buildAcpChildEnv(
++        {
++          ...(agent.tokenEnv && input.credentials?.apiKey
++            ? { [agent.tokenEnv]: String(input.credentials.apiKey) }
++            : {}),
++          ...options.env,
++        },
++        agent.passEnv
++      ),
++      requestTimeoutMs,
++      permissionPolicy:
++        options.permissionPolicy ??
++        (process.env.ACP_PERMISSION_POLICY === "allow" ? "allow" : "reject"),
++      onUpdate: (update) => this.onUpdate(update),
++    });
++    input.signal?.addEventListener("abort", this.onAbort, { once: true });
++  }
++
++  get wasTimedOut(): boolean {
++    return this.timedOut;
++  }
++
++  private readonly onAbort = () => {
++    this.aborted = true;
++    this.cancel();
++  };
++
++  private onUpdate(update: AcpSessionUpdate): void {
++    const kind = update.sessionUpdate;
++    if (kind !== "agent_message_chunk" && kind !== "agent_thought_chunk") return;
++    const block = asRecord(update.content);
++    if (block.type !== "text" || typeof block.text !== "string" || !block.text) return;
++    if (this.truncated) return;
++    this.outputBytes += Buffer.byteLength(block.text);
++    const limit =
++      this.options.maxOutputBytes ?? envNumber("ACP_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES);
++    if (this.outputBytes > limit) {
++      this.truncated = true;
++      this.cancel();
++      return;
++    }
++    const thought = kind === "agent_thought_chunk";
++    if (thought) this.reasoning += block.text;
++    else this.content += block.text;
++    this.sawOutput = true;
++    this.emit?.(thought ? { reasoning_content: block.text } : { content: block.text });
++    this.onFirstOutput?.();
++  }
++
++  /** Ask the agent to stop the turn; force-kill it if it does not within the grace period. */
++  cancel(): void {
++    if (this.promptInFlight && this.sessionId && !this.client.exited) {
++      this.client.notify("session/cancel", { sessionId: this.sessionId });
++      const forced = setTimeout(() => this.client.kill(), this.cancelGraceMs);
++      forced.unref?.();
++      this.timers.push(forced);
++    } else {
++      this.client.kill();
++    }
++  }
++
++  /**
++   * Spawn the agent and prepare the session. Resolves to the model that will answer,
++   * or to a refusal (`unknownModel`) when the agent does not offer the requested one.
++   */
++  async open(requested: string): Promise<{ model: string } | { unknownModel: string }> {
++    if (this.input.signal?.aborted) {
++      this.onAbort();
++      throw abortError();
++    }
++    this.client.start();
++    await this.client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
++    const created = asRecord(
++      await this.client.request("session/new", { cwd: this.cwd, mcpServers: [] })
++    );
++    const sessionId = typeof created.sessionId === "string" ? created.sessionId : undefined;
++    if (!sessionId) throw new Error("ACP agent returned no sessionId");
++    this.sessionId = sessionId;
++
++    const models = asRecord(created.models);
++    const available = Array.isArray(models.availableModels)
++      ? (models.availableModels as unknown[]).map((m) => String(asRecord(m).modelId))
++      : [];
++    let model =
++      requested || (typeof models.currentModelId === "string" ? models.currentModelId : "");
++    if (requested && available.length > 0) {
++      if (!available.includes(requested)) {
++        return {
++          unknownModel: `Unknown ${this.agent.displayName} model "${requested}". Available: ${available.join(", ")}.`,
++        };
++      }
++      if (requested !== models.currentModelId) {
++        await this.client.request("session/set_model", { sessionId, modelId: requested });
++      }
++    }
++    if (!model) model = this.agent.id;
++
++    const wantedMode = this.options.sessionMode ?? this.agent.sessionMode;
++    const modes = asRecord(created.modes);
++    const modeIds = Array.isArray(modes.availableModes)
++      ? (modes.availableModes as unknown[]).map((m) => asRecord(m).id)
++      : [];
++    if (wantedMode && modeIds.includes(wantedMode) && modes.currentModeId !== wantedMode) {
++      await this.client.request("session/set_mode", { sessionId, modeId: wantedMode });
++    }
++    return { model };
++  }
++
++  /** Send the prompt; the returned promise settles when the turn ends, however it ends. */
++  prompt(text: string, turnTimeoutMs: number): Promise<Outcome> {
++    this.promptInFlight = true;
++    const timer = setTimeout(() => {
++      this.timedOut = true;
++      this.cancel();
++    }, turnTimeoutMs);
++    timer.unref?.();
++    this.timers.push(timer);
++    return this.client
++      .request("session/prompt", { sessionId: this.sessionId, prompt: [{ type: "text", text }] }, 0)
++      .then(
++        (result): Outcome => ({ ok: true, result: asRecord(result) }),
++        (error): Outcome => ({ ok: false, error })
++      )
++      .finally(() => {
++        this.promptInFlight = false;
++        clearTimeout(timer);
++      });
++  }
++
++  /** Turn a settled outcome into either a completed result or the error to report. */
++  judge(outcome: Outcome): { result: JsonRecord } | { error: unknown } {
++    if (outcome.ok === false) {
++      return { error: this.timedOut ? new TurnTimeoutError("ACP turn timed out") : outcome.error };
++    }
++    if (outcome.result.stopReason === "cancelled") {
++      if (this.truncated) return { result: { ...outcome.result, stopReason: "max_tokens" } };
++      // An agent that cancels itself after producing text still answered; keep the text.
++      if (this.sawOutput && !this.timedOut) return { result: outcome.result };
++      return {
++        error: this.timedOut
++          ? new TurnTimeoutError(`ACP turn timed out after ${this.timeoutLabel()}`)
++          : new Error("ACP turn was cancelled by the agent"),
++      };
++    }
++    return { result: outcome.result };
++  }
++
++  private timeoutLabel(): string {
++    return `${this.options.turnTimeoutMs ?? envNumber("ACP_TURN_TIMEOUT_MS", DEFAULT_TURN_TIMEOUT_MS)}ms`;
++  }
++
++  async dispose(): Promise<void> {
++    if (this.cleanedUp) return;
++    this.cleanedUp = true;
++    this.input.signal?.removeEventListener("abort", this.onAbort);
++    for (const timer of this.timers) clearTimeout(timer);
++    await this.client.close().catch(() => undefined);
++    if (this.scratch)
++      await rm(this.scratch, { recursive: true, force: true }).catch(() => undefined);
++    activeTurns.set(this.agent.id, Math.max(0, (activeTurns.get(this.agent.id) ?? 1) - 1));
++  }
++}
++
++export class AcpExecutor extends BaseExecutor {
++  private readonly agent: AcpAgentSpec;
++  private readonly options: AcpExecutorOptions;
++  private readonly url: string;
++
++  constructor(agentId: string, options: AcpExecutorOptions = {}) {
++    const agent = getAcpAgent(agentId);
++    if (!agent) throw new Error(`Unknown ACP agent "${agentId}"`);
++    const url = `acp://${agent.id}/stdio`;
++    super(`${agent.id}-acp`, { id: `${agent.id}-acp`, baseUrl: url, format: "openai" });
++    this.agent = agent;
++    this.options = options;
++    this.url = url;
++  }
++
++  buildUrl(): string {
++    return this.url;
++  }
++
++  transformRequest(): null {
++    return null;
++  }
++
++  // Credentials never travel as headers: the token reaches the agent through its env only.
++  override buildHeaders(): Record<string, string> {
++    return {};
++  }
++
++  private errorResult(status: number, message: string, model: string): ExecutorExecuteResult {
++    return {
++      response: errorResponse(status, message),
++      url: this.url,
++      headers: {},
++      transformedBody: { model, agent: this.agent.id },
++      transport: `acp-${this.agent.id}`,
++    };
++  }
++
++  /**
++   * @executorRecovery native
++   * @executorRecoveryReason Local ACP subprocess turn: there is no upstream HTTP payload, so reasoning-enum, known-field and Gemini-budget recovery do not apply; failures map straight to status codes.
++   * @executorRecoveryTest tests/unit/acp-executor.test.ts
++   */
++  async execute(input: ExecuteInput): Promise<ExecutorExecuteResult> {
++    const agent = this.agent;
++    const requested = typeof input.model === "string" ? input.model.trim() : "";
++    if (requested.startsWith("-")) {
++      return this.errorResult(
++        400,
++        `Invalid model "${requested}": must not start with "-".`,
++        requested
++      );
++    }
++
++    const maxConcurrent =
++      this.options.maxConcurrent ?? envNumber("ACP_MAX_CONCURRENT", DEFAULT_MAX_CONCURRENT);
++    if ((activeTurns.get(agent.id) ?? 0) >= maxConcurrent) {
++      return this.errorResult(429, `Too many concurrent ${agent.displayName} sessions.`, requested);
++    }
++    activeTurns.set(agent.id, (activeTurns.get(agent.id) ?? 0) + 1);
++
++    const turnTimeoutMs =
++      this.options.turnTimeoutMs ?? envNumber("ACP_TURN_TIMEOUT_MS", DEFAULT_TURN_TIMEOUT_MS);
++    const explicitCwd = this.options.cwd ?? (process.env.ACP_CWD || undefined);
++    let scratch: string | undefined;
++    try {
++      scratch = explicitCwd ? undefined : await mkdtemp(join(tmpdir(), "omniroute-acp-"));
++    } catch (error) {
++      activeTurns.set(agent.id, Math.max(0, (activeTurns.get(agent.id) ?? 1) - 1));
++      return this.errorResult(502, failureMessage(error, agent), requested);
++    }
++    const turn = new AcpTurn(
++      agent,
++      this.options,
++      input,
++      resolve(explicitCwd ?? (scratch as string)),
++      scratch,
++      this.options.cancelGraceMs ?? DEFAULT_CANCEL_GRACE_MS,
++      this.options.requestTimeoutMs ??
++        envNumber("ACP_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS)
++    );
++
++    const messages = Array.isArray(asRecord(input.body).messages)
++      ? (asRecord(input.body).messages as OpenAIMsg[])
++      : [];
++    const prompt = buildAcpPrompt(messages);
++
++    const fail = async (error: unknown, model: string): Promise<ExecutorExecuteResult> => {
++      const status = failureStatus(error);
++      const message = failureMessage(error, agent);
++      await turn.dispose();
++      if (turn.aborted || input.signal?.aborted) throw abortError();
++      input.log?.warn?.("ACP", `${agent.id}: ${message}`);
++      return this.errorResult(status, message, model);
++    };
++
++    let model: string;
++    try {
++      const opened = await turn.open(requested);
++      if ("unknownModel" in opened) {
++        await turn.dispose();
++        return this.errorResult(400, opened.unknownModel, requested);
++      }
++      model = opened.model;
++    } catch (error) {
++      return fail(error, requested);
++    }
++
++    input.log?.info?.("ACP", `${agent.id} turn started model=${model}`);
++    const meta = { model, agent: agent.id, promptLength: prompt.length };
++
++    if (!input.stream) {
++      const settled = await turn.prompt(prompt, turnTimeoutMs);
++      const judged = turn.judge(settled);
++      if ("error" in judged) return fail(judged.error, model);
++      await turn.dispose();
++      if (turn.aborted || input.signal?.aborted) throw abortError();
++      return {
++        response: new Response(
++          JSON.stringify({
++            id: `chatcmpl-acp-${randomUUID()}`,
++            object: "chat.completion",
++            created: Math.floor(Date.now() / 1000),
++            model,
++            choices: [
++              {
++                index: 0,
++                message: {
++                  role: "assistant",
++                  content: turn.content,
++                  ...(turn.reasoning ? { reasoning_content: turn.reasoning } : {}),
++                },
++                finish_reason: finishReasonFor(judged.result.stopReason),
++              },
++            ],
++            usage: usageFrom(judged.result, prompt, turn.content),
++          }),
++          { status: 200, headers: { "Content-Type": "application/json" } }
++        ),
++        url: this.url,
++        headers: {},
++        transformedBody: meta,
++        transport: `acp-${agent.id}`,
++      };
++    }
++
++    // Streaming: relay deltas as they arrive. The response is only handed back once the
++    // agent has produced output or finished, so a failure before the first token is a
++    // real HTTP error (which lets combo/fallback routing react) instead of a 200 stream.
++    const id = `chatcmpl-acp-${randomUUID()}`;
++    const created = Math.floor(Date.now() / 1000);
++    const encoder = new TextEncoder();
++    let controller!: ReadableStreamDefaultController<Uint8Array>;
++    let streamOpen = true;
++    const write = (payload: unknown) => {
++      if (!streamOpen) return;
++      try {
++        controller.enqueue(
++          encoder.encode(
++            `data: ${typeof payload === "string" ? payload : JSON.stringify(payload)}\n\n`
++          )
++        );
++      } catch {
++        streamOpen = false;
++      }
++    };
++    const closeStream = () => {
++      if (!streamOpen) return;
++      streamOpen = false;
++      try {
++        controller.close();
++      } catch {
++        // already closed by the consumer
++      }
++    };
++    const chunk = (
++      delta: JsonRecord,
++      finishReason: string | null = null,
++      extra: JsonRecord = {}
++    ) => ({
++      id,
++      object: "chat.completion.chunk",
++      created,
++      model,
++      choices: [{ index: 0, delta, finish_reason: finishReason }],
++      ...extra,
++    });
++    const body = new ReadableStream<Uint8Array>({
++      start(c) {
++        controller = c;
++      },
++      cancel() {
++        // The consumer is gone: stop the turn. Disposal follows when the prompt settles
++        // (the agent answers `cancelled`, or the grace timer kills it).
++        streamOpen = false;
++        turn.cancel();
++      },
++    });
++    write(chunk({ role: "assistant", content: "" }));
++    turn.emit = (delta) => write(chunk(delta));
++
++    const firstOutput = new Promise<void>((resolveFirst) => {
++      turn.onFirstOutput = resolveFirst;
++    });
++    const settledPromise = turn.prompt(prompt, turnTimeoutMs);
++    const first = await Promise.race([firstOutput.then(() => "output" as const), settledPromise]);
++    if (first !== "output" && !turn.sawOutput) {
++      const judged = turn.judge(first);
++      if ("error" in judged) {
++        streamOpen = false;
++        void body.cancel().catch(() => undefined);
++        return fail(judged.error, model);
++      }
++    }
++
++    void settledPromise
++      .then(async (outcome) => {
++        const judged = turn.judge(outcome);
++        if (turn.aborted || input.signal?.aborted) {
++          closeStream();
++        } else if ("error" in judged) {
++          write(buildErrorBody(failureStatus(judged.error), failureMessage(judged.error, agent)));
++          write("[DONE]");
++          closeStream();
++        } else {
++          write(
++            chunk({}, finishReasonFor(judged.result.stopReason), {
++              usage: usageFrom(judged.result, prompt, turn.content),
++            })
++          );
++          write("[DONE]");
++          closeStream();
++        }
++        await turn.dispose();
++      })
++      .catch(() => {
++        // The stream is already closed or failed; never let this tail become an unhandled rejection.
++        closeStream();
++        void turn.dispose().catch(() => undefined);
++      });
++
++    return {
++      response: new Response(body, { status: 200, headers: SSE_HEADERS }),
++      url: this.url,
++      headers: {},
++      transformedBody: { ...meta, buffered: false },
++      transport: `acp-${agent.id}`,
++    };
++  }
++}
++
++const SSE_HEADERS = {
++  "Content-Type": "text/event-stream",
++  "Cache-Control": "no-cache",
++  Connection: "keep-alive",
++};
+diff --git a/open-sse/executors/acpAgents.ts b/open-sse/executors/acpAgents.ts
+new file mode 100644
+index 0000000..73e0005
+--- /dev/null
++++ b/open-sse/executors/acpAgents.ts
+@@ -0,0 +1,56 @@
++/**
++ * Agents that the generic ACP executor can drive. Each entry is the command line
++ * that starts the agent as an Agent Client Protocol server on stdio, plus the few
++ * agent-specific hints the executor needs. Adding an agent is one entry here and a
++ * provider registry entry that names it.
++ */
++export interface AcpAgentSpec {
++  id: string;
++  displayName: string;
++  /** Default binary; the environment variable in `binEnv` overrides it. */
++  command: string;
++  /** Arguments that switch the binary into ACP server mode. */
++  args: string[];
++  /** Environment variable that overrides `command` (absolute path or alternative name). */
++  binEnv: string;
++  /**
++   * Environment variable the agent reads its access token from. When the connection
++   * carries an api key it is passed through this variable and nowhere else.
++   */
++  tokenEnv?: string;
++  /** Extra environment variable names the agent needs from the gateway environment. */
++  passEnv?: string[];
++  /** Session mode that refuses tool use instead of asking, applied when the agent offers it. */
++  sessionMode?: string;
++}
++
++export const ACP_AGENTS: Readonly<Record<string, AcpAgentSpec>> = Object.freeze({
++  qoder: {
++    id: "qoder",
++    displayName: "Qoder CLI",
++    command: "qodercli",
++    args: ["--acp"],
++    binEnv: "CLI_QODER_BIN",
++    tokenEnv: "QODER_PERSONAL_ACCESS_TOKEN",
++    sessionMode: "dontAsk",
++  },
++  "qwen-code": {
++    id: "qwen-code",
++    displayName: "Qwen Code",
++    command: "qwen",
++    args: ["--acp"],
++    binEnv: "CLI_QWEN_BIN",
++    passEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"],
++  },
++  opencode: {
++    id: "opencode",
++    displayName: "OpenCode",
++    command: "opencode",
++    args: ["acp"],
++    binEnv: "CLI_OPENCODE_BIN",
++  },
++});
++
++export function getAcpAgent(id: string): AcpAgentSpec | undefined {
++  return Object.prototype.hasOwnProperty.call(ACP_AGENTS, id) ? ACP_AGENTS[id] : undefined;
++}
+diff --git a/open-sse/executors/acpProtocol.ts b/open-sse/executors/acpProtocol.ts
+new file mode 100644
+index 0000000..3b77463
+--- /dev/null
++++ b/open-sse/executors/acpProtocol.ts
+@@ -0,0 +1,357 @@
++import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
++import { StringDecoder } from "node:string_decoder";
++import { shouldUseShellForCommand } from "@/shared/services/cliRuntime";
++
++/**
++ * Minimal Agent Client Protocol (https://agentclientprotocol.com) client: newline
++ * delimited JSON-RPC 2.0 over the stdio of a spawned agent. It carries the client
++ * side of one session and answers the agent's own requests under a deny-by-default
++ * policy: the agent is a text backend here, never a tool host for the gateway.
++ */
++
++export type AcpPermissionPolicy = "reject" | "allow";
++
++type JsonRecord = Record<string, unknown>;
++
++/** JSON-RPC error code used for requests the client refuses by policy. */
++export const ACP_DENIED_CODE = -32000;
++const METHOD_NOT_FOUND = -32601;
++const MAX_LINE_CHARS = 32 * 1024 * 1024;
++const STDERR_TAIL_BYTES = 4096;
++const KILL_ESCALATION_MS = 2000;
++
++/** Agent stderr is untrusted text: mask token-looking runs before it can reach an error body. */
++function maskCredentialLikeText(text: string): string {
++  return text
++    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]")
++    .replace(/\b(?:sk|pk|ghp|gho|xox[abps]|AIza)[-_A-Za-z0-9]{12,}/g, "[REDACTED]");
++}
++
++/**
++ * Environment variables a spawned agent inherits from the gateway. Everything else
++ * (session secrets, provider keys, database settings) stays out of the child, which
++ * runs model-driven tools. Agent-specific names come in through `passEnv`.
++ */
++const INHERITED_ENV = [
++  "PATH",
++  "HOME",
++  "USER",
++  "LOGNAME",
++  "SHELL",
++  "LANG",
++  "TERM",
++  "TMPDIR",
++  "TEMP",
++  "TMP",
++  "TZ",
++  "USERPROFILE",
++  "APPDATA",
++  "LOCALAPPDATA",
++  "SystemRoot",
++  "ComSpec",
++  "PATHEXT",
++  "XDG_CONFIG_HOME",
++  "XDG_DATA_HOME",
++  "XDG_CACHE_HOME",
++  "XDG_STATE_HOME",
++  "HTTP_PROXY",
++  "HTTPS_PROXY",
++  "NO_PROXY",
++  "ALL_PROXY",
++  "http_proxy",
++  "https_proxy",
++  "no_proxy",
++  "all_proxy",
++  "NODE_EXTRA_CA_CERTS",
++  "SSL_CERT_FILE",
++  "SSL_CERT_DIR",
++];
++
++export function buildAcpChildEnv(
++  extra: Record<string, string | undefined> = {},
++  passEnv: string[] = [],
++  source: NodeJS.ProcessEnv = process.env
++): Record<string, string> {
++  const env: Record<string, string> = {};
++  for (const name of [...INHERITED_ENV, ...passEnv]) {
++    const value = source[name];
++    if (typeof value === "string") env[name] = value;
++  }
++  for (const [name, value] of Object.entries(extra)) {
++    if (typeof value === "string") env[name] = value;
++  }
++  return env;
++}
++
++export class AcpRpcError extends Error {
++  readonly code: number;
++  readonly data?: unknown;
++  constructor(code: number, message: string, data?: unknown) {
++    super(message);
++    this.name = "AcpRpcError";
++    this.code = code;
++    this.data = data;
++  }
++}
++
++export type AcpSessionUpdate = JsonRecord & { sessionUpdate?: string };
++
++export interface AcpClientOptions {
++  command: string;
++  args?: string[];
++  cwd?: string;
++  env?: Record<string, string>;
++  /** Default timeout for one request, ms. A request may override it; 0 disables it. */
++  requestTimeoutMs?: number;
++  permissionPolicy?: AcpPermissionPolicy;
++  onUpdate?: (update: AcpSessionUpdate) => void;
++}
++
++interface Pending {
++  resolve: (value: unknown) => void;
++  reject: (error: Error) => void;
++  timer?: ReturnType<typeof setTimeout>;
++}
++
++function asRecord(value: unknown): JsonRecord {
++  return value && typeof value === "object" && !Array.isArray(value) ? (value as JsonRecord) : {};
++}
++
++/** Outcome for `session/request_permission` under the given policy. */
++export function decidePermission(params: unknown, policy: AcpPermissionPolicy): JsonRecord {
++  const options = Array.isArray(asRecord(params).options)
++    ? (asRecord(params).options as unknown[]).map(asRecord)
++    : [];
++  const wanted = policy === "allow" ? ["allow_once"] : ["reject_once", "reject_always"];
++  for (const kind of wanted) {
++    const match = options.find(
++      (option) => option.kind === kind && typeof option.optionId === "string"
++    );
++    if (match) return { outcome: { outcome: "selected", optionId: match.optionId } };
++  }
++  return { outcome: { outcome: "cancelled" } };
++}
++
++export class AcpClient {
++  private readonly options: AcpClientOptions;
++  private child?: ChildProcessWithoutNullStreams;
++  private nextId = 1;
++  private readonly pending = new Map<number, Pending>();
++  private buffer = "";
++  private stderrTail = "";
++  // Multi-byte characters can straddle two chunks; a decoder per stream keeps them whole.
++  private readonly stdoutDecoder = new StringDecoder("utf8");
++  private readonly stderrDecoder = new StringDecoder("utf8");
++  private exitInfo?: string;
++  private spawnError?: Error;
++  private exitPromise?: Promise<void>;
++
++  constructor(options: AcpClientOptions) {
++    this.options = options;
++  }
++
++  get pid(): number | undefined {
++    return this.child?.pid;
++  }
++
++  get exited(): boolean {
++    return this.exitInfo !== undefined;
++  }
++
++  /** Last bytes the agent wrote to stderr (unscrubbed; callers sanitize before surfacing). */
++  get stderr(): string {
++    return this.stderrTail.trim();
++  }
++
++  start(): void {
++    if (this.child) throw new Error("ACP client already started");
++    const { command, args = [], cwd, env } = this.options;
++    const child = spawn(command, args, {
++      cwd,
++      env,
++      stdio: ["pipe", "pipe", "pipe"],
++      shell: shouldUseShellForCommand(command),
++      windowsHide: true,
++    });
++    this.child = child;
++    this.exitPromise = new Promise<void>((resolveExit) => {
++      child.once("exit", (code, signal) => {
++        this.exitInfo = signal ? `signal ${signal}` : `code ${code}`;
++        this.failAll(this.exitError());
++        resolveExit();
++      });
++      child.once("error", (error) => {
++        // spawn failure (ENOENT, EACCES): no exit event follows
++        this.spawnError = error;
++        this.exitInfo = `spawn error ${(error as NodeJS.ErrnoException).code ?? ""}`.trim();
++        this.failAll(error);
++        resolveExit();
++      });
++    });
++    child.stdout.on("data", (chunk: Buffer) => this.onStdout(chunk));
++    child.stderr.on("data", (chunk: Buffer) => {
++      this.stderrTail = (this.stderrTail + this.stderrDecoder.write(chunk)).slice(
++        -STDERR_TAIL_BYTES
++      );
++    });
++    // A write to a dead agent raises EPIPE on the stream; the exit handler reports it.
++    child.stdin.on("error", () => undefined);
++  }
++
++  private exitError(): Error {
++    const tail = this.stderr ? `: ${maskCredentialLikeText(this.stderr.slice(-400))}` : "";
++    return new Error(`ACP agent exited (${this.exitInfo})${tail}`);
++  }
++
++  private failAll(error: Error): void {
++    for (const [id, entry] of this.pending) {
++      if (entry.timer) clearTimeout(entry.timer);
++      this.pending.delete(id);
++      entry.reject(error);
++    }
++  }
++
++  private onStdout(chunk: Buffer): void {
++    this.buffer += this.stdoutDecoder.write(chunk);
++    if (this.buffer.length > MAX_LINE_CHARS && !this.buffer.includes("\n")) {
++      this.buffer = "";
++      this.failAll(new Error("ACP agent produced an oversized message"));
++      this.kill();
++      return;
++    }
++    let newline = this.buffer.indexOf("\n");
++    while (newline !== -1) {
++      const line = this.buffer.slice(0, newline).trim();
++      this.buffer = this.buffer.slice(newline + 1);
++      if (line) this.onLine(line);
++      newline = this.buffer.indexOf("\n");
++    }
++  }
++
++  private onLine(line: string): void {
++    let message: JsonRecord;
++    try {
++      message = asRecord(JSON.parse(line));
++    } catch {
++      return; // agents may print banners or logs on stdout; only JSON objects matter
++    }
++    const hasId = message.id !== undefined && message.id !== null;
++    if (typeof message.method === "string") {
++      if (hasId) this.onAgentRequest(message.id as number | string, message.method, message.params);
++      else this.onNotification(message.method, message.params);
++      return;
++    }
++    if (!hasId) return;
++    const entry = this.pending.get(message.id as number);
++    if (!entry) return;
++    this.pending.delete(message.id as number);
++    if (entry.timer) clearTimeout(entry.timer);
++    if (message.error !== undefined) {
++      const err = asRecord(message.error);
++      entry.reject(
++        new AcpRpcError(
++          typeof err.code === "number" ? err.code : -32603,
++          typeof err.message === "string" ? err.message : "ACP agent returned an error",
++          err.data
++        )
++      );
++    } else {
++      entry.resolve(message.result);
++    }
++  }
++
++  private onNotification(method: string, params: unknown): void {
++    if (method !== "session/update") return;
++    const update = asRecord(asRecord(params).update);
++    try {
++      this.options.onUpdate?.(update as AcpSessionUpdate);
++    } catch {
++      // a faulty consumer must not break the protocol loop
++    }
++  }
++
++  private onAgentRequest(id: number | string, method: string, params: unknown): void {
++    if (method === "session/request_permission") {
++      this.write({
++        id,
++        result: decidePermission(params, this.options.permissionPolicy ?? "reject"),
++      });
++      return;
++    }
++    if (method.startsWith("fs/") || method.startsWith("terminal/")) {
++      this.write({ id, error: { code: ACP_DENIED_CODE, message: "Denied by gateway policy" } });
++      return;
++    }
++    this.write({ id, error: { code: METHOD_NOT_FOUND, message: `Method not found: ${method}` } });
++  }
++
++  private write(message: JsonRecord): void {
++    const stdin = this.child?.stdin;
++    if (!stdin || stdin.destroyed || !stdin.writable) return;
++    stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
++  }
++
++  request(
++    method: string,
++    params: unknown,
++    timeoutMs = this.options.requestTimeoutMs ?? 30_000
++  ): Promise<unknown> {
++    if (this.spawnError) return Promise.reject(this.spawnError);
++    if (this.exited) return Promise.reject(this.exitError());
++    const id = this.nextId++;
++    return new Promise<unknown>((resolve, reject) => {
++      const entry: Pending = { resolve, reject };
++      if (timeoutMs > 0) {
++        entry.timer = setTimeout(() => {
++          this.pending.delete(id);
++          reject(new Error(`ACP request ${method} timed out after ${timeoutMs}ms`));
++        }, timeoutMs);
++        entry.timer.unref?.();
++      }
++      this.pending.set(id, entry);
++      this.write({ id, method, params });
++    });
++  }
++
++  notify(method: string, params: unknown): void {
++    this.write({ method, params });
++  }
++
++  /** Resolves when the agent process has exited or failed to spawn. */
++  whenExited(): Promise<void> {
++    return this.exitPromise ?? Promise.resolve();
++  }
++
++  /** SIGTERM is followed by SIGKILL after a short delay, so an agent that ignores it cannot leak. */
++  kill(signal: NodeJS.Signals = "SIGTERM"): void {
++    if (!this.child || this.exited) return;
++    try {
++      this.child.kill(signal);
++    } catch {
++      // already gone
++    }
++    if (signal === "SIGTERM") {
++      const forced = setTimeout(() => this.kill("SIGKILL"), KILL_ESCALATION_MS);
++      forced.unref?.();
++      void this.whenExited().then(() => clearTimeout(forced));
++    }
++  }
++
++  /** Close stdin, ask the agent to stop, escalate to SIGKILL, and wait for the exit. */
++  async close(graceMs = 1000): Promise<void> {
++    if (!this.child) return;
++    this.failAll(new Error("ACP client closed"));
++    try {
++      this.child.stdin.end();
++    } catch {
++      // ignore
++    }
++    if (!this.exited) {
++      this.kill("SIGTERM");
++      const forced = setTimeout(() => this.kill("SIGKILL"), graceMs);
++      forced.unref?.();
++      await this.whenExited();
++      clearTimeout(forced);
++    }
++  }
++}
+diff --git a/open-sse/executors/index.ts b/open-sse/executors/index.ts
+index f0c5727..3e75715 100644
+--- a/open-sse/executors/index.ts
++++ b/open-sse/executors/index.ts
+@@ -39,6 +39,7 @@ import { DevinDesktopExecutor } from "./devin-desktop.ts";
+ import { ZedHostedExecutor } from "./zed-hosted.ts";
+ import { DevinCliExecutor } from "./devin-cli.ts";
+ import { ZcodeExecutor } from "./zcode.ts";
++import { AcpExecutor } from "./acp.ts";
+ import { DevinCliAgenticExecutor } from "./devin-cli-agentic.ts";
+ import { AuggieExecutor } from "./auggie.ts";
+ import { DeepSeekWebExecutor } from "./deepseek-web.ts";
+@@ -152,6 +153,7 @@ const executors = {
+   "zed-hosted": new ZedHostedExecutor(),
+   "devin-cli": new DevinCliExecutor(),
+   zcode: new ZcodeExecutor(),
++  "qoder-acp": new AcpExecutor("qoder"),
+   zc: new ZcodeExecutor(), // Alias
+   "devin-cli-agentic": new DevinCliAgenticExecutor(),
+   devin: new DevinCliExecutor(), // Alias
+diff --git a/src/shared/constants/providers.ts b/src/shared/constants/providers.ts
+index a9bfee5..7533684 100644
+--- a/src/shared/constants/providers.ts
++++ b/src/shared/constants/providers.ts
+@@ -31,6 +31,9 @@ export const FREE_APIKEY_PROVIDER_IDS = new Set([
+   "auggie",
+   // zcode is a local app-server backend; auth stays in the ZCode profile.
+   "zcode",
++  // qoder-acp drives `qodercli --acp` locally; the Qoder login lives in the CLI profile, and an
++  // optional Personal Access Token connection is passed to the agent through its environment.
++  "qoder-acp",
+   // AI Horde works anonymously (`0000000000`) and also accepts a free registered
+   // key for higher queue priority. The no-auth page still enables the provider;
+   // this flag admits an optional apikey connection so that stored key is used.
+diff --git a/src/shared/constants/providers/noauth.ts b/src/shared/constants/providers/noauth.ts
+index dabf424..1df2e0f 100644
+--- a/src/shared/constants/providers/noauth.ts
++++ b/src/shared/constants/providers/noauth.ts
+@@ -175,6 +175,24 @@ export const NOAUTH_PROVIDERS = {
+       text: "ZCode runs locally through its native app-server. OmniRoute never receives or stores the Z.ai credential.",
+     },
+   },
++  "qoder-acp": {
++    id: "qoder-acp",
++    alias: "qoacp",
++    name: "Qoder CLI (ACP)",
++    icon: "terminal",
++    color: "#6C47FF",
++    textIcon: "QA",
++    website: "https://docs.qoder.com/cli/acp",
++    noAuth: true,
++    hasFree: false,
++    serviceKinds: ["llm"],
++    isLocalCli: true,
++    authHint:
++      "No API key required. OmniRoute starts `qodercli --acp` locally and uses its existing login; an optional Personal Access Token connection is handed to the agent instead.",
++    notice: {
++      text: "Qoder CLI (ACP) requires the `qodercli` binary on this machine. Each request runs in an empty scratch directory with tool permissions rejected.",
++    },
++  },
+   "codex-app-server": {
+     id: "codex-app-server",
+     alias: "cxa",
