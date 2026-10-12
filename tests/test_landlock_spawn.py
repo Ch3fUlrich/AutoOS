@@ -100,6 +100,31 @@ probe("qoder_journal_own",
 probe("qoder_journal_foreign", lambda: os.makedirs(cfg["qoder_foreign_dir"]))
 
 
+# P1f: the client's own temp dir. What killed the jailed qoder canary was not a
+# read — it was the client's OWN shell tool: node's os.tmpdir() answered the host
+# /tmp and `mkdir '/tmp/qoder-cli-1000/<cwd-slug>'` came back EACCES. So report the
+# name the launch handed the child and do that same nested mkdir-and-write in it.
+out["tmpdir_value"] = os.environ.get("TMPDIR", "")
+out["tmp_env_values"] = [os.environ.get(n, "") for n in ("TMPDIR", "TMP", "TEMP")]
+
+
+def tmpdir_mkdir():
+    tmp = os.environ.get("TMPDIR")
+    if not tmp:
+        raise RuntimeError("the jailed client was handed no TMPDIR")
+    sub = os.path.join(tmp, "qoder-cli-1000", os.path.basename(cfg["sandbox"]))
+    os.makedirs(sub, exist_ok=True)
+    with open(os.path.join(sub, "shell-output.txt"), "w") as fh:
+        fh.write("git status --short\n")
+
+
+try:
+    tmpdir_mkdir()
+    out["tmpdir_mkdir"] = "ok"
+except Exception as exc:  # a jail refusal is an answer, not a crash
+    out["tmpdir_mkdir"] = "%s: %s" % (type(exc).__name__, exc)
+
+
 def git_status():
     proc = subprocess.run(["git", "status", "--porcelain"], cwd=cfg["sandbox"],
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -360,6 +385,33 @@ class JailLiveTests(unittest.TestCase):
         self.assertTrue(os.path.isdir(own), own)
         self.assertEqual(os.stat(own).st_mode & 0o777, 0o700, own)
 
+    def test_a_jailed_launch_writes_its_tool_output_to_its_own_tmpdir(self):
+        """P1f positive control, end to end through `run_client`: the launcher hands a
+        jailed client a temp dir under its own toolhome — created 0700 at the launch
+        and by nobody before it, since the plan and the env stamp touch no filesystem —
+        and the client can build the nested shape its shell tool asks for inside it.
+        Host /tmp keeps answering `denied`: the fix is a private dir, not a grant."""
+        tmpdir = os.path.join(self.toolhome, "tmp")
+        self.assertFalse(os.path.exists(tmpdir), "the fixture made the temp dir")
+        with contextlib.redirect_stderr(io.StringIO()):
+            planned = agent.worker_env(
+                {"cwd": self.sandbox, "env": {}, "sandbox": {"path": self.sandbox},
+                 "cmd": [self._stub("qodercli"), "x"]},
+                None, base={"HOME": self.home, "PATH": self.bin + ":/usr/bin:/bin"})
+        self.assertEqual(planned.get("TMPDIR"), tmpdir, planned)
+        self.assertFalse(os.path.exists(tmpdir),
+                         "naming the temp dir created it: a dry run writes nothing")
+        rc, report = self._spawn("qodercli")
+        self.assertEqual(int(rc), 0, self.spawn_log[-3000:])
+        self.assertEqual(report.get("tmpdir_value"), tmpdir, report)
+        self.assertEqual(set(report.get("tmp_env_values") or ()), {tmpdir}, report)
+        self.assertEqual(report.get("tmpdir_mkdir"), "ok", report)
+        self.assertTrue(os.path.isdir(tmpdir), tmpdir)
+        self.assertEqual(os.stat(tmpdir).st_mode & 0o777, 0o700, tmpdir)
+        # and the fence still holds on the shared temp: this is no /tmp grant
+        self.assertEqual(report.get("tmp_read"), "denied", report)
+        self.assertEqual(report.get("tmp_write"), "denied", report)
+
     def test_qoder_rw_is_exactly_the_per_run_projects_dir(self):
         """The plan's writable world for qoder names ONE thing under the home: the
         per-run projects slug — never `~/.qoder`, never `~/.qoder/projects` (every
@@ -569,6 +621,101 @@ class JailLiveTests(unittest.TestCase):
         self.assertEqual(report.get("git_status"), "ok", report)
 
 
+class JailTmpDirPlanTests(unittest.TestCase):
+    """P1f at the plan level: the env a JAILED launch is built with names a temp dir
+    under the sandbox toolhome, and an unjailed one names none of it. `worker_env` is
+    the one place a worker env is built and `--dry-run` prints exactly its names, so
+    what a reader previews is what the child gets — for both per-client legs, the
+    own-account one (qoder keeps the operator's HOME) and the gateway one (opencode is
+    re-homed to the toolhome)."""
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("POSIX only: the jail and the fence's absence")
+        if landlock.available() <= 0:
+            self.skipTest("no Landlock ABI on this kernel: the jail is not offered")
+        self.base = tempfile.mkdtemp(prefix="autoos-jail-tmpplan-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.sandbox = os.path.join(self.base, "sb-1")
+        self.toolhome = self.sandbox + agent.TOOLHOME_SUFFIX
+        os.makedirs(self.sandbox, mode=0o700)
+        os.makedirs(self.toolhome, mode=0o700)
+        self.home = os.path.join(self.base, "home")
+        os.makedirs(self.home, mode=0o700)
+
+    def _env(self, program, **extra):
+        plan = {"cwd": self.sandbox, "env": {}, "sandbox": {"path": self.sandbox},
+                "cmd": [os.path.join(self.base, "bin", program), "task"]}
+        plan.update(extra)
+        with contextlib.redirect_stderr(io.StringIO()):
+            return agent.worker_env(plan, None, base={"HOME": self.home,
+                                                      "PATH": "/usr/bin:/bin"})
+
+    def _assert_private(self, env, where):
+        want = os.path.join(self.toolhome, "tmp")
+        for name in agent.JAIL_TMP_ENV:
+            self.assertEqual(env.get(name), want,
+                             "%s: %s is %r, expected the toolhome temp dir %s"
+                             % (where, name, env.get(name), want))
+
+    def test_a_jailed_qoder_plan_names_its_own_tmpdir(self):
+        self._assert_private(self._env("qodercli"), "qoder")
+
+    def test_a_jailed_opencode_plan_names_its_own_tmpdir(self):
+        env = self._env("opencode", forced_home=self.toolhome)
+        self._assert_private(env, "opencode")
+        self.assertEqual(env.get("HOME"), self.toolhome,
+                         "the gateway client is no longer re-homed")
+
+    def test_an_unjailed_plan_names_none_of_it(self):
+        """No fence, no need for a private temp dir: the run keeps the behaviour it
+        had before P1f, and the host default, whatever leg it is on — no ABI (the
+        documented `LANDLOCK_EXEC_FORCE_ABI0` seam) or no --isolate sandbox."""
+        for where, env in (("tier-1", self._env("qodercli", sandbox=None)),
+                           ("no-abi", self._with_abi0("qodercli")),
+                           ("no-abi-opencode", self._with_abi0("opencode"))):
+            for name in agent.JAIL_TMP_ENV:
+                self.assertNotIn(name, env,
+                                 "%s: an unjailed plan set %s=%r" % (where, name,
+                                                                    env.get(name)))
+
+    def _with_abi0(self, program):
+        """The same plan with the kernel's fence switched off, the seam the wrapper
+        documents. The ABI answer is cached PER MODULE, and the spawner imported its
+        own copy of the wrapper, so both caches are re-measured — and restored."""
+        copies = [landlock]
+        if getattr(agent, "landlock", None) is not landlock:
+            copies.append(agent.landlock)
+        saved = [dict(mod._cached) for mod in copies]
+        os.environ[landlock.FORCE_ABI0_ENV] = "1"
+        for mod in copies:
+            mod._cached.clear()
+        try:
+            return self._env(program)
+        finally:
+            os.environ.pop(landlock.FORCE_ABI0_ENV, None)
+            for mod, cache in zip(copies, saved):
+                mod._cached.clear()
+                mod._cached.update(cache)
+
+    def test_the_temp_dir_grant_is_the_toolhome_it_sits_under(self):
+        """No new grant: the temp dir is `tmp` under a directory the jail already
+        grants rw, so the plan's writable world does not name it and does not name
+        the shared temp either."""
+        entry = agent.jail_client_entry([os.path.join(self.base, "bin", "qodercli")])
+        grants = agent.jail_grants(self.sandbox, [os.path.join(self.base, "bin",
+                                                              "qodercli")],
+                                   {"HOME": self.home}, entry)
+        tmpdir = agent.jail_tmpdir(self.sandbox)
+        self.assertNotIn(tmpdir, grants["rw"], grants)
+        self.assertIn(self.toolhome, grants["rw"], grants)
+        self.assertTrue(os.path.realpath(tmpdir)
+                        .startswith(os.path.realpath(self.toolhome) + os.sep), tmpdir)
+        for paths in grants.values():
+            for path in paths:
+                self.assertFalse(agent.jail_denied(path, self.home), path)
+
+
 class JailNoLandlockGateTests(unittest.TestCase):
     """Item 3, end to end through the CLI: with no fence to build, a PRIVATE lane
     is refused with rc 2 before anything is cloned, and a PUBLIC one runs as it
@@ -669,6 +816,25 @@ class JailNoLandlockGateTests(unittest.TestCase):
         self.assertTrue(records, "no worker record carries a jail answer")
         self.assertEqual(records[-1]["jail"].get("override"), "--allow-unjailed",
                          records[-1]["jail"])
+
+    def test_the_dry_run_env_line_shows_the_private_tmpdir_only_when_jailed(self):
+        """P1f at the CLI: `--dry-run` prints the names the child actually gets, so a
+        preview of a jailed plan lists TMPDIR/TMP/TEMP and a preview of a plan the
+        kernel cannot fence lists none of them. One grep of one line is the whole
+        answer — which is why the same env helper serves both sites."""
+        def env_line(out):
+            lines = [l for l in out.splitlines() if l.startswith("env: ")]
+            self.assertTrue(lines, out)
+            return {n.strip() for n in lines[-1][len("env: "):].split(",")}
+
+        rc, out, err = self._run(["--dry-run"] + self.PUBLIC, abi0=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("jail: landlock", out)
+        self.assertTrue(set(agent.JAIL_TMP_ENV) <= env_line(out), out)
+        rc, out, err = self._run(["--dry-run"] + self.PUBLIC, abi0=True)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("jail: unjailed", out)
+        self.assertFalse(set(agent.JAIL_TMP_ENV) & env_line(out), out)
 
     def test_a_private_isolated_lane_is_jailed_when_the_kernel_has_the_abi(self):
         """The rc-2 path is the exception, not the rule: the same card on a
