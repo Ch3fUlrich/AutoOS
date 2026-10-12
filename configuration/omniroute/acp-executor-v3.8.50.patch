@@ -47,10 +47,10 @@ index 0000000..b230c57
 +};
 diff --git a/open-sse/executors/acp.ts b/open-sse/executors/acp.ts
 new file mode 100644
-index 0000000..32732cf
+index 0000000..ccfcce6
 --- /dev/null
 +++ b/open-sse/executors/acp.ts
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,638 @@
 +import { randomUUID } from "node:crypto";
 +import { mkdtemp, rm } from "node:fs/promises";
 +import { tmpdir } from "node:os";
@@ -326,6 +326,15 @@ index 0000000..32732cf
 +      this.onAbort();
 +      throw abortError();
 +    }
++    if (
++      this.options.permissionPolicy === "allow" ||
++      process.env.ACP_PERMISSION_POLICY === "allow"
++    ) {
++      this.input.log?.warn?.(
++        "ACP",
++        `${this.agent.id}: ACP_PERMISSION_POLICY=allow auto-approves agent tool requests for every caller`
++      );
++    }
 +    this.client.start();
 +    await this.client.request("initialize", { protocolVersion: 1, clientCapabilities: {} });
 +    const created = asRecord(
@@ -360,6 +369,11 @@ index 0000000..32732cf
 +      : [];
 +    if (wantedMode && modeIds.includes(wantedMode) && modes.currentModeId !== wantedMode) {
 +      await this.client.request("session/set_mode", { sessionId, modeId: wantedMode });
++    } else if (wantedMode && !modeIds.includes(wantedMode)) {
++      this.input.log?.warn?.(
++        "ACP",
++        `${this.agent.id}: agent does not offer session mode "${wantedMode}"; its own tool policy applies`
++      );
 +    }
 +    return { model };
 +  }
@@ -677,7 +691,7 @@ index 0000000..32732cf
 +};
 diff --git a/open-sse/executors/acpAgents.ts b/open-sse/executors/acpAgents.ts
 new file mode 100644
-index 0000000..73e0005
+index 0000000..6d0ce41
 --- /dev/null
 +++ b/open-sse/executors/acpAgents.ts
 @@ -0,0 +1,56 @@
@@ -723,7 +737,7 @@ index 0000000..73e0005
 +    command: "qwen",
 +    args: ["--acp"],
 +    binEnv: "CLI_QWEN_BIN",
-+    passEnv: ["OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"],
++    passEnv: ["OPENAI_BASE_URL", "OPENAI_MODEL"],
 +  },
 +  opencode: {
 +    id: "opencode",
