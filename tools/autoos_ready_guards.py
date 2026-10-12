@@ -262,15 +262,18 @@ def _files_item(item):
     return item.strip(" ")
 
 
-def brief_files(brief_text):
+def brief_files(brief_text, max_files=MAX_FILES):
     """Normalised paths the brief allows, from its ONE canonical FILES line.
 
     The cap counts the entries the lane may EDIT: every entry EXCEPT the one spelled
     exactly `CHANGELOG.md` (the repo-root name, case-exact, after `_files_item` plus
     `exact_path` normalisation, so './CHANGELOG.md' is exempt and 'changelog.md',
-    'docs/CHANGELOG.md', 'CHANGELOG.md.bak' are ordinary files). Up to `MAX_FILES`
-    counted entries pass, which is at most 4 items in total, because the duplicate
-    check lets only one CHANGELOG line through. Lanes briefed after 2026-10-10 12:00Z
+    'docs/CHANGELOG.md', 'CHANGELOG.md.bak' are ordinary files). Up to `max_files`
+    (default `MAX_FILES`) counted entries pass, which is at most one more item in
+    total, because the duplicate check lets only one CHANGELOG line through. `max_files`
+    is the ONE thing `ready --cap-exception` relaxes: every other rule in this function —
+    the count, the exemption, the duplicate check, the canonical single line — is decided
+    the same whatever the cap. Lanes briefed after 2026-10-10 12:00Z
     must satisfy this; the one-time exception for F1a eac8dda6 is logged in
     ready-inbox and is NOT encoded here (no allowlist entry, no sha special-case).
 
@@ -316,12 +319,13 @@ def brief_files(brief_text):
     if None in out or len(folded) != len(set(folded)):
         raise GuardError("FILES paths unusable (unparsable, duplicate): %r" % raw[:120])
     counted = [p for p in out if p != CHANGELOG_ENTRY]
-    if len(counted) > MAX_FILES:
-        raise GuardError("FILES is >3 files not counting CHANGELOG.md: %d counted "
+    if len(counted) > max_files:
+        raise GuardError("FILES is >%d files not counting CHANGELOG.md: %d counted "
                          "against the cap of %d. The exemption is the one repo-root "
                          "path %r spelled case-exactly; docs/CHANGELOG.md, "
                          "CHANGELOG.md.bak and changelog.md are ordinary files: %r"
-                         % (len(counted), MAX_FILES, CHANGELOG_ENTRY, raw[:120]))
+                         % (max_files, len(counted), max_files, CHANGELOG_ENTRY,
+                            raw[:120]))
     return out
 
 

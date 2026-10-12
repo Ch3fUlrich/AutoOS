@@ -12492,6 +12492,297 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         self.assertEqual(calls, [(self.REPO, "origin/main", self.SHA)], calls)
 
 
+class ReadyCapExceptionTests(ReadyWriterGuardsTests):
+    """AO-READY-CAP-EXCEPTION: `ready --cap-exception D-NNN` — a decision-bound,
+    one-sha relaxation of the writer brief's FILES cap.
+
+    It inherits the whole writer-guards driver AND every parent case: with no flag
+    on the command line each of them must still land where it landed before, which is
+    the byte-identical proof that the single-brief path did not move (a routing repo
+    is built and pointed at, but never read).
+
+    That repo is a REAL git repo in a throwaway dir — the way `FleetLedgerPathTests`
+    proves the ledger home — whose `refs/remotes/origin/main` is pinned with
+    `update-ref`, and `AUTOOS_ROUTING_DIR` names it. The row is read with
+    `git show <origin/main commit>:docs/decisions-log.md`, so an uncommitted edit and
+    a row that lives only on another branch buy nothing. The id shape, the routing
+    dir and the word-bounded id rule all come from the routing gate module itself.
+    """
+
+    REF = "D-7"
+    OTHER_SHA = "d" * 40
+    TABLE = ("| id | project | decision | by | date |\n"
+             "| --- | --- | --- | --- | --- |\n")
+    FOUR = ["tools/a.py", "tools/b.py", "tools/c.py", "tools/d.py"]
+
+    def setUp(self):
+        super().setUp()
+        self.routing = self.routing_repo(self.TABLE + self.row(self.SHA))
+        self.routing_commit = self.git(self.routing, "rev-parse",
+                                       "refs/remotes/origin/main")
+        env = mock.patch.dict(os.environ, {
+            "AUTOOS_ROUTING_DIR": self.routing, "AUTOOS_STATE_DIR": self.work,
+            "AUTOOS_LEDGER_PATH": os.path.join(self.work, "wl.jsonl")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, d, *argv):
+        return subprocess.run(["git", "-C", d, *argv], capture_output=True, text=True,
+                              check=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+    def routing_repo(self, text):
+        """A temp git repo whose origin/main holds `text` as docs/decisions-log.md."""
+        d = tempfile.mkdtemp(prefix="capex-routing-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "docs"))
+        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(text)
+        self.git(d, "init", "-q")
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "row")
+        self.git(d, "update-ref", "refs/remotes/origin/main", self.git(d, "rev-parse", "HEAD"))
+        return d
+
+    def write_routing_log(self, d, text):
+        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(text)
+
+    def row(self, sha, ref=None, by="routing-00"):
+        return ("| %s | autoos | relax the cap for lane si2-p6e at %s | %s | 2026-10-12 |\n"
+                % (ref or self.REF, sha, by))
+
+    def brief(self, paths):
+        return ("TASK: one lane, several writer segments\nFILES (only these; <= 3 files,"
+                " <= 200 lines changed): %s. Do not touch other lines/files.\n"
+                % ", ".join(paths))
+
+    def check(self, d, ref=None, sha=None):
+        return self.agent.cap_exception_ok(ref or self.REF, sha or self.SHA,
+                                           env={"AUTOOS_ROUTING_DIR": d})
+
+    # --- the committed routing row ------------------------------------------
+
+    def test_one_committed_row_naming_the_full_sha_is_accepted(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        ok, reason, commit = self.check(d)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+        self.assertEqual(commit, self.git(d, "rev-parse", "refs/remotes/origin/main"))
+
+    def test_every_row_rule_that_fails_is_refused(self):
+        t, sha, ref = self.TABLE, self.SHA, self.REF
+        cases = (
+            ("an id the log does not name", t + self.row(sha, ref="D-999"), ref, sha, "no row"),
+            ("D-82 is not D-825", t + self.row(sha, ref="D-825"), "D-82", sha, "no row"),
+            ("D-82 is not D-82.5", t + self.row(sha, ref="D-82.5"), "D-82", sha, "no row"),
+            ("the id only in prose", t + "lane %s shipped at %s\n" % (ref, sha), ref, sha, "no row"),
+            ("a forged first cell", t + self.row(sha).replace("| %s |" % ref,
+                                                              "| %s x |" % ref), ref, sha, "no row"),
+            ("a lower-cased id cell", t + self.row(sha).replace("| %s |" % ref,
+                                                                "| %s |" % ref.lower()),
+             ref, sha, "no row"),
+            ("by is routing-01", t + self.row(sha, by="routing-01"), ref, sha, "by cell"),
+            ("by is empty", t + self.row(sha, by=""), ref, sha, "by cell"),
+            ("by is routing-00x", t + self.row(sha, by="routing-00x"), ref, sha, "by cell"),
+            ("the sha sits in another row", t + self.row(sha, ref="D-8") + self.row(
+                self.OTHER_SHA), ref, sha, "full --sha"),
+            ("a 12-character prefix", t + self.row(sha[:12]), ref, sha, "full --sha"),
+            ("a sha inside a longer hex run", t + self.row(sha + "ab"), ref, sha, "full --sha"),
+            ("an upper-cased sha", t + self.row(sha.upper()), ref, sha, "full --sha"),
+            ("the row binds another sha", t + self.row(self.OTHER_SHA), ref, sha, "full --sha"),
+            ("one id in two rows", t + self.row(sha) + self.row(sha), ref, sha,
+             "one row binds one sha"),
+            ("the --sha is only 12 hex", t + self.row(sha), ref, sha[:12], "full 40-hex"),
+            ("the id is not a decision id", t + self.row(sha), "7", sha, "not a decision id"),
+            ("the id carries a tail", t + self.row(sha), "D-7.5", sha, "not a decision id"),
+            ("the id is lower-cased", t + self.row(sha), "d-7", sha, "not a decision id"),
+        )
+        for label, text, asked_ref, asked_sha, needle in cases:
+            with self.subTest(case=label):
+                ok, reason, commit = self.check(self.routing_repo(text), asked_ref, asked_sha)
+                self.assertFalse(ok, reason)
+                self.assertIsNone(commit)
+                self.assertIn(needle, reason)
+
+    def test_a_working_tree_edit_is_not_a_committed_row(self):
+        d = self.routing_repo(self.TABLE + self.row(self.OTHER_SHA))
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA))
+        ok, reason, _commit = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("full --sha", reason)
+
+    def test_a_row_on_head_but_not_on_origin_main_is_refused(self):
+        d = self.routing_repo(self.TABLE + self.row(self.OTHER_SHA))
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA))
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "row-2")
+        ok, reason, _commit = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("full --sha", reason)
+
+    def test_a_missing_origin_main_ref_is_a_refusal_not_a_fallback(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        self.git(d, "update-ref", "-d", "refs/remotes/origin/main")
+        ok, reason, commit = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIsNone(commit)
+        self.assertIn("origin/main", reason)
+
+    def test_a_routing_repo_that_is_missing_or_unreadable_is_refused(self):
+        for d in (os.path.join(self.work, "no-such-routing"),
+                  os.path.join(self.work, "plain-dir")):
+            with self.subTest(routing=d):
+                if not os.path.isdir(d):
+                    os.makedirs(d)
+                ok, reason, commit = self.check(d)
+                self.assertFalse(ok, reason)
+                self.assertIsNone(commit)
+                self.assertIn("routing", reason)
+
+    # --- the ready gate with the exception ----------------------------------
+
+    def cap(self, **kw):
+        kw.setdefault("extra", ("--task-type", "code", "--cap-exception", self.REF))
+        kw.setdefault("brief", self.brief(self.FOUR))
+        kw.setdefault("diff_paths", self.FOUR[:2])
+        kw.setdefault("diff_raw", "+print(1)\n")
+        return self.ready(**kw)
+
+    def test_the_exception_lets_a_fourth_counted_file_through_the_cap(self):
+        rc, out, err, inbox, _calls = self.cap()
+        self.assertEqual(rc, 0, out + err)
+        line = inbox.rstrip("\n")
+        self.assertIn(" cap-exception=%s routing=%s" % (self.REF, self.routing_commit), line)
+        self.assertIn(" guards=ok", line)
+
+    def test_the_exception_does_not_move_the_scope_fence(self):
+        rc, out, err, inbox, _calls = self.cap(
+            diff_paths=self.FOUR[:2] + ["setup.sh"])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("scope-fence", out + err)
+        self.assertIn("setup.sh", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_seven_counted_files_are_refused_even_with_the_exception(self):
+        rc, out, err, inbox, _calls = self.cap(
+            brief=self.brief(self.FOUR + ["tools/e.py", "tools/f.py", "tools/g.py"]))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("writer-guards", out + err)
+        self.assertIn(">6 files not counting CHANGELOG.md", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_missing_review_is_still_refused_with_the_exception(self):
+        with io.open(self.record, "w", encoding="utf-8") as fh:
+            fh.write(CROSS_FAMILY_LINE + "\n")
+        rc, out, err, inbox, _calls = self.cap()
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("does not carry both reviews", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_red_pre_push_record_is_still_refused_with_the_exception(self):
+        # The parent driver answers the pre-push gate green INSIDE `ready()`, so this
+        # case drives the same CLI with the same stubs and a red answer instead.
+        self._stub("lane_diff_paths",
+                   lambda repo, base, sha: (self.FOUR[:2], "+print(1)\n", None))
+        self._stub("remote_branch_tip", lambda repo, branch: (self.SHA, None))
+        self._stub("main_ci_status",
+                   lambda repo=None, runner=None: ("success", "999", None))
+        patch = mock.patch.object(self.agent.prepush_mod, "local_green",
+                                  lambda sha, repo=None, **kw: False)
+        patch.start()
+        self.addCleanup(patch.stop)
+        argv = ["ready", self.record, "--branch", self.BRANCH, "--sha", self.SHA,
+                "--inbox", self.inbox, "--repo", self.REPO, "--registry",
+                self.registry_path, "--task-type", "code", "--cap-exception", self.REF,
+                "--brief", self.write_text("brief.md", self.brief(self.FOUR))]
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = self.agent.main(argv)
+        said = out.getvalue() + err.getvalue()
+        self.assertEqual(rc, 1, said)
+        self.assertIn("no green pre-push record", said)
+        self.assertEqual(self.inbox_text(), "")
+
+    def test_an_unbound_id_refuses_with_one_line(self):
+        for asked, needle in (("D-999", "no row"), ("7", "not a decision id"),
+                              ("D-7.5", "not a decision id")):
+            with self.subTest(asked=asked):
+                rc, out, err, inbox, _calls = self.cap(
+                    extra=("--task-type", "code", "--cap-exception", asked))
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn("ready: not appended -- cap-exception %s: " % asked, out + err)
+                self.assertIn(needle, out + err)
+                self.assertEqual(len((out + err).strip().splitlines()), 1, out + err)
+                self.assertEqual(inbox, "")
+
+    def test_dry_run_prints_the_verdict_and_appends_nothing(self):
+        rc, out, err, inbox, _calls = self.cap(
+            extra=("--task-type", "code", "--dry-run", "--cap-exception", self.REF))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("cap-exception=%s routing=%s" % (self.REF, self.routing_commit), out)
+        self.assertEqual(inbox, "")
+
+    def test_without_the_flag_the_cap_and_its_message_are_unchanged(self):
+        # The refusal text is the guards module's own message, word for word, and the
+        # accepted line carries no new field — the single-brief path did not move.
+        g = self.agent.ready_guards
+        try:
+            g.brief_files(self.brief(self.FOUR))
+            self.fail("a fourth counted file must still be refused without the flag")
+        except g.GuardError as exc:
+            golden = str(exc)
+        rc, out, err, inbox, _calls = self.ready(diff_paths=self.FOUR[:2],
+                                                extra=("--task-type", "code"),
+                                                brief=self.brief(self.FOUR))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ready: not appended -- writer-guards: %s" % golden, err)
+        self.assertIn(">3 files not counting CHANGELOG.md", err)
+        self.assertNotIn("cap-exception", out + err + inbox)
+        self.assertEqual(inbox, "")
+        rc, out, err, inbox, _calls = self.ready(diff_paths=["tools/a.py"],
+                                                 diff_raw="+print(1)\n",
+                                                 extra=("--task-type", "code"),
+                                                 brief=self.brief(["tools/a.py"]))
+        self.assertEqual(rc, 0, out + err)
+        self.assertNotIn("cap-exception", out + err)
+        self.assertTrue(inbox.rstrip("\n").endswith(" guards=ok"), inbox)
+
+    # --- the cap the guards module owns -------------------------------------
+
+    def test_brief_files_max_files_relaxes_only_the_count(self):
+        g = self.agent.ready_guards
+        self.assertEqual(g.MAX_FILES, 3)
+        for n in (4, 5, 6):
+            paths = ["tools/f%d.py" % i for i in range(n)]
+            with self.subTest(n=n):
+                self.assertEqual(g.brief_files(self.brief(paths), max_files=6), paths)
+        seven = ["tools/f%d.py" % i for i in range(7)]
+        with self.assertRaises(g.GuardError) as cm:
+            g.brief_files(self.brief(seven), max_files=6)
+        self.assertIn(">6 files not counting CHANGELOG.md", str(cm.exception))
+        # the CHANGELOG exemption, the duplicate rule and the canonical-line rule all
+        # still hold at the relaxed count.
+        self.assertEqual(g.brief_files(self.brief(self.FOUR + ["CHANGELOG.md"]),
+                                       max_files=6), self.FOUR + ["CHANGELOG.md"])
+        for text in (self.brief(["tools/a.py", "CHANGELOG.md", "CHANGELOG.md"]),
+                     self.brief(["tools/a.py"]) + self.brief(["tools/b.py"]),
+                     "TASK: x\nFILES: tools/a.py\n"):
+            with self.subTest(text=text[:40]):
+                with self.assertRaises(g.GuardError):
+                    g.brief_files(text, max_files=6)
+
+    def test_brief_files_default_cap_is_unchanged(self):
+        g = self.agent.ready_guards
+        self.assertEqual(g.brief_files(self.brief(self.FOUR[:3])), self.FOUR[:3])
+        with self.assertRaises(g.GuardError) as cm:
+            g.brief_files(self.brief(self.FOUR))
+        self.assertIn(">3 files not counting CHANGELOG.md", str(cm.exception))
+
+
 class LaneDiffPathsTests(unittest.TestCase):
     """`lane_diff_paths` (AO-WRITER-GUARDS P4b) reads the lane's diff through the
     injectable `subprocess.run` — the same shape `ci_run_status` uses, because
