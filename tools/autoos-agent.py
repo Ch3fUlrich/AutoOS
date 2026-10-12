@@ -76,7 +76,10 @@ Jail (AO-OPENCODE-JAIL P1b): every `--isolate` worker on a Landlock kernel runs 
 `tools/landlock_exec.py` — a fence the kernel enforces below the process, so the worker
 has no syscall that lifts it. Its writable world is its own sandbox, the sandbox's two
 private siblings and its per-run XDG dirs; everything else it may read is the tool chain
-and the trust store named in `JAIL_RO_BY_CLIENT`. The jail wraps the client INSIDE the
+and the trust store named in `JAIL_RO_BY_CLIENT`. Host `/tmp` is granted to nothing, so a
+jailed launch is handed a temp dir of its own under its toolhome (`TMPDIR`/`TMP`/`TEMP`)
+instead — a client that writes its tool output to `/tmp` would else die on the first
+`mkdir`. The jail wraps the client INSIDE the
 `systemd-run` scope: the scope decides who can be killed, Landlock decides what can be
 read. `--dry-run` prints the jailed argv, the record carries `jail`, and the run prints a
 `jail:` line. With no Landlock ABI an isolated private lane FAILS CLOSED (rc 2) —
@@ -2196,6 +2199,15 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     forced_home = plan.get("forced_home")
     if forced_home is not None and forced_home == toolhome_dir(str(plan.get("cwd", ""))):
         env["HOME"] = forced_home
+    # JAILED-TMPDIR (P1f): a launch the fence will actually wrap gets its temp dir
+    # repointed into the sandbox toolhome, because host /tmp is not granted to a
+    # jailed worker and its first `mkdir` under it kills its own shell tool. Named
+    # here — the one place a worker env is built — so the `--dry-run` env list and
+    # the child's env answer the same question; `jail_provision` creates the
+    # directory at the real launch. An unjailed launch keeps what it had.
+    if jail_decision(str(plan.get("cwd") or ""), plan.get("cmd") or [], env,
+                     isolated=bool(plan.get("sandbox")))["path"] == "landlock":
+        apply_jail_tmpdir(env, str(plan["cwd"]))
     # SEAT-PYTEST (P4): honoured only when the plan's key is exactly what this
     # spawner recomputes now — a plan cannot write down a path of its own.
     user_site = plan.get("user_site_path")
@@ -12248,6 +12260,42 @@ def jail_home_rw_dirs(entry: dict, home: str, cwd: str) -> list:
     return [path] if path else []
 
 
+# JAILED-TMPDIR (AO-OPENCODE-JAIL P1f, measured on the real run
+# 20261012-044216-…-ao-opencode-jail-canary-5cf689): a jailed qoder could not run
+# its own shell tool at all — `Failed to prepare shell output (EACCES): mkdir
+# '/tmp/qoder-cli-1000/<cwd-slug>'` — because a client puts its tool output under
+# its temp dir, that resolves to the HOST /tmp, and no grant names /tmp. Naming it
+# is not an option either: `/tmp` is every other run's scratch, which is exactly
+# why `jail_denied` refuses to cover it. So the fence keeps host /tmp ungranted and
+# the client gets a temp dir of its own instead: `tmp` under the sandbox toolhome,
+# which the jail ALREADY grants rw — no new grant, and no new reach. The three
+# names are what a client reads to find it: node's `os.tmpdir()` takes TMPDIR,
+# Python's `tempfile` takes TMPDIR then TMP/TEMP, a Windows-shaped client TEMP/TMP.
+JAIL_TMP_ENV = ("TMPDIR", "TMP", "TEMP")
+
+
+def jail_tmpdir(cwd: str) -> str:
+    """The private temp dir of a jailed launch: `tmp` under its own toolhome.
+
+    One function so the env stamp and the launcher's `mkdir` cannot disagree about
+    the path — the same rule `sandbox_slug_dir` serves for the journal."""
+    return os.path.join(toolhome_dir(str(cwd)), "tmp")
+
+
+def apply_jail_tmpdir(env: dict, cwd: str) -> str:
+    """Point a JAILED launch's temp dir at its own toolhome; return the path.
+
+    Overwrites whatever the caller had: an inherited host TMPDIR is the defect this
+    closes, not a default to preserve. Idempotent, and it creates nothing — the
+    directory is provisioned at the real launch site (`jail_provision`), so a plan,
+    a `--dry-run` and an unjailed launch still touch no filesystem.
+    """
+    path = jail_tmpdir(cwd)
+    for name in JAIL_TMP_ENV:
+        env[name] = path
+    return path
+
+
 def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     """{rw, ro, ro_file} this launch needs, as absolute paths.
 
@@ -12259,6 +12307,11 @@ def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     is skipped by the wrapper, so an optional sibling costs nothing — and the client's
     per-run home dir is provisioned by the launcher before this argv execs, never
     created here (a dry run touches the filesystem for nothing).
+
+    The client's private temp dir (P1f) is NOT one of these grants: `jail_tmpdir`
+    puts it under the toolhome sibling named below, so a jailed client gets a temp
+    dir with no new grant, and host `/tmp` — every other run's scratch — stays
+    ungranted.
     """
     entry = entry or jail_client_entry(cmd)
     home = env.get("HOME") or os.path.expanduser("~")
@@ -12409,6 +12462,12 @@ def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:
     launch — never in `jail_grants`, so a `--dry-run` plan still writes nothing.
     Reuses `provision_runtime_dir`, which refuses to follow a symlink or tighten a
     directory owned by another uid.
+
+    The private temp dir (P1f) is stamped and made here too, because the wrapper
+    execs with THIS env: a client that was handed a TMPDIR naming a directory nobody
+    created fails on its first mkdir, so a provisioner REFUSAL takes the three names
+    back out and the client falls back to its own default — the same non-fatal rule
+    `provision_runtime_dir` documents for the runtime dir.
     """
     if jail.get("path") != "landlock":
         return
@@ -12416,6 +12475,10 @@ def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:
     entry = jail_client_entry(cmd)
     for path in jail_home_rw_dirs(entry, home, cwd):
         provision_runtime_dir(path)
+    tmp = apply_jail_tmpdir(env, cwd)
+    if provision_runtime_dir(tmp) is None:
+        for name in JAIL_TMP_ENV:
+            env.pop(name, None)
 
 
 def delete_qoder_projects(sandbox_path: str, home: str | None = None) -> int:
