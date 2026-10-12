@@ -166,10 +166,14 @@ class CustomModelsFileShapeTests(unittest.TestCase):
                 self.assertIsInstance(row.get(field), str, "%r: %s is not a string" % (row, field))
                 self.assertTrue(row[field].strip(), "%r: %s is empty" % (row, field))
 
-    def test_every_row_carries_positive_integer_limits(self):
+    def test_declared_limits_are_positive_integers(self):
+        # Limits are optional (openrouter/free is a router with no fixed model),
+        # but a limit that is declared must be a real one.
         for row in _rows():
             for field in ("max_input_tokens", "max_output_tokens"):
-                value = row.get(field)
+                if field not in row:
+                    continue
+                value = row[field]
                 self.assertIsInstance(value, int, "%s: %s is not an int" % (row["id"], field))
                 self.assertNotIsInstance(value, bool, "%s: %s is a bool, not a limit" % (row["id"], field))
                 self.assertGreater(value, 0, "%s: %s must be positive" % (row["id"], field))
@@ -199,12 +203,12 @@ class ApplierAgainstFakeGatewayTests(unittest.TestCase):
                 row = next(r for r in rows if r["id"] == post["modelId"])
                 self.assertEqual(post["provider"], row["provider"])
                 self.assertEqual(post["modelName"], row["name"])
-                self.assertEqual(post["max_input_tokens"], row["max_input_tokens"])
-                self.assertEqual(post["max_output_tokens"], row["max_output_tokens"])
-                self.assertEqual(post["supportsVision"], row["supportsVision"])
+                for field in ("max_input_tokens", "max_output_tokens", "supportsVision"):
+                    self.assertEqual(post.get(field), row.get(field), "%s: %s" % (post["modelId"], field))
             self.assertIn("  = %s/%s already present" % (rows[0]["provider"], held_id), proc.output)
-            for mid in expected:
-                self.assertIn("  + %s/%s added" % (rows[0]["provider"], mid), proc.output)
+            for row in rows:
+                if row["id"] != held_id:
+                    self.assertIn("  + %s/%s added" % (row["provider"], row["id"]), proc.output)
 
     @unittest.skipUnless(HEAD, "no git HEAD to name in --go-sha")
     def test_second_run_changes_nothing(self):
