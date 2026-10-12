@@ -1,0 +1,46 @@
+{
+  "$comment": [
+    "Custom (manual) models for providers whose gateway-side model list is a",
+    "static, image-baked list with no live discovery. Applied by",
+    "apply-custom-models.sh through POST /api/provider-models {provider, modelId,",
+    "modelName, source: manual, max_input_tokens, max_output_tokens, supportsVision};",
+    "an id the gateway already holds is left alone (re-run = no-op).",
+    "",
+    "WHY (2026-10-12, read from the gateway image sources): OmniRoute 3.8.50 ships",
+    "xiaomi-mimo and xiaomi-mimo-token-plan with only mimo-v2.5-pro and mimo-v2.5",
+    "(open-sse/config/providers/shared.ts), no entry in PROVIDER_MODELS_CONFIG and no",
+    "registry modelsUrl, so GET /api/providers/<id>/models answers source",
+    "local_catalog (intentional) and model sync imports just those two. The synced",
+    "catalog is authoritative, so mimo-v2.6-* answers 400 'not available in the",
+    "active live catalog'. A custom model is an explicit operator override that the",
+    "authoritative catalog does not exclude (src/sse/services/model.ts lookupModelMeta).",
+    "",
+    "PROVIDER: the Token Plan key lives on the connection of provider xiaomi-mimo",
+    "(base URL overridden to the AMS token-plan host in the connection's",
+    "provider_specific_data), so the rows target xiaomi-mimo, not xiaomi-mimo-token-plan.",
+    "",
+    "Numbers: context and output are the vendor's v2.6 figures (1M context, 128K =",
+    "131072 max output; mimo.mi.com model table, 2026-10-12). supportsVision follows",
+    "the vendor's 'full-modal understanding' for v2.6; the registry capability flags",
+    "stay 'unproven' until a live call proves them (fixes-L2-mimo smoke).",
+    "Retire the v2.5 ids from routes after 2026-10-21 (vendor retirement)."
+  ],
+  "models": [
+    {
+      "provider": "xiaomi-mimo",
+      "id": "mimo-v2.6-pro",
+      "name": "MiMo-V2.6-Pro",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "supportsVision": true
+    },
+    {
+      "provider": "xiaomi-mimo",
+      "id": "mimo-v2.6-flash",
+      "name": "MiMo-V2.6-Flash",
+      "max_input_tokens": 1048576,
+      "max_output_tokens": 131072,
+      "supportsVision": true
+    }
+  ]
+}
