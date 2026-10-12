@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -49,6 +50,27 @@ REEMIT_DELTA = 10000
 
 # Sentinel for a tail line that is not the assistant+usage record we want.
 _SKIP = object()
+
+
+# A session id becomes a file name: a letter/digit first, then letters, digits, dot, dash, underscore.
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+def safe_id(session_id) -> bool:
+    """True when `session_id` is usable as a file name under the state dir."""
+    return isinstance(session_id, str) and _SAFE_ID.match(session_id) is not None
+
+
+def _write_json(path: Path, data: dict) -> None:
+    """Write `data` as JSON via a temp file + rename, so a reader never sees half a file."""
+    tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        os.replace(str(tmp), str(path))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def state_dir() -> Path:
@@ -161,8 +183,7 @@ def write_state(session_id: str, state: dict) -> None:
     """Persist one session's state file (raises on an unwritable state dir)."""
     directory = state_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / ("%s.json" % session_id)).open("w", encoding="utf-8") as fh:
-        json.dump(state, fh)
+    _write_json(directory / ("%s.json" % session_id), state)
 
 
 def emit_line(level: str, ctx: int, threshold: int, script_path) -> str:
@@ -196,7 +217,7 @@ def run_hook() -> int:
         transcript_path = payload.get("transcript_path")
         session_id = payload.get("session_id")
         cwd = payload.get("cwd")
-        if not (isinstance(transcript_path, str) and isinstance(session_id, str)
+        if not (isinstance(transcript_path, str) and safe_id(session_id)
                 and isinstance(cwd, str)):
             return 0
         ctx = context_tokens(transcript_path)
@@ -233,17 +254,15 @@ def cmd_ready(args) -> int:
         print("context_guard: ready needs <handoff-path>", file=sys.stderr)
         return 2
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not session_id:
-        print("context_guard: ready needs CLAUDE_CODE_SESSION_ID", file=sys.stderr)
+    if not safe_id(session_id):
+        print("context_guard: ready needs a valid CLAUDE_CODE_SESSION_ID", file=sys.stderr)
         return 2
     marker = {"session_id": session_id, "handoff": args[0],
               "ts": time.time(), "cwd": os.getcwd()}
     try:
         directory = state_dir()
         directory.mkdir(parents=True, exist_ok=True)
-        with (directory / ("%s.ready.json" % session_id)).open("w",
-                                                                encoding="utf-8") as fh:
-            json.dump(marker, fh)
+        _write_json(directory / ("%s.ready.json" % session_id), marker)
     except OSError as exc:
         print("context_guard: cannot write ready marker: %s" % exc, file=sys.stderr)
         return 2

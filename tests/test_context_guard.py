@@ -177,6 +177,13 @@ class NeverFails(GuardCase):
         self.write(json.dumps({"type": "assistant", "message": {"usage": {"input_tokens": "many"}}}))
         self.assert_silent(self.hook())
 
+    def test_session_id_cannot_escape_the_state_dir(self):
+        self.write(usage_line(read=251000))
+        for bad in ("../evil", "a/b", "..", ".hidden", "x" * 200, "a\\b"):
+            p = self.hook({"transcript_path": str(self.transcript), "session_id": bad, "cwd": "/w"})
+            self.assertEqual((p.returncode, p.stdout), (0, ""), bad)
+        self.assertEqual([f.name for f in self.tmp.rglob("*.json")], [], "no state written for a bad id")
+
     def test_garbled_stdin(self):
         self.assert_silent(self.hook("{not json"))
         self.assert_silent(self.hook(""))
@@ -287,6 +294,16 @@ class ReadyAndStatus(GuardCase):
     def test_ready_without_session_id_fails_loudly(self):
         p = self.run_cmd("ready", "/h/handoff.md")
         self.assertNotEqual(p.returncode, 0)
+
+    def test_ready_rejects_unsafe_session_id(self):
+        p = self.run_cmd("ready", "/h/handoff.md", CLAUDE_CODE_SESSION_ID="../evil")
+        self.assertEqual(p.returncode, 2)
+        self.assertEqual(list(self.tmp.rglob("*.json")), [])
+
+    def test_state_writes_leave_no_temp_files(self):
+        self.write(usage_line(read=251000))
+        self.hook()
+        self.assertEqual([f.name for f in self.state_file().parent.iterdir()], [f"{SID}.json"])
 
     def test_ready_without_path_fails_loudly(self):
         self.assertNotEqual(self.run_cmd("ready", CLAUDE_CODE_SESSION_ID=SID).returncode, 0)
