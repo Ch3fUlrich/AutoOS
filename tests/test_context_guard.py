@@ -135,6 +135,28 @@ class ReEmit(GuardCase):
         self.write(usage_line(read=245000))
         self.assertEqual(self.hook().stdout, "")          # +4k since the last emit
 
+    def test_guard_rearms_after_the_fill_drops(self):
+        self.write(usage_line(read=300000))
+        self.assertIn("HARD-CAP", self.hook().stdout)
+        self.write(usage_line(read=40000))                 # auto-compact: the fill fell below both thresholds
+        self.assertEqual(self.hook().stdout, "")
+        self.assertFalse(self.state_file().exists(), "state cleared once the session is back under the handoff line")
+        self.write(usage_line(read=232000))
+        self.assertIn("HANDOFF-NOW ctx=232k", self.ctx_text(self.hook()))
+
+    def test_fill_drop_but_still_over_the_line_emits(self):
+        self.write(usage_line(read=300000))
+        self.hook()
+        self.write(usage_line(read=240000))                # dropped 60k, still >= handoff
+        self.assertIn("HANDOFF-NOW ctx=240k", self.ctx_text(self.hook()))
+
+    def test_garbled_state_file_counts_as_no_state(self):
+        d = self.state_file().parent
+        d.mkdir(parents=True)
+        self.state_file().write_text(json.dumps({"level": "hard", "ctx": "lots"}))
+        self.write(usage_line(read=251000))
+        self.assertIn("HARD-CAP", self.hook().stdout)
+
     def test_escalation_to_hard_emits_even_below_10k_growth(self):
         self.write(usage_line(read=246000))
         self.assertIn("HANDOFF-NOW", self.hook().stdout)
@@ -203,13 +225,15 @@ class NeverFails(GuardCase):
 
 class TailRead(GuardCase):
     def big_transcript(self, mb=50):
-        filler = json.dumps({"type": "user", "message": {"content": "x" * 4000}}) + "\n"
-        with self.transcript.open("w") as f:
-            f.write(usage_line(read=999999) + "\n")  # stale, deep in the file: must NOT be found
-            for _ in range(mb * 1024 * 1024 // len(filler) + 2):
-                f.write(filler)
-            f.write(usage_line(read=235000) + "\n")
-            f.write(json.dumps({"type": "user", "message": {"content": "tail"}}) + "\n")
+        """A transcript of `mb` MB: a stale over-cap record first, a sparse hole (no disk, no write time), then the tail."""
+        with self.transcript.open("wb") as f:
+            f.write((usage_line(read=999999) + "\n").encode())  # stale, deep in the file: must NOT be found
+            f.seek(mb * 1024 * 1024)
+            f.write(b"\n")
+            for _ in range(20):
+                f.write((json.dumps({"type": "user", "message": {"content": "x" * 400}}) + "\n").encode())
+            f.write((usage_line(read=235000) + "\n").encode())
+            f.write((json.dumps({"type": "user", "message": {"content": "tail"}}) + "\n").encode())
 
     def load(self):
         spec = importlib.util.spec_from_file_location("context_guard", SCRIPT)
@@ -274,8 +298,8 @@ class TailRead(GuardCase):
     def test_usage_older_than_tail_is_not_found(self):
         self.big_transcript(1)
         # drop the recent assistant record: the only usage left is >256 KB from the end
-        lines = self.transcript.read_text().splitlines()
-        self.transcript.write_text("\n".join(l for l in lines if "235000" not in l) + "\n")
+        raw = self.transcript.read_bytes()
+        self.transcript.write_bytes(raw.replace(b"235000", b"000000"))
         self.assertEqual(self.hook().stdout, "")
 
 

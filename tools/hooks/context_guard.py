@@ -163,20 +163,27 @@ def read_state(session_id: str):
 
 
 def should_emit(session_id: str, ctx: int, level: str) -> bool:
-    """Whether to announce this fill: new session, handoff->hard, or +10k growth.
+    """Whether to announce this fill: new/garbled state, handoff->hard, +10k growth, or a fill drop.
 
     An escalation is judged before the growth delta, so crossing the hard cap is
     announced even when the fill barely moved since the last handoff.
     """
     stored = read_state(session_id)
-    if stored is None:
-        return True
+    stored_ctx = stored.get("ctx") if stored else None
+    if not isinstance(stored_ctx, int) or isinstance(stored_ctx, bool):
+        return True  # no state, or a garbled one: announce
     if stored.get("level") == "handoff" and level == "hard":
         return True
-    stored_ctx = stored.get("ctx")
-    if isinstance(stored_ctx, int) and not isinstance(stored_ctx, bool):
-        return ctx >= stored_ctx + REEMIT_DELTA
-    return False
+    # growth since the last announcement; a fill that fell (auto-compact) re-arms the guard
+    return ctx >= stored_ctx + REEMIT_DELTA or ctx < stored_ctx
+
+
+def clear_state(session_id: str) -> None:
+    """Drop the session's announce state; a missing file is fine."""
+    try:
+        (state_dir() / ("%s.json" % session_id)).unlink()
+    except OSError:
+        pass
 
 
 def write_state(session_id: str, state: dict) -> None:
@@ -226,6 +233,7 @@ def run_hook() -> int:
         handoff = _env_int("AUTOOS_CTX_HANDOFF", DEFAULT_HANDOFF)
         hard = _env_int("AUTOOS_CTX_HARD", DEFAULT_HARD)
         if ctx < handoff:
+            clear_state(session_id)  # back under the line (compaction): the next climb is announced afresh
             return 0
         level = "hard" if ctx >= hard else "handoff"
         threshold = hard if level == "hard" else handoff

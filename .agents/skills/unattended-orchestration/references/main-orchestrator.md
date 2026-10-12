@@ -214,6 +214,8 @@ L2 alike.
     files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
 - Install, once per host, in `~/.claude/settings.json`:
   `"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 <repo>/tools/hooks/context_guard.py"}]}]}`
+  On Windows write `py -3` (or `python`) in place of `python3` in that command; the `HANDOFF-NOW` line names `python3`, so
+  run the `ready` call with the interpreter your host has.
 - Safety net: the launcher exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` (the router's `bin/fleet-launch` does). Never put
   it in a shared `settings.json`.
 - The watchdog on the router side stops and relaunches a session that is over the cap and wrote its `ready` marker.
