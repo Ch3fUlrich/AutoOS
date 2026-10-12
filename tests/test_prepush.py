@@ -1422,5 +1422,128 @@ class ChangedFilesModeTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
 
 
+class GitLocationEnvTests(RepoFixture):
+    """(g) AO-PREPUSH-HOOK-GITENV: the gate and its children never inherit
+    git's repo-location env from a hook.
+
+    Measured 2026-10-11 23:17-23:28Z: `git push` exported its repo-location
+    vars to the pre-push shim (the list `git rev-parse --local-env-vars`
+    prints), the shim ran tools/prepush.py, and the gate's children inherited
+    them — so a test fixture running `git init`/`commit`/`config`/
+    `sparse-checkout` in a tmp dir acted on the *pushing* repo instead:
+    core.bare=true landed in the main .git/config, fixture commits moved the
+    worktree's HEAD and its sparse-checkout, and stray refs appeared. Three
+    layers are pinned here: the scrub helper and its list (unit), the child
+    launch path (the incident end to end), and the installed shim's unset
+    line (string check — the shim is POSIX sh, but the text is platform-free).
+    """
+
+    TRUST = (ROOT / ".agents" / "skills" / "unattended-orchestration" /
+             "trust_worktree.py")
+
+    #: Not repo pins — every scrub must leave these alone. The config pins are
+    #: ci_env's own doing (the SBA rule d), not something to remove.
+    KEEP = {"PATH": "/usr/bin:/bin", "HOME": "/home/dev",
+            "GIT_CONFIG_GLOBAL": "/tmp/mine", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Dev", "GIT_COMMITTER_EMAIL": "d@example.invalid",
+            "AUTOOS_STATE_DIR": "/tmp/state"}
+
+    def test_the_location_list_is_gits_own_plus_the_two_extra_pins(self):
+        # The set to scrub is git's fact, not this file's opinion: it is exactly
+        # `git rev-parse --local-env-vars` plus the two that pin a repo just as
+        # hard but are not exported to hooks.
+        probe = subprocess.run(["git", "rev-parse", "--local-env-vars"],
+                               capture_output=True, text=True, cwd=str(ROOT))
+        self.assertEqual(probe.returncode, 0, probe.stderr)
+        expected = set(probe.stdout.split()) | {"GIT_QUARANTINE_PATH",
+                                                "GIT_NAMESPACE"}
+        self.assertEqual(set(prepush.GIT_LOCATION_VARS), expected)
+
+    def test_the_scrub_helper_removes_the_list_and_nothing_else(self):
+        env = dict.fromkeys(prepush.GIT_LOCATION_VARS, "/victim/.git")
+        env.update(self.KEEP)
+        prepush.scrub_git_location_env(env)
+        for name in prepush.GIT_LOCATION_VARS:
+            self.assertNotIn(name, env, "%s survived the scrub" % name)
+        self.assertEqual(env, self.KEEP,
+                         "the scrub removed a variable that locates no repo")
+
+    def test_ci_env_scrubs_the_location_vars_it_copies(self):
+        leak = {"GIT_DIR": "/victim/.git", "GIT_INDEX_FILE": "/victim/.git/index",
+                "GIT_WORK_TREE": "/victim"}
+        with mock.patch.dict(os.environ, leak, clear=False):
+            env = prepush.ci_env({})
+        for name in prepush.GIT_LOCATION_VARS:
+            self.assertNotIn(name, env, "%s leaked into the child env" % name)
+        self.assertEqual(env.get("GIT_CONFIG_GLOBAL"), "/dev/null",
+                         "ci_env must keep pinning the config away from the host")
+        self.assertEqual(env.get("GIT_CONFIG_NOSYSTEM"), "1")
+
+    def test_a_gate_child_that_runs_git_never_touches_the_victim_repo(self):
+        # The incident end to end: a gate child (the way run_command launches
+        # one) runs `git config` in its own tmp repo while the environment
+        # still carries the hook's GIT_DIR. Un-scrubbed, the write lands in the
+        # victim — core.bare flipped, exactly what the main .git/config got.
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        run_git("init", "-q", cwd=victim)
+        work = self.tmp / "fixture-work"
+        work.mkdir()
+        run_git("init", "-q", cwd=work)
+        victim_cfg = victim / ".git" / "config"
+        before = victim_cfg.read_text(encoding="utf-8")
+        child = self.tmp / "child.py"
+        child.write_text("import subprocess, sys\n"
+                         "sys.exit(subprocess.run(['git', 'config', 'core.bare', "
+                         "'true']).returncode)\n", encoding="utf-8")
+        leak = {"GIT_DIR": str(victim / ".git"),
+                "GIT_INDEX_FILE": str(victim / ".git" / "index")}
+        with mock.patch.dict(os.environ, leak, clear=False):
+            ok, out = prepush.run_command(work, [sys.executable, str(child)], {})
+        self.assertTrue(ok, "the child git command never succeeded: %s" % out)
+        self.assertEqual(victim_cfg.read_text(encoding="utf-8"), before,
+                         "a gate child wrote the repo the exported GIT_DIR named")
+        self.assertIn("bare = true",
+                      (work / ".git" / "config").read_text(encoding="utf-8"),
+                      "the child did not act on the repo in its own cwd")
+
+    def test_the_gate_started_by_a_hook_reads_the_pushing_repo_not_a_leaked_one(self):
+        # main()'s own scrub, proved from outside: the whole gate run with
+        # GIT_DIR exported to a foreign repo that cannot even answer for HEAD.
+        # A gate that honours the leak cannot run at all (rc 2); a scrubbed
+        # gate reads --repo/cwd and goes green, and the victim stays a victim
+        # of nothing.
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        run_git("init", "-q", cwd=victim)
+        self.suite_is_green()
+        self.set_plan({})
+        out = self.assert_rc(0, env={"GIT_DIR": str(victim / ".git"),
+                                     "GIT_INDEX_FILE": str(victim / ".git" / "index")})
+        self.assertIn("green", out)
+        self.assertFalse((victim / ".git" / prepush.LOG_NAME).exists(),
+                         "the gate annotated the repo the env named, not --repo")
+
+    def test_the_hook_shim_unsets_the_location_vars_before_running_the_gate(self):
+        # The shim is the first layer: by the time the gate starts, the pins
+        # are gone from its environment. Pinned against the gate's own constant
+        # so the two lists cannot drift apart; unset after root (root is what
+        # the hook's own git env resolves correctly) and before the gate runs.
+        trust = _load("trust_worktree_for_shim_scrub", self.TRUST)
+        lines = trust.hook_text().splitlines()
+        unset_tokens = {w for l in lines if l.startswith("unset ")
+                        for w in l.split()[1:]}
+        self.assertEqual(unset_tokens, set(prepush.GIT_LOCATION_VARS),
+                         "the shim must unset exactly the gate's list")
+        first_unset = min(i for i, l in enumerate(lines) if l.startswith("unset "))
+        root_line = next(i for i, l in enumerate(lines)
+                         if l.startswith("root=$(git rev-parse"))
+        gate_line = next(i for i, l in enumerate(lines) if '"$py" "$gate"' in l)
+        self.assertLess(root_line, first_unset,
+                        "root must still be resolved from the hook's git env")
+        self.assertLess(first_unset, gate_line,
+                        "the shim unsets only after it has already run the gate")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
