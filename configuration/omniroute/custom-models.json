@@ -22,7 +22,7 @@
     "Numbers: context and output are the vendor's v2.6 figures (1M context, 128K =",
     "131072 max output; mimo.mi.com model table, 2026-10-12). supportsVision follows",
     "the vendor's 'full-modal understanding' for v2.6; the registry capability flags",
-    "stay 'unproven' until a live call proves them (fixes-L2-mimo smoke).",
+    "follow the live smoke (text/tools/image/audio_in proven 2026-10-12; audio_out and video_in unproven).",
     "Retire the v2.5 ids from routes after 2026-10-21 (vendor retirement).",
     "openrouter/free: the OpenRouter free-model router. It answers 200 through the gateway but is not in GET /v1/models, so model-list consumers (OWUI sync) flag it (fixes-L1 D-1199). No limits declared: the router picks the underlying model.",
     "No mimo-v2.5-* model is declared (operator, 2026-10-12: legacy; the gateway's static v2.5 list is not wired to any route and mimo-v2.5-asr/-tts are not declared)."

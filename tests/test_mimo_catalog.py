@@ -39,7 +39,6 @@ other suite in this repo (AGENTS.md section 5):
 """
 from __future__ import annotations
 
-import copy
 import importlib.util
 import json
 import pathlib

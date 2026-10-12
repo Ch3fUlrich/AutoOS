@@ -1,7 +1,7 @@
 {
   "_comment": [
-    "Gateway view of provider xiaomi-mimo (OmniRoute :20128, Token Plan key on the AMS endpoint), captured 2026-10-12 by fixes-L2-mimo after apply-custom-models.sh added the v2.6 ids and mimo-v2.5-asr.",
-    "NOT the vendor's own /v1/models: the key lives only in the gateway DB. Sources: GET /v1/models (ids with the xiaomi-mimo/ prefix) and GET /api/v1/providers/xiaomi-mimo/models (capability fields). mimo-v2.6-*, mimo-v2.5-asr are CUSTOM models declared in configuration/omniroute/custom-models.json (the gateway image's static list only knows v2.5-pro and v2.5).",
+    "Gateway view of provider xiaomi-mimo (OmniRoute :20128, Token Plan key on the AMS endpoint), captured 2026-10-12 by fixes-L2-mimo after apply-custom-models.sh added the v2.6 ids (and, at capture time, mimo-v2.5-asr, which the lane later dropped from the declared set; it stays here only because the gateway view still lists it).",
+    "NOT the vendor's own /v1/models: the key lives only in the gateway DB. Sources: GET /v1/models (ids with the xiaomi-mimo/ prefix) and GET /api/v1/providers/xiaomi-mimo/models (capability fields). mimo-v2.6-* are CUSTOM models declared in configuration/omniroute/custom-models.json (the gateway image's static list only knows v2.5-pro and v2.5).",
     "live_call_results are the smoke calls of 2026-10-12 (status + usage fields only). mimo-v2.5-tts* are listed but chat is rejected ('not in live catalog') and /v1/audio/speech answers upstream 400 'Param Incorrect': audio_out stays unproven.",
     "Refresh when the gateway catalog changes (v2.5 chat ids retire 2026-10-21)."
   ],
