@@ -271,7 +271,7 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | local `autoos/omniroute:3.8.50-autoos5` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`; autoos5 = + U2 Vertex turn-shape patch, applied at build time and counted by `tools/vertex-patch-gate.py`; autoos4 shipped the v2 guard, autoos3 the v1 guard; the v3 guard splits a mixed tool/text user turn into user/model/user and then pops the trailing model run — see `configuration/omniroute/vertex-trailing-turn-README.md`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> the service user's home (`/home/<service-user>`, `HOME`) |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos6` (FROM the source-built `autoos/omniroute-src:3.8.50-acp1`: upstream tag `v3.8.50`, commit-verified, + `configuration/omniroute/acp-executor-v3.8.50.patch` = the generic ACP executor and the `qoder-acp` provider, built by `build-omniroute-src.sh` with upstream's own Dockerfile; autoos6 = + qodercli 1.1.69 and that base; autoos5 added the U2 Vertex turn-shape patch, applied at build time and counted by `tools/vertex-patch-gate.py`; autoos4 shipped the v2 guard, autoos3 the v1 guard; the v3 guard splits a mixed tool/text user turn into user/model/user and then pops the trailing model run - see `configuration/omniroute/vertex-trailing-turn-README.md`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> the service user's home (`/home/<service-user>`, `HOME`) |
 | `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/<service-user>`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
@@ -668,6 +668,21 @@ for OmniRoute the pinned qodercli version moves with them), run
 `ai-stack.sh up`. For OmniRoute keep a backup of the data dir first; for
 OpenHands check the settings schema note in `start-stack.sh`. `up` recreates a
 running gateway whose image changed (a short gap on `:20128`).
+
+OmniRoute is built from source, not pulled: the published image ships compiled
+chunks that cannot take a new executor. `ai-stack.sh up` first runs
+`configuration/docker/ai-stack/build-omniroute-src.sh` (clone the pinned tag,
+verify the commit, apply the patch with `git apply -C1`, build upstream's
+`runner-base` stage; about 10-20 minutes and ~6 GB RAM; `--dry-run` says
+`would build` / `skipped`). To bump: change `TAG`, `COMMIT` and `REV` there, regenerate
+`configuration/omniroute/acp-executor-<tag>.patch` against the new tag, move the
+`FROM` line of `omniroute.Dockerfile` and the tag in `compose.yml`, and re-run
+`tools/apply-vertex-patch.py` with `tools/vertex-patch-gate.py` over the new build's
+chunks (3.8.51 builds minify `mergeConsecutiveSameRoleContents`, so the guard
+cannot find its call sites there - measured on the published 3.8.51 image; the
+gate fails the build rather than ship an unpatched gateway). The first call
+through the executor needs a Qoder login in the gateway's home (`qodercli` PAT)
+and shows up as a `qoder-acp` row in `call_logs`.
 
 Each locally built image (`opencode`, `omniroute`: the services with a `build:`
 in `compose.yml`) carries the label `org.autoos.<service>.source`: a hash of
