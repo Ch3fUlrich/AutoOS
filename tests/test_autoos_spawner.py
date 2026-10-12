@@ -20084,10 +20084,12 @@ Options:
         with io.open(help_path, "w", encoding="utf-8") as fh:
             fh.write(help_text)
         path = os.path.join(self.tmp, name)
-        # `change` writes one file into the cwd: a qoder writer runs in its own
-        # clone, and an isolated run that changed nothing AND printed no REPORT
-        # is INCOMPLETE (10) — the fake has to be a worker that did its job. The
-        # in-place claude launch writes nothing: its cwd is the caller's checkout.
+        # `change` writes one file into the cwd of the RUN (`-p …`): a qoder writer
+        # runs in its own clone, and an isolated run that changed nothing AND
+        # printed no REPORT is INCOMPLETE (10) — the fake has to be a worker that
+        # did its job. The plan-time probes (`--version`, `--help`,
+        # `--list-models`) reach this same stub from the CALLER's checkout, where
+        # a real client writes nothing, so they must not write either.
         script = ("#!/bin/sh\n"
                   "case \"$1\" in\n"
                   "  --version) printf '0.0.0-fake\\n'; exit 0 ;;\n"
@@ -20095,7 +20097,7 @@ Options:
                   "esac\n"
                   "echo \"$*\" >> '%s'\n" % (help_path, self.calls))
         if change:
-            script += "echo work > launch-proof.txt\n"
+            script += "[ \"$1\" = \"-p\" ] && echo work > launch-proof.txt\n"
         script += "echo done\\n"
         with io.open(path, "w", encoding="utf-8") as fh:
             fh.write(script)
