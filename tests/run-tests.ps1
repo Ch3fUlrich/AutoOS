@@ -328,6 +328,9 @@ Test-Case 'registry: no generated file drifts' {
         # applier against a fake loopback gateway it owns — never the live one.
         $out = & python3 (Join-Path $Root 'tests\test_custom_models_apply.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-True ($rc -eq 0) "custom-models apply tests failed: $out"
+        # AO-MIMO-WIRING: registry MiMo ids/flags vs the gateway /v1/models fixture.
+        $out = & python3 (Join-Path $Root 'tests\test_mimo_catalog.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "mimo catalog tests failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
