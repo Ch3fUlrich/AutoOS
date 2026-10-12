@@ -23,7 +23,8 @@
     "131072 max output; mimo.mi.com model table, 2026-10-12). supportsVision follows",
     "the vendor's 'full-modal understanding' for v2.6; the registry capability flags",
     "stay 'unproven' until a live call proves them (fixes-L2-mimo smoke).",
-    "Retire the v2.5 ids from routes after 2026-10-21 (vendor retirement)."
+    "Retire the v2.5 ids from routes after 2026-10-21 (vendor retirement).",
+    "mimo-v2.5-asr: speech recognition over POST /chat/completions with an input_audio part (vendor model table: 8k context, 2k output; mp3/wav only)."
   ],
   "models": [
     {
@@ -41,6 +42,14 @@
       "max_input_tokens": 1048576,
       "max_output_tokens": 131072,
       "supportsVision": true
+    },
+    {
+      "provider": "xiaomi-mimo",
+      "id": "mimo-v2.5-asr",
+      "name": "MiMo-V2.5-ASR",
+      "max_input_tokens": 8192,
+      "max_output_tokens": 2048,
+      "supportsVision": false
     }
   ]
 }
