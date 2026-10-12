@@ -12553,6 +12553,9 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
     TABLE = ("| id | project | decision | by | date |\n"
              "| --- | --- | --- | --- | --- |\n")
     FOUR = ["tools/a.py", "tools/b.py", "tools/c.py", "tools/d.py"]
+    SEVEN = FOUR + ["tools/e.py", "tools/f.py", "tools/g.py"]
+    EIGHT = SEVEN + ["tools/h.py"]
+    ATOMIC = "atomic: two writer segments, one brief"
 
     def setUp(self):
         super().setUp()
@@ -12589,9 +12592,14 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
                      encoding="utf-8") as fh:
             fh.write(text)
 
-    def row(self, sha, ref=None, by="routing-00"):
-        return ("| %s | autoos | relax the cap for lane si2-p6e at %s | %s | 2026-10-12 |\n"
-                % (ref or self.REF, sha, by))
+    def row(self, sha, ref=None, by="routing-00", extra=None):
+        """One committed row; `extra` is appended to the DECISION cell, which is where a
+        row-states-its-own-count `files=<N> atomic: <reason>` token sits (AO-READY-CAP-COUNT)."""
+        decision = "relax the cap for lane si2-p6e at %s" % sha
+        if extra is not None:
+            decision = "%s %s" % (decision, extra)
+        return ("| %s | autoos | %s | %s | 2026-10-12 |\n"
+                % (ref or self.REF, decision, by))
 
     def brief(self, paths):
         return ("TASK: one lane, several writer segments\nFILES (only these; <= 3 files,"
@@ -12602,14 +12610,33 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         return self.agent.cap_exception_ok(ref or self.REF, sha or self.SHA,
                                            env={"AUTOOS_ROUTING_DIR": d})
 
+    def route_to(self, text):
+        """Rebuild the routing repo with `text` committed on origin/main and point the
+        gate at it, so a `ready` run reads THAT row. Returns the dir; re-points
+        `self.routing_commit` at the new commit."""
+        d = self.routing_repo(text)
+        self.routing = d
+        self.routing_commit = self.git(d, "rev-parse", "refs/remotes/origin/main")
+        patch = mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": d})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return d
+
+    def helper(self, *cells):
+        """`cap_exception_row_cap` on one row text — the same `" | ".join(row)` the sha
+        binding reads, which is the only thing the cap may come from."""
+        return self.agent.cap_exception_row_cap(" | ".join(cells))
+
     # --- the committed routing row ------------------------------------------
 
     def test_one_committed_row_naming_the_full_sha_is_accepted(self):
         d = self.routing_repo(self.TABLE + self.row(self.SHA))
-        ok, reason, commit = self.check(d)
+        ok, reason, commit, cap = self.check(d)
         self.assertTrue(ok, reason)
         self.assertEqual(reason, "")
         self.assertEqual(commit, self.git(d, "rev-parse", "refs/remotes/origin/main"))
+        # AO-READY-CAP-COUNT: a row that states no count keeps the old one.
+        self.assertEqual(cap, self.agent.CAP_EXCEPTION_MAX_FILES)
 
     def test_every_row_rule_that_fails_is_refused(self):
         t, sha, ref = self.TABLE, self.SHA, self.REF
@@ -12641,15 +12668,17 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         )
         for label, text, asked_ref, asked_sha, needle in cases:
             with self.subTest(case=label):
-                ok, reason, commit = self.check(self.routing_repo(text), asked_ref, asked_sha)
+                ok, reason, commit, cap = self.check(self.routing_repo(text),
+                                                     asked_ref, asked_sha)
                 self.assertFalse(ok, reason)
                 self.assertIsNone(commit)
+                self.assertIsNone(cap)
                 self.assertIn(needle, reason)
 
     def test_a_working_tree_edit_is_not_a_committed_row(self):
         d = self.routing_repo(self.TABLE + self.row(self.OTHER_SHA))
         self.write_routing_log(d, self.TABLE + self.row(self.SHA))
-        ok, reason, _commit = self.check(d)
+        ok, reason, _commit, _cap = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("full --sha", reason)
 
@@ -12659,16 +12688,17 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         self.git(d, "add", "-A")
         self.git(d, "-c", "user.name=autoos-test",
                  "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "row-2")
-        ok, reason, _commit = self.check(d)
+        ok, reason, _commit, _cap = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("full --sha", reason)
 
     def test_a_missing_origin_main_ref_is_a_refusal_not_a_fallback(self):
         d = self.routing_repo(self.TABLE + self.row(self.SHA))
         self.git(d, "update-ref", "-d", "refs/remotes/origin/main")
-        ok, reason, commit = self.check(d)
+        ok, reason, commit, cap = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIsNone(commit)
+        self.assertIsNone(cap)
         self.assertIn("origin/main", reason)
 
     def test_a_routing_repo_that_is_missing_or_unreadable_is_refused(self):
@@ -12677,9 +12707,10 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
             with self.subTest(routing=d):
                 if not os.path.isdir(d):
                     os.makedirs(d)
-                ok, reason, commit = self.check(d)
+                ok, reason, commit, cap = self.check(d)
                 self.assertFalse(ok, reason)
                 self.assertIsNone(commit)
+                self.assertIsNone(cap)
                 self.assertIn("routing", reason)
 
     # --- the ready gate with the exception ----------------------------------
@@ -12695,7 +12726,8 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         rc, out, err, inbox, _calls = self.cap()
         self.assertEqual(rc, 0, out + err)
         line = inbox.rstrip("\n")
-        self.assertIn(" cap-exception=%s routing=%s" % (self.REF, self.routing_commit), line)
+        self.assertIn(" cap-exception=%s routing=%s cap=6"
+                      % (self.REF, self.routing_commit), line)
         self.assertIn(" guards=ok", line)
 
     def test_the_exception_does_not_move_the_scope_fence(self):
@@ -12762,7 +12794,8 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         rc, out, err, inbox, _calls = self.cap(
             extra=("--task-type", "code", "--dry-run", "--cap-exception", self.REF))
         self.assertEqual(rc, 0, out + err)
-        self.assertIn("cap-exception=%s routing=%s" % (self.REF, self.routing_commit), out)
+        self.assertIn("cap-exception=%s routing=%s cap=6" % (self.REF, self.routing_commit), out)
+        self.assertIn("the FILES cap is 6 counted entries (cap=6)", out)
         self.assertEqual(inbox, "")
 
     def test_without_the_flag_the_cap_and_its_message_are_unchanged(self):
@@ -12789,6 +12822,165 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         self.assertEqual(rc, 0, out + err)
         self.assertNotIn("cap-exception", out + err)
         self.assertTrue(inbox.rstrip("\n").endswith(" guards=ok"), inbox)
+
+    # --- the row states its own count (AO-READY-CAP-COUNT) ------------------
+
+    # (label, text appended to the bound row's decision cell, refusal needle)
+    ROW_CASES = (
+        ("two files= tokens", "files=7 files=8 atomic: two segments", "two files= tokens"),
+        ("files= carries no value", "files= atomic: two segments", "malformed files= value"),
+        ("a digit tail", "files=7x atomic: two segments", "malformed files= value"),
+        ("a leading zero", "files=07 atomic: two segments", "malformed files= value"),
+        ("a decimal point", "files=7.5 atomic: two segments", "malformed files= value"),
+        ("a fullwidth digit", "files=７ atomic: two segments", "malformed files= value"),
+        ("an arabic-indic digit", "files=٧ atomic: two segments", "malformed files= value"),
+        ("above the band", "files=9 atomic: two segments", "7..8"),
+        ("below the band", "files=6 atomic: two segments", "7..8"),
+        ("no atomic at all", "files=7", "needs atomic"),
+        ("an empty atomic", "files=7 atomic:", "needs atomic"),
+    )
+
+    def test_the_band_the_row_may_state_is_7_and_8(self):
+        self.assertEqual(self.agent.CAP_EXCEPTION_MAX_FILES, 6)
+        self.assertEqual(self.agent.CAP_EXCEPTION_ROW_MIN_FILES, 7)
+        self.assertEqual(self.agent.CAP_EXCEPTION_ROW_MAX_FILES, 8)
+        for n in (self.agent.CAP_EXCEPTION_ROW_MIN_FILES,
+                  self.agent.CAP_EXCEPTION_ROW_MAX_FILES):
+            with self.subTest(n=n):
+                self.assertEqual(
+                    self.helper(self.REF, "autoos", "relax files=%d %s" % (n, self.ATOMIC),
+                                "routing-00", "2026-10-12"), (n, None))
+
+    def test_the_helper_refuses_every_token_that_is_not_a_band_value(self):
+        for label, decision, needle in self.ROW_CASES:
+            with self.subTest(case=label):
+                cap, error = self.helper(self.REF, "autoos", decision, "routing-00",
+                                         "2026-10-12")
+                self.assertIsNone(cap, error)
+                self.assertIn(needle, error)
+
+    def test_cap_exception_ok_refuses_the_same_tokens_on_the_committed_row(self):
+        for label, decision, needle in self.ROW_CASES:
+            with self.subTest(case=label):
+                ok, reason, commit, cap = self.check(
+                    self.routing_repo(self.TABLE + self.row(self.SHA, extra=decision)))
+                self.assertFalse(ok, reason)
+                self.assertIn(needle, reason)
+                self.assertIsNone(commit)
+                self.assertIsNone(cap)
+
+    def test_a_row_that_states_no_count_keeps_the_default_cap(self):
+        for decision in ("an old row with no token at all",
+                         "an old row atomic: two segments",
+                         "an old row profiles=7 atomic: two segments"):
+            with self.subTest(decision=decision):
+                self.assertEqual(
+                    self.helper(self.REF, "autoos", decision, "routing-00", "2026-10-12"),
+                    (self.agent.CAP_EXCEPTION_MAX_FILES, None))
+
+    def test_a_profiles_token_is_not_a_files_token(self):
+        # `(?<!\w)files=` sees the `o` of `profiles=` and refuses to call it a token, so
+        # a row that only looks like it states a count stays at six.
+        d = self.routing_repo(self.TABLE + self.row(self.SHA,
+                                                    extra="profiles=7 " + self.ATOMIC))
+        ok, reason, commit, cap = self.check(d)
+        self.assertTrue(ok, reason)
+        self.assertEqual(cap, self.agent.CAP_EXCEPTION_MAX_FILES)
+        self.assertEqual(commit, self.git(d, "rev-parse", "refs/remotes/origin/main"))
+
+    def test_files_in_another_row_does_not_raise_this_rows_cap(self):
+        text = (self.TABLE
+                + self.row(self.OTHER_SHA, ref="D-8", extra="files=8 " + self.ATOMIC)
+                + self.row(self.SHA))
+        ok, reason, commit, cap = self.check(self.routing_repo(text), self.REF, self.SHA)
+        self.assertTrue(ok, reason)
+        self.assertEqual(cap, self.agent.CAP_EXCEPTION_MAX_FILES)
+
+    def test_a_files_row_for_another_sha_is_unbound(self):
+        text = self.TABLE + self.row(self.OTHER_SHA, extra="files=8 " + self.ATOMIC)
+        ok, reason, commit, cap = self.check(self.routing_repo(text), self.REF, self.SHA)
+        self.assertFalse(ok, reason)
+        self.assertIn("full --sha", reason)
+        self.assertIsNone(commit)
+        self.assertIsNone(cap)
+
+    def test_a_working_copy_files_token_is_not_the_committed_row(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA,
+                                                        extra="files=8 " + self.ATOMIC))
+        ok, reason, commit, cap = self.check(d)
+        self.assertTrue(ok, reason)
+        self.assertEqual(cap, self.agent.CAP_EXCEPTION_MAX_FILES)
+
+    def test_an_atomic_beyond_a_cell_boundary_buys_nothing(self):
+        self.assertEqual(self.helper(self.REF, "autoos", "relax files=7", "routing-00",
+                                     "atomic: two segments")[0], None)
+        self.assertIn("needs atomic",
+                      self.helper(self.REF, "autoos", "relax files=7", "routing-00",
+                                  "atomic: two segments")[1])
+        row = ("| %s | autoos | relax the cap at %s files=7 | %s | atomic: two segments |\n"
+               % (self.REF, self.SHA, self.agent.CAP_EXCEPTION_BY))
+        ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
+        self.assertFalse(ok, reason)
+        self.assertIn("needs atomic", reason)
+        self.assertIsNone(cap)
+
+    def test_a_row_stating_files_7_caps_the_brief_at_seven(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=7 " + self.ATOMIC))
+        rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.SEVEN))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(" cap-exception=%s routing=%s cap=7"
+                      % (self.REF, self.routing_commit), inbox.rstrip("\n"))
+
+    def test_a_row_stating_files_8_caps_the_brief_at_eight(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=8 " + self.ATOMIC))
+        rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.EIGHT))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(" cap=8", inbox.rstrip("\n"))
+
+    def test_a_files_7_row_still_refuses_an_eight_file_brief(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=7 " + self.ATOMIC))
+        rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.EIGHT))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn(">7 files not counting CHANGELOG.md", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_files_7_row_on_a_six_file_brief_is_accepted_with_cap_7(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=7 " + self.ATOMIC))
+        rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.SEVEN[:6]))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn(" cap=7", inbox.rstrip("\n"))
+
+    def test_a_files_row_without_its_atomic_is_refused_by_ready(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=7"))
+        rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.SEVEN))
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("needs atomic", out + err)
+        self.assertEqual(len((out + err).strip().splitlines()), 1, out + err)
+        self.assertEqual(inbox, "")
+
+    def test_a_files_row_out_of_the_band_is_refused_by_ready(self):
+        for label, decision, needle in (
+                ("above", "files=9 " + self.ATOMIC, "7..8"),
+                ("below", "files=6 " + self.ATOMIC, "7..8"),
+                ("malformed", "files=7x " + self.ATOMIC, "malformed files= value"),
+                ("two tokens", "files=7 files=8 " + self.ATOMIC, "two files= tokens")):
+            with self.subTest(case=label):
+                self.route_to(self.TABLE + self.row(self.SHA, extra=decision))
+                rc, out, err, inbox, _calls = self.cap(brief=self.brief(self.SEVEN))
+                self.assertEqual(rc, 1, out + err)
+                self.assertIn(needle, out + err)
+                self.assertEqual(inbox, "")
+
+    def test_dry_run_says_the_cap_the_row_stated(self):
+        self.route_to(self.TABLE + self.row(self.SHA, extra="files=7 " + self.ATOMIC))
+        rc, out, err, inbox, _calls = self.cap(
+            brief=self.brief(self.SEVEN),
+            extra=("--task-type", "code", "--dry-run", "--cap-exception", self.REF))
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("the FILES cap is 7 counted entries (cap=7)", out)
+        self.assertIn("cap-exception=%s routing=%s cap=7" % (self.REF, self.routing_commit), out)
+        self.assertEqual(inbox, "")
 
     # --- the cap the guards module owns -------------------------------------
 
