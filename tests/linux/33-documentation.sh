@@ -974,6 +974,15 @@ if it "context_guard hook: 230k handoff / 250k hard cap, ready marker, tail read
     out="$(python3 tests/test_context_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/unit_breaker.py + tools/gateway_alerts.py (P1.2): the circuit breaker around agent-starting units and the
+# provider-suspension check - fake systemctl, fixture sqlite, tmp state dirs, never the live ones.
+if it "unit_breaker: identical-failure trip, alert line, reset, status (unit tests)"; then
+    out="$(python3 tests/test_unit_breaker.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "gateway_alerts: provider suspension signals, one alert per provider per 24 h (unit tests)"; then
+    out="$(python3 tests/test_gateway_alerts.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # heartbeat (R-heartbeat-02/03, R-pause-01, R-handoff-07 migrated into code): pause,
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then

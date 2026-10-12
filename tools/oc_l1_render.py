@@ -69,6 +69,12 @@ def _registry_models():
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
 ENV_KEY = "AUTOOS_OMNIROUTE_KEY"
+SESSION_TAG_HEADER = "x-omniroute-session-id"
+
+
+def session_tag(lane_name):
+    """`oc-l1-<lane>` limited to the gateway header charset [A-Za-z0-9._/-] and 120 chars."""
+    return ("oc-l1-" + re.sub(r"[^A-Za-z0-9._-]+", "-", str(lane_name)).strip("-"))[:120]
 # The same name oc_l1.ENV_AGENT_LAYER and oc_l1_serve export into the lane
 # child's environment; named here too because importing oc_l1 would close the
 # cycle oc_l1 -> render. tests/test_agent_mcp_tool_profile.py pins the three.
@@ -317,6 +323,9 @@ def render(lane, repo_config_path):
                     # environment, never in this file.
                     "baseURL": "{env:%s}/v1" % ENV_URL,
                     "apiKey": "{env:%s}" % ENV_KEY,
+                    # P1.2: the gateway call log groups spend by this id; without it every opencode call
+                    # lands untagged. A plain string (no secret), flat so autoos_usage's lane = the whole tag.
+                    "headers": {SESSION_TAG_HEADER: session_tag(lane["name"])},
                 },
                 "models": models,
             }

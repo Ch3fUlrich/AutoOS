@@ -45,7 +45,7 @@ FIXTURE_KEY = "unit-test-manage-key-9f8b7c6d"  # fixture, asserted never printed
 
 
 def row(ts, rid=None, provider="openrouter", model="deepseek-v4.1-flash",
-        combo="tier3", tag="or4/lane-a", status=200, error=None, tin=100, tout=50):
+        combo="tier3", tag="or4/lane-a", status=200, error=None, tin=100, tout=50, key_name="autoos"):
     """One call-log row in the documented response shape (callLogs.ts:462-507)."""
     return {
         "id": rid or "id-%s" % ts,
@@ -63,7 +63,7 @@ def row(ts, rid=None, provider="openrouter", model="deepseek-v4.1-flash",
         "tokens": {"in": tin, "out": tout, "cacheRead": None, "cacheWrite": None,
                    "reasoning": None, "compressed": None},
         "apiKeyId": "key-id-1",
-        "apiKeyName": "autoos",
+        "apiKeyName": key_name,
         "comboName": combo,
         "comboStepId": None,
         "comboExecutionKey": None,
@@ -262,13 +262,36 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual(model["deepseek-v4.1-flash"]["calls"], 2)
 
     def test_untagged_lane(self):
-        rows = [row(iso(NOW), rid="a", tag=None),
-                row(iso(NOW), rid="b", tag=""),
+        rows = [row(iso(NOW), rid="a", tag=None, key_name=None),
+                row(iso(NOW), rid="b", tag="", key_name=""),
                 row(iso(NOW), rid="c", tag="or4/lane-a")]
         by = usage.aggregate(rows, ["lane"])
         lanes = {g["key"]: g["calls"] for g in by["lane"]}
         self.assertEqual(lanes["(untagged)"], 2)
         self.assertEqual(lanes["or4"], 1)
+
+    def test_empty_tag_is_attributed_to_the_api_key_name(self):
+        """P1.2: 70-84 % of rows carry no session tag; they group under key:<api key NAME>."""
+        rows = [row(iso(NOW), rid="a", tag="", key_name="opencode-l1"),
+                row(iso(NOW), rid="b", tag=None, key_name="opencode-l1"),
+                row(iso(NOW), rid="c", tag="", key_name="qoder"),
+                row(iso(NOW), rid="d", tag="or4/lane-a", key_name="opencode-l1")]
+        lanes = {g["key"]: g["calls"] for g in usage.aggregate(rows, ["lane"])["lane"]}
+        self.assertEqual(lanes, {"key:opencode-l1": 2, "key:qoder": 1, "or4": 1})
+
+    def test_fallback_conversation_tag_is_attributed_to_the_key_name(self):
+        """OmniRoute's own fallback `conv_<uuid>` is not a lane."""
+        rows = [row(iso(NOW), rid="a", tag="conv_0f8e6c1a-1111-2222-3333-444455556666", key_name="autoos"),
+                row(iso(NOW), rid="b", tag="conv_0f8e6c1a-1111-2222-3333-444455556666", key_name=None)]
+        lanes = {g["key"]: g["calls"] for g in usage.aggregate(rows, ["lane"])["lane"]}
+        self.assertEqual(lanes, {"key:autoos": 1, "(untagged)": 1})
+
+    def test_key_value_never_becomes_a_group(self):
+        """Only the NAME is read; an apiKey value in a row is ignored."""
+        r = row(iso(NOW), rid="a", tag="", key_name="autoos")
+        r["apiKey"] = "sk-SECRET-VALUE"
+        out = json.dumps(usage.aggregate([r], ["lane"]))
+        self.assertNotIn("sk-SECRET-VALUE", out)
 
     def test_no_combo_grouped_as_none(self):
         rows = [row(iso(NOW), rid="a", combo=None)]
@@ -426,7 +449,7 @@ class CliTests(UsageCliTests):
         self.assertIn("provider", out)
         self.assertIn("lane", out)
         self.assertLess(out.index("groq"), out.index("openrouter"))
-        self.assertIn("(untagged)", out)
+        self.assertIn("key:autoos", out)  # P1.2: an empty tag shows the api key NAME
         self.assertIn("or4", out)
         self.assertNotIn(FIXTURE_KEY, out)
 
@@ -1013,7 +1036,7 @@ class SessionIdSplitTests(unittest.TestCase):
 
     def test_old_and_new_session_ids_group_into_the_same_lane(self):
         self.assertEqual(self.lanes(),
-                         {self.LANE: 4, "lane-a": 1, "(untagged)": 1})
+                         {self.LANE: 4, "lane-a": 1, "key:autoos": 1})
 
     def test_the_lane_never_keeps_a_run_id(self):
         # grouping by the whole session id would split one lane into one bucket
