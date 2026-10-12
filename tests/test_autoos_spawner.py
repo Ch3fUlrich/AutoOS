@@ -10660,7 +10660,10 @@ class LedgerWriteTests(unittest.TestCase):
     ACCEPT = "VERDICT: ACCEPT\n\nMinor: nothing blocking.\n"
     REJECT = "VERDICT: REJECT\n\nRepro: `pytest -q` exited 1.\n"
     HOLD = "VERDICT: HOLD\n\nBlocked on an operator decision.\n"
-    WRITER = ("opencode", "vertex/gemini-3.8-flash")
+    # P6e: a rejected row is stamped with the writer's and the reviewer's family, so the
+    # writer names a model the pinned registry places in a family of its own (alpha) —
+    # none of the fixture's four reviewer families.
+    WRITER = ("opencode", "free-model")
     RUNS = "writer-run-1"
 
     def setUp(self):
@@ -10670,6 +10673,10 @@ class LedgerWriteTests(unittest.TestCase):
         self.addCleanup(os.unlink, self.registry_path)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(self.registry, fh)
+        # P6e: the ledger reads the families the gate was handed, not this checkout's
+        # moving catalog — pin the same fixture registry both doors see.
+        self._old_registry_env = os.environ.get("AUTOOS_REGISTRY_PATH")
+        os.environ["AUTOOS_REGISTRY_PATH"] = self.registry_path
         self.root = tempfile.mkdtemp()
         self.folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.root, True)
@@ -10691,6 +10698,10 @@ class LedgerWriteTests(unittest.TestCase):
             os.environ.pop("AUTOOS_LEDGER_PATH", None)
         else:
             os.environ["AUTOOS_LEDGER_PATH"] = self._old_env
+        if self._old_registry_env is None:
+            os.environ.pop("AUTOOS_REGISTRY_PATH", None)
+        else:
+            os.environ["AUTOOS_REGISTRY_PATH"] = self._old_registry_env
 
     def set_ledger(self, target):
         os.environ["AUTOOS_LEDGER_PATH"] = self.target = target
@@ -11618,8 +11629,14 @@ class LedgerReadyPathTests(ReadyCommandTests):
         # setUp moved AUTOOS_STATE_DIR to a temp store, and the fleet resolver reads
         # that env first — so the rows land in the temp store, never in logs/.
         self.target = os.path.join(self.store_dir, "writer-ledger.jsonl")
-        for name, value in (("writer_for_run", lambda run: ("opencode",
-                                                            "vertex/gemini-3.8-flash")),
+        # P6e: a rejected row is stamped with the writer's and the reviewer's family, read
+        # off `AUTOOS_REGISTRY_PATH` — pin the fixture registry the gate was handed, and
+        # make the writer name a model it places in a family of its own (alpha), which is
+        # none of the fixture's four reviewer families.
+        registry = mock.patch.dict(os.environ, {"AUTOOS_REGISTRY_PATH": self.registry_path})
+        registry.start()
+        self.addCleanup(registry.stop)
+        for name, value in (("writer_for_run", lambda run: ("opencode", "free-model")),
                             ("run_cost", lambda run: None)):
             patch = mock.patch.object(writer_ledger, name, value)
             patch.start()
@@ -11667,7 +11684,7 @@ class LedgerReadyPathTests(ReadyCommandTests):
         self.assertEqual(rc, 0, out + err)
         self.assertEqual({(r["writer_client"], r["writer_model_served"], r["cost"])
                           for r in self.rows()},
-                         {("opencode", "vertex/gemini-3.8-flash", 0.25)})
+                         {("opencode", "free-model", 0.25)})
         os.remove(self.target)
         repo, sha = self.make_repo()
         rc, out, err = self.ready(self.seats(repo), repo, sha, self.make_inbox(""))
@@ -11829,8 +11846,7 @@ class LedgerReadyPathTests(ReadyCommandTests):
                                            text="VERDICT: REJECT\n\nRepro: %s.\n" % run),
                         repo, sha)
         self.assertEqual(len(self.rows()), 2, self.rows())
-        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code",
-                                              path=self.target),
+        self.assertTrue(writer_ledger.demoted("free-model", "code", path=self.target),
                         "the refusal feed never reached the demotion gate")
 
     # --- AO-LEDGER-REJECT-ROWS P6d-FIX: tip, notes, one evidence = one run ----
@@ -11929,7 +11945,7 @@ class LedgerJsonlShapeTests(unittest.TestCase):
     def row(self, run_id):
         return {"run_id": run_id, "verdict": "rejected", "failure_class": "syntax",
                 "writer_client": "opencode", "writer_model_served": "vertex/gemini-3.8-flash",
-                "task_type": "code", "reviewer": "t3"}
+                "task_type": "code", "reviewer": "qwen3.8-flash"}
 
     def target(self):
         return os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
@@ -11995,11 +12011,25 @@ class LedgerJsonlShapeTests(unittest.TestCase):
         self.assertEqual(writer_ledger.record(dict(self.row("r2"), cost=0),
                                               path=self.target())["cost"], 0)
 
-    def test_old_rows_without_lane_and_sha_still_load_and_demote(self):
+    def test_old_rows_without_lane_and_sha_still_load_and_a_family_pair_demotes(self):
+        # P6e: a rejection moves the clock only when its row names two different families,
+        # and `record()` stamped no families before it. So a family-less old row still
+        # LOADS — the file is never rewritten — and counts 0; the two rows written through
+        # `record()` carry the pair, and those are what fire demoted().
         target = self.target()
+        old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+        with io.open(target, "w", encoding="utf-8") as fh:
+            for i in (1, 2):
+                row = dict(self.row("old%d" % i), ts=old.isoformat().replace("+00:00", "Z"))
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        rows, skipped = writer_ledger.load(target)
+        self.assertEqual((len(rows), skipped), (2, 0), rows)
+        self.assertFalse(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target),
+                         "a row naming no families is not evidence about a family")
+        self.assertEqual(writer_ledger.rollup(path=target), {})
         writer_ledger.record(self.row("r1"), path=target)
         writer_ledger.record(self.row("r2"), path=target)
-        self.assertEqual(len(writer_ledger.load(target)[0]), 2)
+        self.assertEqual(len(writer_ledger.load(target)[0]), 4)
         self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target))
         self.assertEqual(writer_ledger.rollup(path=target)
                          ["gemini-3.8-flash"]["code"]["rejected"], 2)
@@ -12022,7 +12052,7 @@ class FleetLedgerPathTests(unittest.TestCase):
         "    wl.record_seat({'run_id': 'fr-1', 'verdict': 'rejected',\n"
         "                    'failure_class': 'tests-missing', 'writer_client': 'opencode',\n"
         "                    'writer_model_served': 'vertex/gemini-3.8-flash',\n"
-        "                    'task_type': 'code', 'reviewer': 't3', 'ref': 'b' * 40,\n"
+        "                    'task_type': 'code', 'reviewer': 'qwen3.8-flash', 'ref': 'b' * 40,\n"
         "                    'lane': sys.argv[3], 'sha': 'a' * 40})\n"
         "    print(wl.default_path())\n"
         "elif what == 'demoted':\n"
@@ -12031,6 +12061,11 @@ class FleetLedgerPathTests(unittest.TestCase):
         "else:\n"
         "    print(wl.fleet_state_dir())\n")
 
+    # P6e: `record()` stamps both families through the resolver, read off THIS checkout's
+    # catalog — so the fixture repo carries the whole read chain, not just the ledger.
+    LEDGER_TOOLS = ("autoos_writer_ledger.py", "autoos_clients.py", "autoos_resolver.py",
+                    "autoos_track.py", "registry.py")
+
     def setUp(self):
         self.base = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.base, True)
@@ -12038,18 +12073,22 @@ class FleetLedgerPathTests(unittest.TestCase):
                     "-c", "init.defaultBranch=master"]
 
     def caller_env(self):
-        """The caller's env with the two ledger overrides removed — the case the fleet
-        resolver is asked about is the one where neither is set."""
+        """The caller's env with the ledger and family overrides removed — the case the
+        fleet resolver is asked about is the one where neither is set, and the child reads
+        its own checkout's catalog (P6e)."""
         return {k: v for k, v in os.environ.items()
-                if k not in ("AUTOOS_LEDGER_PATH", "AUTOOS_STATE_DIR")}
+                if k not in ("AUTOOS_LEDGER_PATH", "AUTOOS_STATE_DIR", "AUTOOS_REGISTRY_PATH")}
 
     def checkout(self):
         """A real repo whose `tools/` carries the modules under test, plus a worktree."""
         repo = os.path.join(self.base, "main")
         subprocess.run(self.git + ["init", "-q", repo], check=True)
         os.makedirs(os.path.join(repo, "tools"))
-        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+        for name in self.LEDGER_TOOLS:
             shutil.copyfile(str(TOOLS / name), os.path.join(repo, "tools", name))
+        os.makedirs(os.path.join(repo, "catalog"))
+        shutil.copyfile(str(ROOT / "catalog" / "ai-registry.json"),
+                        os.path.join(repo, "catalog", "ai-registry.json"))
         subprocess.run(self.git + ["-C", repo, "add", "-A"], check=True)
         subprocess.run(self.git + ["-C", repo, "commit", "-q", "-m", "tools"], check=True)
         subprocess.run(self.git + ["-C", repo, "worktree", "add", "-q",

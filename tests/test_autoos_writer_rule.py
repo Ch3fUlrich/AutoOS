@@ -20,6 +20,10 @@ import registry as registry_mod  # noqa: E402
 NEMOTRON = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
 QWEN = "qoder/qwen3.8-max"
 VERTEX = "vertex/gemini-3.8-flash"
+# P6e: a rejected row is stamped with both families, read off the registry, and is refused
+# unless they differ. VERTEX is the writer (google), so the reviewer must name a model the
+# registry places elsewhere — "t3" was a route stub no catalog declares.
+REVIEWER = "qwen3.8-flash"
 QODER = {"client": "qoder", "model": "qwen3.8-max", "available": False,
          "reason": "out of credits"}
 VERTEX_LEG = {"client": "vertex", "model": "gemini-3.8-flash", "effort": "high"}
@@ -385,7 +389,7 @@ class DemotionHookTests(unittest.TestCase):
         path = os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
         for i, verdict in enumerate(verdicts):
             item = {"run_id": "r%d" % i, "verdict": verdict, "writer_client": "vertex",
-                    "writer_model_served": VERTEX, "task_type": "code", "reviewer": "t3"}
+                    "writer_model_served": VERTEX, "task_type": "code", "reviewer": REVIEWER}
             if verdict != "accepted":
                 item["failure_class"] = "syntax"
             ledger.record(item, path=path)
@@ -441,11 +445,10 @@ class DemotionHookTests(unittest.TestCase):
     def test_canonical_spelling_demoted_denies(self):
         target = os.path.join(tempfile.mkdtemp(), "writer-ledger.jsonl")
 
-        for i, served in enumerate(("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-                                    "nemotron-3-super")):
+        for i, served in enumerate((NEMOTRON, "nvidia/nemotron-3-super-120b-a12b:free")):
             item = {"run_id": "n%d" % i, "verdict": "rejected", "failure_class": "syntax",
                     "writer_client": "openrouter", "writer_model_served": served,
-                    "task_type": "code", "reviewer": "t3"}
+                    "task_type": "code", "reviewer": REVIEWER}
             ledger.record(item, path=target)
 
         self.assertFalse(rule.writer_allowed("NEMOTRON-3-SUPER", "R1", "code", reg(), target))
