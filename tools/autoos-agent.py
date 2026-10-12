@@ -12240,18 +12240,83 @@ def jail_tree(prog: str, cap: int, home: str) -> list:
     return out
 
 
-def sandbox_slug_dir(home: str, parts, cwd: str) -> str | None:
-    """`$HOME/<parts>/<cwd with separators as '-'>`, or None.
+# QODER-SLUG (AO-OPENCODE-JAIL P1g, read off the installed qodercli bundle): the
+# leaf qodercli keys one project's journal by is NOT the cwd with its separators
+# turned into `-`. It is the cwd with EVERY non-alphanumeric character turned into
+# `-` (`A.replace(/[^a-zA-Z0-9]/g,"-")`), and when that string is longer than 200
+# characters qodercli keeps its first 200 and appends `-` plus the base36 of a
+# 32-bit rolling hash of the ORIGINAL path (`Math.abs(hash(A)).toString(36)`). A
+# sandbox path is routinely longer than 200 (state root, lane name, clone, run id),
+# so the plain-separator slug P1e granted names a directory qodercli never opens:
+# the grant misses and the jailed client dies on the same startup EACCES the grant
+# was cut to clear. The hash is reproduced exactly here (the golden values in
+# tests/test_landlock_spawn.py are taken from the bundle's own function), so a jail
+# over a long lane path is still the narrowest directory that fixes it.
+QODER_SLUG_MAX = 200
+_QODER_SLUG_KEEP = frozenset("abcdefghijklmnopqrstuvwxyz"
+                             "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 
-    The leaf is how qoder keys its per-project transcript: the run's own working
-    directory with every path separator replaced by `-` — the exact slug in the
-    startup EACCES (`~/.qoder/projects/-home-…-<repo>-<run id>`). Because the cwd
-    carries the run id, the directory is unique to one run. One function so the
-    grant and the pre-jail `mkdir` cannot disagree about the path.
+
+def _js_int32(value: int) -> int:
+    """JS's ToInt32: truncate to 32 bits and read them as signed. JS's `^` coerces
+    both operands this way, and Python's unbounded ints otherwise diverge from it
+    at the first overflow — which is the second character of any long path."""
+    value &= 0xFFFFFFFF
+    return value - (1 << 32) if value >= (1 << 31) else value
+
+
+def _utf16_units(text: str) -> list:
+    """A string the way JS sees it: a sequence of 16-bit code units, so one
+    character outside the BMP is two units — what `.length` counts and what
+    `.charCodeAt(i)` returns."""
+    raw = text.encode("utf-16-le", "surrogatepass")
+    return [raw[i] | (raw[i + 1] << 8) for i in range(0, len(raw), 2)]
+
+
+def _base36(value: int) -> str:
+    """`Number.prototype.toString(36)` for a non-negative integer."""
+    if value == 0:
+        return "0"
+    digits, out = "0123456789abcdefghijklmnopqrstuvwxyz", []
+    while value:
+        value, rem = divmod(value, 36)
+        out.append(digits[rem])
+    return "".join(reversed(out))
+
+
+def _qoder_path_hash(units) -> int:
+    """The bundle's project hash: `e=5381; for (i) e = 33*e ^ A.charCodeAt(i)`."""
+    e = 5381
+    for unit in units:
+        e = _js_int32(33 * e) ^ _js_int32(unit)
+    return e
+
+
+def qoder_project_slug(cwd: str) -> str:
+    """The directory name qodercli keys this project's journal by — for a path over
+    the limit, the truncated-and-hashed leaf it really creates."""
+    units = _utf16_units(str(cwd))
+    slug = "".join(chr(unit) if chr(unit) in _QODER_SLUG_KEEP else "-"
+                   for unit in units)
+    if len(slug) <= QODER_SLUG_MAX:
+        return slug
+    return (slug[:QODER_SLUG_MAX] + "-"
+            + _base36(abs(_qoder_path_hash(units))))
+
+
+def sandbox_slug_dir(home: str, parts, cwd: str) -> str | None:
+    """`$HOME/<parts>/<qoder_project_slug(cwd)>`, or None.
+
+    The leaf is the per-project key qodercli derives from its own working directory
+    (`qoder_project_slug` — sanitize, then truncate-and-hash past 200 characters),
+    which for a sandbox path is the exact slug in the startup EACCES
+    (`~/.qoder/projects/-home-…-<repo>-<run id>`). Because the cwd carries the run
+    id, the directory is unique to one run. One function so the grant and the
+    pre-jail `mkdir` cannot disagree about the path.
     """
     if not parts or not cwd:
         return None
-    return os.path.join(str(home), *parts, str(cwd).replace(os.sep, "-"))
+    return os.path.join(str(home), *parts, qoder_project_slug(cwd))
 
 
 def jail_home_rw_dirs(entry: dict, home: str, cwd: str) -> list:

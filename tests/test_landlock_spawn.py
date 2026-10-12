@@ -850,5 +850,89 @@ class JailNoLandlockGateTests(unittest.TestCase):
         self.assertEqual(records[-1]["jail"].get("path"), "landlock", records[-1])
 
 
+class QoderSlugRuleTests(unittest.TestCase):
+    """P1g (B): the grant names the directory qodercli really creates.
+
+    qodercli does not key a project by the cwd with its separators replaced — it
+    replaces EVERY non-alphanumeric character, and past 200 characters of that it
+    keeps the first 200 and appends the base36 of a 32-bit rolling hash of the
+    original path. The expected values below are not hand-derived: they are the
+    output of the bundle's own function (`node` running the sanitizer, the length
+    check and the hash copied out of `qodercli.js`), so a change in the port that
+    stops matching the client fails here instead of silently re-creating the
+    missing grant. A sandbox path is over 200 characters routinely, which is
+    exactly why the plain slug P1e granted missed."""
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("the qoder journal path is a POSIX grant")
+
+    def test_at_or_under_the_limit_the_slug_is_the_sanitized_path(self):
+        # 100 and 200 characters of path: no truncation, no hash tail.
+        self.assertEqual(agent.qoder_project_slug("/" + "a" * 99),
+                         "-" + "a" * 99)
+        self.assertEqual(len("/" + "a" * 99), 100)
+        self.assertEqual(agent.qoder_project_slug("/" + "b" * 199),
+                         "-" + "b" * 199)
+        self.assertEqual(len("/" + "b" * 199), 200)
+        self.assertEqual(len(agent.qoder_project_slug("/" + "b" * 199)), 200)
+
+    def test_past_the_limit_the_slug_is_truncated_and_hashed(self):
+        # 201 and 300: the first 200 characters of the sanitized path (the leading
+        # separator is one of them), then `-` and the base36 of the hash of the
+        # ORIGINAL path — 207 characters, no more.
+        self.assertEqual(agent.qoder_project_slug("/" + "d" * 200),
+                         "-" + "d" * 199 + "-clo0wa")
+        self.assertEqual(agent.qoder_project_slug("/" + "c" * 299),
+                         "-" + "c" * 199 + "-1o45c9")
+        self.assertEqual(len(agent.qoder_project_slug("/" + "c" * 299)), 207)
+        # the hash is of the whole path, so two 300-character paths sharing a
+        # 200-character prefix still land in two different journal directories
+        self.assertNotEqual(agent.qoder_project_slug("/" + "c" * 299),
+                            agent.qoder_project_slug("/" + "c" * 298 + "d"))
+
+    def test_every_non_alphanumeric_character_is_replaced(self):
+        """The sanitizer is `[^a-zA-Z0-9]`, not `os.sep`: a lane path with a dot or
+        an underscore in it (a `<sandbox>.opencode-data` sibling, a state dir) keys
+        its journal with those as `-` too. The non-BMP case pins the JS view of a
+        string — one character is two code units, so it is two dashes and the hash
+        runs over the pair."""
+        self.assertEqual(agent.qoder_project_slug("/home/u/sb_1/repo.d/x y"),
+                         "-home-u-sb-1-repo-d-x-y")
+        self.assertEqual(agent.qoder_project_slug("/weird_ünïcode.päth/x y"),
+                         "-weird--n-code-p-th-x-y")
+        self.assertEqual(agent.qoder_project_slug("/a\U0001F600b" + "z" * 210),
+                         "-a--b" + "z" * 195 + "-1q62y4")
+
+    def test_a_long_sandbox_path_grants_the_hashed_slug_dir(self):
+        """The grant builder, not just the string function: over a sandbox path
+        longer than the limit the writable world names the hashed directory and NOT
+        the plain-separator slug qoder never opens."""
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        base = tempfile.mkdtemp(prefix="autoos-jail-slug-")
+        self.addCleanup(shutil.rmtree, base, True)
+        home = os.path.join(base, "home")
+        sandbox = os.path.join(base, "sandboxes",
+                               "lane-ao-opencode-jail-p1g-" + "x" * 220)
+        self.assertGreater(len(sandbox), agent.QODER_SLUG_MAX,
+                           "the fixture is not a long path")
+        grants = agent.jail_grants(sandbox, ["/usr/bin/qodercli"], {"HOME": home},
+                                   agent.jail_client_entry(["/usr/bin/qodercli"]))
+        hashed = agent.sandbox_slug_dir(home, parts, sandbox)
+        plain = os.path.join(home, *parts, sandbox.replace(os.sep, "-"))
+        self.assertIn(hashed, grants["rw"], grants)
+        self.assertNotEqual(hashed, plain, "the plain slug is back: the grant misses")
+        self.assertNotIn(plain, grants["rw"], grants)
+        self.assertEqual(os.path.dirname(hashed),
+                         os.path.join(home, *parts),
+                         "the grant escaped this run's journal directory")
+        self.assertEqual(len(os.path.basename(hashed)), 207, hashed)
+        # and the prune mirror deletes exactly what the launcher made
+        os.makedirs(hashed, mode=0o700)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(agent.delete_qoder_projects(sandbox, home=home), 1)
+        self.assertFalse(os.path.exists(hashed))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
