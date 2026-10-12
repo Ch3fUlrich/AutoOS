@@ -4645,11 +4645,9 @@ PROMPT_CACHE_D657 = {model_id: value
 # never probed must not read as if it came out of that probe's data.
 # AO-MIMO-V26 (same day) re-names the set: the two v2.5 chat ids retire 2026-10-21
 # and their rows are gone, the two v2.6 chat ids answer cached_tokens on the
-# second identical call (1792 of 1917 / 1856 of 1917), and mimo-v2.5-asr — the row
-# that rides no route — was never cache-probed, so it stays "unknown".
+# second identical call (1792 of 1917 / 1856 of 1917), (no v2.5 row is wired).
 PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true",
-                           "mimo-v2.6-flash": "true",
-                           "mimo-v2.5-asr": "unknown"}
+                           "mimo-v2.6-flash": "true"}
 PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
 # The source string must name the measurement event that set the verdict, so
 # each accepted provenance is one dated event.

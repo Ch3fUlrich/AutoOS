@@ -74,7 +74,8 @@ GATEWAY_ID = "xiaomi-mimo"
 # the swap landed, so nothing here fires today: the table is the alarm that keeps
 # them deleted, and the fails-from-that-day-on spelling is what lets a lane record
 # a scheduled retirement before it lands.
-RETIRED: dict = {"mimo-v2.5-pro": "2026-10-21", "mimo-v2.5": "2026-10-21"}
+RETIRED: dict = {"mimo-v2.5-pro": "2026-10-21", "mimo-v2.5": "2026-10-21",
+                 "mimo-v2.5-asr": "2026-10-21"}
 
 # providers.<key> for the MiMo connection: the registry keys providers in
 # snake_case and spells a leg with the gateway's own id, so both are looked up.
@@ -337,8 +338,7 @@ def _today():
 
 def synth_registry():
     """The shape the real registry has for MiMo, at the smallest size that still
-    exercises every check: one provider row, three model rows (two legged, one
-    row-only like the shipped asr id), one vertex row to fall through to."""
+    exercises every check: one provider row, two model rows (both legged), one vertex row to fall through to."""
     return {
         "version": "2026-10-12",
         "providers": {
@@ -376,16 +376,6 @@ def synth_registry():
                 "tool_calls": "proven", "price_in": 0.0, "price_out": 0.0,
                 "prompt_cache": "true",
                 "capabilities": {"text": "proven", "image_in": "proven"},
-            },
-            "mimo-v2.5-asr": {
-                "id": "mimo-v2.5-asr", "family": "xiaomi",
-                "context_advertised": 8192,
-                "context_usable": {"tokens": 4096, "source": "default"},
-                "output_max": 2048, "reasoning": True, "effort_ladder": [],
-                "tool_calls": "unproven", "price_in": 0.0, "price_out": 0.0,
-                "prompt_cache": "unknown",
-                "capabilities": {"text": "unproven", "image_in": "unproven",
-                                 "audio_in": "proven"},
             },
             "gemini-3.8-flash": {
                 "id": "gemini-3.8-flash", "family": "google",
@@ -517,13 +507,13 @@ class MimoRegistryAgainstFixture(unittest.TestCase):
             {"xiaomi-mimo/mimo-v2.6-pro": ["l2-worker"],
              "xiaomi-mimo/mimo-v2.6-flash": ["l3-driver"]})
 
-    def test_the_asr_id_carries_a_row_and_no_leg(self):
-        """mimo-v2.5-asr answers 200 for an `input_audio` part and nothing else —
-        its `text` cell is unproven and it takes 8192 of window — so it is a row the
-        catalog keeps for the record and not a leg any tier route may carry."""
-        self.assertIn("mimo-v2.5-asr", self.registry["models"])
+    def test_no_mimo_v25_model_is_wired(self):
+        """Operator 2026-10-12: every mimo-v2.5-* id is legacy — no registry row and
+        no route leg for any of them, chat, asr or tts."""
+        self.assertEqual([m for m in self.registry["models"]
+                          if m.startswith("mimo-v2.5")], [])
         self.assertEqual([leg for _r, leg, mid in mimo_legs(self.registry)
-                          if mid == "mimo-v2.5-asr"], [])
+                          if mid.startswith("mimo-v2.5")], [])
 
 
 class RetiredTableChecker(unittest.TestCase):
@@ -547,7 +537,8 @@ class RetiredTableChecker(unittest.TestCase):
 
     def test_the_table_names_the_two_retiring_chat_ids(self):
         self.assertEqual(RETIRED, {"mimo-v2.5-pro": "2026-10-21",
-                                   "mimo-v2.5": "2026-10-21"})
+                                   "mimo-v2.5": "2026-10-21",
+                                   "mimo-v2.5-asr": "2026-10-21"})
 
     def test_the_shipped_registry_carries_neither_retired_id(self):
         """No leg and no model row for an id the gateway retires — read with

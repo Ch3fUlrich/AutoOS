@@ -736,32 +736,6 @@
       "tool_calls": "unproven",
       "trains_on_prompts": true
     },
-    "mimo-v2.5-asr": {
-      "$comment": "AO-MIMO-V26 (gateway smoke 2026-10-12; tests/fixtures/mimo-models.json): the plan's SPEECH-RECOGNITION id — a registered row that rides NO route. Measured through the gateway: one input_audio (wav) call 200 with audio_tokens 7 and a transcript back, which is the only cell the smoke answered for this id, so capabilities.audio_in is \"proven\" and text/image_in/video_in/audio_out stay \"unproven\" — the gateway's own custom-model row agrees on no image input (vision false, no input_modalities). Not a leg because it is not a chat model: it is only usable by input_audio parts, a 8192-token window (the gateway's context_length; output_max 2048 from its max_output_tokens) is no window for a coding card, and tool_calls stays \"unproven\" — the smoke never sent a tool to it, so tools/autoos_resolver.py would fall through it on an agentic card anyway. prompt_cache \"unknown\": the two-call prefix test was never run for this id, and an unanswered call is unknown (tools/registry.py, AO-PROBE-D657). reasoning true only from the gateway's capability cell, never exercised; effort_ladder empty because no effort parameter has been answered. audio_out is NOT claimed here: the plan's mimo-v2.5-tts* ids are the output side and stay unproven (chat rejects them, /v1/audio/speech answers upstream 400), so no tts row exists.",
-      "capabilities": {
-        "audio_in": "proven",
-        "audio_out": "unproven",
-        "image_in": "unproven",
-        "text": "unproven",
-        "video_in": "unproven"
-      },
-      "context_advertised": 8192,
-      "context_usable": {
-        "source": "default",
-        "tokens": 4096
-      },
-      "effort_ladder": [],
-      "family": "xiaomi",
-      "id": "mimo-v2.5-asr",
-      "output_max": 2048,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "price_source": "Xiaomi MiMo Token Plan: a flat subscription with vendor-side credit metering, no per-token API price is metered (the seat-metered providers.cc shape) — 0.0 here means 'not metered', not 'free' (gateway smoke 2026-10-12)",
-      "prompt_cache": "unknown",
-      "prompt_cache_source": "gateway smoke 2026-10-12 — the prefix/cache call was never answered for this id, so the verdict is unknown, never false",
-      "reasoning": true,
-      "tool_calls": "unproven"
-    },
     "mimo-v2.6-flash": {
       "$comment": "AO-MIMO-V26 (gateway smoke 2026-10-12; tests/fixtures/mimo-models.json): the L3-class MiMo Token Plan leg. Measured through the gateway: text 200, one tool call 200 (tool_calls proven), image input 200 with image_tokens 9 and an audio input (input_audio wav) 200 with audio_tokens 7 — so capabilities.image_in and audio_in are \"proven\" and the gateway's own custom-model row agrees on the image half (vision true, input_modalities [text, image]). prompt_cache \"true\": 1856 cached_tokens of 1917 on the second identical call (this leg rides l3-driver, where the l2 cache gate of tools/combo-contract.py rule (f) does not reach, so the measurement is recorded, not required). context_advertised/output_max 1048576/131072 are the gateway's reported context_length/max_output_tokens; context_usable stays at the 50% default until a probe measures it. reasoning true from the gateway's capability cell and reasoning_tokens in the usage block; effort_ladder empty because no effort parameter has been answered for this id. audio_out/video_in unproven: the chat path rejects the plan's mimo-v2.5-tts* ids (/v1/audio/speech answers upstream 400) and video input was never tested. Replaces the retired mimo-v2.5 chat id (retires 2026-10-21); the id is a gateway custom model, declared in configuration/omniroute/custom-models.json.",
       "capabilities": {
