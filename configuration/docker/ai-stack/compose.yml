@@ -23,17 +23,18 @@ networks:
 
 services:
   omniroute:
-    # Upstream image + qodercli (the Qoder PAT login spawns it; the bare image
-    # has none). The FROM is pinned by digest: a moved tag can never change the
-    # gateway underneath the encrypted provider credentials. Bump deliberately
-    # (docs page).
+    # Upstream source build + the ACP executor patch (build-omniroute-src.sh,
+    # pinned by tag and commit) + qodercli (the Qoder PAT login and the qoder-acp
+    # provider spawn it; the bare image has none). A moved tag can never change
+    # the gateway underneath the encrypted provider credentials. Bump
+    # deliberately (docs page).
     build:
       context: .
       dockerfile: omniroute.Dockerfile
       # tools/apply-vertex-patch.py for the U2 build stage (omniroute.Dockerfile).
       additional_contexts:
         tools: ../../../tools
-    image: autoos/omniroute:3.8.50-autoos5
+    image: autoos/omniroute:3.8.50-autoos6
     container_name: autoos-omniroute
     restart: unless-stopped
     # The image's own user is node (1000); the host user's ids keep the

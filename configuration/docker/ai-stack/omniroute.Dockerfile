@@ -8,19 +8,24 @@
 # base blocks install scripts by default, so nothing from the package runs at
 # build either.
 #
-# The FROM digest and the qodercli version are bumped together, and with them
-# the local tag in compose.yml (autoos/omniroute:<upstream>-autoos<n>; see
-# docs/web-services.md, "Bumping an image"). The qodercli version is the one
-# the host runs (`qodercli --version`).
+# The base is NOT the published image (autoos6): that ships compiled chunks, which
+# cannot take a new executor. build-omniroute-src.sh (ai-stack.sh up runs it first)
+# builds autoos/omniroute-src:<upstream>-acp<n> from the pinned upstream tag with
+# configuration/omniroute/acp-executor-<tag>.patch applied - the generic ACP
+# executor and the qoder-acp provider (`qodercli --acp`), so qoder calls are
+# tracked legs of the gateway with call_logs rows. The tag pin, the upstream commit
+# and the patch move together, and with them the local tag in compose.yml
+# (autoos/omniroute:<upstream>-autoos<n>; see docs/web-services.md, "Bumping an
+# image"). The qodercli version is the one the host runs (`qodercli --version`).
 #
 # A second layer adds bcryptjs for the reset-password CLI (`docker exec -i
 # autoos-omniroute node bin/reset-password.mjs --password-stdin`): the base's
 # standalone build prunes it from /app/node_modules, so the CLI dies with
 # ERR_MODULE_NOT_FOUND. The version is the one /app/package-lock.json pins -
 # bump it with the FROM digest.
-FROM diegosouzapw/omniroute:3.8.50@sha256:085c57adf499a8aaa9f35ccde95c0df9c11bd9ecd18d6c9edbf3b68b8079ba9d AS base
+FROM autoos/omniroute-src:3.8.50-acp1 AS base
 USER root
-RUN npm install -g @qoder-ai/qodercli@1.1.63 && npm cache clean --force
+RUN npm install -g @qoder-ai/qodercli@1.1.69 && npm cache clean --force
 # Into a throw-away prefix, then moved: npm in /app would reconcile the whole
 # package.json. bcryptjs has no dependencies, so the one package is the tree.
 RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-fund bcryptjs@3.0.3 && rm -rf /app/node_modules/bcryptjs && mv /tmp/autoos-cli-deps/node_modules/bcryptjs /app/node_modules/bcryptjs && rm -rf /tmp/autoos-cli-deps && npm cache clean --force

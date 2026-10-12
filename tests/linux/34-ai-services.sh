@@ -3668,12 +3668,19 @@ _aistack() {
     local d="$1" extra=()
     shift
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
+    # The omniroute source build clones upstream: a stub that only records its call.
+    if [[ ! -x "$d/bin/fake-src-build" ]]; then
+        mkdir -p "$d/bin"
+        printf '#!/bin/sh\necho "src-build $*" >>"%s/src-build.log"\n' "$d" >"$d/bin/fake-src-build"
+        chmod +x "$d/bin/fake-src-build"
+    fi
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
         -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
         -u AUTOOS_ZCODE_DIR -u AUTOOS_ZCODE_MOUNT_MODE \
+        AUTOOS_OMNIROUTE_SRC_BUILD="$d/bin/fake-src-build" \
         HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
         AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
         AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
@@ -4749,10 +4756,13 @@ if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is di
     for f in "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile"; do
         froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null || true)"
         pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true)"
+        # The locally source-built base (build-omniroute-src.sh pins its tag, commit and patch;
+        # ai-stack.sh folds the image id into the rebuild hash) is pinned too.
+        pinned=$(( pinned + $(grep -cE '^[[:space:]]*FROM[[:space:]]+autoos/omniroute-src:[0-9][0-9.]*-acp[0-9]+([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true) ))
         # A multi-stage `FROM <stage>` is pinned through its stage: it counts only when an
         # EARLIER line declared `... @sha256:<digest> AS <stage>` (the stage name is not a registry ref).
         staged="$(awk 'BEGIN{IGNORECASE=1}
-            /^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]+[[:space:]]+AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1; next }
+            /^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+(@sha256:[0-9a-f]+|:[0-9][0-9.]*-acp[0-9]+)[[:space:]]+AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1; next }
             /^[[:space:]]*FROM[[:space:]]+[^[:space:]@:\/]+[[:space:]]*$/ { if (tolower($2) in st) n++ }
             END{print n+0}' "$f" 2>/dev/null || echo 0)"
         (( froms >= 1 && froms == pinned + staged )) || { ok=0; echo "${pinned:-0} pinned + ${staged:-0} pinned-stage of ${froms:-0} FROM lines in $f" >&2; }
@@ -4765,12 +4775,12 @@ fi
 # upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
 # it - built like the opencode one, from a digest-pinned base.
 
-if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+if it "aistack: the omniroute layer adds qodercli at an exact version on the pinned source-built base, no vendor binary"; then
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
-    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}\( AS [a-z][a-z0-9-]*\)\{0,1\}$/\1/p' "$f" 2>/dev/null)"
-    [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
+    base="$(sed -n 's/^FROM autoos\/omniroute-src:\([0-9][0-9.]*\)-acp[0-9][0-9]*\( AS [a-z][a-z0-9-]*\)\{0,1\}$/\1/p' "$f" 2>/dev/null)"
+    [[ -n "$base" ]] || { ok=0; echo "FROM is not autoos/omniroute-src:<version>-acp<n> (the source build, build-omniroute-src.sh)" >&2; }
     # The local tag names the upstream version it is built on: bumped together.
     grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
         || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
@@ -4793,6 +4803,12 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
             print }' "$f" 2>/dev/null)"
     [[ -z "$bad_copy" ]] || { ok=0; echo "COPY/ADD from the build context (vendor binary risk): $bad_copy" >&2; }
     if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: omniroute source build pins tag + commit + patch, and the Dockerfile, compose tag and qodercli move with them (unit tests)"; then
+    # tests/test_omniroute_src_build.py is hermetic: it reads the recipe, the patch and the
+    # Dockerfile, and runs the script's --dry-run against a fake docker. No clone, no build.
+    out="$(python3 tests/test_omniroute_src_build.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "aistack: vertex the omniroute U2 stage patches at build time and hands the tree to vertex-patch-gate.py, which counts every chunk"; then
@@ -4945,7 +4961,7 @@ if it "aistack: up creates the qoder home before compose starts the gateway, on 
     if (( ok )); then pass; else fail "compose can be the one to create the qoder home"; fi
 fi
 
-if it "aistack: the omniroute image is rebuilt when its label, base digest or Dockerfile changes, and only then"; then
+if it "aistack: the omniroute image is rebuilt when its label, base image or Dockerfile changes, and only then"; then
     d="$(_aistack_sandbox)"
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack" "$d/cfg"
@@ -4957,21 +4973,23 @@ if it "aistack: the omniroute image is rebuilt when its label, base digest or Do
     ok=1
     : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
     _omni_up
-    grep -qE "^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:[^ ]+ -f $t/docker/ai-stack/omniroute\.Dockerfile " "$d/docker.log" \
+    grep -qE "^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:[^ ]+ --build-context tools=[^ ]+ -f $t/docker/ai-stack/omniroute\.Dockerfile " "$d/docker.log" \
         || { ok=0; echo "a stale label was not rebuilt: $(cat "$d/docker.log")" >&2; }
     [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "up omniroute built something else too" >&2; }
     [[ -e "$d/opencode-label" ]] && { ok=0; echo "the omniroute build wrote the opencode label" >&2; }
     first="$(cat "$d/omniroute-label")"
     _omni_up
     [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt an up-to-date image" >&2; }
-    # A bumped base digest, the Dockerfile text unchanged otherwise.
-    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]{64}/\1$(printf '%064d' 0)/" "$t/docker/ai-stack/omniroute.Dockerfile"
+    # The source-built base was rebuilt (a new image id), the Dockerfile text unchanged. The
+    # first run asked the source build once and passed it no arguments (a real run).
+    grep -qx 'src-build ' "$d/src-build.log" || { ok=0; echo "up did not run the source build: $(cat "$d/src-build.log" 2>&1)" >&2; }
+    printf 'sha256:%064d\n' 1 >"$d/omniroute-src-id"
     _omni_up
-    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a bumped base digest was not rebuilt" >&2; }
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a rebuilt source base was not rebuilt" >&2; }
     second="$(cat "$d/omniroute-label")"
-    [[ "$second" != "$first" ]] || { ok=0; echo "label did not change with the digest" >&2; }
+    [[ "$second" != "$first" ]] || { ok=0; echo "label did not change with the base image id" >&2; }
     _omni_up
-    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt after the digest bump was built" >&2; }
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt after the base bump was built" >&2; }
     printf '# a changed layer\n' >>"$t/docker/ai-stack/omniroute.Dockerfile"
     _omni_up
     [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
@@ -4996,6 +5014,7 @@ if it "aistack: --dry-run up says would build or rebuild the omniroute image and
     out="$(_aistack "$d" --dry-run up omniroute)"
     [[ "$out" == *"would rebuild autoos/omniroute:"*" (omniroute.Dockerfile or its base image changed)"* ]] || { ok=0; echo "stale label: $out" >&2; }
     grep -q '^build' "$d/docker.log" 2>/dev/null && { ok=0; echo "a dry run built: $(cat "$d/docker.log")" >&2; }
+    grep -qx 'src-build --dry-run' "$d/src-build.log" 2>/dev/null || { ok=0; echo "the source build was not asked for a dry run: $(cat "$d/src-build.log" 2>&1)" >&2; }
     # Up to date (label from a real build): nothing to announce.
     _aistack "$d" up omniroute >/dev/null
     rm -f "$d/docker.log"

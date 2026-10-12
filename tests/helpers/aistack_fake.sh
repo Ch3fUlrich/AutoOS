@@ -180,7 +180,10 @@ fake_docker() {
             [[ -e "$S/image-exists" ]] || return 1
             svc="$(image_name "${*: -1}")"
             [[ -e "$S/noimage-$svc" ]] && return 1
-            if [[ "$fmt" == *Labels* ]]; then
+            if [[ "$fmt" == *.Id* ]]; then
+                # a locally built base has no digest: its image id stands in (omniroute-src-id)
+                [[ -s "$S/$svc-id" ]] && cat "$S/$svc-id"
+            elif [[ "$fmt" == *Labels* ]]; then
                 if [[ -s "$S/$svc-label" ]]; then cat "$S/$svc-label"; else echo '<no value>'; fi
             fi
             return 0 ;;

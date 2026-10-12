@@ -38,6 +38,8 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The source build of the gateway base image (omniroute.Dockerfile builds FROM it); tests stub it.
+SRC_BUILD="${AUTOOS_OMNIROUTE_SRC_BUILD:-$HERE/build-omniroute-src.sh}"
 REPO="$(cd "$HERE/../../.." && pwd)"
 CONFIG_DIR="${AUTOOS_AI_STACK_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/ai-stack}"
 DATA_DIR="${AUTOOS_AI_STACK_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/autoos/ai-stack}"
@@ -771,9 +773,12 @@ compose_service_field() {
 # edited Dockerfile or a bumped base never keeps serving the old layer under
 # the unchanged local tag.
 image_source_hash() {
-    local base
+    local base from local_id=""
     base="$(sed -n 's/^FROM[[:space:]][[:space:]]*[^[:space:]]*@\(sha256:[0-9a-f]\{64\}\).*/\1/p' "$1" | head -n1)"
-    { cat "$1"; printf 'base=%s\n' "$base"; } | sha256sum | cut -d' ' -f1
+    # A locally built base (autoos/omniroute-src) has no digest: its image id joins the hash.
+    from="$(sed -n 's/^FROM[[:space:]][[:space:]]*\(autoos\/[^[:space:]]*\).*/\1/p' "$1" | head -n1)"
+    [[ -n "$from" ]] && local_id="$("$DOCKER" image inspect -f '{{.Id}}' "$from" 2>/dev/null || true)"
+    { cat "$1"; printf 'base=%s\n' "$base"; [[ -n "$local_id" ]] && printf 'local=%s\n' "$local_id"; true; } | sha256sum | cut -d' ' -f1
 }
 
 # ensure_images <service...>: a service compose builds (it has `build:`) gets
@@ -785,6 +790,11 @@ ensure_images() {
         img="$(compose_service_field "$svc" image)"
         dockerfile="$(compose_service_field "$svc" build dockerfile)"
         if [[ -n "$dockerfile" ]]; then
+            # A service whose Dockerfile builds FROM the local source-built base gets it first.
+            if grep -qE '^FROM[[:space:]]+autoos/omniroute-src:' "$HERE/$dockerfile"; then
+                if [[ $DRY -eq 1 ]]; then "$SRC_BUILD" --dry-run || return 1
+                else "$SRC_BUILD" || return 1; fi
+            fi
             label="org.autoos.$svc.source"
             want="$(image_source_hash "$HERE/$dockerfile")"
             if "$DOCKER" image inspect "$img" >/dev/null 2>&1; then
@@ -797,6 +807,7 @@ ensure_images() {
             if [[ $DRY -eq 1 ]]; then echo "  - would $what"; continue; fi
             echo "  + $what"
             "$DOCKER" build --label "$label=$want" -t "$img" \
+                --build-context "tools=$HERE/../../../tools" \
                 -f "$HERE/$dockerfile" "$HERE" || { echo "  ! building $img failed"; return 1; }
         else
             if "$DOCKER" image inspect "$img" >/dev/null 2>&1; then continue; fi
