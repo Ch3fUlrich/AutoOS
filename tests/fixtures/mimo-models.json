@@ -1,17 +1,20 @@
 {
   "_comment": [
-    "Gateway view of provider xiaomi-mimo (OmniRoute :20128), captured 2026-10-12 by fixes-L2-mimo.",
-    "NOT the vendor's own /v1/models: the key lives only in the gateway DB. Sources: GET /v1/models (ids with the xiaomi-mimo/ prefix) and GET /api/v1/providers/xiaomi-mimo/models (capability fields).",
-    "Live-call findings the list does not show: chat xiaomi-mimo/mimo-v2.6-flash|v2.6-pro|v2.6-pro-ultraspeed|v2.5-asr|v2.5-tts -> 400 'not available in the active live catalog'; only mimo-v2.5-pro and mimo-v2.5 answered 200. mimo-v2.5-pro image input -> 404 'No endpoints found that support image input'; mimo-v2.5 image input -> 200.",
-    "Refresh the fixture when the gateway's xiaomi-mimo catalog changes (v2.6 ids expected after 2026-10-14)."
+    "Gateway view of provider xiaomi-mimo (OmniRoute :20128, Token Plan key on the AMS endpoint), captured 2026-10-12 by fixes-L2-mimo after apply-custom-models.sh added the v2.6 ids and mimo-v2.5-asr.",
+    "NOT the vendor's own /v1/models: the key lives only in the gateway DB. Sources: GET /v1/models (ids with the xiaomi-mimo/ prefix) and GET /api/v1/providers/xiaomi-mimo/models (capability fields). mimo-v2.6-*, mimo-v2.5-asr are CUSTOM models declared in configuration/omniroute/custom-models.json (the gateway image's static list only knows v2.5-pro and v2.5).",
+    "live_call_results are the smoke calls of 2026-10-12 (status + usage fields only). mimo-v2.5-tts* are listed but chat is rejected ('not in live catalog') and /v1/audio/speech answers upstream 400 'Param Incorrect': audio_out stays unproven.",
+    "Refresh when the gateway catalog changes (v2.5 chat ids retire 2026-10-21)."
   ],
   "captured": "2026-10-12",
   "gateway_v1_models_ids": [
     "xiaomi-mimo/mimo-v2.5",
+    "xiaomi-mimo/mimo-v2.5-asr",
     "xiaomi-mimo/mimo-v2.5-pro",
     "xiaomi-mimo/mimo-v2.5-tts",
     "xiaomi-mimo/mimo-v2.5-tts-voiceclone",
-    "xiaomi-mimo/mimo-v2.5-tts-voicedesign"
+    "xiaomi-mimo/mimo-v2.5-tts-voicedesign",
+    "xiaomi-mimo/mimo-v2.6-flash",
+    "xiaomi-mimo/mimo-v2.6-pro"
   ],
   "provider_models": [
     {
@@ -99,14 +102,76 @@
       ],
       "max_output_tokens": 131072,
       "max_input_tokens": 1048576
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "context_length": 1048576,
+      "max_output_tokens": 131072,
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "context_length": 1048576,
+      "max_output_tokens": 131072,
+      "capabilities": {
+        "vision": true,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "output_modalities": [
+        "text"
+      ]
+    },
+    {
+      "id": "mimo-v2.5-asr",
+      "context_length": 8192,
+      "max_output_tokens": 2048,
+      "capabilities": {
+        "vision": false,
+        "tool_calling": true,
+        "reasoning": true
+      },
+      "max_input_tokens": 1048576
     }
   ],
   "live_call_results": {
+    "mimo-v2.6-pro": {
+      "text": "200",
+      "tools": "200 tool_call",
+      "image_in": "200 image_tokens 9",
+      "audio_in": "200 audio_tokens 7",
+      "prompt_cache": "cached_tokens 1792 of 1917 on 2nd identical call"
+    },
+    "mimo-v2.6-flash": {
+      "text": "200",
+      "tools": "200 tool_call",
+      "image_in": "200 image_tokens 9",
+      "audio_in": "200 audio_tokens 7",
+      "prompt_cache": "cached_tokens 1856 of 1917 on 2nd identical call"
+    },
+    "mimo-v2.5-asr": {
+      "audio_in": "200 audio_tokens 7 (transcript of a 440 Hz tone)"
+    },
     "mimo-v2.5-pro": {
       "text": "200",
       "tools": "200 tool_call",
       "image_in": "404 no image endpoint",
-      "prompt_cache": "cached_tokens 1792 of 1917 on 2nd identical call"
+      "prompt_cache": "cached_tokens 1792 of 1917"
     },
     "mimo-v2.5": {
       "text": "200",
@@ -114,13 +179,8 @@
       "image_in": "200 image_tokens 9"
     },
     "mimo-v2.5-tts": {
-      "chat": "400 not in live catalog"
-    },
-    "mimo-v2.6-flash": {
-      "chat": "400 not in live catalog"
-    },
-    "mimo-v2.6-pro": {
-      "chat": "400 not in live catalog"
+      "chat": "400 not in live catalog",
+      "audio_speech": "400 Param Incorrect (upstream)"
     }
   }
 }
