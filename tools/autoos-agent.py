@@ -72,6 +72,17 @@ Claude), and a leaf never spawns at all (R-worker-06). Either refusal exits 14,
 distinct from 2 on purpose: a layer refusal is a report upward, not a flag to fix
 and retry. An unmarked session is an L1's and is fenced by neither rule.
 
+Jail (AO-OPENCODE-JAIL P1b): every `--isolate` worker on a Landlock kernel runs inside
+`tools/landlock_exec.py` — a fence the kernel enforces below the process, so the worker
+has no syscall that lifts it. Its writable world is its own sandbox, the sandbox's two
+private siblings and its per-run XDG dirs; everything else it may read is the tool chain
+and the trust store named in `JAIL_RO_BY_CLIENT`. The jail wraps the client INSIDE the
+`systemd-run` scope: the scope decides who can be killed, Landlock decides what can be
+read. `--dry-run` prints the jailed argv, the record carries `jail`, and the run prints a
+`jail:` line. With no Landlock ABI an isolated private lane FAILS CLOSED (rc 2) —
+`--allow-unjailed` is the only override and is named on the record; a public lane runs
+unjailed and says so. Windows is unchanged (no Landlock there; AO-JAIL-WINDOWS).
+
 Run identity: one canonical id per spawn, minted once in UTC as
 `YYYYMMDD-HHMMSS-<slug>-<hex6>` (slug from --title else the task, capped at 24
 chars). It names the sandbox dir, the `agent/<id>` branch, logs/workers/<id>.json
@@ -217,7 +228,8 @@ The same marked run that only reported is NOT a failure: it exits 0 with "RESEAR
 FAMILYFENCE — nothing outside the excluded families could serve the run, so it refuses instead of
 falling through onto the writer's own family and calling the result a cross-family review; the
 track record carries failure class "refusal", like the other refusals); the child's
-exit code; 2 bad arguments, card or route refused, or a --permission-mode/--approval-mode/--sandbox
+exit code; 2 bad arguments, card, route or jail refused (P1b: an isolated private lane on
+a host with no Landlock, unless --allow-unjailed), or a --permission-mode/--approval-mode/--sandbox
 value the client's own --help does not offer (CLIENT-MODE, SPAWNFREE item 3 - the message names the
 mode and the client's accepted list);
 3 gateway, key or client binary missing, OR AUTOOS_AGENT_INBOX names an inbox with an active
@@ -318,6 +330,7 @@ import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
+import landlock_exec as landlock  # noqa: E402  (AO-OPENCODE-JAIL P1b: the fence)
 from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11988,26 +12001,326 @@ class ClientExit(int):
     after — learns from it whether a cgroup holds the subtree or only the
     process-group kill does. None for an exit object this spawner did not produce
     (a test's own stub, a run that never launched).
+
+    `.jail` is the same answer for the fence around the filesystem rather than
+    around the process (AO-OPENCODE-JAIL P1b): `jail_decision()`'s dict for the
+    argv that was really execed, so a run recorded as `landlock` cannot have run
+    bare. Plumbed exactly like `.scope`, for the same reason.
     """
     tail = ""
     refusal = None
     raw_tail = ""
     raw_err = None
     scope = None
+    jail = None
 
     def __new__(cls, rc: int, tail: str = "", refusal: str | None = None,
                 raw_tail: str = "", raw_err: str | None = None,
-                scope: dict | None = None):
+                scope: dict | None = None, jail: dict | None = None):
         obj = super().__new__(cls, rc)
         obj.tail = tail
         obj.refusal = refusal
         obj.raw_tail = raw_tail
         obj.raw_err = raw_err
         obj.scope = scope
+        obj.jail = jail
         return obj
 
 
 SCOPE_WRAPPER = "systemd-run"
+
+# --- AO-OPENCODE-JAIL P1b: the Landlock fence an isolated worker cannot lift ---
+#
+# The scope decides who can be KILLED; this decides what can be READ. P0 measured
+# that this host's `systemd --user` sandbox properties start but enforce nothing
+# (AppArmor restricts unprivileged userns, no bwrap), so the only fence that lives
+# BELOW the process — one a worker has no syscall to lift — is Landlock
+# (tools/landlock_exec.py). The two compose rather than compete: the jail wraps the
+# client INSIDE the scope, so the argv is `systemd-run --scope … -- env -u … --
+# python3 landlock_exec.py … -- <client>` and `cancel` still stops a cgroup while
+# every open() the client makes is still governed by the kernel.
+#
+# Windows is untouched by all of this: there is no Landlock there, `jail_decision`
+# answers `unjailed (windows)` and the launch is exactly the code that ran before.
+# Job Objects / Restricted Tokens are the separate lane (AO-JAIL-WINDOWS).
+JAIL_WRAPPER = "landlock_exec.py"
+# The ONE table of read grants. `default` is what every jail starts from; a
+# per-client key names the program's BASENAME as the jail actually execs it —
+# `run_client` only ever sees argv, and the client name in the card is not what
+# starts (`--client qoder` runs `qodercli`, `--client codex` runs `omniroute`).
+# Every path here was found by iterating EACCES on a real trivial run of that
+# client inside the jail on this host (Ubuntu 24.04, kernel 7.0.0-34, Landlock
+# ABI v8); nothing is granted that the run did not ask for.
+#
+#   ro / ro_file   read grants shared by every client (the tool chain, the trust
+#                  store a TLS client reads). A path that does not exist is
+#                  skipped by the wrapper, so a split-usr and a merged-usr host
+#                  both work without probing which one this is.
+#   rw             read-write grants added beside the sandbox and its siblings.
+#                  /dev is here because git opens /dev/null READ-WRITE as its
+#                  discard target — `--ro /dev` is not enough for a commit.
+#   tree           how far above the program's own directory to walk (its install
+#                  tree — an npm global puts the entry point two levels inside its
+#                  package). The walk NEVER grants `$HOME` or an ancestor of it,
+#                  so an install under the operator's home stays per-package.
+#   interp_tree    same, for the interpreter a `.js`/`.py` entry point runs under
+#                  (`/usr/bin/env node` has to read node itself). One level: the
+#                  bin directory, not the whole prefix.
+#   proc_self      opencode's Bun runtime aborts at startup without /proc/self.
+#                  Granting `/proc` at large would let the worker read a same-uid
+#                  process's environ — the spawner's holds the lane password — so
+#                  only its own `/proc/self` is named. Consequence: a grandchild
+#                  (the worker's own tool call) that asks for its `/proc/self` is
+#                  denied; the client itself works.
+#   home_ro        directories under the run's `$HOME`, read-only, that a
+#                  own-account client authenticates from. qoder's journal
+#                  (`~/.qoder/projects`, what FAMILYFENCE reads) is deliberately
+#                  NOT writable from inside the jail: a worker that could plant a
+#                  transcript there could choose who reviews it. The honest cost
+#                  is `writer: unresolved` for a jailed qoder run.
+#   ungrantable    a path this client needs that NO grant may name — the jail is
+#                  therefore not offered to it (see `jail_gate`: a private lane is
+#                  refused, a public one runs as it did before this mechanism).
+JAIL_RO_BY_CLIENT = {
+    "default": {
+        "ro": ("/usr", "/bin", "/lib", "/lib64", "/etc/ssl", "/etc/ca-certificates"),
+        "ro_file": ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+                    "/etc/ssl/openssl.cnf"),
+        "rw": ("/dev",),
+        "tree": 2,
+        "interp_tree": 1,
+        "proc_self": False,
+        "home_ro": (),
+    },
+    "opencode": {"proc_self": True},
+    "qodercli": {"home_ro": (".qoder",)},
+    "agy": {"tree": 1},
+    "claude": {"ungrantable": os.path.join("~", ".claude")},
+}
+# What the sandbox's own writable world is, beyond the clone and its two siblings:
+# the per-run XDG dirs the plan points the client at (its sockets, its config).
+JAIL_ENV_RW = ("XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "XDG_DATA_HOME")
+# The shebang interpreter a resolved entry point needs readable, by extension.
+JAIL_INTERPRETER = {".js": "node", ".mjs": "node", ".py": "python3"}
+JAIL_REASON_WINDOWS = "windows (AO-JAIL-WINDOWS is the separate lane)"
+JAIL_REASON_NOT_ISOLATED = "not an --isolate sandbox"
+JAIL_REASON_NO_ABI = "no Landlock ABI on this kernel"
+# Item 3: the fallback is legal for a public lane, never quiet — the same rule
+# SCOPE_WARNING states for an unscoped one. An unjailed worker reads every file
+# this uid can, which is the whole defect P1b exists to close.
+JAIL_WARNING = ("autoos-agent: WARNING client runs UNJAILED (%s): "
+                "the worker can read any file this uid can")
+JAIL_REFUSAL = ("refusing to launch an unjailed isolated worker (%s) while the "
+                "card is privacy=%s; --allow-unjailed is the only override")
+
+
+def jail_unique(paths: list) -> list:
+    """Order-preserving de-dup — the wrapper takes one flag per path and a
+    repeated grant reads as a table nobody audited."""
+    seen, out = set(), []
+    for path in paths:
+        if path and path not in seen:
+            seen.add(path)
+            out.append(path)
+    return out
+
+
+def is_jailed(cmd) -> bool:
+    """Is this argv already wrapped by `landlock_exec.py`?
+
+    Asked of the wrapper's own slots only (the client program sits at index 1, or
+    one past the scope's `--`), never of the whole argv: the task text is the last
+    element of every client launch, and a brief that merely NAMES the wrapper must
+    not talk a lane out of its jail.
+    """
+    argv = list(cmd)
+    if argv and os.path.basename(argv[0]) == SCOPE_WRAPPER and "--" in argv:
+        argv = argv[argv.index("--") + 1:]
+    return len(argv) > 1 and os.path.basename(argv[1]) == JAIL_WRAPPER
+
+
+def jail_client_entry(cmd) -> dict:
+    """The grant table entry that applies to this argv, merged onto `default`."""
+    argv = list(cmd)
+    name = os.path.basename(argv[client_program_index(argv)]) if argv else ""
+    entry = dict(JAIL_RO_BY_CLIENT["default"])
+    entry.update(JAIL_RO_BY_CLIENT.get(name) or {})
+    entry["program"] = name
+    return entry
+
+
+def jail_tree(prog: str, cap: int, home: str) -> list:
+    """Up to `cap` ancestor directories of `prog`, never reaching `$HOME`.
+
+    The walk exists to cover an install tree (an npm package's own directory, the
+    bin directory node lives in). It stops at `$HOME` and at anything that CONTAINS
+    `$HOME`, because granting those is granting the operator's whole home — the one
+    thing this fence is here to deny.
+    """
+    out, d = [], os.path.dirname(os.path.realpath(prog))
+    for _ in range(max(0, cap)):
+        if not d or d == os.sep or d == home or home.startswith(d + os.sep):
+            break
+        out.append(d)
+        d = os.path.dirname(d)
+    return out
+
+
+def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
+    """{rw, ro, ro_file} this launch needs, as absolute paths.
+
+    The writable world is the sandbox and nothing else: the clone, its two private
+    siblings (`SANDBOX_PRIVATE_SUFFIXES`), the per-run XDG dirs the plan points the
+    client at, and `/dev`. The readable world is the table plus the program's own
+    install tree. A path that does not exist is skipped by the wrapper, so an
+    optional sibling costs nothing.
+    """
+    entry = entry or jail_client_entry(cmd)
+    home = env.get("HOME") or os.path.expanduser("~")
+    argv = list(cmd)
+    prog = argv[client_program_index(argv)] if argv else ""
+    ro = list(entry["ro"]) + jail_tree(prog, entry["tree"], home)
+    ext = os.path.splitext(os.path.realpath(prog))[1] if prog else ""
+    interp = JAIL_INTERPRETER.get(ext)
+    if interp:
+        # `#!/usr/bin/env node` inside a jail still needs node READABLE: the entry
+        # point's extension says which interpreter the kernel will go looking for.
+        found = shutil.which(interp) or interp
+        ro += jail_tree(found, entry["interp_tree"], home)
+    for name in entry.get("home_ro") or ():
+        path = os.path.join(home, *str(name).split(os.sep))
+        if os.path.isdir(path):
+            ro.append(path)
+    if entry.get("proc_self"):
+        ro.append("/proc/self")
+    rw = ([cwd, toolhome_dir(cwd), cwd + OPENCODE_DATA_SUFFIX]
+          + list(entry.get("rw") or []))
+    rw += [env[name] for name in JAIL_ENV_RW if env.get(name)]
+    return {"rw": jail_unique([str(p) for p in rw]),
+            "ro": jail_unique([str(p) for p in ro]),
+            "ro_file": jail_unique([str(p) for p in entry["ro_file"]])}
+
+
+def jail_decision(cwd: str, cmd, env: dict, isolated: bool | None = None) -> dict:
+    """What THIS launch would do about the jail, decided once and read by all.
+
+    `{"path": "landlock"|"unjailed", "reason": …, "abi": N, "client": …,
+    "grants": …, "refusable": bool}` — the sibling of `scope_decision()` and held
+    to the same rule: the record, the `jail:` line and the argv that actually
+    launches are answers to one question, so a run that recorded "landlock" while
+    it execed bare is not possible from here.
+
+    `refusable` is the half that keeps the fallback honest: it is True only where
+    a jail WAS expected and could not be built (no Landlock ABI, a client that
+    needs an ungrantable path). `jail_gate()` turns those into a refusal for a
+    private lane. A tier-1 run in the caller's own checkout or a Windows launch is
+    `unjailed` and never refusable — that is the design, not a hole in it.
+
+    `isolated=None` reads the disk: an --isolate sandbox always stands with its
+    `.toolhome` sibling (the provisioner made it before the client starts), so the
+    sibling IS the fact. A caller that must decide before the clone exists
+    (`--dry-run`, the worker record) passes `bool(plan["sandbox"])` instead.
+    """
+    abi = landlock.available()
+    entry = jail_client_entry(cmd)
+    client = entry["program"]
+    if os.name == "nt":
+        return {"path": "unjailed", "reason": JAIL_REASON_WINDOWS, "abi": 0,
+                "client": client, "refusable": False}
+    if is_jailed(cmd):
+        return {"path": "landlock", "reason": "argv already wrapped", "abi": abi,
+                "client": client, "refusable": False}
+    if isolated is None:
+        isolated = os.path.isdir(toolhome_dir(cwd))
+    if not isolated:
+        return {"path": "unjailed", "reason": JAIL_REASON_NOT_ISOLATED, "abi": abi,
+                "client": client, "refusable": False}
+    if entry.get("ungrantable"):
+        return {"path": "unjailed",
+                "reason": "client %s reads %s, which no grant may name" % (
+                    client, entry["ungrantable"]),
+                "abi": abi, "client": client, "refusable": True}
+    if abi <= 0:
+        return {"path": "unjailed", "reason": JAIL_REASON_NO_ABI, "abi": 0,
+                "client": client, "refusable": True}
+    return {"path": "landlock", "reason": "", "abi": abi, "client": client,
+            "grants": jail_grants(cwd, cmd, env, entry), "refusable": False}
+
+
+def jail_plan_env(plan: dict) -> dict:
+    """The env a NOT-YET-LAUNCHED plan would jail against.
+
+    `jail_decision` reads three names out of the environment: HOME (which decides
+    both where the install-tree walk stops and where a per-client credential dir is
+    looked for) and the two per-run XDG dirs. `worker_env` is what applies HOME in
+    the real launch, so the record and the `--dry-run` preview — both taken before
+    it runs — have to apply the same rule here, or a plan would be recorded with one
+    set of grants and execed behind another.
+    """
+    env = dict(plan.get("env") or {})
+    cwd = str(plan.get("cwd") or "")
+    forced = plan.get("forced_home")
+    if forced is not None and cwd and forced == toolhome_dir(cwd):
+        env["HOME"] = forced
+    return env
+
+
+def jail_gate(decision: dict, privacy: str = "public",
+              allow_unjailed: bool = False) -> dict:
+    """Item 3: the only place that decides whether an unjailed lane may run.
+
+    A `landlock` decision needs no gate. An `unjailed` one that was REFUSABLE —
+    an isolated private worker the fence could not cover — stops the run unless
+    the caller said so out loud with `--allow-unjailed`, which is itself carried
+    on the record so a later reader can tell "no jail existed" from "someone asked
+    for none". A public lane, and anything that was never expected to be jailed
+    (Windows, a tier-1 in-place run), keeps the behaviour it had before P1b and
+    says so on stderr.
+    """
+    if decision.get("path") != "unjailed" or not decision.get("refusable"):
+        return dict(decision)
+    if privacy != "public" and not allow_unjailed:
+        return dict(decision, path="refused", privacy=privacy)
+    out = dict(decision)
+    if allow_unjailed:
+        out["override"] = "--allow-unjailed"
+    return out
+
+
+def jail_refusal_reason(jail: dict) -> str:
+    """The line a reader of rc 2 acts on: what was missing and what would change it."""
+    return JAIL_REFUSAL % (jail.get("reason") or JAIL_REASON_NO_ABI,
+                           jail.get("privacy") or "sensitive")
+
+
+def jail_line(jail: dict) -> str:
+    """The one line a reader of the run sees beside `scope:`: which path it took."""
+    if not jail:
+        return ""
+    if jail.get("path") == "landlock":
+        grants = jail.get("grants") or {}
+        return "jail: landlock abi=%s (%d rw, %d ro, %d ro-file grants)" % (
+            jail.get("abi"), len(grants.get("rw") or ()),
+            len(grants.get("ro") or ()), len(grants.get("ro_file") or ()))
+    return "jail: %s (%s)%s" % (jail.get("path"),
+                                jail.get("reason") or "-",
+                                " [%s]" % jail["override"]
+                                if jail.get("override") else "")
+
+
+def jailed_argv(cwd: str, cmd, env: dict, jail: dict) -> list:
+    """`cmd` prefixed with the wrapper that jails it — or itself, unchanged.
+
+    The wrapper is handed `--require`, so a kernel that turns Landlock off between
+    this decision and the exec makes the CHILD fail (exit 78) rather than run
+    unjailed: fail closed twice is not belt-and-braces, it is the two places a
+    silent fallback could hide.
+    """
+    if jail.get("path") != "landlock" or is_jailed(cmd):
+        return list(cmd)
+    grants = jail["grants"]
+    return landlock.jail_argv(rw=grants["rw"], ro=grants["ro"],
+                              ro_file=grants["ro_file"], cmd=list(cmd))
 
 
 class ClientMissing(Exception):
@@ -12373,6 +12686,16 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     POSIX run that ends up UNSCOPED says so out loud on our stderr first: the
     group kill that is all a canceller has there cannot follow a `setsid()` child.
 
+    AO-OPENCODE-JAIL P1b: the same rule one level down, for what the client can
+    READ. `jail_decision()` is taken from the argv that just got resolved — the same
+    one `Popen` gets — and `ClientExit.jail` returns it, so the record and the
+    `jail:` line describe the fence the worker really ran behind. An --isolate
+    sandbox on a Landlock kernel is wrapped in `tools/landlock_exec.py` INSIDE the
+    scope: the scope is still what `cancel` stops, and Landlock is what the worker
+    cannot lift. A POSIX run that expected a fence and could not have one says so on
+    our stderr (`JAIL_WARNING`); a private such run is refused upstream by
+    `jail_gate()` before this function is ever reached.
+
     `run_id`/`attempt` (SB-B merge): the client's NEW group is re-recorded in the
     runner-private kill store on every launch, so a `cancel` that falls back to the
     group kill where there is no user manager is aimed at the attempt that is
@@ -12409,6 +12732,23 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
     register_secret_env(env)
     # WINSHIM: Popen starts the file which() resolved, never the bare name.
     cmd = resolve_client_executable(cmd)
+    # AO-OPENCODE-JAIL P1b: one decision, made here from the argv that is really
+    # about to exec, and returned on ClientExit.jail — the same rule SCOPECLI-b set
+    # for `.scope`, because a run that recorded a fence it did not run behind is
+    # the defect this closes. The wrap goes INSIDE the scope below (the scope
+    # owns who can be killed, Landlock owns what can be read; neither replaces the
+    # other), so `systemd-run … -- python3 landlock_exec.py … -- <client>` is the
+    # shape both `cancel` and the jail were built for.
+    jail = jail_decision(cwd, cmd, env)
+    cmd = jailed_argv(cwd, cmd, env, jail)
+    if jail["path"] == "landlock":
+        print("autoos-agent: client runs jailed (landlock abi %s)" % jail["abi"],
+              file=sys.stderr)
+    elif jail.get("refusable"):
+        # Item 3: a public lane, or a lane whose caller said --allow-unjailed, is
+        # legal but never silent. A private lane never gets here — `jail_gate()`
+        # refused it before the record was even written.
+        print(JAIL_WARNING % jail["reason"], file=sys.stderr)
     pipe, merge = (subprocess.PIPE, subprocess.STDOUT) if capture else (None, None)
     # ERRCHANNEL: on POSIX the two channels stay two pipes, so the rate-limit
     # family can be classified on stderr alone. Their bytes still land in one
@@ -12519,7 +12859,7 @@ def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = Fals
                       found[0] if found else None,
                       raw_tail.decode("utf-8", "replace"),
                       raw_err.decode("utf-8", "replace") if separate_err else None,
-                      scope=scope)
+                      scope=scope, jail=jail)
 
 
 # --- the host-wide worker registry (`ps`) ---------------------------------
@@ -12741,6 +13081,15 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
         "host": socket.gethostname(),
         "task_dir": os.environ.get("AUTOOS_TASK_DIR") or None,
         "scope": scope_decision(plan.get("run_id"), attempt),
+        # AO-OPENCODE-JAIL P1b: read with the same inputs `run_client` will use,
+        # and gated on the card's privacy — the record says which of the three
+        # answers this run got, before the child exists (R-orch-17: runner-private,
+        # never job.json).
+        "jail": jail_gate(jail_decision(plan.get("cwd", ""), plan.get("cmd") or [],
+                                        jail_plan_env(plan),
+                                        isolated=bool(plan.get("sandbox"))),
+                         (plan.get("route") or {}).get("privacy", "public"),
+                         bool(getattr(args, "allow_unjailed", False))),
         "route_plan": route.get("route_plan")})
     # T2-RECORD-PIN item 2: a plan whose ask and launch disagree is refused at
     # the launch site; the reason rides on the record it already wrote, so `ps`
@@ -13570,7 +13919,24 @@ def cmd_run(args, cfg: dict) -> int:
                   "materialisation of allowed HEAD files, secrets excluded)" % (
                 plan["sandbox"].get("source") or isolate_source(),
                 plan["sandbox"]["path"], plan["sandbox"]["branch"]))
-        print("would run: " + " ".join(shlex.quote(c) for c in plan["cmd"]))
+        # AO-OPENCODE-JAIL P1b item 4: the preview shows the argv that would ACTUALLY
+        # exec — wrapper and all — because a plan line the launch does not match is
+        # the one defect this whole mechanism was written to prevent. Resolved the
+        # same way the launch resolves it; a client that is not installed keeps its
+        # bare name here and is named as missing by the pre-check below.
+        try:
+            preview_cmd = resolve_client_executable(plan["cmd"])
+        except ClientMissing:
+            preview_cmd = list(plan["cmd"])
+        preview_env = jail_plan_env(plan)
+        jail_preview = jail_gate(
+            jail_decision(plan["cwd"], preview_cmd, preview_env,
+                          isolated=bool(plan["sandbox"])),
+            route.get("privacy", "public"), bool(getattr(args, "allow_unjailed", False)))
+        print("would run: " + " ".join(shlex.quote(c) for c in
+                                       jailed_argv(plan["cwd"], preview_cmd,
+                                                   preview_env, jail_preview)))
+        print(jail_line(jail_preview))
         print("cwd: %s" % plan["cwd"])
         print("env: %s" % (", ".join(env_names) or "-"))
         if leaf_refusal is not None:
@@ -13586,6 +13952,11 @@ def cmd_run(args, cfg: dict) -> int:
         if mismatch is not None:
             # T2 item 2: the preview names the swap the real run would refuse.
             print("note: spawning this plan is refused: %s" % mismatch)
+        if jail_preview.get("path") == "refused":
+            # P1b item 3: same rule for the fence — the preview is what a caller
+            # plans from, so a private lane with no Landlock says so here too.
+            print("note: spawning this plan is refused: %s"
+                  % jail_refusal_reason(jail_preview))
         return 0
     # KEYDENY3b: the leaf fence returns here, after the preview above and before
     # anything is cloned or started.
@@ -13613,6 +13984,17 @@ def cmd_run(args, cfg: dict) -> int:
         resolve_client_executable(plan["cmd"])
     except ClientMissing as exc:
         return refuse(str(exc), 3)
+    # AO-OPENCODE-JAIL P1b item 3: the fence, as one of these plan gates — an
+    # isolated private worker with nothing to jail it with is refused before the
+    # clone, the record and the client, exactly like the four checks above. It is
+    # weighed again inside the launch loop, because a fallthrough re-plan can move
+    # the route to a different privacy after this point.
+    early_jail = jail_gate(
+        jail_decision(plan["cwd"], plan["cmd"], jail_plan_env(plan),
+                      isolated=bool(plan["sandbox"])),
+        route.get("privacy", "public"), bool(getattr(args, "allow_unjailed", False)))
+    if early_jail.get("path") == "refused":
+        return refuse(jail_refusal_reason(early_jail), 2)
     ok, reason = clients.signin_state(client)
     if ok is False:
         what = "installed but not signed in" if clients.signed_out(reason) else "installed but not usable"
@@ -13780,6 +14162,9 @@ def cmd_run(args, cfg: dict) -> int:
     # before the client starts, so a run in progress already says it, and from the
     # exit object after, so what is printed is what ran.
     scope_rec = None
+    # P1b: the same two-phase answer for the fence, so a run that was refused for
+    # want of a jail still prints which answer it got.
+    jail_rec = None
     # F4: child_rc and attempt_start are assigned inside the loop but used
     # after the loop (in wip_commit and track_entry). Initialize them to
     # avoid NameError if the loop breaks early (e.g., on mismatch or D-284).
@@ -13881,6 +14266,27 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: %s" % d284_fallthrough, file=sys.stderr)
             rc = 2
             break
+        # AO-OPENCODE-JAIL P1b item 3: the fence gate, on the same answer the
+        # record was written with — and a refusal stops the run HERE, exactly like
+        # the two checks above, so an isolated private worker with no Landlock
+        # never becomes a client failure that a fallthrough re-plan would run on
+        # another leg unjailed. A record that could not be written must not swallow
+        # the gate either, so it is recomputed from the plan when there is none.
+        jail_rec = (worker_rec or {}).get("jail") or jail_gate(
+            jail_decision(plan["cwd"], plan["cmd"], env,
+                          isolated=bool(plan.get("sandbox"))),
+            (plan.get("route") or {}).get("privacy", "public"),
+            bool(getattr(args, "allow_unjailed", False)))
+        if jail_rec.get("path") == "refused":
+            if worker_id is not None:
+                try:
+                    _worker_record_end(workers, worker_id, worker_rec, 2)
+                except OSError:
+                    pass
+            print("autoos-agent: %s" % jail_refusal_reason(jail_rec),
+                  file=sys.stderr)
+            rc = 2
+            break
         try:
             run_rc = run_client(plan["cmd"], plan["cwd"], env, reap=not args.joinable,
                                 capture=capture,
@@ -13891,6 +14297,12 @@ def cmd_run(args, cfg: dict) -> int:
                                 run_id=plan.get("run_id"),
                                 attempt=fallthroughs + cooldown_retries + 1)
             scope_rec = getattr(run_rc, "scope", None) or scope_rec
+            # P1b: the launch's own answer, re-gated with the card's privacy so the
+            # line printed under the run describes the argv that execed and still
+            # carries the override that let it through.
+            jail_rec = jail_gate(getattr(run_rc, "jail", None) or jail_rec,
+                                 (plan.get("route") or {}).get("privacy", "public"),
+                                 bool(getattr(args, "allow_unjailed", False)))
         except ClientMissing as exc:
             # WINSHIM: gone between the pre-check and this attempt (a fallthrough
             # re-run can be hours later, or the PATH moved). The spawner's own 3,
@@ -14183,6 +14595,10 @@ def cmd_run(args, cfg: dict) -> int:
         # first attempt has no line claiming a path it never took.
         if scope_rec is not None:
             print(scope_line(scope_rec))
+        # P1b: and behind WHICH fence it read the disk. Same rule as the line above
+        # — only ever the answer a launch (or its refusal) actually produced.
+        if jail_rec is not None:
+            print(jail_line(jail_rec))
     # Nothing that runs after here occupies the free leg: whatever is left of the
     # summary is bookkeeping, and a placeholder with no run behind it would make
     # the next spawner wait for nothing.
@@ -14606,6 +15022,10 @@ def _parser_run(sub):
     run.add_argument("--registry",
                      help="registry to use (default: catalog/ai-registry.json)")
     run.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
+    run.add_argument("--allow-unjailed", dest="allow_unjailed", action="store_true",
+                     help="run an isolated worker UNJAILED on a host with no "
+                          "Landlock instead of refusing it (the only override; "
+                          "named on the record and the jail: line)")
     run.add_argument("task")
 
 

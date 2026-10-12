@@ -22,6 +22,12 @@ silently run without one. ``--allow-unjailed`` is the only opt-out — it prints
 ``landlock-unavailable: running UNJAILED`` on stderr and execs anyway (P1b uses
 it for non-private lanes at most).
 
+Test seams: ``LANDLOCK_EXEC_FORCE_ABI0=1`` makes ``available()`` answer 0 so a
+host *with* Landlock can still prove the fail-closed path.
+``LANDLOCK_EXEC_FORCE_ABI=<n>`` clamps the reported ABI down to ``n`` (never
+up), which is how the scoping code is measured against an ABI it is not running
+on — the same code path, a kernel that must not be asked to scope.
+
 Inherited fds: Landlock cannot revoke access an open fd already holds, so
 before exec every fd >= 3 not named by ``--keep-fd`` is marked close-on-exec
 and closed by the exec itself. stdin/stdout/stderr (0, 1, 2) are deliberately
@@ -82,13 +88,40 @@ What the discovery run measured, each point asserted by a case in
   reader to follow.
 
 What this fence does not cover, measured (``tests/test_landlock_exec.py``
-asserts each one so a kernel that changes the answer is noticed): a
-**pathname or abstract AF_UNIX** socket outside the grants stays connectable,
-AF_INET **loopback** stays reachable because ``handled_access_net`` is left 0
-on purpose (this is a filesystem fence), and **``stat()``** on an ungranted
-path still returns size, mode and mtime — Landlock has no metadata right. A
-lane's sockets and its config directory therefore have to be inside the grant
-set deliberately; they are not reachable around it.
+asserts each one so a kernel that changes the answer is noticed): AF_INET
+**loopback** stays reachable because ``handled_access_net`` is left 0 on
+purpose (this is a filesystem fence), **``stat()``** on an ungranted path still
+returns size, mode and mtime — Landlock has no metadata right — and an
+**AF_UNIX socket addressed by pathname** outside every grant stays connectable
+(see the RESOLVE_UNIX paragraph: the right that would fence it is not offered
+by this kernel, so the test asserts whichever answer the host gives). A lane's
+sockets and its config directory therefore have to be inside the grant set
+deliberately; they are not reachable around it. A **pathname** socket is the
+one hole the spawner cannot grant around safely: the user D-Bus path
+``/run/user/<uid>/bus`` is guessable and is what a ``systemd-run`` escape would
+be taken over, which is why the spawner strips ``DBUS_SESSION_BUS_ADDRESS`` and
+``XDG_RUNTIME_DIR`` from a worker env rather than relying on this fence.
+
+IPC scoping (Landlock ABI 6 and up, measured here on ABI 8):
+``landlock_ruleset_attr.scoped`` is set to
+``LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL``, so a jailed
+worker can neither connect to an **abstract** AF_UNIX socket outside the jail
+(the old gap: it has no path for a filesystem rule to police) nor **signal** a
+process the jail does not own — ``kill(parent, 0)`` answers EPERM. Descendants
+of the jailed process are inside the scope, so a worker still signals the shell
+and the tools it forks. The struct grows for this: the fields are
+``handled_access_fs``, ``handled_access_net``, ``scoped`` in upstream order, and
+the wrapper passes size 24 only when it asks for scopes and 8 otherwise, so an
+older kernel is asked exactly what it has always accepted. On a lower ABI the
+scope mask is 0 and nothing changes.
+
+``LANDLOCK_ACCESS_FS_RESOLVE_UNIX`` (fs bit ``1<<16``) is **probed by trying,
+never assumed from the ABI number**: ``landlock_create_ruleset`` with that bit
+answers EINVAL on this host (kernel 7.0.0-34, ABI 8 — bits up to 15 are
+accepted), which is what keeps the pathname-socket limit above true today. A
+newer kernel that accepts it gets the bit in ``handled_access_fs`` and in the
+``--rw``/``--ro`` rule masks without a line of this file changing, and the
+pathname-socket test flips from "open" to "denied" on its own.
 
 Python stdlib only (ctypes); no dependency on any other tool in this repo.
 """
@@ -104,6 +137,10 @@ UNJAILED_WARNING = "landlock-unavailable: running UNJAILED"
 # fail-closed path, and forcing the probe to report "no ABI" is the one way to
 # do that without unloading a kernel LSM.
 FORCE_ABI0_ENV = "LANDLOCK_EXEC_FORCE_ABI0"
+# The other seam: a host with ABI 8 still has to prove that the scoping code is
+# *masked down* on an ABI that knows no scopes, and clamping the reported
+# version is the only way to run that path without an older kernel.
+FORCE_ABI_ENV = "LANDLOCK_EXEC_FORCE_ABI"
 
 SYS_LANDLOCK_CREATE_RULESET = 444
 SYS_LANDLOCK_ADD_RULE = 445
@@ -134,6 +171,28 @@ FS_MAKE_SYM = 1 << 12
 FS_REFER = 1 << 13          # ABI 2
 FS_TRUNCATE = 1 << 14       # ABI 3
 FS_IOCTL_DEV = 1 << 15      # ABI 6
+# Path resolution of a PF_UNIX socket. Not offered by this host's kernel (ABI 8
+# answers EINVAL for bit 16 and up), so this wrapper never assumes it from the
+# ABI number: `fs_mask_candidates` is tried with the bit first and the bit is
+# kept only if `landlock_create_ruleset` accepts it. On a kernel that does, a
+# pathname AF_UNIX outside the grants stops being a hole.
+FS_RESOLVE_UNIX = 1 << 16
+
+# enum landlock_scope, upstream bit order (ABI 6). These are not filesystem
+# rights: they go in `landlock_ruleset_attr.scoped` and are *restrictions*, so
+# a bit that is set removes a channel rather than granting one, and there is no
+# rule to add — which is exactly why an abstract socket, which has no path for
+# a PATH_BENEATH rule to police, can only be fenced here.
+SCOPE_ABSTRACT_UNIX_SOCKET = 1 << 0
+SCOPE_SIGNAL = 1 << 1
+
+# {highest scope ABI: the scope bits it knows}, same widening rule as
+# FS_GEN_RIGHTS: masked down by the ABI, so an ABI 5 kernel is never asked to
+# scope anything, and a scope bit this table does not name stays unscoped until
+# the table is widened.
+SCOPE_GEN_RIGHTS = [
+    (6, SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL),
+]
 
 # {highest fs ABI generation: the rights it knows}. An ABI only ever adds
 # rights, so a newer kernel supports every older mask; a right a newer kernel
@@ -149,12 +208,16 @@ FS_GEN_RIGHTS = [
 # Everything a --rw directory gets. REFER is deliberately absent: it is what
 # lets a file be renamed or hardlinked *into another directory*, and
 # same-directory renames (git's whole locking strategy) do not need it.
+# RESOLVE_UNIX is granted with the directory because the kernel-side mask
+# decides whether the bit exists at all: where it is unhandled it is masked off
+# and changes nothing, and where it is handled a socket path *inside* a grant
+# still resolves while one outside is denied.
 RW_RIGHTS = (FS_EXECUTE | FS_READ_FILE | FS_WRITE_FILE | FS_READ_DIR
              | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
              | FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK
-             | FS_MAKE_SYM | FS_TRUNCATE)
+             | FS_MAKE_SYM | FS_TRUNCATE | FS_RESOLVE_UNIX)
 # A --ro directory is opened, listed, executed and read — nothing else.
-RO_RIGHTS = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR
+RO_RIGHTS = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR | FS_RESOLVE_UNIX
 RO_FILE_RIGHTS = FS_READ_FILE
 
 
@@ -196,20 +259,40 @@ def abi_for_kernel():
 _cached = {}
 
 
+def _forced_abi(real):
+    """The ABI a test seam asked for, never more than the kernel reports.
+
+    Clamping happens once, in `available()`, so every consumer — the scope
+    mask, the report line, the fail-closed decision — reads the same lie.
+    """
+    if os.environ.get(FORCE_ABI0_ENV) == "1":
+        return 0
+    if real <= 0:
+        # no jail here: a clamp cannot invent one
+        return real
+    try:
+        forced = int(os.environ.get(FORCE_ABI_ENV, ""))
+    except ValueError:
+        return real
+    return max(0, min(forced, real))
+
+
 def available():
     """The kernel's Landlock ABI version, or 0 when there is no usable jail.
 
     0 is also the answer off Linux and the answer with
     ``LANDLOCK_EXEC_FORCE_ABI0=1`` — the three states a caller has to treat
     identically, because none of them can enforce anything.
+    ``LANDLOCK_EXEC_FORCE_ABI=<n>`` clamps the answer down to n (only ever
+    down), which is how the ABI-6 scoping path gets tested against a kernel
+    that must not be asked to scope.
 
     Cached for the process: the answer cannot change under a running process
     (the ABI is fixed at boot), and ``jail_argv`` callers ask twice — once to
     decide, once to report. The tests clear ``_cached`` to re-measure.
     """
     if "abi" not in _cached:
-        forced = os.environ.get(FORCE_ABI0_ENV) == "1"
-        _cached["abi"] = 0 if forced else abi_for_kernel()
+        _cached["abi"] = _forced_abi(abi_for_kernel())
     return _cached["abi"]
 
 
@@ -236,10 +319,69 @@ def fs_mask_candidates(abi):
     return [rights for _, rights in FS_GEN_RIGHTS if rights <= fs_mask(abi)]
 
 
+def scope_mask(abi):
+    """The `scoped` bits this ABI is known to have — 0 below ABI 6.
+
+    Scoping is a restriction the kernel has to be told about, so asking an ABI
+    that never learned the field for scopes is not a stricter jail, it is an
+    EINVAL and a lane that never starts.
+    """
+    if abi <= 0:
+        return 0
+    for generation, rights in SCOPE_GEN_RIGHTS:
+        if abi >= generation:
+            return rights
+    return 0
+
+
+def scope_mask_candidates(abi):
+    """The widest scope set first, then nothing — 0 is always offered last.
+
+    A kernel that rejects the field is given the ABI-1 ruleset this wrapper ran
+    before scoping existed rather than a failure: a jail with no IPC scoping
+    still fences every file, which is more than no jail at all.
+    """
+    widest = scope_mask(abi)
+    return [widest, 0] if widest else [0]
+
+
+def ruleset_candidates(abi):
+    """[(handled_access_fs, scoped)] in the order to try them.
+
+    Scopes first, then the filesystem rights: the scope bits decide whether the
+    struct is 8 or 24 bytes, and a kernel that refuses the widest fs mask still
+    gets the scopes it knows. For each scope set the fs mask is tried widest to
+    narrowest, and the first pair the kernel accepts is the jail.
+    """
+    return [(fs, scoped) for scoped in scope_mask_candidates(abi)
+            for fs in fs_probe_candidates(abi)]
+
+
+def fs_probe_candidates(abi):
+    """The fs masks to try, with RESOLVE_UNIX attempted before it is dropped.
+
+    The bit is *probed by trying*, because the ABI number does not say whether
+    this kernel has it: this host reports ABI 8 and rejects bit 16 outright.
+    A pair the kernel accepts with the bit is the only case in which the bit
+    ends up handled, and `build_ruleset` reports what it actually got.
+    """
+    out = []
+    for rights in fs_mask_candidates(abi):
+        widened = rights | FS_RESOLVE_UNIX
+        if widened != rights:
+            out.append(widened)
+        out.append(rights)
+    return out
+
+
 class _RulesetAttr(ctypes.Structure):
+    # Upstream order: handled_access_fs, handled_access_net, scoped. The
+    # wrapper hands the kernel an 8-byte prefix (fs only) or a 24-byte one
+    # (fs + net + scoped) — `landlock_create_ruleset` reads exactly the size it
+    # is given, so a kernel with no `scoped` field is never shown one.
     _fields_ = [("handled_access_fs", ctypes.c_uint64),
                 ("handled_access_net", ctypes.c_uint64),
-                ("handled_access_block", ctypes.c_uint64)]
+                ("scoped", ctypes.c_uint64)]
 
 
 class _PathBeneathAttr(ctypes.Structure):
@@ -287,16 +429,19 @@ def _open_beneath(path, directory):
         return None
 
 
-def _create_ruleset(libc, handled):
+def _create_ruleset(libc, handled, scoped=0):
     attr = _RulesetAttr()
     attr.handled_access_fs = handled
     attr.handled_access_net = 0
-    attr.handled_access_block = 0
+    attr.scoped = scoped
     # size 8 = only handled_access_fs: valid on every ABI from 1 up, and net
     # is left unhandled so a jailed worker keeps the plain TCP it needs.
+    # 24 adds handled_access_net (left 0) and `scoped`, and is asked for only
+    # when there is something to scope — a kernel that has no third field
+    # rejects the size, which is why the two are never both in play.
+    size = ctypes.sizeof(ctypes.c_uint64) * (3 if scoped else 1)
     return _syscall(libc, SYS_LANDLOCK_CREATE_RULESET, ctypes.byref(attr),
-                    ctypes.c_size_t(ctypes.sizeof(ctypes.c_uint64)),
-                    ctypes.c_uint(0))
+                    ctypes.c_size_t(size), ctypes.c_uint(0))
 
 
 def build_ruleset(libc, abi, grants):
@@ -309,9 +454,9 @@ def build_ruleset(libc, abi, grants):
     """
     last_error = None
     fd = handled = None
-    for candidate in fs_mask_candidates(abi):
+    for candidate, scoped in ruleset_candidates(abi):
         try:
-            fd = _create_ruleset(libc, candidate)
+            fd = _create_ruleset(libc, candidate, scoped)
             handled = candidate
             break
         except LandlockError as exc:
@@ -339,6 +484,32 @@ def build_ruleset(libc, abi, grants):
     except BaseException:
         os.close(fd)
         raise
+
+
+def probe_accepted(abi=None):
+    """(handled_access_fs, scoped) this kernel accepts — built and closed.
+
+    The one source for "what does this host actually fence": a caller that has
+    to state a limit (the pathname-socket test, a lane's report line) asks the
+    same candidate list `build_ruleset` walks, so the answer adapts to a newer
+    kernel by itself instead of being rewritten when one arrives.
+    """
+    if "accepted" in _cached:
+        return _cached["accepted"]
+    abi = available() if abi is None else abi
+    libc = _libc() if abi > 0 else None
+    result = (0, 0)
+    if libc is not None:
+        for fs, scoped in ruleset_candidates(abi):
+            try:
+                fd = _create_ruleset(libc, fs, scoped)
+            except LandlockError:
+                continue
+            os.close(fd)
+            result = (fs, scoped)
+            break
+    _cached["accepted"] = result
+    return result
 
 
 def set_no_new_privs(libc):

@@ -33,13 +33,14 @@ The grant set below was found by iteration on Ubuntu 24.04 x86_64, kernel
                                   grant around, and the reason a lane needs
                                   its config dir in the grant set explicitly
 
-What Landlock did NOT stop, measured (asserted by the two gap tests, so a
-kernel that closes one fails here instead of quietly changing the threat
-model):
+What Landlock did NOT stop, measured (asserted by the gap tests, so a kernel
+that closes one fails here instead of quietly changing the threat model):
 
-* AF_UNIX with a **pathname** outside every grant — a jailed child connected
-  to the parent's `/tmp/….sock` without trouble; so does an **abstract**
-  socket, which has no path to police.
+* AF_UNIX by **pathname** outside every grant — a jailed child connects to the
+  parent's `/tmp/….sock` — because the right that would fence it
+  (`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, fs bit 16) is not offered by this kernel.
+  `test_documented_limit_pathname_unix_socket_open` asserts whichever answer the
+  host gives, so a newer kernel flips it without an edit.
 * AF_INET **loopback** connect — `handled_access_net` is left 0 by design, so
   this is a filesystem fence and the worker keeps networking.
 * **`stat()` metadata** of an ungranted file: size, mode and mtime of
@@ -48,11 +49,17 @@ model):
 * `/proc/self/mem` is not evidence either way: reading it already fails for a
   same-uid process with no Landlock in the picture (EIO).
 
+What DID close in P1b: the **abstract** AF_UNIX socket and **signals** to a
+process outside the jail, both by `landlock_ruleset_attr.scoped` on ABI 6+
+(`IpcScopeTests`) — the two channels a filesystem rule structurally cannot
+reach, and the reason a pathname-less gap list is now shorter.
+
 Everything else probed WAS blocked, including `/proc/self/environ`,
 `/proc/self/maps`, `/proc/1/cmdline`, the `/proc` listing,
 `/sys/kernel/security/lsm`, `/etc/passwd` and the `$HOME` listing.
 """
 import errno
+import ctypes
 import importlib.util
 import os
 import shutil
@@ -733,6 +740,215 @@ class JailArgvTests(unittest.TestCase):
                       % result.stdout)
 
 
+class IpcScopeTests(_JailFixture):
+    """ABI 6 scoping: the two channels that are not paths.
+
+    A filesystem rule needs an inode to hang off. An **abstract** AF_UNIX name
+    has none, and a **signal** is not a file at all, so `scoped` is the only
+    place Landlock can fence them — which is why the old gap list let both
+    through and this class is where the fence for them is measured.
+    """
+
+    def _abstract(self, tag):
+        """An abstract socket bound by *this* (unjailed) process."""
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        name = b"\x00autoos-landlock-abs-%d-%s" % (os.getpid(), tag.encode())
+        try:
+            listener.bind(name)
+        except OSError as exc:
+            listener.close()
+            self.skipTest("no abstract AF_UNIX here: %s" % exc)
+        listener.listen(1)
+        self.addCleanup(listener.close)
+        return listener, name
+
+    def test_an_abstract_unix_socket_outside_the_jail_is_denied(self):
+        """The channel the filesystem fence structurally could not reach."""
+        listener, name = self._abstract("abstract")
+        scoped = bool(LANDLOCK.probe_accepted()[1]
+                      & LANDLOCK.SCOPE_ABSTRACT_UNIX_SOCKET)
+        result = self.py(
+            "import socket\n"
+            "s = socket.socket(socket.AF_UNIX)\n"
+            "s.settimeout(20)\n"
+            "try:\n"
+            "    s.connect(%r)\n"
+            "except OSError as exc:\n"
+            "    print('ABSTRACT-DENIED', exc.errno)\n"
+            "else:\n"
+            "    print('ABSTRACT-CONNECTED')\n" % name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        if scoped:
+            self.assertIn("ABSTRACT-DENIED", result.stdout,
+                          "the scoped bit is asked for and the abstract "
+                          "connect still landed")
+            self._assert_nothing_queued(listener)
+        else:
+            self.accept_now(listener)
+            self.assertIn("ABSTRACT-CONNECTED", result.stdout,
+                          "no scopes on this ABI, so nothing should have "
+                          "blocked it — and if it did, the seam below is wrong")
+
+    def _assert_nothing_queued(self, listener):
+        """A refused connect that still reached the accept queue is not refused."""
+        listener.setblocking(False)
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        conn.close()
+        self.fail("the child was refused but its connection still landed")
+
+    def test_a_jailed_child_cannot_signal_a_process_outside_the_jail(self):
+        """`kill(unjailed_parent, 0)` is EPERM now — and the child still owns
+        its own descendants, or a jail would be a process that cannot run a
+        build, a test or a `git commit` at all."""
+        scoped = bool(LANDLOCK.probe_accepted()[1] & LANDLOCK.SCOPE_SIGNAL)
+        me = os.getpid()  # the wrapper exec()s, so the child's parent is us
+        code = (
+            "import os, signal, subprocess, sys\n"
+            "try:\n"
+            "    os.kill(%d, 0)\n"
+            "except OSError as exc:\n"
+            "    print('PARENT-SIGNAL', 'DENIED', exc.errno)\n"
+            "else:\n"
+            "    print('PARENT-SIGNAL', 'OPEN')\n"
+            "child = subprocess.Popen([sys.executable, '-c', 'import time; "
+            "time.sleep(30)'])\n"
+            "try:\n"
+            "    os.kill(child.pid, signal.SIGCONT)\n"
+            "    print('CHILD-SIGNAL', 'OPEN')\n"
+            "except OSError as exc:\n"
+            "    print('CHILD-SIGNAL', 'DENIED', exc.errno)\n"
+            "finally:\n"
+            "    child.kill()\n"
+            "    child.wait()\n" % me)
+        result = self.py(code)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PARENT-SIGNAL %s" % ("DENIED" if scoped else "OPEN"),
+                      result.stdout,
+                      "signal scoping did not do what the scoped bit says it "
+                      "does: %r" % result.stdout)
+        # A descendant inherits the domain, so it stays signalable whatever the
+        # ABI: the one case that would make this fence unusable is a worker
+        # that cannot kill its own tool calls.
+        self.assertIn("CHILD-SIGNAL OPEN", result.stdout, result.stdout)
+
+    def test_scopes_are_never_asked_of_an_abi_that_has_none(self):
+        """The cheap ABI simulation the seam exists for: force 1 and the
+        wrapper must build the 8-byte ruleset an ABI-1 kernel has always
+        accepted, still fence the filesystem, and leave IPC unfenced.
+
+        Forcing it *up* is not possible — `_forced_abi` takes the minimum with
+        what the kernel reports — so this proves both halves of the mask-down
+        rule on one host.
+        """
+        if ABI < 6:
+            self.skipTest("this host has no scopes to take away (ABI %d)" % ABI)
+        for forced, wants_scoped in (("1", False), ("5", False), ("6", True)):
+            with self.subTest(abi=forced):
+                env = self.child_env()
+                env[LANDLOCK.FORCE_ABI_ENV] = forced
+                listener, name = self._abstract("seam-%s" % forced)
+                probe = (
+                    "import socket\n"
+                    "s = socket.socket(socket.AF_UNIX)\n"
+                    "s.settimeout(20)\n"
+                    "try:\n"
+                    "    s.connect(%r)\n"
+                    "except OSError:\n"
+                    "    print('ABSTRACT-DENIED')\n"
+                    "else:\n"
+                    "    print('ABSTRACT-CONNECTED')\n" % name)
+                result = self.py(probe + probe_at(READ_PROBE, self.canary),
+                                 env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                marker = ("ABSTRACT-CONNECTED" if not wants_scoped
+                          else "ABSTRACT-DENIED")
+                self.assertIn(marker, result.stdout, result.stdout)
+                # the file fence is the same jail at either end of the seam: a
+                # forced ABI that quietly stopped policing files is the defect
+                # this lane was written to avoid.
+                self.assertIn("PERMISSION-DENIED", result.stdout, result.stdout)
+                if wants_scoped:
+                    self._assert_nothing_queued(listener)
+
+
+class ScopeTableTests(unittest.TestCase):
+    """The scope table is as much the fence as the fs table: a wrong bit here
+    is a channel left open, not a crash. Pure logic — runs with no Landlock."""
+
+    def test_the_scope_bits_match_upstreams_enum(self):
+        self.assertEqual(LANDLOCK.SCOPE_ABSTRACT_UNIX_SOCKET, 1 << 0)
+        self.assertEqual(LANDLOCK.SCOPE_SIGNAL, 1 << 1)
+        self.assertEqual(LANDLOCK.SCOPE_GEN_RIGHTS,
+                         [(6, LANDLOCK.SCOPE_ABSTRACT_UNIX_SOCKET
+                           | LANDLOCK.SCOPE_SIGNAL)])
+
+    def test_the_scope_mask_only_widens_with_the_abi(self):
+        for abi in (0, 1, 2, 3, 4, 5):
+            self.assertEqual(LANDLOCK.scope_mask(abi), 0, abi)
+        previous = 0
+        for abi in (6, 7, 8, 9, 99):
+            mask = LANDLOCK.scope_mask(abi)
+            self.assertGreaterEqual(mask, previous, abi)
+            previous = mask
+
+    def test_the_scoped_field_is_the_third_word_of_the_ruleset_struct(self):
+        """The wrapper hands the kernel a 24-byte prefix when it scopes: that
+        has to be fs, net, scoped — a field named in the wrong order is a
+        ruleset that means something else than the code says."""
+        attr = LANDLOCK._RulesetAttr
+        self.assertEqual(ctypes.sizeof(attr), 24)
+        offsets = {name: getattr(attr, name).offset for name in
+                   ("handled_access_fs", "handled_access_net", "scoped")}
+        self.assertEqual(offsets, {"handled_access_fs": 0,
+                                   "handled_access_net": 8, "scoped": 16})
+
+    def test_ruleset_candidates_prefer_scopes_then_the_probed_bit(self):
+        cands = LANDLOCK.ruleset_candidates(8)
+        self.assertEqual(cands[0], (LANDLOCK.fs_mask(8)
+                                    | LANDLOCK.FS_RESOLVE_UNIX,
+                                    LANDLOCK.scope_mask(8)))
+        self.assertEqual(cands[-1], (LANDLOCK.fs_mask(1), 0))
+        scoped_seen = [scoped for _fs, scoped in cands]
+        # every scoping attempt precedes the unscoped fallbacks, so a kernel
+        # that takes both gets scopes and a wider fs mask together
+        self.assertEqual(scoped_seen, sorted(scoped_seen, reverse=True))
+        # an ABI with no scopes is never offered one
+        self.assertEqual({s for _f, s in LANDLOCK.ruleset_candidates(1)}, {0})
+
+    def test_the_resolve_unix_bit_is_tried_before_it_is_dropped(self):
+        """Probed by trying, never read off the ABI number.
+
+        This kernel (ABI 8) answers EINVAL for bit 16, so the accepted ruleset
+        carries no bit 16 and the pathname-socket limit stands; a kernel that
+        accepts it lands in the other branch and the same assertions hold —
+        which is the whole point of a probe over a table lookup.
+        """
+        if ABI <= 0:
+            self.skipTest("no Landlock ABI — nothing to probe")
+        handled, _scoped = LANDLOCK.probe_accepted()
+        self.assertTrue(handled, "the probe could not build a ruleset here")
+        libc = LANDLOCK._libc()
+        # The same bit, asked for on its own: what the kernel says to *this*
+        # call is what `probe_accepted` must have agreed to, or the candidate
+        # list is dropping a right the host supports (or claiming one it does
+        # not). Measured on kernel 7.0.0-34 / ABI 8: EINVAL, so no bit 16.
+        try:
+            fd = LANDLOCK._create_ruleset(
+                libc, LANDLOCK.fs_mask(ABI) | LANDLOCK.FS_RESOLVE_UNIX, 0)
+        except LANDLOCK.LandlockError:
+            kernel_takes_it = False
+        else:
+            os.close(fd)
+            kernel_takes_it = True
+        self.assertEqual(bool(handled & LANDLOCK.FS_RESOLVE_UNIX),
+                         kernel_takes_it,
+                         "the accepted ruleset and a direct ask for bit 16 "
+                         "disagree — the probe is not the kernel's answer")
+
+
 class MeasuredGapTests(_JailFixture):
     """The fence's limits, asserted so that a change is *noticed*.
 
@@ -751,11 +967,23 @@ class MeasuredGapTests(_JailFixture):
             % self.canary)
         self.assertAllows(result, "STAT-LEAK %d" % expected)
 
-    def test_a_pathname_unix_socket_outside_the_grant_is_connectable(self):
-        """AF_UNIX by pathname is not policed (there is no socket right in any
-        ABI this wrapper handles), so a socket under /tmp is a channel out of
-        the jail. Consequence for P1b: a lane's D-Bus / agent sockets must be
-        inside the grants deliberately, not reached around the fence."""
+    def test_documented_limit_pathname_unix_socket_open(self):
+        """AO-JAIL P1b item 0b: this one is written down, not fixed.
+
+        A **pathname** AF_UNIX outside every grant is connectable because the
+        right that would fence it — `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, fs bit
+        16 — is not offered here: `landlock_create_ruleset` answers EINVAL for
+        it on this kernel (ABI 8), which `probe_accepted()` re-measures rather
+        than assumes. The consequence is named in the wrapper's docstring and
+        it is the reason the spawner strips `DBUS_SESSION_BUS_ADDRESS` and
+        `XDG_RUNTIME_DIR` instead of trusting the jail: `/run/user/<uid>/bus`
+        is guessable and would be a `systemd-run` escape taken over that
+        socket. Routing decides seccomp later; this lane does not fix it.
+
+        The case is skip-free and adaptive: it asserts OPEN while the bit is
+        unsupported and DENIED on a kernel that accepts it, so the limit flips
+        by itself when one arrives.
+        """
         path = os.path.join(tempfile.gettempdir(),
                             "autoos-landlock-probe-%d.sock" % os.getpid())
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -766,15 +994,42 @@ class MeasuredGapTests(_JailFixture):
             self.skipTest("no AF_UNIX here: %s" % exc)
         self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
         self.listen(listener)
+        fenced = bool(LANDLOCK.probe_accepted()[0] & LANDLOCK.FS_RESOLVE_UNIX)
         result = self.py(
             "import socket\n"
             "s = socket.socket(socket.AF_UNIX)\n"
             "s.settimeout(20)\n"
-            "s.connect(%r)\n"
-            "print('UNIX-SOCKET-CONNECTED')\n" % path)
-        self.accept_now(listener)
-        self.assertAllows(
-            result, "UNIX-SOCKET-CONNECTED")
+            "try:\n"
+            "    s.connect(%r)\n"
+            "except OSError as exc:\n"
+            "    print('UNIX-SOCKET-DENIED', exc.errno)\n"
+            "else:\n"
+            "    print('UNIX-SOCKET-CONNECTED')\n" % path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        if fenced:
+            self.assertIn("UNIX-SOCKET-DENIED", result.stdout,
+                          "this kernel accepts the RESOLVE_UNIX bit, so the "
+                          "wrapper fences it — the documented limit above is "
+                          "obsolete and the threat model needs re-reading")
+            self.assertNoPending(listener)
+        else:
+            self.accept_now(listener)
+            self.assertIn("UNIX-SOCKET-CONNECTED", result.stdout,
+                          "the documented limit was not reproduced: bit 16 is "
+                          "not handled here either, so nothing should have "
+                          "blocked the connect")
+
+    def assertNoPending(self, listener):
+        """The listener must have nothing queued — a denied connect that still
+        reached the accept queue is not a denial."""
+        listener.setblocking(False)
+        try:
+            conn, _ = listener.accept()
+        except (BlockingIOError, socket.timeout, OSError):
+            return
+        conn.close()
+        self.fail("the child's connect was refused but still reached the "
+                  "listener's queue")
 
     def test_proc_is_policed_on_this_kernel_and_denied_when_ungranted(self):
         """The one assumed to leak: `/proc/self/environ` of the *same* uid. On
