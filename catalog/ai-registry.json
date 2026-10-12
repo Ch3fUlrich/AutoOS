@@ -4709,7 +4709,8 @@
       "legs": [
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "xiaomi-mimo/mimo-v2.6-pro"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4854,7 +4855,8 @@
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
         "ovhcloud/Qwen3.5-397B-A17B",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "xiaomi-mimo/mimo-v2.6-flash"
       ],
       "strategy": "priority",
       "surfaces": {

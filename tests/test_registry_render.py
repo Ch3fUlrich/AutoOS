@@ -1486,13 +1486,17 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # Every -clean combo is one leg now: spec 3.1 rule 3 admits only a
         # non-training paid/credit/subscription leg and rule (b-or) forces every
         # openrouter leg ':free', so no free band can ever be clean.
+        # MIMO 2026-10-12 (AO-MIMO-WIRING) appends the subscription tail to
+        # l2-worker; the provider declares no model_prefix, so its leg renders in
+        # the gateway's own spelling (xiaomi-mimo/...), not a short alias.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         self.assertEqual(
             combos["l2-worker"]["models"],
             ["bzl/deepseek/deepseek-v4-flash-0731free:free",
              "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-             "vertex/gemini-3.8-flash"])
+             "vertex/gemini-3.8-flash",
+             "xiaomi-mimo/mimo-v2.6-pro"])
         self.assertEqual(combos["l2-worker-clean"]["models"], ["vertex/gemini-3.8-flash"])
         # A gated leg is dropped while the route survives on its other leg:
         # l1-orchestrator-clean's contributor copy is probe-denied (402/403), the
@@ -1873,15 +1877,19 @@ class FreeAiRenderTests(unittest.TestCase):
                  if m.startswith(("free-ai/", "free_ai/"))],
                 combo["name"])
 
-    def test_l2_worker_combo_closes_with_the_vertex_leg(self):
+    def test_l2_worker_combo_closes_with_the_subscription_tail(self):
         # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:
         # paid last, deepseek last). D657-CHAIN supersedes that tail again - SS8
-        # removed deepseek/deepseek-flash from every chain, so the combo closes
+        # removed deepseek/deepseek-flash from every chain, so the combo closed
         # on the cached vertex leg and free_ai appears nowhere.
+        # MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg once more: the
+        # vertex leg is the last CREDIT leg and the xiaomi-mimo subscription leg
+        # follows it, because rule (b) ranks subscription with paid.
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         models = combos["l2-worker"]["models"]
-        self.assertEqual(models[-1], "vertex/gemini-3.8-flash")
+        self.assertEqual(models[-2:],
+                         ["vertex/gemini-3.8-flash", "xiaomi-mimo/mimo-v2.6-pro"])
         self.assertNotIn("deepseek/deepseek-flash", models)
         self.assertNotIn("free-ai/qwen7b", models)
 

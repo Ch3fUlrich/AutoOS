@@ -2259,6 +2259,13 @@ class GatewayOrderTests(unittest.TestCase):
         # 2026-10-08 (AO-DENYLEGS open item 1) widens that tail to two credit
         # legs — the re-probed OVH grant sits in the band's trial position and
         # the vertex leg the D-657 probes confirmed still closes the chain.
+        # MIMO 2026-10-12 (AO-MIMO-WIRING) adds the third non-free leg and it is
+        # the one that closes the chain now: `xiaomi-mimo/mimo-v2.6-flash` is a
+        # `subscription` leg, which this gate (and tools/combo-contract.py
+        # TIER_ORDER) reads as non-free, so it may only sit behind the credit
+        # legs — the same reading that makes it a last resort in plan().
+        # AO-MIMO-V26 (2026-10-12): the id moved v2.5 -> v2.6-flash in the same
+        # day's swap; the position, the tier and this order are unchanged.
         registry = self.registry()
         legs = self._legs(registry, "l3-driver")
         tiers = [cc.leg_tier(registry, leg) for leg in legs]
@@ -2266,9 +2273,11 @@ class GatewayOrderTests(unittest.TestCase):
         priced = [i for i, t in enumerate(tiers) if t != "free"]
         self.assertTrue(free, legs)
         self.assertEqual([legs[i] for i in priced],
-                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash"],
-                         "l3-driver must keep exactly two credit legs, the OVH "
-                         "grant ahead of the probe-confirmed vertex tail")
+                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash",
+                          "xiaomi-mimo/mimo-v2.6-flash"],
+                         "l3-driver must keep exactly two credit legs — the OVH "
+                         "grant ahead of the probe-confirmed vertex leg — and "
+                         "close on the subscription tail")
         self.assertEqual(priced[-1], len(legs) - 1,
                          "%s: a priced leg anywhere but last breaks the "
                          "trial->free->credits->paid order" % tiers)
@@ -2788,10 +2797,15 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # keeps the ones that still carry a gated or pinned-single leg
         # (antigravity, google_ai_studio, meta_api, ovhcloud, deepseek). The
         # vertex provider key is `vertex_ai` (its omniroute_id is `vertex`),
-        # which is the name the reason prints. Earliest return: bazaarlink.
+        # which is the name the reason prints. MIMO 2026-10-12 (AO-MIMO-WIRING)
+        # adds the subscription tail of l2-worker/l3-driver, whose provider key
+        # is `xiaomi_mimo` (its omniroute_id is `xiaomi-mimo`); it returns after
+        # vertex, so it does not become the earliest date. Earliest return:
+        # bazaarlink.
         "bazaarlink": "2026-09-28T12:10:00Z",
         "openrouter": "2026-09-28T12:20:00Z",
         "vertex_ai": "2026-09-28T12:30:00Z",
+        "xiaomi_mimo": "2026-09-28T12:35:00Z",
         "groq": "2026-09-28T12:40:00Z",
         "cohere": "2026-09-28T12:50:00Z",
         "antigravity": "2026-09-28T12:25:00Z",
@@ -2822,13 +2836,15 @@ class UnavailableUntilResolverTests(unittest.TestCase):
     def test_a_free_band_cooldown_sends_the_t2_worker_routes_away(self):
         # D657-D2's chains put three providers behind the t2-worker combos:
         # bazaarlink (the free head), openrouter (the free middle) and
-        # vertex_ai (the credit tail). Cooling exactly those is the shape this
+        # vertex_ai (the credit tail) — MIMO 2026-10-12 made it four, the tail
+        # now closing on xiaomi_mimo. Cooling exactly those is the shape this
         # test was written for: the combos whose whole band cools stop being an
         # answer, and the plan still serves from a legged, live route.
         cooled = {"l2-worker", "l2-worker-free-only", "l2-worker-clean"}
         band = {"bazaarlink": "2026-09-28T12:10:00Z",
                 "openrouter": "2026-09-28T12:20:00Z",
-                "vertex_ai": "2026-09-28T12:30:00Z"}
+                "vertex_ai": "2026-09-28T12:30:00Z",
+                "xiaomi_mimo": "2026-09-28T12:35:00Z"}
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public"}
         result = self.real_plan(card, band)
@@ -2849,8 +2865,9 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # plan refuses, and the reason names the EARLIEST return as the retry --
         # a caller reading it must not wait for the last one. D657-D2 put
         # bazaarlink's free head at l2-worker's leg 1, so its 12:10 return is
-        # the earliest date the reason may print; the vertex credit tail is the
-        # same route's last leg, and the provider key is `vertex_ai`.
+        # the earliest date the reason may print. AO-MIMO-WIRING (2026-10-12)
+        # closes the route with the xiaomi_mimo subscription leg, so vertex is
+        # no longer its last leg and the tail's own return has to be named too.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "l2-worker"}}
@@ -2861,6 +2878,8 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIn("unavailable: bazaarlink until 2026-09-28T12:10:00Z",
                       result["reason"])
         self.assertIn("unavailable: vertex_ai until 2026-09-28T12:30:00Z",
+                      result["reason"])
+        self.assertIn("unavailable: xiaomi_mimo until 2026-09-28T12:35:00Z",
                       result["reason"])
         self.assertIn("unavailable: openrouter until 2026-09-28T12:20:00Z",
                       result["reason"])
