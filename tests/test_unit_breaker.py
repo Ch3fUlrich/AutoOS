@@ -79,6 +79,11 @@ class TestWrapper(Base):
         self.assertNotEqual(ub.signature(1, "pid 123 died"), ub.signature(2, "pid 123 died"))
         self.assertNotEqual(ub.signature(1, "pid 123 died"), ub.signature(1, "other"))
 
+    def test_hex_ids_and_uuids_are_normalised_too(self):
+        a = ub.signature(1, "crash at 0x7f3a9c10 id 0f8e6c1a-1111-2222-3333-444455556666")
+        b = ub.signature(1, "crash at 0x7f3a9d99 id 9a8e6c1a-1111-2222-3333-444455550000")
+        self.assertEqual(a, b)
+
     def test_different_signature_restarts_the_count(self):
         self.wrap("w.service", failing(3, "a"))
         self.wrap("w.service", failing(3, "a"))

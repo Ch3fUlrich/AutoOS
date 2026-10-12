@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 WATCHED = ("xiaomi-mimo",)
 SIGNAL_STATUS = (401, 403)
@@ -76,7 +77,7 @@ def signals(db_path, since_iso):
         raise AlertError("call-log db not found: %s" % db_path)
     marks = ",".join("?" * len(WATCHED))
     try:
-        con = sqlite3.connect("file:%s?mode=ro" % Path(db_path).resolve(), uri=True)
+        con = sqlite3.connect("file:%s?mode=ro" % quote(str(Path(db_path).resolve())), uri=True)
         try:
             cur = con.execute(
                 "select provider, status, error_summary, error_type, timestamp from call_logs"

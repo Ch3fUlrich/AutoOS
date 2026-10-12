@@ -175,7 +175,7 @@ def lane_of_row(row) -> str:
     Only the NAME is read; the key value never reaches this tool."""
     tag = row.get("sessionTag") if isinstance(row, dict) else None
     tag = str(tag).strip() if tag else ""
-    if tag and not FALLBACK_TAG.match(tag):
+    if tag and not FALLBACK_TAG.match(tag) and lane_of(tag) != UNTAGGED_LANE:
         return lane_of(tag)
     name = row.get("apiKeyName") if isinstance(row, dict) else None
     return KEY_LANE_PREFIX + str(name).strip() if name and str(name).strip() else UNTAGGED_LANE

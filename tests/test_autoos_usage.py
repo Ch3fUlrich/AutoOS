@@ -291,6 +291,11 @@ class AggregationTests(unittest.TestCase):
             [row(iso(NOW), rid="a", tag="  ", key_name="qoder")], ["lane"])["lane"]}
         self.assertEqual(lanes, {"key:qoder": 1})
 
+    def test_tag_with_empty_lane_part_falls_back_to_the_key_name(self):
+        lanes = {g["key"]: g["calls"] for g in usage.aggregate(
+            [row(iso(NOW), rid="a", tag="/x", key_name="qoder")], ["lane"])["lane"]}
+        self.assertEqual(lanes, {"key:qoder": 1})
+
     def test_key_value_never_becomes_a_group(self):
         """Only the NAME is read; an apiKey value in a row is ignored."""
         r = row(iso(NOW), rid="a", tag="", key_name="autoos")

@@ -40,7 +40,9 @@ def state_dir(env):
 
 
 def normalise(line):
-    return re.sub(r"\d+", "N", line.strip())
+    """Digits -> N, also hex ids, uuids and 0x addresses, so a varying crash line still counts as one failure."""
+    line = re.sub(r"0x[0-9a-fA-F]+|\b[0-9a-fA-F]{8,}\b", "H", line.strip())
+    return re.sub(r"\d+", "N", line)
 
 
 def signature(code, last_line):

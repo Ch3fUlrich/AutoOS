@@ -115,6 +115,15 @@ class TestSignals(Fixture):
         self.run_check()
         self.assertEqual(self.db.read_bytes(), before)
 
+    def test_db_path_with_uri_metacharacters(self):
+        odd = self.root / "a#b%c d"
+        odd.mkdir()
+        new = odd / "storage.sqlite"
+        self.db.rename(new)
+        self.db = new
+        self.add("xiaomi-mimo", 401)
+        self.assertEqual(self.run_check(), ["xiaomi-mimo"])
+
     def test_missing_db_is_a_clean_error(self):
         with self.assertRaises(ga.AlertError):
             ga.check(db_path=self.root / "nope.sqlite", alert_file=None, state_path=self.state, now=NOW, window_min=60)
