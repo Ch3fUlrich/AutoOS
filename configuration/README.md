@@ -9,7 +9,8 @@ git-ignored, only the template is tracked.
 | `api-keys.yml` | **The key file.** Flat `provider: key`. Git-ignored. | `omniroute/apply.*`, `start-stack.*`, the browser UI (status only) |
 | `api-keys.example.yml` | Tracked template — copy to `api-keys.yml` | you |
 | `omniroute/combos.json` | Tier definitions (l1-orchestrator/l2-worker/l3-driver/t4-rag + `-clean`/`-free-only` variants) | `omniroute/apply.*` |
-| `omniroute/apply.sh` / `apply.ps1` | Registers providers + (re)creates combos | you, once after keys are in |
+| `omniroute/custom-models.json` | Models the gateway's own list does not carry (a provider whose list is baked into the image), declared as manual models — idempotent | `omniroute/apply-custom-models.sh`, run by `omniroute/apply.*` |
+| `omniroute/apply.sh` / `apply.ps1` | Registers providers, refreshes + declares the model catalog, (re)creates combos | you, once after keys are in |
 | `start-stack.sh` / `start-stack.ps1` | Starts OmniRoute if needed, then an app wired to it | you |
 | `autostart/` | Opt-in resume after reboot (scheduled task / systemd unit + launcher) | you, once |
 | `healthcheck.sh` / `healthcheck.ps1` | Probe `:20128` `:3000` `:4096` `:8777`; log-only, `--fix`/`-Fix` resumes | you |

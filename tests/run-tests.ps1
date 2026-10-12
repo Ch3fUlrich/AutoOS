@@ -323,6 +323,11 @@ Test-Case 'registry: no generated file drifts' {
         # AO-DENYLEGS D1 (2026-10-08): the (f)-(i) gate's own unit tests.
         $out = & python3 (Join-Path $Root 'tests\test_combo_contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-True ($rc -eq 0) "combo-contract unit tests failed: $out"
+        # AO-MIMO-CUSTOM-APPLY (2026-10-12): the declared custom models the apply
+        # paths must declare. Checks apply.ps1's block as text and runs the shell
+        # applier against a fake loopback gateway it owns — never the live one.
+        $out = & python3 (Join-Path $Root 'tests\test_custom_models_apply.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "custom-models apply tests failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE

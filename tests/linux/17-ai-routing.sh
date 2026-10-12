@@ -2652,3 +2652,16 @@ if it "combo-contract's D1 checks (f)-(i) unit tests pass (AO-DENYLEGS)"; then
     out="$(python3 tests/test_combo_contract.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-MIMO-WIRING: the gateway's view of xiaomi-mimo is the source of truth for
+# every MiMo leg the registry routes; this reads it back from a fixture, so it
+# opens no socket.
+if it "MiMo Token Plan catalog guard passes (AO-MIMO-WIRING)"; then
+    out="$(python3 tests/test_mimo_catalog.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# AO-MIMO-CUSTOM-APPLY: declared custom (manual) models reach both apply paths.
+# Against a fake loopback gateway this test owns — never the live one.
+if it "custom-models.json and the apply paths agree (AO-MIMO-CUSTOM-APPLY)"; then
+    out="$(python3 tests/test_custom_models_apply.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
