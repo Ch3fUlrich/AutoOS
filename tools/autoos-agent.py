@@ -12369,9 +12369,10 @@ def jail_grants(cwd: str, cmd, env: dict, entry: dict | None = None) -> dict:
     client at, `/dev`, and any per-run directory an own-account client must write at
     startup (`home_rw_slug` — qoder's own `~/.qoder/projects/<slug>`). The readable
     world is the table plus the program's own install tree. A path that does not exist
-    is skipped by the wrapper, so an optional sibling costs nothing — and the client's
-    per-run home dir is provisioned by the launcher before this argv execs, never
-    created here (a dry run touches the filesystem for nothing).
+    is skipped by the wrapper, so an optional sibling costs nothing — and every
+    per-run directory in this list is created by the launcher before this argv execs
+    (`jail_provision`, `jail_per_run_grant`), never here: a dry run touches the
+    filesystem for nothing.
 
     The client's private temp dir (P1f) is NOT one of these grants: `jail_tmpdir`
     puts it under the toolhome sibling named below, so a jailed client gets a temp
@@ -12517,16 +12518,69 @@ def jail_line(jail: dict) -> str:
                                 if jail.get("override") else "")
 
 
+# The per-run subtrees of the state tree a jailed launch is granted rw and the
+# launcher therefore owns outright: `<state>/configs/<run id>` and
+# `<state>/runtimes/<run id>`. Anything else under the state root is not one — and
+# `<state>/sandboxes/<run id>` is the clone itself, which the run already made.
+JAIL_PER_RUN_STATE_SUBTREES = ("configs", "runtimes")
+
+
+def jail_per_run_grant(path: str, cwd: str, home: str | None = None,
+                       entry: dict | None = None, state: str | None = None) -> bool:
+    """Does this rw grant name a directory that belongs to THIS run alone?
+
+    Landlock only governs a path that exists when the ruleset is built — the
+    wrapper skips a missing one silently — and the parent of a sandbox's private
+    sibling is the shared sandboxes root, which no jail writes into. So a granted
+    but absent per-run directory is a fence that kills the client on its first
+    mkdir (measured, run 20261012-064757-…-ao-opencode-jail-canary-0d32ee: the
+    jailed opencode died on `EACCES mkdir '<sandbox>.opencode-data'` with the seal
+    already applied, because that sibling is in the grant list and on nobody's to
+    create it). Creating it is the launcher's job, and ONLY for the paths it owns:
+    `/dev`, an install tree, a host directory or the operator's own XDG dir is
+    somebody else's, and a `mkdir -p` plus chmod 0700 on one of those is a write
+    outside the run.
+
+    Three shapes answer yes: the sandbox's own private siblings
+    (`SANDBOX_PRIVATE_SUFFIXES`) and anything beneath them; this run's directory in
+    the state tree's `configs`/`runtimes` subtrees — the leaf must be THIS run's own
+    id, read off the sandbox name, or a borrowed `XDG_CONFIG_HOME` would have the
+    launcher create and tighten another run's directory; and the client's own
+    per-run home directory (`home_rw_slug` — qoder's journal)."""
+    p = str(path)
+    for suffix in SANDBOX_PRIVATE_SUFFIXES:
+        root = str(cwd) + suffix
+        if p == root or p.startswith(root + os.sep):
+            return True
+    parts = (entry or {}).get("home_rw_slug")
+    if parts and home and p == sandbox_slug_dir(home, parts, cwd):
+        return True
+    run_id = _run_id_from_entry(os.path.basename(str(cwd).rstrip(os.sep)))
+    if not run_id:
+        return False
+    state_root = os.path.realpath(clients.state_dir() if state is None
+                                  else str(state))
+    real = os.path.realpath(p)
+    if not state_root or not real.startswith(state_root + os.sep):
+        return False
+    rel = real[len(state_root) + 1:].split(os.sep)
+    return (len(rel) == 2 and rel[0] in JAIL_PER_RUN_STATE_SUBTREES
+            and rel[1] == run_id)
+
+
 def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:
     """Create, 0700, the per-run directories the jail is about to grant rw to.
 
     Landlock only governs a directory that already exists when the ruleset is built,
-    so a `home_rw_slug` grant on a not-yet-created path would be silently skipped by
-    the wrapper and the client would die on the same EACCES the grant was meant to
-    clear. Provisioning is the launcher's job and happens ONLY here, at the real
-    launch — never in `jail_grants`, so a `--dry-run` plan still writes nothing.
-    Reuses `provision_runtime_dir`, which refuses to follow a symlink or tighten a
-    directory owned by another uid.
+    so a grant on a not-yet-created path is silently skipped by the wrapper and the
+    client dies on the same EACCES the grant was meant to clear — P1e hit this on
+    the per-run home slug, P1g on the sandbox's `.opencode-data` sibling. So the
+    rule is the whole grant list: every rw path that `jail_per_run_grant` says this
+    run owns is made here, and nothing else ever is (no `/dev`, no host directory,
+    no install tree). Provisioning is the launcher's job and happens ONLY here, at
+    the real launch — never in `jail_grants`, so a `--dry-run` plan still writes
+    nothing. Reuses `provision_runtime_dir`, which refuses to follow a symlink or
+    tighten a directory owned by another uid.
 
     The private temp dir (P1f) is stamped and made here too, because the wrapper
     execs with THIS env: a client that was handed a TMPDIR naming a directory nobody
@@ -12538,8 +12592,9 @@ def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:
         return
     home = env.get("HOME") or os.path.expanduser("~")
     entry = jail_client_entry(cmd)
-    for path in jail_home_rw_dirs(entry, home, cwd):
-        provision_runtime_dir(path)
+    for path in (jail.get("grants") or {}).get("rw") or ():
+        if jail_per_run_grant(path, cwd, home, entry):
+            provision_runtime_dir(path)
     tmp = apply_jail_tmpdir(env, cwd)
     if provision_runtime_dir(tmp) is None:
         for name in JAIL_TMP_ENV:

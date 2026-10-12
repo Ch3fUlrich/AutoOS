@@ -99,6 +99,22 @@ probe("qoder_journal_own",
       lambda: write(os.path.join(cfg["qoder_own_dir"], "session.jsonl")))
 probe("qoder_journal_foreign", lambda: os.makedirs(cfg["qoder_foreign_dir"]))
 
+# P1g (A): the sandbox's private data sibling. `jail_grants` has named it since
+# P1b, but Landlock only governs a directory that EXISTS when the ruleset is built
+# and its parent — the shared sandboxes root — is outside every jail, so the real
+# jailed opencode died at startup on `EACCES mkdir '<sandbox>.opencode-data'` with
+# the seal already applied (run 20261012-064757-…-ao-opencode-jail-canary-0d32ee).
+# Do the nested shape opencode itself builds; if nobody provisioned the sibling,
+# the mkdir lands on the ungranted parent and this answers `denied`.
+def data_dir_write():
+    log = os.path.join(cfg["data_dir"], "opencode", "log")
+    os.makedirs(log, exist_ok=True)
+    with open(os.path.join(log, "session.log"), "w") as fh:
+        fh.write("startup\n")
+
+
+probe("opencode_data_write", data_dir_write)
+
 
 # P1f: the client's own temp dir. What killed the jailed qoder canary was not a
 # read — it was the client's OWN shell tool: node's os.tmpdir() answered the host
@@ -185,6 +201,9 @@ class JailLiveTests(unittest.TestCase):
         # sandbox clone with its private `.toolhome` sibling beside it
         self.sandbox = os.path.join(self.base, "sandboxes", "sb-1")
         self.toolhome = self.sandbox + agent.TOOLHOME_SUFFIX
+        # the second private sibling: granted rw by every jail since P1b, created
+        # by nobody here — the launcher has to make it or the client dies on it
+        self.opencode_data = self.sandbox + agent.OPENCODE_DATA_SUFFIX
         for path in (self.sandbox, self.toolhome):
             os.makedirs(path, mode=0o700)
         subprocess.run(["git", "-c", "init.defaultBranch=test", "init", "-q",
@@ -312,6 +331,7 @@ class JailLiveTests(unittest.TestCase):
             "tmp_canary_write": self.tmp_canary_write,
             "outside_canary_file": self.outside_canary,
             "sandbox": self.sandbox, "toolhome": self.toolhome,
+            "data_dir": self.opencode_data,
             "qoder_own_dir": own, "qoder_foreign_dir": foreign,
             "tcp_port": tcp.getsockname()[1],
             "abstract_name": self.abstract_name,
@@ -346,7 +366,7 @@ class JailLiveTests(unittest.TestCase):
             self.assertEqual(report.get(probe), "denied",
                              "%s: probe %s answered %r, expected denied"
                              % (where, probe, report.get(probe)))
-        for probe in ("sandbox_write", "toolhome_write"):
+        for probe in ("sandbox_write", "toolhome_write", "opencode_data_write"):
             self.assertEqual(report.get(probe), "ok",
                              "%s: probe %s answered %r, expected ok"
                              % (where, probe, report.get(probe)))
@@ -411,6 +431,28 @@ class JailLiveTests(unittest.TestCase):
         # and the fence still holds on the shared temp: this is no /tmp grant
         self.assertEqual(report.get("tmp_read"), "denied", report)
         self.assertEqual(report.get("tmp_write"), "denied", report)
+
+    def test_a_jailed_launch_writes_inside_the_data_sibling_the_launcher_made(
+            self):
+        """P1g (A) positive control, end to end through `run_client`: the private
+        data sibling is in every jail's rw grants and owned by nobody but this run,
+        so the launcher has to create it before the ruleset is built. It does not
+        exist before the spawn; after it the client has written its own log tree
+        inside a directory that is 0700 — and the clone, which the jail also grants,
+        was left as it was rather than tightened."""
+        self.assertFalse(os.path.exists(self.opencode_data),
+                         "the fixture made the data sibling")
+        before = os.stat(self.sandbox).st_mode & 0o777
+        rc, report = self._spawn("opencode")
+        self.assertEqual(int(rc), 0, self.spawn_log[-3000:])
+        self.assertEqual(report.get("opencode_data_write"), "ok", report)
+        self.assertTrue(os.path.isdir(self.opencode_data), self.opencode_data)
+        self.assertEqual(os.stat(self.opencode_data).st_mode & 0o777, 0o700,
+                         self.opencode_data)
+        self.assertTrue(os.path.exists(os.path.join(self.opencode_data, "opencode",
+                                                    "log", "session.log")))
+        self.assertEqual(os.stat(self.sandbox).st_mode & 0o777, before,
+                         "the provisioner chmod-ed the clone itself")
 
     def test_qoder_rw_is_exactly_the_per_run_projects_dir(self):
         """The plan's writable world for qoder names ONE thing under the home: the
@@ -836,6 +878,21 @@ class JailNoLandlockGateTests(unittest.TestCase):
         self.assertIn("jail: unjailed", out)
         self.assertFalse(set(agent.JAIL_TMP_ENV) & env_line(out), out)
 
+    def test_a_dry_run_provisions_none_of_the_directories_the_jail_grants(self):
+        """P1g (A) at the CLI: the preview answers `jail: landlock`, which means it
+        read the very grant list the launcher would later create — and it leaves the
+        state tree as it found it. No sandbox is cloned, so no sibling of one exists
+        either, and no `configs/<run>` or `runtimes/<run>` directory is made."""
+        rc, out, err = self._run(["--dry-run"] + self.PUBLIC, abi0=False)
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("jail: landlock", out)
+        for name in ("configs", "runtimes"):
+            self.assertFalse(os.path.isdir(os.path.join(self.state, name)),
+                             "the dry run provisioned the %s subtree" % name)
+        sandboxes = os.path.join(self.state, "sandboxes")
+        self.assertEqual(os.listdir(sandboxes) if os.path.isdir(sandboxes) else [],
+                         [], "a dry run cloned a sandbox")
+
     def test_a_private_isolated_lane_is_jailed_when_the_kernel_has_the_abi(self):
         """The rc-2 path is the exception, not the rule: the same card on a
         kernel that has the ABI is jailed, recorded, and never warned about."""
@@ -932,6 +989,179 @@ class QoderSlugRuleTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(agent.delete_qoder_projects(sandbox, home=home), 1)
         self.assertFalse(os.path.exists(hashed))
+
+
+class JailPerRunProvisionTests(unittest.TestCase):
+    """P1g (A) at the provisioner and at the plan.
+
+    The rule the launcher owes the grant list: a directory this run owns outright
+    must exist before the ruleset is built (Landlock skips a missing path silently,
+    and the parent of a sandbox sibling is outside the jail), and a directory it
+    does not own must never be created or tightened — `/dev`, an install tree, the
+    operator's own XDG dir, another run's state dir. And none of it happens at plan
+    time: a `--dry-run` writes nothing, which is why provisioning lives at the
+    launch site and not in `jail_grants`."""
+
+    RUN_ID = "20261012-064828-ao-opencode-jail-p1g-a1b2c3"
+    OTHER = "20261011-000000-another-run-d4e5f6"
+
+    def setUp(self):
+        if os.name == "nt":
+            self.skipTest("POSIX only: the jail and its directories")
+        self.base = tempfile.mkdtemp(prefix="autoos-jail-provision-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.state = os.path.join(self.base, "state")
+        self.home = os.path.join(self.base, "home")
+        self.sandbox = os.path.join(self.base, "sandboxes", "AutoOS-" + self.RUN_ID)
+        self.toolhome = self.sandbox + agent.TOOLHOME_SUFFIX
+        self.data = self.sandbox + agent.OPENCODE_DATA_SUFFIX
+        self.host_dir = os.path.join(self.base, "someone-elses-directory")
+        # the clone and its toolhome exist (the provisioner made them, as --isolate
+        # does); the data sibling does NOT — that is the P1g defect
+        os.makedirs(self.sandbox, mode=0o755)
+        os.makedirs(self.toolhome, mode=0o700)
+        os.makedirs(self.home, mode=0o700)
+        # `clients.state_dir()` reads the process environment, so the state tree is
+        # pointed at the fixture for the duration of each test and restored after.
+        self._saved_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.state
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self._saved_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self._saved_state
+
+    def _grants(self, program="opencode"):
+        parts = agent.JAIL_RO_BY_CLIENT.get(program, {}).get("home_rw_slug")
+        rw = [self.sandbox, self.toolhome, self.data, "/dev", self.host_dir,
+              os.path.join(self.state, "configs", self.RUN_ID),
+              os.path.join(self.state, "runtimes", self.RUN_ID),
+              os.path.join(self.state, "configs", self.OTHER),
+              os.path.join(self.home, ".config")]
+        if parts:
+            rw.append(agent.sandbox_slug_dir(self.home, parts, self.sandbox))
+        return rw
+
+    def _provision(self, program="opencode", grants=None):
+        env = {"HOME": self.home}
+        jail = {"path": "landlock", "grants": {"rw": grants or self._grants(program)}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.jail_provision(self.sandbox, ["/usr/bin/" + program], env, jail)
+        return env
+
+    @staticmethod
+    def _made(path):
+        return os.path.isdir(path) and os.stat(path).st_mode & 0o777 == 0o700
+
+    def test_the_provisioner_makes_every_per_run_directory_the_jail_grants(self):
+        slug = agent.sandbox_slug_dir(
+            self.home, agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"],
+            self.sandbox)
+        self.assertFalse(os.path.exists(self.data), "the fixture made the sibling")
+        self._provision("qodercli")
+        for path in (self.data, self.toolhome, slug,
+                     os.path.join(self.state, "configs", self.RUN_ID),
+                     os.path.join(self.state, "runtimes", self.RUN_ID)):
+            self.assertTrue(self._made(path), "%s is not a 0700 directory" % path)
+
+    def test_the_provisioner_never_creates_a_directory_it_does_not_own(self):
+        """/dev, a host directory, the operator's own config home, another run's
+        state directory, and the clone itself are all in the grant list of the
+        fixture above and none of them is anybody's to make or tighten."""
+        before = os.stat(self.sandbox).st_mode & 0o777
+        self._provision("qodercli")
+        self.assertFalse(os.path.exists(self.host_dir), self.host_dir)
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".config")),
+                         "created the operator's config home")
+        self.assertFalse(os.path.exists(os.path.join(self.state, "configs",
+                                                     self.OTHER)),
+                         "created another run's state directory")
+        self.assertEqual(os.stat(self.sandbox).st_mode & 0o777, before,
+                         "tightened the clone itself")
+
+    def test_the_predicate_answers_for_each_shape_of_grant(self):
+        parts = agent.JAIL_RO_BY_CLIENT["qodercli"]["home_rw_slug"]
+        slug = agent.sandbox_slug_dir(self.home, parts, self.sandbox)
+        cases = [
+            (self.toolhome, True), (self.data, True),
+            (os.path.join(self.data, "opencode", "log"), True),
+            (os.path.join(self.toolhome, "tmp", "x"), True),
+            (os.path.join(self.state, "configs", self.RUN_ID), True),
+            (os.path.join(self.state, "runtimes", self.RUN_ID), True),
+            (slug, True),
+            (self.sandbox, False), (self.sandbox + "notmine", False),
+            (self.host_dir, False), ("/dev", False), ("/usr", False),
+            (os.path.join(self.home, ".config"), False),
+            (os.path.join(self.state, "sandboxes", "AutoOS-" + self.RUN_ID), False),
+            (os.path.join(self.state, "configs", self.OTHER), False),
+            (os.path.join(self.state, "configs", self.RUN_ID, "git"), False),
+            (os.path.join(self.state, "configs"), False),
+            (os.path.join(self.home, *parts), False),
+        ]
+        for path, want in cases:
+            got = agent.jail_per_run_grant(path, self.sandbox, home=self.home,
+                                           entry=agent.jail_client_entry(
+                                               ["/usr/bin/qodercli"]),
+                                           state=self.state)
+            self.assertEqual(got, want, "%s -> %s, expected %s" % (path, got, want))
+
+    def test_a_sandbox_whose_name_carries_no_run_id_grants_no_state_dir(self):
+        """A borrowed `XDG_CONFIG_HOME` naming some other run's state directory is
+        refused by the run-id match, not by luck: the launcher only ever makes the
+        directory whose id its own sandbox names."""
+        foreign = os.path.join(self.state, "configs", self.OTHER)
+        self.assertFalse(agent.jail_per_run_grant(foreign, self.sandbox,
+                                                  state=self.state))
+        plain = os.path.join(self.base, "sandboxes", "hand-made-checkout")
+        os.makedirs(plain)
+        self.assertFalse(agent.jail_per_run_grant(
+            os.path.join(self.state, "configs", self.RUN_ID), plain,
+            state=self.state))
+
+    def test_an_unjailed_provision_creates_nothing_and_stamps_no_temp_dir(self):
+        env = {"HOME": self.home}
+        agent.jail_provision(self.sandbox, ["/usr/bin/opencode"], env,
+                             {"path": "unjailed", "reason": "no Landlock ABI"})
+        self.assertFalse(os.path.exists(self.data), self.data)
+        for name in agent.JAIL_TMP_ENV:
+            self.assertNotIn(name, env, env)
+
+    def test_a_refused_temp_dir_is_taken_back_out_of_the_env(self):
+        """The P1f fallback still holds with the grant loop in front of it: a temp
+        dir the provisioner refuses — here a planted symlink, the shape a same-uid
+        competitor leaves behind — takes the three names back out of the env so the
+        client falls back to its own default instead of an unusable one."""
+        tmp = os.path.join(self.toolhome, "tmp")
+        outside = os.path.join(self.base, "outside-target")
+        os.makedirs(outside)
+        os.symlink(outside, tmp)
+        env = self._provision("opencode")
+        for name in agent.JAIL_TMP_ENV:
+            self.assertNotIn(name, env, env)
+        self.assertEqual(os.readlink(tmp), outside, "the launcher followed the link")
+        self.assertFalse(os.path.exists(os.path.join(outside, "anything")))
+
+    def test_the_plan_names_the_sibling_it_will_grant_and_makes_nothing(self):
+        """`jail_decision` is what `--dry-run` and the worker record answer with: it
+        has to carry the grant the launcher will later create, and must not create
+        it on the way out."""
+        if landlock.available() <= 0:
+            self.skipTest("no Landlock ABI on this kernel: the jail is not offered")
+        env = {"HOME": self.home,
+               "XDG_CONFIG_HOME": os.path.join(self.state, "configs", self.RUN_ID),
+               "XDG_RUNTIME_DIR": os.path.join(self.state, "runtimes", self.RUN_ID)}
+        cmd = ["/usr/bin/opencode", "task"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            jail = agent.jail_decision(self.sandbox, cmd, env, isolated=True)
+        self.assertEqual(jail["path"], "landlock", jail)
+        self.assertIn(self.data, jail["grants"]["rw"], jail["grants"])
+        for path in (self.data, os.path.join(self.state, "configs", self.RUN_ID),
+                     os.path.join(self.state, "runtimes", self.RUN_ID),
+                     os.path.join(self.toolhome, "tmp")):
+            self.assertFalse(os.path.exists(path),
+                             "the plan created %s: a dry run writes nothing" % path)
 
 
 if __name__ == "__main__":
