@@ -6,8 +6,12 @@
   1. Registers every provider key found in configuration/api-keys.yml.
   2. Refreshes the gateway's model catalog for what it just registered
      (omniroute models <provider>), so one run is enough for a fresh machine.
-  3. (Re)creates the tier combos from configuration/omniroute/combos.json.
-  4. Prunes the combos listed there as "retired" or "omitted" from the store
+  3. Declares the custom (manual) models of configuration/omniroute/
+     custom-models.json through POST /api/provider-models, before the catalog is
+     read for combo validation — a provider whose model list the gateway image
+     bakes has no live discovery, so its new ids exist only once declared.
+  4. (Re)creates the tier combos from configuration/omniroute/combos.json.
+  5. Prunes the combos listed there as "retired" or "omitted" from the store
      (only those).
 
   B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
@@ -619,6 +623,90 @@ if ($DryRun) {
         & omniroute models $providerId *> $null
         if ($LASTEXITCODE -eq 0) { Write-Host "  + $providerId enumerated" }
         else { Write-Host "  ! $providerId could not be enumerated - its legs may be dropped below" }
+    }
+}
+
+# --- Declared custom (manual) models -----------------------------------------
+# A provider whose model list is baked into the gateway image has no live
+# discovery: OmniRoute 3.8.50 ships xiaomi-mimo with mimo-v2.5-pro and
+# mimo-v2.5 only, and the synced catalog is authoritative, so mimo-v2.6-*
+# answered 400 "not available in the active live catalog". custom-models.json is
+# the operator's declared override, registered through
+# POST /api/provider-models {provider, modelId, modelName, source: "manual",
+# max_input_tokens, max_output_tokens, supportsVision} - the one body shape
+# configuration/omniroute/apply-custom-models.sh (Linux) sends. Idempotent: an
+# id the gateway already holds is reported, not rewritten. Runs BEFORE the live
+# catalog read below, or a combo leg naming a custom id the store does not hold
+# yet is dropped as "catalog does not know" until the second run.
+Write-Host 'Custom models:'
+$customFile = Join-Path $Here 'custom-models.json'
+if (-not (Test-Path $customFile)) {
+    Write-Host '  = no custom-models.json - nothing to do'
+} else {
+    $customEntries = @()
+    try {
+        $customDoc = Get-Content $customFile -Raw -Encoding utf8 | ConvertFrom-Json
+        $customEntries = @($customDoc.models)
+    } catch {
+        Write-Host "  ! $customFile is unreadable - nothing applied"
+    }
+    if ($customEntries.Count -eq 0 -and (Test-Path $customFile)) {
+        Write-Host '  = custom-models.json lists none'
+    }
+    $HeldIds = @{}
+    foreach ($m in $customEntries) {
+        if (-not $m.PSObject.Properties['provider'] -or -not $m.provider) { continue }
+        if (-not $m.PSObject.Properties['id'] -or -not $m.id) { continue }
+        $customProvider = [string]$m.provider
+        $customId = [string]$m.id
+        if ($DryRun) {
+            Write-Host "  - would add $customProvider/$customId (POST /api/provider-models, source manual)"
+            continue
+        }
+        if (-not $ManageToken) {
+            Write-Host "  ! $customProvider/${customId}: no machine token for the management API - declare it in the dashboard (Provider Models)"
+            continue
+        }
+        if (-not $HeldIds.ContainsKey($customProvider)) {
+            $listDoc = Invoke-AutoOSGateway -Method GET -Path "/api/provider-models?provider=$customProvider"
+            if ($null -eq $listDoc) {
+                $why = 'the gateway answered without a list'
+                if ($script:GatewayError) { $why = $script:GatewayError }
+                Write-Host "  ! ${customProvider}: could not read the list ($why)"
+                $HeldIds[$customProvider] = @('?')
+            } else {
+                $held = @()
+                if ($listDoc.PSObject.Properties['models']) {
+                    foreach ($row in @($listDoc.models)) {
+                        if ($null -ne $row -and $row.PSObject.Properties['id'] -and $row.id) {
+                            $held += [string]$row.id
+                        }
+                    }
+                }
+                $HeldIds[$customProvider] = $held
+            }
+        }
+        if ($HeldIds[$customProvider] -contains '?') { continue }
+        if ($HeldIds[$customProvider] -contains $customId) {
+            Write-Host "  = $customProvider/$customId already present"
+            continue
+        }
+        $displayName = $customId
+        if ($m.PSObject.Properties['name'] -and $m.name) { $displayName = [string]$m.name }
+        $customBody = @{ provider = $customProvider; modelId = $customId
+                         modelName = $displayName; source = 'manual' }
+        foreach ($field in @('max_input_tokens', 'max_output_tokens', 'supportsVision')) {
+            if ($m.PSObject.Properties[$field] -and $null -ne $m.$field) {
+                $customBody[$field] = $m.$field
+            }
+        }
+        $null = Invoke-AutoOSGateway -Method POST -Path '/api/provider-models' -Body $customBody
+        if ($script:GatewayError) {
+            Write-Host "  ! $customProvider/$customId add failed ($($script:GatewayError))"
+        } else {
+            Write-Host "  + $customProvider/$customId added"
+            $HeldIds[$customProvider] = @($HeldIds[$customProvider]) + $customId
+        }
     }
 }
 
