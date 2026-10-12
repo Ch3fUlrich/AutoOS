@@ -12085,14 +12085,27 @@ JAIL_WRAPPER = "landlock_exec.py"
 #                  process's environ — the spawner's holds the lane password — so
 #                  only its own `/proc/self` is named. Consequence: a grandchild
 #                  (the worker's own tool call) that asks for its `/proc/self` is
-#                  denied; the client itself works.
+#                  denied; the client itself works. The rule is bound to the
+#                  LAUNCHED process's inode: `/proc/self` is resolved by the kernel
+#                  per-pid, and a child has a different pid, so `--ro /proc/self`
+#                  cannot follow a fork. Measured (P1g trial, run
+#                  20261012-064828-…-p1g-rw-457c60): the opencode parent CLI starts
+#                  under the jail, then spawns its own `serve --stdio --port 0`
+#                  child, whose Bun cannot read `/proc/self` and aborts the launch
+#                  (rc -6, "Standalone server exited before reporting readiness") —
+#                  the same child runs fine when `/proc` at large is granted, which
+#                  is not an acceptable fix. See the REPORT: this is a limitation of
+#                  P1g's scope, not something a narrower grant resolves.
 #   home_ro        directories under the run's `$HOME`, read-only, that a
 #                  own-account client authenticates from.
 #   home_rw_slug   the components under the run's `$HOME` that name the PARENT of
 #                  a per-run directory this client must write during startup, where
-#                  the leaf is the run's own `cwd` with every path separator turned
-#                  into `-` (`sandbox_slug_dir`). qoder keeps its real `$HOME` (only
-#                  a gateway client is re-homed to the toolhome), and it writes its
+#                  the leaf is the slug qodercli derives from its own `cwd`
+#                  (`sandbox_slug_dir` → `qoder_project_slug`: sanitize to
+#                  `[A-Za-z0-9]`/`-`, and past 200 characters truncate and append a
+#                  base36 hash, exactly as the installed bundle does). qoder keeps
+#                  its real `$HOME` (only a gateway client is re-homed to the
+#                  toolhome), and it writes its
 #                  per-project session transcript to `~/.qoder/projects/<slug>/<id>`
 #                  at startup — measured EACCES on the jailed canary (run
 #                  20261012-042616-…-canary-0aa1e8), which killed the client before
@@ -12543,10 +12556,10 @@ def jail_per_run_grant(path: str, cwd: str, home: str | None = None,
 
     Three shapes answer yes: the sandbox's own private siblings
     (`SANDBOX_PRIVATE_SUFFIXES`) and anything beneath them; this run's directory in
-    the state tree's `configs`/`runtimes` subtrees — the leaf must be THIS run's own
-    id, read off the sandbox name, or a borrowed `XDG_CONFIG_HOME` would have the
-    launcher create and tighten another run's directory; and the client's own
-    per-run home directory (`home_rw_slug` — qoder's journal)."""
+    the state tree's `configs`/`runtimes` subtrees — the leaf must be a run id AND
+    the TAIL of this sandbox's own name, so a borrowed `XDG_CONFIG_HOME` can never
+    have the launcher create and tighten another run's directory; and the client's
+    own per-run home directory (`home_rw_slug` — qoder's journal)."""
     p = str(path)
     for suffix in SANDBOX_PRIVATE_SUFFIXES:
         root = str(cwd) + suffix
@@ -12555,17 +12568,19 @@ def jail_per_run_grant(path: str, cwd: str, home: str | None = None,
     parts = (entry or {}).get("home_rw_slug")
     if parts and home and p == sandbox_slug_dir(home, parts, cwd):
         return True
-    run_id = _run_id_from_entry(os.path.basename(str(cwd).rstrip(os.sep)))
-    if not run_id:
-        return False
     state_root = os.path.realpath(clients.state_dir() if state is None
                                   else str(state))
     real = os.path.realpath(p)
     if not state_root or not real.startswith(state_root + os.sep):
         return False
     rel = real[len(state_root) + 1:].split(os.sep)
+    # the tail of the sandbox name, not `_run_id_from_entry`: a lane-nested
+    # checkout carries TWO run ids (the lane's and this attempt's) and the leftmost
+    # match is the lane's, while the state dir is named by the attempt's.
+    name = os.path.basename(str(cwd).rstrip(os.sep))
     return (len(rel) == 2 and rel[0] in JAIL_PER_RUN_STATE_SUBTREES
-            and rel[1] == run_id)
+            and _RUN_ID_TAIL_RE.fullmatch(rel[1]) is not None
+            and name.endswith(rel[1]))
 
 
 def jail_provision(cwd: str, cmd, env: dict, jail: dict) -> None:

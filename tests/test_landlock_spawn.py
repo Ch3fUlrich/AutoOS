@@ -179,6 +179,27 @@ probe("abstract_unix", lambda: unix_connect(kind=0, addr=cfg["abstract_name"]))
 probe("pathname_unix", lambda: unix_connect(kind=0, addr=cfg["pathname_socket"]))
 probe("signal_parent", lambda: os.kill(cfg["parent_pid"], 0))
 
+# P1h: the `/proc/self` grant is bound to the inode the wrapper resolved, which is
+# the WRAPPED process's own pid directory; exec keeps the pid, a fork does not.
+# So the client reads its `/proc/self` and a child it spawns does not. Reported as
+# the child's own answer, because a child that could not run at all must not read
+# as "denied": that would be the test passing on a broken fixture.
+CHILD_PROC_SELF = ("try:\n"
+                   "    open('/proc/self/status').read()\n"
+                   "except PermissionError:\n"
+                   "    print('denied')\n"
+                   "except OSError as exc:\n"
+                   "    print('%s:%s' % (exc.errno, exc.strerror))\n"
+                   "else:\n"
+                   "    print('ok')\n")
+
+probe("proc_self_read", lambda: read("/proc/self/status"))
+_child = subprocess.run([sys.executable, "-c", CHILD_PROC_SELF],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+out["proc_self_child"] = (_child.stdout.decode("utf-8", "replace").strip()
+                          or "no-answer rc=%s %s" % (_child.returncode,
+                                                     _child.stderr.decode("utf-8", "replace")[-160:]))
+
 with open(os.path.join(cfg["sandbox"], "jail-report.json"), "w") as fh:
     json.dump(out, fh)
 print("JAILED-CLIENT-DONE")
@@ -572,6 +593,45 @@ class JailLiveTests(unittest.TestCase):
         self.assertEqual(report.get("signal_parent"), "denied",
                          "the signal scope did not hold: %r"
                          % report.get("signal_parent"))
+
+    def test_proc_self_follows_the_granted_process_and_not_its_children(self):
+        """P1h, measured: `--ro /proc/self` names ONE inode — the pid directory the
+        wrapper resolved, which `exec` keeps and `fork` does not. So a jailed
+        client reads its own `/proc/self`, and a child it spawns is denied, which is
+        exactly why the jailed opencode's Bun dies: the parent CLI starts, then
+        spawns `serve --stdio --port 0` as a CHILD and that child cannot read
+        `/proc/self` (rc -6, "Standalone server exited before reporting readiness").
+        The fix is not a `/proc` grant — same-uid `/proc/<pid>/environ` holds the
+        spawner's env, lane password included — it is launching the shape that needs
+        `/proc/self` as the wrapped process itself."""
+        rc, report = self._spawn("opencode")
+        self.assertEqual(int(rc), 0, self.spawn_log[-3000:])
+        self.assertEqual(report.get("proc_self_read"), "ok",
+                         "the client itself lost the grant it was given: %r"
+                         % report.get("proc_self_read"))
+        self.assertEqual(report.get("proc_self_child"), "denied",
+                         "a forked child read its own /proc/self: the grant is wider "
+                         "than the launched process (%r)" % report.get("proc_self_child"))
+        # and the grant is per-leg: only the opencode entry names /proc/self at all.
+        env = {"HOME": self.home}
+        open_ended = agent.jail_grants(self.sandbox, [self._stub("opencode")], env,
+                                       agent.jail_client_entry([self._stub("opencode")]))
+        silent = agent.jail_grants(self.sandbox, [self._stub("qodercli")], env,
+                                   agent.jail_client_entry([self._stub("qodercli")]))
+        self.assertIn("/proc/self", open_ended["ro"], open_ended)
+        self.assertNotIn("/proc/self", silent["ro"], silent["ro"])
+        for ro in (open_ended["ro"], silent["ro"]):
+            self.assertNotIn("/proc", ro,
+                             "all of /proc is granted: /proc/<pid>/environ is the "
+                             "spawner's own environment")
+
+    def test_a_leg_with_no_proc_self_grant_reads_no_proc_self(self):
+        """The other side of the same coin: the qoder leg never names `/proc/self`,
+        so its client is denied too — the grant is per-client, not ambient."""
+        rc, report = self._spawn("qodercli")
+        self.assertEqual(int(rc), 0, self.spawn_log[-3000:])
+        self.assertEqual(report.get("proc_self_read"), "denied", report)
+        self.assertEqual(report.get("proc_self_child"), "denied", report)
 
     def test_documented_limit_pathname_unix_socket_open(self):
         """A pathname AF_UNIX outside every grant is fenced only on a kernel that
@@ -1004,6 +1064,10 @@ class JailPerRunProvisionTests(unittest.TestCase):
 
     RUN_ID = "20261012-064828-ao-opencode-jail-p1g-a1b2c3"
     OTHER = "20261011-000000-another-run-d4e5f6"
+    # a nested attempt inside a lane checkout: the sandbox name carries BOTH ids and
+    # the leftmost `re.search` match is the LANE's, while the state dir of THIS launch
+    # is named by the attempt's (measured on the real `run --isolate` of P1g).
+    ATTEMPT = "20261012-070540-t2-reply-with-the-single-29711d"
 
     def setUp(self):
         if os.name == "nt":
@@ -1119,6 +1183,32 @@ class JailPerRunProvisionTests(unittest.TestCase):
         self.assertFalse(agent.jail_per_run_grant(
             os.path.join(self.state, "configs", self.RUN_ID), plain,
             state=self.state))
+
+    def test_a_lane_nested_sandbox_names_the_attempts_state_dir_not_the_lanes(self):
+        """A nested checkout carries TWO run ids. `re.search` on the name answers the
+        lane's (leftmost), which is why the predicate matches the state leaf against
+        the TAIL of its own name instead: the attempt's directory is made, the lane's
+        is left alone — it belongs to the L1 that owns this sandbox."""
+        nested = os.path.join(self.base, "sandboxes",
+                              "lane-opencode-jail-" + self.RUN_ID + "-" + self.ATTEMPT)
+        attempt_dir = os.path.join(self.state, "runtimes", self.ATTEMPT)
+        lane_dir = os.path.join(self.state, "configs", self.RUN_ID)
+        self.assertTrue(agent.jail_per_run_grant(attempt_dir, nested,
+                                                 state=self.state))
+        self.assertFalse(agent.jail_per_run_grant(lane_dir, nested,
+                                                  state=self.state))
+        # and the un-nested launch keeps matching its own id, which IS the tail.
+        self.assertTrue(agent.jail_per_run_grant(lane_dir, self.sandbox,
+                                                 state=self.state))
+        self.assertFalse(agent.jail_per_run_grant(attempt_dir, self.sandbox,
+                                                  state=self.state))
+        env = {"HOME": self.home}
+        jail = {"path": "landlock", "grants": {"rw": [attempt_dir, lane_dir]}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent.jail_provision(nested, ["/usr/bin/opencode"], env, jail)
+        self.assertTrue(self._made(attempt_dir), attempt_dir)
+        self.assertFalse(os.path.exists(lane_dir),
+                         "a nested launch tightened the lane's own state directory")
 
     def test_an_unjailed_provision_creates_nothing_and_stamps_no_temp_dir(self):
         env = {"HOME": self.home}
