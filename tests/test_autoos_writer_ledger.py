@@ -33,8 +33,21 @@ FAMILY_REGISTRY = {"providers": {"vertex": {}, "openrouter": {}},
                    "policy": {"reviewers": [{"model": "t3", "family": "deepseek"},
                                              {"model": "gemini-3.8-flash", "family": "google"},
                                              {"model": "qwen3.8-flash", "family": "qwen"}]}}
-REAL_FAMILY_REGISTRY = ledger._family_registry
-ledger._family_registry = lambda: FAMILY_REGISTRY
+REAL_FAMILY_REGISTRY = None
+
+
+def setUpModule():
+    """P6e-c: pin the registry only while THIS file's tests run. pytest imports every test
+    module at collection, so an import-time assignment here replaced the real registry reader
+    for the whole session and reddened other files' ledger tests."""
+    global REAL_FAMILY_REGISTRY
+    REAL_FAMILY_REGISTRY = ledger._family_registry
+    ledger._family_registry = lambda: FAMILY_REGISTRY
+
+
+def tearDownModule():
+    if REAL_FAMILY_REGISTRY is not None:
+        ledger._family_registry = REAL_FAMILY_REGISTRY
 
 
 def path():
