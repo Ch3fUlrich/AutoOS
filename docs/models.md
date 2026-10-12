@@ -51,32 +51,32 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
 | `deepseek-v4.1-flash` | cheap | 1M | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
-| `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → vertex `gemini-3.8-flash` |
+| `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `groq-qwen3.8-27b` | free | 128k | groq `qwen/qwen3.8-27b` |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |
 | `hf-qwen3.8-27b` | free | 128k | ~~huggingface `Qwen/Qwen3.8-27B`~~ (unavailable) |
-| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l1-orchestrator-clean` | cheap | 1M | vertex `gemini-3.8-flash` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l1-orchestrator-clean` | cheap | 1M | ~~vertex `gemini-3.8-flash`~~ (unavailable) → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
 | `l1-orchestrator-free-only` | free | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` |
 | `l1-orchestrator-paid` | cheap | 1M | (none) |
-| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l2-orchestrator-clean` | frontier | 1M | vertex `gemini-3.8-flash` |
+| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l2-orchestrator-clean` | frontier | 1M | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
-| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.5-pro` |
-| `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
+| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) → xiaomi-mimo `mimo-v2.6-pro` |
+| `l2-worker-clean` | mid | 128k | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` → xiaomi-mimo `mimo-v2.5` |
-| `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
+| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → ~~vertex `gemini-3.8-flash`~~ (unavailable) → xiaomi-mimo `mimo-v2.6-flash` |
+| `l3-driver-clean` | cheap | 128k | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l3-driver-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
-| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
-| `l3-implementer-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
-| `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
-| `l3-researcher-clean` | cheap | 1M | vertex `gemini-3.8-flash` |
-| `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
+| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-implementer-clean` | cheap | 128k | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-researcher-clean` | cheap | 1M | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
+| `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l3-review-diff` | cheap | 128k | groq `qwen/qwen3.8-27b` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
-| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
+| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 | `l3-review-transcript` | cheap | 1M | (none) |
 | `opus-5-5` | frontier | 1M | ~~antigravity `claude-opus-5-5-medium`~~ (unavailable) |
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
@@ -88,7 +88,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | ~~meta_api `muse-spark-1.3-contributor`~~ (unavailable) → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
 | `t4-rag` | cheap | 128k | cohere `command-r-plus-08-2024` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` |
-| `vertex-gemini-3.8-flash` | credit | 1M | vertex `gemini-3.8-flash` |
+| `vertex-gemini-3.8-flash` | credit | 1M | ~~vertex `gemini-3.8-flash`~~ (unavailable) |
 <!-- AUTOOS-MANAGED-END models-doc -->
 
 **l2-worker is not context-capped at 128k.** 128k is a display convention inherited

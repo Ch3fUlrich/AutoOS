@@ -1692,15 +1692,22 @@ class FreeAiProviderTests(unittest.TestCase):
         gateways with a documented cache, and spec SS8's paid-deepseek ban took
         the old tail out, so the vertex leg is now the last leg a real request
         can fall through to.
-        MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg: `xiaomi-mimo/
-        mimo-v2.5-pro` is a `subscription` leg, contract rule (b) ranks
-        subscription with paid (tools/combo-contract.py TIER_ORDER) and
-        tools/autoos_resolver.py holds a non-free tier back as a last resort
-        while a free/trial/credit leg is healthy, so vertex stays the last
-        CREDIT leg and the subscription tail follows it."""
+        MIMO 2026-10-12 (AO-MIMO-WIRING) moves the closing leg: a `xiaomi-mimo/`
+        leg is a `subscription` leg, contract rule (b) ranks subscription with paid
+        (tools/combo-contract.py TIER_ORDER) and tools/autoos_resolver.py holds a
+        non-free tier back as a last resort while a free/trial/credit leg is healthy,
+        so vertex stays the last CREDIT leg and the subscription tail follows it.
+
+        AO-MIMO-V26 (2026-10-12) keeps that shape and changes two facts: the tail id
+        is `mimo-v2.6-pro` (the v2.5 chat ids retire 2026-10-21), and D-1181's
+        `providers.vertex_ai.available: false` takes the vertex leg out of what the
+        gateway can serve, so the subscription leg is now the last LIVE leg — the
+        declared order is unchanged, the served one lost its credit rung."""
         route = self.reg["routes"]["l2-worker"]
-        self.assertEqual(live_legs(self.reg, "l2-worker")[-2:],
-                         ["vertex/gemini-3.8-flash", "xiaomi-mimo/mimo-v2.5-pro"])
+        self.assertEqual(route["legs"][-2:],
+                         ["vertex/gemini-3.8-flash", "xiaomi-mimo/mimo-v2.6-pro"])
+        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
+                         "xiaomi-mimo/mimo-v2.6-pro")
         legs = route["legs"]
         for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
                      "ovhcloud/gpt-oss-120b",
@@ -2333,13 +2340,26 @@ class DeepSeekBackTests(unittest.TestCase):
         # so the -clean twins now render exactly the one leg that is both
         # private-safe and probe-acked. The render, not the registry list, is
         # what the gateway serves.
-        rendered = {c["name"]: c for c in
-                    registry.render_omniroute(self.reg)["combos"]}
+        # D-1181 (2026-10-12) turns providers.vertex_ai off, and vertex is the only
+        # servable leg these twins declare, so each now renders as OMITTED — the
+        # designed fate of a route with no gateway-servable leg (tools/registry.py
+        # gateway_legs/servable_route_ids), not a defect. Pinned as an omission on
+        # purpose: re-enabling vertex must bring this same render back, and nothing
+        # else. The l1 twin's second leg is the gated 2026-09-21 contributor row.
+        render = registry.render_omniroute(self.reg)
+        rendered = {c["name"]: c for c in render["combos"]}
+        omitted = set(render["omitted"])
         for name in ("l1-orchestrator-clean", "l2-orchestrator-clean",
                      "l2-worker-clean", "l3-driver-clean",
                      "l3-implementer-clean", "l3-researcher-clean"):
-            self.assertEqual(rendered[name]["models"],
-                             ["vertex/gemini-3.8-flash"], name)
+            route = self.reg["routes"][name]
+            self.assertEqual(registry.gateway_legs(route, self.reg), [], name)
+            self.assertEqual(route["legs"],
+                             ["vertex/gemini-3.8-flash"]
+                             + (["openrouter/meta/muse-spark-1.3-contributor"]
+                                if name == "l1-orchestrator-clean" else []), name)
+            self.assertNotIn(name, rendered, name)
+            self.assertIn(name, omitted, name)
         served = [model for combo in rendered.values()
                   for model in combo["models"]]
         self.assertNotIn("deepseek/deepseek-flash", served)
@@ -2781,12 +2801,17 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
         # chain, so the -clean twins are now the single probe-acked, private-safe
         # leg -- and it is live, which is what the route-liveness invariant needs.
+        # D-1181 (2026-10-12) flips providers.vertex_ai off, so "live" is now the
+        # wrong word for them: the leg is still the one they declare and the one
+        # that answers when the grant comes back, but nothing is served while the
+        # flag is off, and the route-liveness invariant scopes them out with the
+        # other unservable routes (servable_route_ids).
         for route_id in ("l2-worker-clean", "l3-driver-clean"):
             self.assertEqual(self.reg["routes"][route_id]["legs"],
                              ["vertex/gemini-3.8-flash"], route_id)
-            self.assertTrue(live_legs(self.reg, route_id), route_id)
+            self.assertNotIn(route_id, registry.servable_route_ids(self.reg), route_id)
             self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(self.reg, route_id), route_id)
+                             self.reg["routes"][route_id]["legs"], route_id)
 
     def test_t3_driver_heads_with_the_free_band(self):
         # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
@@ -2814,7 +2839,8 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # MIMO 2026-10-12 (AO-MIMO-WIRING): vertex is no longer the closing leg —
         # the subscription tail follows it (rule (b) ranks subscription with paid).
         self.assertEqual(legs[-2], "vertex/gemini-3.8-flash")
-        self.assertEqual(legs[-1], "xiaomi-mimo/mimo-v2.5")
+        # AO-MIMO-V26: the tail id is the v2.6 flash (the v2.5 chat ids retire 2026-10-21).
+        self.assertEqual(legs[-1], "xiaomi-mimo/mimo-v2.6-flash")
 
     # -- the invariant ------------------------------------------------------
 
@@ -2893,12 +2919,19 @@ class MistralReplaceTests(unittest.TestCase):
         # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
         # twins. They still serve -- one leg each, the probe-acked private-safe
         # vertex row -- which is what the route-liveness invariant needs.
+        # D-1181 (2026-10-12) turns that row's provider off, so the twins serve
+        # nothing until the grant comes back: they declare the same one leg and are
+        # OMITTED from the render, which is how the registry treats every route with
+        # no gateway-servable leg (the route-liveness invariant then scopes them out
+        # through servable_route_ids). Re-enabling vertex restores the render with no
+        # edit here.
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertEqual(live_legs(reg, route_id),
+            self.assertEqual(reg["routes"][route_id]["legs"],
                              ["vertex/gemini-3.8-flash"], route_id)
+            self.assertNotIn(route_id, registry.servable_route_ids(reg), route_id)
             self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(reg, route_id), route_id)
+                             reg["routes"][route_id]["legs"], route_id)
 
     # -- the registered tested alternative ----------------------------------
 
@@ -3607,11 +3640,22 @@ class ComboCrossProviderTests(unittest.TestCase):
         # the skip is lifted: the route now answers with two providers.
         # l1-orchestrator-free-only is L0 ACCEPT single-provider (see
         # test_t1_free_only_single_provider_exemption below), not skipped here.
+        # D-1181 (operator 2026-10-12) re-suspends l1-orchestrator: its second
+        # provider was the vertex credit leg, and `providers.vertex_ai.available:
+        # false` takes it out of every render, so the route has one servable
+        # provider until the grant comes back. Suspended loudly, not silently: the
+        # leg stays declared, which is what the companion assert below pins, and
+        # tools/combo-contract.py rule (e) still fails the combo (reported).
         for route_id in AGENTIC_TIER_ROUTES:
             if route_id == "l1-orchestrator-free-only":
                 continue  # asserted in exemption test, not silently passed
             providers = {registry.resolve_leg(leg, self.reg)[0]
                          for leg in usable_legs(self.reg, route_id)}
+            if route_id == "l1-orchestrator":
+                self.assertEqual(providers, {"bazaarlink"}, route_id)
+                self.assertIn("vertex/gemini-3.8-flash",
+                              self.reg["routes"][route_id]["legs"], route_id)
+                continue
             self.assertGreaterEqual(
                 len(providers), 2,
                 "%s has %d usable free/priced provider(s) (%s): a card routed "
@@ -3651,23 +3695,32 @@ class ComboCrossProviderTests(unittest.TestCase):
     # context fitting the route's declared need), the bands are these; each
     # shortfall names its cause instead of a floor the registry no longer
     # supports. Shortfall != defect — inventing a leg to reach 3 would be.
+    # D-1181 (operator 2026-10-12) turns `providers.vertex_ai.available` off, and the
+    # vertex leg is the credit rung of every band below: each count is one lower than
+    # it was, and re-enabling the grant raises it again with no edit here.
     USABLE_LEG_BAND = {
         # the gemini AI-Studio leg 401s on both gateways and free-ai's tool call
         # never landed, so the free band keeps one leg and stays exempt above.
         "l1-orchestrator-free-only": 1,
         # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
         # second providers are all either paid (banned from a free-only band) or
-        # unproven, so two is what passes.
-        "l1-orchestrator": 2,
+        # unproven, so two is what passes. D-1181 takes the vertex leg out of the
+        # render, so this band is one leg deep until the grant comes back -- the
+        # leg stays DECLARED, which is what keeps the two-provider shape restorable.
+        "l1-orchestrator": 1,
         # the openrouter :free legs top out at 262144 < the route's 1M need, so
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
-        # MIMO 2026-10-12 (AO-MIMO-WIRING): +1 each — the subscription legs are
-        # tool_calls proven and 1M, so the resolver counts them in the band.
-        "l2-worker": 4,
-        "l3-driver": 11,
+        # MIMO 2026-10-12 (AO-MIMO-WIRING): the subscription legs are tool_calls
+        # proven and 1M, so the resolver counts them in the band.
+        "l2-worker": 3,
+        "l3-driver": 10,
         "l3-driver-free-only": 9,
     }
+
+    # The bands allowed to sit below two legs: the named single-provider exemption,
+    # and l1-orchestrator for as long as D-1181 holds vertex off.
+    SUB_TWO_BANDS = ("l1-orchestrator-free-only", "l1-orchestrator")
 
     def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
         """TORDER D-TORDER-2 wanted three fallbacks per agentic tier. D657-D2
@@ -3681,10 +3734,16 @@ class ComboCrossProviderTests(unittest.TestCase):
                 len(usable), count,
                 "%s plans %d usable leg(s) (%s), expected %d"
                 % (route_id, len(usable), usable, count))
-            if route_id != "l1-orchestrator-free-only":
-                # the named single-provider exemption is the one route allowed
-                # below two; every other band must still reach a fallback.
+            if route_id not in self.SUB_TWO_BANDS:
+                # the named exemption and the D-1181 suspension are the only routes
+                # allowed below two; every other band must still reach a fallback.
                 self.assertGreaterEqual(len(usable), 2, route_id)
+            if route_id == "l1-orchestrator":
+                # the suspension is dated, not a redesign: the credit leg it waits
+                # on is still the second declared leg of the route.
+                self.assertEqual(self.reg["routes"][route_id]["legs"],
+                                 ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                  "vertex/gemini-3.8-flash"], route_id)
 
     def test_a_new_free_leg_never_trails_a_paid_leg(self):
         # The band order the brief asks for: free -> credit -> paid. A new free
@@ -3774,7 +3833,10 @@ class ComboCrossProviderTests(unittest.TestCase):
         # promise, head and paid tail included.
         self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
         self.assertIn("cohere/command-a-plus-05-2026", after)
-        self.assertIn("vertex/gemini-3.8-flash", after)
+        # D-1181 (2026-10-12): vertex_ai is off, so the credit leg this assertion
+        # used to name is no longer counted; the subscription tail AO-MIMO-V26 put
+        # in its place carries the same promise (1M, tool_calls proven).
+        self.assertIn("xiaomi-mimo/mimo-v2.6-flash", after)
         self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
@@ -4578,10 +4640,16 @@ PROMPT_CACHE_D657 = {model_id: value
                      for model_id in ids}
 
 # AO-MIMO-WIRING (2026-10-12) is a SECOND provenance, not an extension of the
-# D-657 TSV: two MiMo chat ids measured through the OmniRoute gateway the same
-# day the provider was wired. Kept apart from the D657 table on purpose — a row
-# this lane never probed must not read as if it came out of that probe's data.
-PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.5-pro": "true", "mimo-v2.5": "unknown"}
+# D-657 TSV: MiMo ids measured through the OmniRoute gateway the same day the
+# provider was wired. Kept apart from the D657 table on purpose — a row this lane
+# never probed must not read as if it came out of that probe's data.
+# AO-MIMO-V26 (same day) re-names the set: the two v2.5 chat ids retire 2026-10-21
+# and their rows are gone, the two v2.6 chat ids answer cached_tokens on the
+# second identical call (1792 of 1917 / 1856 of 1917), and mimo-v2.5-asr — the row
+# that rides no route — was never cache-probed, so it stays "unknown".
+PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true",
+                           "mimo-v2.6-flash": "true",
+                           "mimo-v2.5-asr": "unknown"}
 PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
 # The source string must name the measurement event that set the verdict, so
 # each accepted provenance is one dated event.
@@ -4613,7 +4681,7 @@ class PromptCacheFieldTests(unittest.TestCase):
         """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
         leg resolved to, at the verdict its TSV cells add up to - no invented
         row, no verdict for a leg the probe never answered.
-        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: two rows
+        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: three rows
         from a gateway smoke the D-657 TSV never saw. The set is still closed —
         a verdict with no measurement behind it is what this test refuses."""
         reg = load_registry()

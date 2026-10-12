@@ -144,31 +144,10 @@
       "reasoning": true
     },
     {
-      "id": "omniroute-l2-worker-clean",
-      "model": "openai/l2-worker-clean",
-      "max_input_tokens": 128000,
-      "max_output_tokens": 32768,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-l3-driver-clean",
-      "model": "openai/l3-driver-clean",
-      "max_input_tokens": 128000,
-      "max_output_tokens": 16384,
-      "reasoning": false
-    },
-    {
       "id": "omniroute-t4-rag",
       "model": "openai/t4-rag",
       "max_input_tokens": 131072,
       "max_output_tokens": 4096,
-      "reasoning": false
-    },
-    {
-      "id": "omniroute-gemini-3.8-flash",
-      "model": "openai/gemini-3.8-flash",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 65536,
       "reasoning": false
     },
     {
@@ -184,13 +163,6 @@
       "max_input_tokens": 131072,
       "max_output_tokens": 16384,
       "reasoning": false
-    },
-    {
-      "id": "omniroute-l1-orchestrator-clean",
-      "model": "openai/l1-orchestrator-clean",
-      "max_input_tokens": 1000000,
-      "max_output_tokens": 32768,
-      "reasoning": true
     },
     {
       "id": "litellm-l1-orchestrator",

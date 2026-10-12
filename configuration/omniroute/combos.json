@@ -191,13 +191,21 @@
     "cheaperinference/kimi-k3",
     "deepseek-v4.1-flash",
     "faik-gpt-6-sol",
+    "gemini-3.8-flash",
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
+    "l1-orchestrator-clean",
+    "l2-orchestrator-clean",
+    "l2-worker-clean",
+    "l3-driver-clean",
+    "l3-implementer-clean",
+    "l3-researcher-clean",
     "opus-5-5",
     "ovh-gpt-oss-120b",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
-    "spark-1.3-contributor"
+    "spark-1.3-contributor",
+    "vertex-gemini-3.8-flash"
   ],
   "d657_combos": [
     "l1-orchestrator",
@@ -224,14 +232,6 @@
   ],
   "combos": [
     {
-      "name": "gemini-3.8-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
       "name": "groq-qwen3.8-27b",
       "strategy": "priority",
       "context": "128k",
@@ -244,16 +244,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l1-orchestrator-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -269,16 +260,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l2-orchestrator-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -297,16 +279,7 @@
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi-mimo/mimo-v2.5-pro"
-      ]
-    },
-    {
-      "name": "l2-worker-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi-mimo/mimo-v2.6-pro"
       ]
     },
     {
@@ -333,16 +306,7 @@
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
         "ovh/Qwen3.5-397B-A17B",
-        "vertex/gemini-3.8-flash",
-        "xiaomi-mimo/mimo-v2.5"
-      ]
-    },
-    {
-      "name": "l3-driver-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi-mimo/mimo-v2.6-flash"
       ]
     },
     {
@@ -375,16 +339,7 @@
         "groq/openai/gpt-oss-120b",
         "openrouter/cohere/north-mini-code:free",
         "cohere/command-a-plus-05-2026",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l3-implementer-clean",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "ovh/Qwen3.8-27B"
       ]
     },
     {
@@ -393,16 +348,7 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
-      ]
-    },
-    {
-      "name": "l3-researcher-clean",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -410,8 +356,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -429,8 +374,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -473,14 +417,6 @@
         "cohere/command-r-plus-08-2024",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "cohere/command-a-03-2025"
-      ]
-    },
-    {
-      "name": "vertex-gemini-3.8-flash",
-      "strategy": "priority",
-      "context": "1M",
-      "models": [
-        "vertex/gemini-3.8-flash"
       ]
     }
   ]

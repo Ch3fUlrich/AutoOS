@@ -19,7 +19,9 @@ case is a mutated copy rather than a hand-edited registry file:
       resolve to the MiMo provider) names an id the fixture's `provider_models`
       answers -- an id the gateway does not list is an id it cannot serve;
   (2) no MiMo id sits in `RETIRED` (the dated table below): an id past its
-      retirement answers 400 forever, so the table is the alarm;
+      retirement answers 400 forever, so the table is the alarm. Read from the
+      legs AND from `models`, since a retirement is a delete-the-row instruction
+      and a leftover row with no leg is a half-done swap;
   (3) `context_advertised` / `output_max` equal the fixture's
       `context_length` / `max_output_tokens` for that id -- a row that promises
       more window than the gateway reports is a 413 waiting for the biggest
@@ -66,11 +68,13 @@ GATEWAY_ID = "xiaomi-mimo"
 # an ISO date means "fails from that day on" (so a lane can record a scheduled
 # retirement before it lands), null or absent means "fails now".
 #
-# Extend it on 2026-10-21 -- the MiMo auto-route retires the v2.5 chat ids that
-# day (v2.5 -> v2.6 on 2026-10-14) -- with:
-#     RETIRED = {"mimo-v2.5": "2026-10-21", "mimo-v2.5-pro": "2026-10-21"}
-# and swap the legs to mimo-v2.6-pro / mimo-v2.6-flash, then refresh the fixture.
-RETIRED: dict = {}
+# The MiMo auto-route re-titles v2.5 -> v2.6 on 2026-10-14 and stops serving the
+# two v2.5 chat ids on 2026-10-21 (fixture `_comment`, AO-MIMO-V26). The legs were
+# swapped to mimo-v2.6-pro / mimo-v2.6-flash and the v2.5 chat rows deleted the day
+# the swap landed, so nothing here fires today: the table is the alarm that keeps
+# them deleted, and the fails-from-that-day-on spelling is what lets a lane record
+# a scheduled retirement before it lands.
+RETIRED: dict = {"mimo-v2.5-pro": "2026-10-21", "mimo-v2.5": "2026-10-21"}
 
 # providers.<key> for the MiMo connection: the registry keys providers in
 # snake_case and spells a leg with the gateway's own id, so both are looked up.
@@ -161,6 +165,15 @@ def fixture_rows(fixture):
             if isinstance(row, dict) and row.get("id")}
 
 
+def _fixture_row(fixture, model_id):
+    """The fixture's own row object for `model_id`, so a red case can mutate the
+    gateway side instead of the registry side."""
+    for row in fixture.get("provider_models") or []:
+        if isinstance(row, dict) and row.get("id") == model_id:
+            return row
+    raise AssertionError("the synthetic fixture carries no %r row" % model_id)
+
+
 def check_provider_present(registry, fixture):
     """The registry must actually carry the provider this fixture describes.
 
@@ -186,7 +199,13 @@ def check_model_ids(registry, fixture):
 
 
 def check_retired_ids(registry, fixture, retired=None, today=None):
-    """(2) no MiMo id sits in the known-retired table once its date has passed."""
+    """(2) the registry carries no id the gateway has said it stops serving.
+
+    Read from both sides, since a retirement is a delete-the-row instruction and not
+    only a re-leg one: a leg that would route work to a retired id (the route names
+    it, which is where the resolver reads), and a `models.<key>` row for one — a
+    row with no leg is still a row claiming the gateway serves that id, and it is
+    what `render ide` / `render models-doc` would publish (AO-MIMO-V26)."""
     if retired is None:
         retired = RETIRED
     problems = []
@@ -199,6 +218,17 @@ def check_retired_ids(registry, fixture, retired=None, today=None):
                 "leg %r is model %r, retired%s -- the gateway answers 400 for a "
                 "retired id; swap the leg and refresh the fixture"
                 % (leg, model_id, " on %s" % until if until is not None else ""))
+    for model_id in sorted(registry.get("models") or {}):
+        if model_id not in retired:
+            continue
+        if any(model_id == mid for _r, _l, mid in mimo_legs(registry)):
+            continue                      # the leg line above already named it
+        until = retired[model_id]
+        if until is None or str(today or _today()) >= str(until):
+            problems.append(
+                "models.%s is retired%s -- no leg routes to it, but the registry "
+                "still carries a row for an id the gateway answers 400 for; delete "
+                "the row" % (model_id, " on %s" % until if until is not None else ""))
     return problems
 
 
@@ -307,7 +337,8 @@ def _today():
 
 def synth_registry():
     """The shape the real registry has for MiMo, at the smallest size that still
-    exercises every check: one provider row, two model rows, one leg each."""
+    exercises every check: one provider row, three model rows (two legged, one
+    row-only like the shipped asr id), one vertex row to fall through to."""
     return {
         "version": "2026-10-12",
         "providers": {
@@ -326,23 +357,35 @@ def synth_registry():
                           "trains_on_prompts": False},
         },
         "models": {
-            "mimo-v2.5-pro": {
-                "id": "mimo-v2.5-pro", "family": "xiaomi",
+            "mimo-v2.6-pro": {
+                "id": "mimo-v2.6-pro", "family": "xiaomi",
                 "context_advertised": 1048576,
                 "context_usable": {"tokens": 524288, "source": "default"},
                 "output_max": 131072, "reasoning": True, "effort_ladder": [],
                 "tool_calls": "proven", "price_in": 0.0, "price_out": 0.0,
                 "prompt_cache": "true",
-                "capabilities": {"text": "proven", "image_in": "broken"},
+                "capabilities": {"text": "proven", "image_in": "proven",
+                                 "audio_in": "proven", "audio_out": "unproven",
+                                 "video_in": "unproven"},
             },
-            "mimo-v2.5": {
-                "id": "mimo-v2.5", "family": "xiaomi",
+            "mimo-v2.6-flash": {
+                "id": "mimo-v2.6-flash", "family": "xiaomi",
                 "context_advertised": 1048576,
                 "context_usable": {"tokens": 524288, "source": "default"},
                 "output_max": 131072, "reasoning": True, "effort_ladder": [],
                 "tool_calls": "proven", "price_in": 0.0, "price_out": 0.0,
-                "prompt_cache": "unknown",
+                "prompt_cache": "true",
                 "capabilities": {"text": "proven", "image_in": "proven"},
+            },
+            "mimo-v2.5-asr": {
+                "id": "mimo-v2.5-asr", "family": "xiaomi",
+                "context_advertised": 8192,
+                "context_usable": {"tokens": 4096, "source": "default"},
+                "output_max": 2048, "reasoning": True, "effort_ladder": [],
+                "tool_calls": "unproven", "price_in": 0.0, "price_out": 0.0,
+                "prompt_cache": "unknown",
+                "capabilities": {"text": "unproven", "image_in": "unproven",
+                                 "audio_in": "proven"},
             },
             "gemini-3.8-flash": {
                 "id": "gemini-3.8-flash", "family": "google",
@@ -354,19 +397,34 @@ def synth_registry():
         },
         "routes": {
             "l2-worker": {"id": "l2-worker", "class": "mid", "strategy": "priority",
-                          "legs": ["xiaomi-mimo/mimo-v2.5-pro"]},
+                          "legs": ["xiaomi-mimo/mimo-v2.6-pro"]},
             "l3-driver": {"id": "l3-driver", "class": "cheap", "strategy": "priority",
-                          "legs": ["xiaomi-mimo/mimo-v2.5", "vertex/gemini-3.8-flash"]},
+                          "legs": ["xiaomi-mimo/mimo-v2.6-flash",
+                                   "vertex/gemini-3.8-flash"]},
         },
     }
 
 
 def synth_fixture():
-    """The gateway's answer for the same two ids, in the fixture's own shape."""
+    """The gateway's answer for the same ids, in the fixture's own shape: the two
+    v2.6 chat rows advertise vision, the asr row does not, and the v2.5 chat ids
+    are still listed (they retire 2026-10-21, not before)."""
     return {
         "captured": "2026-10-12",
-        "gateway_v1_models_ids": ["xiaomi-mimo/mimo-v2.5", "xiaomi-mimo/mimo-v2.5-pro"],
+        "gateway_v1_models_ids": [
+            "xiaomi-mimo/mimo-v2.5", "xiaomi-mimo/mimo-v2.5-asr",
+            "xiaomi-mimo/mimo-v2.5-pro", "xiaomi-mimo/mimo-v2.6-flash",
+            "xiaomi-mimo/mimo-v2.6-pro"],
         "provider_models": [
+            {"id": "mimo-v2.6-pro",
+             "capabilities": {"vision": True, "tool_calling": True, "reasoning": True},
+             "context_length": 1048576, "max_output_tokens": 131072},
+            {"id": "mimo-v2.6-flash",
+             "capabilities": {"vision": True, "tool_calling": True, "reasoning": True},
+             "context_length": 1048576, "max_output_tokens": 131072},
+            {"id": "mimo-v2.5-asr",
+             "capabilities": {"vision": False, "tool_calling": True, "reasoning": True},
+             "context_length": 8192, "max_output_tokens": 2048},
             {"id": "mimo-v2.5-pro",
              "capabilities": {"vision": False, "tool_calling": True, "reasoning": True},
              "context_length": 1048576, "max_output_tokens": 131072},
@@ -375,8 +433,11 @@ def synth_fixture():
              "context_length": 1048576, "max_output_tokens": 131072},
         ],
         "live_call_results": {
-            "mimo-v2.5-pro": {"text": "200", "tools": "200 tool_call"},
-            "mimo-v2.5": {"text": "200", "tools": "200 tool_call"},
+            "mimo-v2.6-pro": {"text": "200", "tools": "200 tool_call",
+                              "image_in": "200 image_tokens 9"},
+            "mimo-v2.6-flash": {"text": "200", "tools": "200 tool_call",
+                                "image_in": "200 image_tokens 9"},
+            "mimo-v2.5-asr": {"audio_in": "200 audio_tokens 7"},
         },
     }
 
@@ -405,27 +466,39 @@ class MimoRegistryAgainstFixture(unittest.TestCase):
         problems = catalog_problems(self.registry, self.fixture)
         self.assertEqual(problems, [], "\n".join(problems))
 
-    def test_both_interim_legs_ride_the_coding_combos(self):
-        """AO-MIMO-WIRING placement: each MiMo leg closes its chain — behind the
-        vertex credit leg in both. The brief asked for "after the free legs,
-        before vertex"; contract rule (b) ranks `subscription` with `paid`
-        (tools/combo-contract.py TIER_ORDER) and tools/autoos_resolver.py holds a
-        non-free tier back as a last resort while a free/trial/credit leg is
-        healthy, so the tail is the only position the shipped spend model admits.
-        The MiMo ToS allows coding tools only, so these two ids and no others."""
+    def test_both_v2_6_legs_ride_the_coding_combos(self):
+        """AO-MIMO-WIRING placement, re-leged to the v2.6 ids by AO-MIMO-V26: each
+        MiMo leg closes its chain — behind the vertex credit leg in both. The brief
+        asked for "after the free legs, before vertex"; contract rule (b) ranks
+        `subscription` with `paid` (tools/combo-contract.py TIER_ORDER) and
+        tools/autoos_resolver.py holds a non-free tier back as a last resort while a
+        free/trial/credit leg is healthy, so the tail is the only position the shipped
+        spend model admits. The tail is unchanged by the swap: same index, new id.
+        The MiMo ToS allows coding tools only, so these two ids and no others.
+
+        And with D-1181's `providers.vertex_ai.available: false`, the vertex leg is
+        declared but dropped from every render, which makes the MiMo leg the last
+        SERVED leg of both chains — the fact the second half of this test pins."""
         legs = self.registry["routes"]["l2-worker"]["legs"]
-        self.assertIn("xiaomi-mimo/mimo-v2.5-pro", legs)
+        self.assertIn("xiaomi-mimo/mimo-v2.6-pro", legs)
         self.assertLess(legs.index("openrouter/nvidia/nemotron-3-super-120b-a12b:free"),
-                        legs.index("xiaomi-mimo/mimo-v2.5-pro"))
+                        legs.index("xiaomi-mimo/mimo-v2.6-pro"))
         self.assertEqual(legs[-2:], ["vertex/gemini-3.8-flash",
-                                     "xiaomi-mimo/mimo-v2.5-pro"])
+                                     "xiaomi-mimo/mimo-v2.6-pro"])
         legs = self.registry["routes"]["l3-driver"]["legs"]
-        self.assertIn("xiaomi-mimo/mimo-v2.5", legs)
+        self.assertIn("xiaomi-mimo/mimo-v2.6-flash", legs)
         self.assertLess(legs.index("cohere/command-a-plus-05-2026"),
-                        legs.index("xiaomi-mimo/mimo-v2.5"))
+                        legs.index("xiaomi-mimo/mimo-v2.6-flash"))
         self.assertEqual(legs[-3:], ["ovhcloud/Qwen3.5-397B-A17B",
                                      "vertex/gemini-3.8-flash",
-                                     "xiaomi-mimo/mimo-v2.5"])
+                                     "xiaomi-mimo/mimo-v2.6-flash"])
+        for route_id, leg in (("l2-worker", "xiaomi-mimo/mimo-v2.6-pro"),
+                              ("l3-driver", "xiaomi-mimo/mimo-v2.6-flash")):
+            served = registry_tool.gateway_legs(self.registry["routes"][route_id],
+                                                self.registry)
+            self.assertEqual(served[-1], leg,
+                             "%s: %r is not the last leg the gateway can actually "
+                             "serve (vertex is off)" % (route_id, leg))
 
     def test_the_legs_reach_no_route_beyond_the_two_coding_combos(self):
         """The Token Plan permits coding tools and bans "clearly non-coding
@@ -441,41 +514,82 @@ class MimoRegistryAgainstFixture(unittest.TestCase):
             "a MiMo leg rides a route the ToS does not permit")
         self.assertEqual(
             {leg: sorted(routes) for leg, routes in seen.items()},
-            {"xiaomi-mimo/mimo-v2.5-pro": ["l2-worker"],
-             "xiaomi-mimo/mimo-v2.5": ["l3-driver"]})
+            {"xiaomi-mimo/mimo-v2.6-pro": ["l2-worker"],
+             "xiaomi-mimo/mimo-v2.6-flash": ["l3-driver"]})
+
+    def test_the_asr_id_carries_a_row_and_no_leg(self):
+        """mimo-v2.5-asr answers 200 for an `input_audio` part and nothing else —
+        its `text` cell is unproven and it takes 8192 of window — so it is a row the
+        catalog keeps for the record and not a leg any tier route may carry."""
+        self.assertIn("mimo-v2.5-asr", self.registry["models"])
+        self.assertEqual([leg for _r, leg, mid in mimo_legs(self.registry)
+                          if mid == "mimo-v2.5-asr"], [])
 
 
 class RetiredTableChecker(unittest.TestCase):
-    """(2) on synthetic data, so the mechanism is proven while `RETIRED` is empty.
+    """(2): the table the shipped registry is checked against, and the mechanism
+    proven on synthetic data — a mutated copy that carries a retired id, since
+    nothing in the shipped registry may.
 
-    The table is what a later lane extends on 2026-10-21, when the v2.5 chat ids
-    retire; nothing in the shipped registry is retired yet."""
+    The v2.5 chat ids retire 2026-10-21 (v2.5 -> v2.6 auto-route on 2026-10-14), so
+    the date has not passed at commit time and the date gate alone would stay quiet
+    even on a wrong registry. The shipped test therefore asserts the registry carries
+    neither id outright, whatever the date, which is what the swap was for."""
 
-    def test_the_shipped_table_is_empty_and_names_nothing(self):
-        self.assertEqual(RETIRED, {})
-        self.assertEqual(check_retired_ids(synth_registry(), synth_fixture(),
-                                          retired=RETIRED, today="2026-10-12"), [])
+    def _plant(self, model_id, leg_route="l2-worker"):
+        """A synth copy carrying a retired id as both a row and a leg — the shape the
+        check must name, which the shipped registry no longer has."""
+        registry, fixture = synth_registry(), synth_fixture()
+        registry["models"][model_id] = {"id": model_id}
+        registry["routes"][leg_route]["legs"].insert(
+            0, "%s/%s" % (GATEWAY_ID, model_id))
+        return registry, fixture
+
+    def test_the_table_names_the_two_retiring_chat_ids(self):
+        self.assertEqual(RETIRED, {"mimo-v2.5-pro": "2026-10-21",
+                                   "mimo-v2.5": "2026-10-21"})
+
+    def test_the_shipped_registry_carries_neither_retired_id(self):
+        """No leg and no model row for an id the gateway retires — read with
+        `today` forced to the retirement date, so this fires on a half-done swap
+        (legs moved, rows left behind) instead of waiting for 2026-10-21."""
+        registry = load_registry()
+        for model_id in sorted(RETIRED):
+            self.assertNotIn(model_id, registry.get("models") or {},
+                             "models.%s is retired 2026-10-21; delete the row" % model_id)
+        problems = check_retired_ids(registry, load_fixture(), retired=RETIRED,
+                                     today="2026-10-21")
+        self.assertEqual(problems, [], "\n".join(problems))
 
     def test_a_retired_id_with_a_passed_date_is_named(self):
-        registry, fixture = synth_registry(), synth_fixture()
-        retired = {"mimo-v2.5": "2026-10-21"}
-        problems = check_retired_ids(registry, fixture, retired=retired,
+        registry, fixture = self._plant("mimo-v2.5")
+        problems = check_retired_ids(registry, fixture, retired=RETIRED,
                                      today="2026-10-22")
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("mimo-v2.5", problems[0])
         self.assertIn("retired on 2026-10-21", problems[0])
 
     def test_a_retirement_recorded_early_does_not_fire_early(self):
-        registry, fixture = synth_registry(), synth_fixture()
-        retired = {"mimo-v2.5": "2026-10-21"}
-        self.assertEqual(check_retired_ids(registry, fixture, retired=retired,
+        registry, fixture = self._plant("mimo-v2.5")
+        self.assertEqual(check_retired_ids(registry, fixture, retired=RETIRED,
                                           today="2026-10-12"), [])
 
     def test_a_dateless_entry_fires_immediately(self):
-        registry, fixture = synth_registry(), synth_fixture()
+        registry, fixture = self._plant("mimo-v2.5-pro")
         problems = check_retired_ids(registry, fixture, retired={"mimo-v2.5-pro": None})
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("xiaomi-mimo/mimo-v2.5-pro", problems[0])
+
+    def test_a_retired_row_with_no_leg_is_still_named(self):
+        """A leftover model row is the half-done swap: no route points at it, but the
+        registry still claims the gateway serves an id it answers 400 for."""
+        registry, fixture = synth_registry(), synth_fixture()
+        registry["models"]["mimo-v2.5-pro"] = {"id": "mimo-v2.5-pro"}
+        problems = check_retired_ids(registry, fixture, retired=RETIRED,
+                                     today="2026-10-21")
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("models.mimo-v2.5-pro", problems[0])
+        self.assertIn("delete the row", problems[0])
 
 
 class RedCaseCheckerFunctions(unittest.TestCase):
@@ -493,17 +607,33 @@ class RedCaseCheckerFunctions(unittest.TestCase):
     def test_model_id_missing_from_the_fixture_is_named(self):
         registry, fixture = mutate(
             lambda reg, fx: reg["models"].__setitem__("mimo-v9.9-turbo", dict(
-                reg["models"]["mimo-v2.5"], id="mimo-v9.9-turbo")))
+                reg["models"]["mimo-v2.6-flash"], id="mimo-v9.9-turbo")))
         registry["routes"]["l2-worker"]["legs"] = ["xiaomi-mimo/mimo-v9.9-turbo"]
         problems = check_model_ids(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("mimo-v9.9-turbo", problems[0])
         self.assertIn("provider_models", problems[0])
 
+    def test_a_retired_id_left_in_the_registry_is_named_by_the_missing_check_too(self):
+        """The shipped fixture still lists the v2.5 chat ids until 2026-10-21, so a
+        leftover row is not a missing-from-fixture problem — RETIRED is the only
+        check that sees it. Pinned here so nobody "fixes" the fixture by deleting
+        those rows and calls the guard sufficient."""
+        registry, fixture = self._plant_rows()
+        self.assertEqual(check_model_ids(registry, fixture), [])
+        self.assertTrue(check_retired_ids(registry, fixture, retired=RETIRED,
+                                         today="2026-10-21"))
+
+    def _plant_rows(self):
+        registry, fixture = synth_registry(), synth_fixture()
+        for model_id in sorted(RETIRED):
+            registry["models"][model_id] = {"id": model_id}
+        return registry, fixture
+
     def test_a_route_leg_naming_an_unknown_mimo_id_is_named_with_its_route(self):
         registry, fixture = mutate(
             lambda reg, fx: reg["models"].__setitem__("mimo-v9.9-turbo", dict(
-                reg["models"]["mimo-v2.5"], id="mimo-v9.9-turbo")))
+                reg["models"]["mimo-v2.6-flash"], id="mimo-v9.9-turbo")))
         registry["routes"]["l3-driver"]["legs"].insert(
             0, "xiaomi-mimo/mimo-v9.9-turbo")
         problems = check_route_legs(registry, fixture)
@@ -513,7 +643,7 @@ class RedCaseCheckerFunctions(unittest.TestCase):
 
     def test_a_window_that_disagrees_with_the_gateway_is_named(self):
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5-pro"].__setitem__(
+            lambda reg, fx: reg["models"]["mimo-v2.6-pro"].__setitem__(
                 "context_advertised", 131072))
         problems = check_windows(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
@@ -522,48 +652,51 @@ class RedCaseCheckerFunctions(unittest.TestCase):
 
     def test_an_output_max_that_disagrees_with_the_gateway_is_named(self):
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5"].__setitem__(
+            lambda reg, fx: reg["models"]["mimo-v2.6-flash"].__setitem__(
                 "output_max", 32768))
         problems = check_windows(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("output_max", problems[0])
 
     def test_image_in_proven_against_vision_false_is_named(self):
+        """The row claims image input; the gateway's own row for that id says it has
+        no vision. Proven either way — the shipped v2.6 rows answer image_tokens 200,
+        so the contradiction is created on the fixture side."""
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5-pro"]["capabilities"].__setitem__(
-                "image_in", "proven"))
+            lambda reg, fx: _fixture_row(fx, "mimo-v2.6-pro")["capabilities"]
+            .__setitem__("vision", False))
         problems = check_image_capability(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
-        self.assertIn("mimo-v2.5-pro", problems[0])
+        self.assertIn("mimo-v2.6-pro", problems[0])
         self.assertIn("vision cell is false", problems[0])
 
     def test_image_in_broken_against_vision_true_is_named(self):
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5"]["capabilities"].__setitem__(
+            lambda reg, fx: reg["models"]["mimo-v2.6-flash"]["capabilities"].__setitem__(
                 "image_in", "broken"))
         problems = check_image_capability(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
-        self.assertIn("mimo-v2.5", problems[0])
+        self.assertIn("mimo-v2.6-flash", problems[0])
         self.assertIn("vision cell is true", problems[0])
 
     def test_an_unproven_capability_contradicts_nothing(self):
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5"]["capabilities"].__setitem__(
+            lambda reg, fx: reg["models"]["mimo-v2.6-flash"]["capabilities"].__setitem__(
                 "image_in", "unproven"))
         self.assertEqual(check_image_capability(registry, fixture), [])
 
     def test_a_leg_on_an_id_the_gateway_refuses_to_chat_is_named(self):
         registry, fixture = mutate(
-            lambda reg, fx: fx["live_call_results"]["mimo-v2.5-pro"].__setitem__(
+            lambda reg, fx: fx["live_call_results"]["mimo-v2.6-pro"].__setitem__(
                 "chat", "400 not in live catalog"))
         problems = check_chat_callable(registry, fixture)
         self.assertEqual(len(problems), 1, problems)
-        self.assertIn("xiaomi-mimo/mimo-v2.5-pro", problems[0])
+        self.assertIn("xiaomi-mimo/mimo-v2.6-pro", problems[0])
 
     def test_absent_capabilities_block_is_not_a_contradiction(self):
         """The field is optional: a row that says nothing claims nothing."""
         registry, fixture = mutate(
-            lambda reg, fx: reg["models"]["mimo-v2.5"].pop("capabilities"))
+            lambda reg, fx: reg["models"]["mimo-v2.6-flash"].pop("capabilities"))
         self.assertEqual(check_image_capability(registry, fixture), [])
 
 

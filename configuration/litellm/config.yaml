@@ -61,7 +61,7 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l2-worker
     litellm_params:
-      model: xiaomi-mimo/mimo-v2.5-pro
+      model: xiaomi-mimo/mimo-v2.6-pro
       api_base: https://token-plan-ams.xiaomimimo.com/v1
       api_key: os.environ/XIAOMI_MIMO_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
@@ -145,7 +145,7 @@ model_list:
       api_key: os.environ/OVHCLOUD_API_KEY
   - model_name: l3-driver
     litellm_params:
-      model: xiaomi-mimo/mimo-v2.5
+      model: xiaomi-mimo/mimo-v2.6-flash
       api_base: https://token-plan-ams.xiaomimimo.com/v1
       api_key: os.environ/XIAOMI_MIMO_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
