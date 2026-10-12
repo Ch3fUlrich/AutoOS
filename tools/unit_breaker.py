@@ -115,6 +115,7 @@ def run_command(cmd):
             if text:
                 last = text
         code = proc.wait()
+        proc.stderr.close()
     finally:
         for s, h in old.items():
             signal.signal(s, h)
@@ -122,19 +123,23 @@ def run_command(cmd):
 
 
 def trip(unit, data, env, runner, directory):
-    disabled = False
-    try:
-        disabled = runner(["systemctl", "--user", "disable", "--now", unit]) == 0
-    except (OSError, subprocess.SubprocessError):
-        disabled = False
-    if not disabled:
-        (directory / (unit + ".tripped")).write_text(_utc() + "\n")
+    """Persist the trip and alert BEFORE `disable --now`: stopping the unit kills this very wrapper."""
     data["tripped"] = True
     if not data.get("alerted"):
         data["alerted"] = True
         tail = data.get("last", "")[:ALERT_TAIL_CHARS]
         _alert(env, "%s BREAKER %s tripped after %d x %s: %s"
                % (_utc(), unit, data["count"], sig_short(data["sig"]), tail))
+    _write(directory / (unit + ".json"), data)
+    old = signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the stop long enough to finish
+    try:
+        disabled = runner(["systemctl", "--user", "disable", "--now", unit]) == 0
+    except (OSError, subprocess.SubprocessError):
+        disabled = False
+    finally:
+        signal.signal(signal.SIGTERM, old)
+    if not disabled:
+        (directory / (unit + ".tripped")).write_text(_utc() + "\n")
 
 
 def wrap(unit, threshold, cmd, env, runner):

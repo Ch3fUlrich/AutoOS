@@ -113,6 +113,19 @@ class TestWrapper(Base):
             self.wrap("w.service", failing(3, "a"))
         self.assertEqual(len(self.alerts()), 2)
 
+    def test_trip_is_persisted_and_alerted_before_disable_runs(self):
+        """`disable --now` kills the wrapper itself; state and alert must already be on disk."""
+        seen = {}
+
+        def runner(argv):
+            seen["state"] = json.loads(self.state_file("w.service").read_text())
+            seen["alerts"] = list(self.alerts())
+            return 0
+        for _ in range(3):
+            self.wrap("w.service", failing(3, "a"), runner=runner)
+        self.assertTrue(seen["state"]["tripped"])
+        self.assertEqual(len(seen["alerts"]), 1)
+
     def test_signal_stop_is_not_a_failure(self):
         for _ in range(5):
             self.wrap("w.service", [PY, "-c", "import sys; sys.exit(143)"])

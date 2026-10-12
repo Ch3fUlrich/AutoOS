@@ -174,7 +174,8 @@ def lane_of_row(row) -> str:
     `key:<api key NAME>` (P1.2: 70-84 % of rows carry no tag); "(untagged)" only when the key has no name.
     Only the NAME is read; the key value never reaches this tool."""
     tag = row.get("sessionTag") if isinstance(row, dict) else None
-    if tag and not FALLBACK_TAG.match(str(tag)):
+    tag = str(tag).strip() if tag else ""
+    if tag and not FALLBACK_TAG.match(tag):
         return lane_of(tag)
     name = row.get("apiKeyName") if isinstance(row, dict) else None
     return KEY_LANE_PREFIX + str(name).strip() if name and str(name).strip() else UNTAGGED_LANE

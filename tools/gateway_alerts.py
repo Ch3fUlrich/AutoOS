@@ -48,6 +48,11 @@ def _utc(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _db_stamp(dt):
+    """Same shape as call_logs.timestamp (`2026-10-12T13:57:20.141Z`) so the text compare is exact."""
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (dt.microsecond // 1000)
+
+
 def _read_state(path):
     try:
         data = json.loads(Path(path).read_text())
@@ -98,7 +103,7 @@ def signals(db_path, since_iso):
 
 def check(db_path, alert_file, state_path, now, window_min=60):
     """Run one check; return the providers alerted now."""
-    since = _utc(now - datetime.timedelta(minutes=window_min))
+    since = _db_stamp(now - datetime.timedelta(minutes=window_min))
     found = signals(db_path, since)
     state = _read_state(state_path)
     alerted = []
