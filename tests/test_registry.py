@@ -4560,6 +4560,20 @@ PROMPT_CACHE_D657 = {model_id: value
                      for value, ids in _D657_BY_VALUE.items()
                      for model_id in ids}
 
+# AO-MIMO-WIRING (2026-10-12) is a SECOND provenance, not an extension of the
+# D-657 TSV: two MiMo chat ids measured through the OmniRoute gateway the same
+# day the provider was wired. Kept apart from the D657 table on purpose — a row
+# this lane never probed must not read as if it came out of that probe's data.
+# AO-MIMO-V26 (same day): the v2.5 chat ids retire 2026-10-21 and are not wired; the
+# two v2.6 chat ids answer cached_tokens on the second identical call (1792 of 1917 /
+# 1856 of 1917).
+PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true", "mimo-v2.6-flash": "true"}
+PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
+# The source string must name the measurement event that set the verdict, so
+# each accepted provenance is one dated event.
+PROMPT_CACHE_PROVENANCES = ("probe D-657 2026-10-08 central+workstation",
+                            "gateway smoke 2026-10-12")
+
 
 
 class PromptCacheFieldTests(unittest.TestCase):
@@ -4584,12 +4598,15 @@ class PromptCacheFieldTests(unittest.TestCase):
     def test_the_committed_registry_carries_the_D657_probe_rows_and_nothing_else(self):
         """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
         leg resolved to, at the verdict its TSV cells add up to - no invented
-        row, no verdict for a leg the probe never answered."""
+        row, no verdict for a leg the probe never answered.
+        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: two rows
+        from a gateway smoke the D-657 TSV never saw. The set is still closed —
+        a verdict with no measurement behind it is what this test refuses."""
         reg = load_registry()
         rows = {model_id: model["prompt_cache"]
                 for model_id, model in reg["models"].items()
                 if "prompt_cache" in model}
-        self.assertEqual(rows, PROMPT_CACHE_D657)
+        self.assertEqual(rows, PROMPT_CACHE_ROWS)
         self.assertEqual(registry.check_registry(reg), [])
 
     def test_every_set_verdict_names_where_it_came_from(self):
@@ -4597,8 +4614,12 @@ class PromptCacheFieldTests(unittest.TestCase):
         for model_id, model in sorted(reg["models"].items()):
             if "prompt_cache" not in model:
                 continue
-            self.assertIn("probe D-657 2026-10-08 central+workstation",
-                          model["prompt_cache_source"], model_id)
+            self.assertIn(
+                True, [names in model["prompt_cache_source"]
+                       for names in PROMPT_CACHE_PROVENANCES],
+                "%s: prompt_cache_source %r names no probe event in %s"
+                % (model_id, model["prompt_cache_source"],
+                   PROMPT_CACHE_PROVENANCES))
 
     def test_the_four_strings_validate(self):
         for value in ("true", "documented", "false", "unknown"):
