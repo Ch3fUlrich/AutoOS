@@ -24,7 +24,8 @@
     "the vendor's 'full-modal understanding' for v2.6; the registry capability flags",
     "stay 'unproven' until a live call proves them (fixes-L2-mimo smoke).",
     "Retire the v2.5 ids from routes after 2026-10-21 (vendor retirement).",
-    "mimo-v2.5-asr: speech recognition over POST /chat/completions with an input_audio part (vendor model table: 8k context, 2k output; mp3/wav only)."
+    "mimo-v2.5-asr: speech recognition over POST /chat/completions with an input_audio part (vendor model table: 8k context, 2k output; mp3/wav only).",
+    "openrouter/free: the OpenRouter free-model router. It answers 200 through the gateway but is not in GET /v1/models, so model-list consumers (OWUI sync) flag it (fixes-L1 D-1199). No limits declared: the router picks the underlying model."
   ],
   "models": [
     {
@@ -50,6 +51,11 @@
       "max_input_tokens": 8192,
       "max_output_tokens": 2048,
       "supportsVision": false
+    },
+    {
+      "provider": "openrouter",
+      "id": "free",
+      "name": "OpenRouter Free"
     }
   ]
 }
