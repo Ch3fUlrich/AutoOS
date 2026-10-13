@@ -2132,7 +2132,8 @@ def stamp_worker_gateway(env: dict) -> bool:
     return True
 
 
-def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> dict:
+def worker_env(plan: dict, key: str | None = None, base: dict | None = None,
+               zen_key: str | None = None) -> dict:
     """The environment of one spawned worker: an allowlist of the caller's
     environment, the plan's own passlisted entries, the worker's single gateway
     ``key``, and the guards that stop git from prompting or reading a stored
@@ -2141,6 +2142,11 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     The caller's ``AUTOOS_OMNIROUTE_KEY`` is never inherited — the minted one is
     added only when this run genuinely goes through the gateway. ``base`` exists
     so the scrub is testable without touching the real environment.
+
+    ``zen_key`` is the same rule for the one credential the *promo* path needs
+    (D-1214): popped first so the caller's own ``OPENCODE_API_KEY`` is never
+    inherited, set only for the plans `plan_zen_key()` decided are entitled to
+    one, and kept off the plan passlist because the name is secret-shaped.
 
     A gateway-backed opencode worker's ``OPENCODE_CONFIG_CONTENT`` overlay is
     stamped with the address `gateway_up()` bound (``stamp_worker_gateway``,
@@ -2200,6 +2206,12 @@ def worker_env(plan: dict, key: str | None = None, base: dict | None = None) -> 
     env.pop("AUTOOS_OMNIROUTE_KEY", None)
     if key:
         env["AUTOOS_OMNIROUTE_KEY"] = key
+    # D-1214: the promo credential, same discipline as the gateway key above —
+    # popped so a caller's OPENCODE_API_KEY never reaches a seat that was never
+    # entitled to one, set only for the plans plan_zen_key() decided are free.
+    env.pop(ZEN_KEY_ENV, None)
+    if zen_key:
+        env[ZEN_KEY_ENV] = zen_key
     # LAYERFENCE (fix 1): the layer the child runs at is the spawner's decision,
     # made from the spawner's own environment, and nothing else gets a vote — the
     # allowlist copy above and a plan entry below both could otherwise name it, and
@@ -5029,6 +5041,66 @@ def client_key(root: str) -> str | None:
         except KeyError:
             continue
     return None
+
+
+# D-1214: opencode's own free promo ids (`opencode/<id>-free`) are served by Zen,
+# which since 2026-10 rejects the anonymous free-tier credential ("Invalid
+# credential"). The operator's Zen key is the `zen` field of api-keys.yml, and
+# opencode takes it from OPENCODE_API_KEY.
+ZEN_KEYS_FIELD = "zen"
+ZEN_KEY_ENV = "OPENCODE_API_KEY"
+ZEN_MISSING_LINE = ("autoos-agent: no zen key in configuration/api-keys.yml "
+                    "(field zen); opencode/*-free seats may fail with "
+                    "Invalid credential")
+
+
+def zen_key(root: str) -> str | None:
+    """The OpenCode Zen key, or None when no checkout's api-keys.yml holds one.
+
+    `client_key`'s shape: each checkout's file in `key_files()` order, the field
+    by NAME only, parsed by the repo's own keys reader (tools/keys_file.py) — the
+    reader is what makes `REPLACE_WITH_ZEN_KEY` and an empty field read as no key
+    rather than a truthy one. The value is returned or None; never printed,
+    logged or recorded.
+    """
+    try:
+        from keys_file import read_keys
+    except ImportError:
+        return None
+    for path in key_files(root):
+        if not os.path.isfile(path):
+            continue
+        value = read_keys(path).get(ZEN_KEYS_FIELD)
+        if value:
+            return value
+    return None
+
+
+def is_opencode_free_model(model) -> bool:
+    """True for `opencode/<id>-free`, the spelling opencode serves itself. The
+    `#<rung>` effort stamp (DSBACK item 3) rides on that id, so it comes off
+    before the shape test."""
+    text = str(model or "").strip().partition("#")[0]
+    return text.startswith("opencode/") and text.endswith("-free")
+
+
+def plan_zen_key(client_name: str, model, root: str, warn: bool = True) -> str | None:
+    """The Zen key one plan's child env gets, decided from that plan alone.
+
+    Only an opencode seat on an `opencode/*-free` model: a paid `opencode/*` id,
+    an `omniroute/*` combo and every other client never see it, so a fallthrough
+    that leaves a free leg drops the key and one that arrives on a free leg picks
+    it up — each re-plan asks again with its own model. A free leg with no usable
+    key is not a new failure (item 5): the run proceeds anonymously as it always
+    did, announced by the one line below; `warn=False` is the re-plan of a run
+    that already said it once.
+    """
+    if client_name != "opencode" or not is_opencode_free_model(model):
+        return None
+    key = zen_key(root)
+    if not key and warn:
+        print(ZEN_MISSING_LINE, file=sys.stderr)
+    return key
 
 
 def gateway_answers(url: str, timeout: int = 3) -> bool:
@@ -13537,6 +13609,21 @@ def cmd_run(args, cfg: dict) -> int:
     # declare is launched unprefixed and only fails inside opencode. Both pins
     # are qualified: --model names the same slot as --free-model.
     if args.free:
+        # D-1214 item 4: --free is the keyless path (`uses_key = client.gateway
+        # and not args.free`), so pinning a model onto the authenticated gateway
+        # with it is a request that cannot be served — it died server side with
+        # "Authentication required". Refuse it as typed, here: before the
+        # sandbox, before the run dir, dry run included. A BARE pin that the
+        # settlement below qualifies onto omniroute/* is the caller's own
+        # provider choice, not this mistake, so only an `omniroute/` spelling
+        # the caller typed is refused.
+        for attr in ("model", "free_model"):
+            pin = str(getattr(args, attr, None) or "")
+            if pin.startswith("omniroute/"):
+                return refuse("--free cannot pin %s: omniroute/* is the "
+                              "authenticated gateway and --free sends no key "
+                              "(drop --free, or use --free-model opencode/<free>)"
+                              % pin, 3)
         # F3: first, check pins that already contain '/' against the free pool
         # (they skip qualify_pinned_model). The free pool uses the client's
         # own spellings (e.g. opencode/... for zen free models).
@@ -13744,11 +13831,15 @@ def cmd_run(args, cfg: dict) -> int:
         if lean_refusal is not None:
             return refuse(lean_refusal)
     uses_key = client.gateway and not args.free
+    # D-1214: the promo credential is decided per plan, before the dry run names
+    # the env and before the first launch builds it. A `--free` run with no Zen
+    # key on the machine proceeds anonymously as it always did, with one warning.
+    zen = plan_zen_key(client.name, plan["model"], ROOT)
     # FF1 (D-106): the dry run names what the child actually gets, so an
     # operator can see the containment instead of trusting it. Item 1: that is
     # the *child's* env, not this process's, so a Claude declaration this
     # orchestrator holds never looks like it was passed on.
-    env_names = sorted(worker_env(plan, "x" if uses_key else None))
+    env_names = sorted(worker_env(plan, "x" if uses_key else None, zen_key=zen))
     print("route: %s reason=%s routing=%s" % (route["combo"] or plan["model"], route["reason"],
                                               routing.ROUTING_VERSION))
     if route.get("review_plan"):
@@ -13880,7 +13971,7 @@ def cmd_run(args, cfg: dict) -> int:
             print("OmniRoute is not answering on %s - start it: configuration/start-stack.sh "
                   "(or use --free)." % GATEWAY, file=sys.stderr)
             return 3
-    env = worker_env(plan, key)
+    env = worker_env(plan, key, zen_key=zen)
     # The worker's private XDG_RUNTIME_DIR is real from here on (FF1b item 4):
     # this is the first point past the dry run, where a directory is allowed.
     # FF1c item 1: the private config home is named in the plan and created
@@ -14343,8 +14434,11 @@ def cmd_run(args, cfg: dict) -> int:
                 # and session tag), not the stopped route's (qoder review 2026-09-27).
                 # Scrubbed the same way as the first launch (FF1, D-106): the
                 # fallthrough must not be the site that inherits the caller's
-                # tokens back in.
-                env = worker_env(plan, key if uses_key else None)
+                # tokens back in. D-1214: the Zen key is re-decided from THIS
+                # plan's model — off a free leg it goes, onto one it comes back;
+                # warn=False because the run already said it once if it applies.
+                zen = plan_zen_key(client.name, plan["model"], ROOT, warn=False)
+                env = worker_env(plan, key if uses_key else None, zen_key=zen)
                 # FF1 Sonnet LOW: the re-plan minted a fresh run id, and the
                 # private runtime/config dirs are named after it — so the
                 # re-run's dirs are the ones that do not exist yet. The first
