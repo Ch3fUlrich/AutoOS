@@ -5612,8 +5612,12 @@ REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
                      "[run=<writer-run-id> task=<ops|code|docs|infra> "
-                     "failure=<class> risk=<R0..R3> ran=<tests|live>] -- a HIGH (R3) "
-                     "lane needs ran=tests|live on at least one counted seat | final: EITHER "
+                     "failure=<class> risk=<R0..R3> ran=<tests|live|judge:<run-ref>>] "
+                     "-- a HIGH (R3) "
+                     "lane needs ran=tests|live on at least one counted seat | a tool-less seat "
+                     "says ran=judge:<run-ref> instead, and counts only against the judge-run "
+                     "record docs/judge-runs/<run-ref>.md and the one routing decisions-log row "
+                     "committed on origin/main that bind it to the lane --sha | final: EITHER "
                      "AutoOS-Review: kind=final author=<model> "
                      "reviewer=<3rd-family model> verdict=<...> evidence=<path> -- a "
                      "Claude-family final counts only when its reason= field is exactly "
@@ -6336,6 +6340,18 @@ def _max_r_level(levels):
     return max(known, key=ready_guards.R_LEVELS.index) if known else None
 
 
+def _judge_lane_sha(lane_sha):
+    """The commit a `ran=judge:` seat binds to, out of whatever the caller handed as `lane_sha`.
+
+    `ready` passes the (lane, pushed sha) pair the writer ledger wants; the judge binding wants
+    the sha alone, and a caller that passed nothing gets None -- which `judge_run_ok` refuses
+    rather than guessing at a commit.
+    """
+    if isinstance(lane_sha, (tuple, list)):
+        return lane_sha[1] if len(lane_sha) > 1 else None
+    return lane_sha
+
+
 def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=None,
                        only_verdicts=None):
     """``(seat, reason)`` for one kind=cross-family entry.
@@ -6369,7 +6385,16 @@ def _cross_family_seat(entry, registry, root=None, write_ledger=True, lane_sha=N
         return None, ("%s declares family=%s but the registry says %s"
                       % (reviewer, declared, family))
     ran = (entry.get("ran") or "").strip()
-    if ran and ran not in SEAT_RAN_VALUES:
+    if ran.startswith(JUDGE_RAN_PREFIX):
+        # AO-READY-D1143 (D-1143): a tool-less seat may name the JUDGE's own run as what
+        # RAN, and that is believed only against the committed record and the committed
+        # row -- see `judge_run_ok`. An unproved one buys the seat nothing and says which
+        # half was missing.
+        ok, judge_reason = judge_run_ok(ran[len(JUDGE_RAN_PREFIX):],
+                                        _judge_lane_sha(lane_sha))
+        if not ok:
+            return None, "%s ran=%s: %s" % (reviewer, ran, judge_reason)
+    elif ran and ran not in SEAT_RAN_VALUES:
         return None, "%s ran=%s is not one of %s" % (
             reviewer, ran, ", ".join(SEAT_RAN_VALUES))
     if _is_claude_family(family) and not _no_free_leg_stated(entry):
@@ -6413,6 +6438,11 @@ def _cross_family_review(entries, registry, root=None, write_ledger=True,
     (`ran=tests|live`), because reading a secrets diff is not the same evidence as
     running it. None means the caller never judged the class (the library callers,
     `review-status`), and asks for nothing, exactly as before.
+
+    AO-READY-D1143: a lane whose seats hold no tool cannot say `ran=tests` truthfully, so
+    a counted seat may instead name the judge's own run, `ran=judge:<run-ref>`, which is
+    verified against the committed record and the committed routing row in
+    `judge_run_ok` -- and the seat that fails that check is not counted at all.
     """
     wanted = [e for e in entries if e.get("kind") == "cross-family"]
     if not wanted:
@@ -7188,16 +7218,59 @@ def cap_exception_row_cap(cells):
     return cap, None
 
 
+def _routing_committed_log(env=None):
+    """``(ok, reason, commit, rows)`` -- the routing decisions log as COMMITTED on origin/main.
+
+    The ONE read every committed-tree reader shares. The routing dir is the routing gate's own
+    answer (`_go_gate.routing_dir`: AUTOOS_ROUTING_DIR, else `$HOME/code/routing`), then
+    `rev-parse origin/main^{commit}` ONCE, then `git show <that commit>:docs/decisions-log.md`,
+    so the commit handed back is the very tree the rows were read from and a caller can name it.
+    No failure -- no gate, no repo, no origin/main, no log, bytes that are not UTF-8 -- falls
+    back to a working copy: it refuses, with the reason worded for the reader that asked.
+
+    `rows` is every table line of that committed text as the cap-exception reader has always
+    split it -- `line.strip().strip('|').split('|')`, each cell stripped, the first cell the id
+    -- unfiltered and unpaged. Which rows mean anything is each caller's own rule, and there is
+    no second parser.
+    """
+    env = os.environ if env is None else env
+    try:
+        gate = go_gate()
+    except Exception as exc:
+        return False, "cannot load the routing gate: %s" % exc, None, None
+    dirpath = gate.routing_dir(env)
+    if not os.path.exists(os.path.join(dirpath, ".git")):
+        return False, ("the routing repo %r is missing or is not a git checkout"
+                       % (dirpath,)), None, None
+    commit, error = _routing_git_out(dirpath, "rev-parse", "origin/main^{commit}")
+    if error:
+        return False, ("cannot read origin/main of the routing repo: %s" % error), None, None
+    commit = (commit or "").strip().split("\n")[0]
+    if not _FULL_SHA_RE.fullmatch(commit):
+        return False, ("origin/main of the routing repo did not resolve to a commit id "
+                       "(read %r)" % (commit[:64],)), None, None
+    text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, CAP_EXCEPTION_LOG))
+    if error:
+        return False, ("cannot read %s as committed on origin/main (%s): the exception is "
+                       "bound to a committed decision, never to a working copy"
+                      % (CAP_EXCEPTION_LOG, error)), None, None
+    rows = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            continue
+        rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+    return True, "", commit, rows
+
+
 def cap_exception_ok(ref, sha, env=None):
     """``(ok, reason, routing_commit, cap)`` -- is `--cap-exception <ref>` bound to <sha>?
 
-    The row is read from the COMMITTED tree and from nothing else: `git -C <routing
-    dir> rev-parse origin/main^{commit}` FIRST, then `git show <that commit>:
-    docs/decisions-log.md`, so the commit reported back is the very tree the row was
-    read from and the ready line can name it. The routing dir is the routing gate's own
-    answer (`_go_gate.routing_dir`: AUTOOS_ROUTING_DIR, else `$HOME/code/routing`), and
-    no failure -- no repo, no origin/main, no log, an undecodable answer -- falls back
-    to a working copy: it refuses.
+    The row is read from the COMMITTED tree and from nothing else, through the ONE shared
+    reader `_routing_committed_log` (`rev-parse origin/main^{commit}` FIRST, then `git show
+    <that commit>:docs/decisions-log.md`), so the commit reported back is the very tree the
+    row was read from and the ready line can name it. No failure -- no repo, no origin/main,
+    no log, an undecodable answer -- falls back to a working copy: it refuses.
 
     One row binds one sha. The row is the ONE table line whose first cell, stripped,
     equals `ref` exactly, so `D-82` is satisfied by neither `D-825` nor `D-82.5`, a prose
@@ -7228,30 +7301,10 @@ def cap_exception_ok(ref, sha, env=None):
         return False, "%r is not a decision id of the shape D-<n>" % (ref,), None, None
     if not isinstance(sha, str) or not _FULL_SHA_RE.fullmatch(sha):
         return False, "%r is not a full 40-hex commit id (--sha)" % (sha,), None, None
-    dirpath = gate.routing_dir(env)
-    if not os.path.exists(os.path.join(dirpath, ".git")):
-        return False, ("the routing repo %r is missing or is not a git checkout"
-                       % (dirpath,)), None, None
-    commit, error = _routing_git_out(dirpath, "rev-parse", "origin/main^{commit}")
-    if error:
-        return False, ("cannot read origin/main of the routing repo: %s" % error), None, None
-    commit = (commit or "").strip().split("\n")[0]
-    if not _FULL_SHA_RE.fullmatch(commit):
-        return False, ("origin/main of the routing repo did not resolve to a commit id "
-                       "(read %r)" % (commit[:64],)), None, None
-    text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, CAP_EXCEPTION_LOG))
-    if error:
-        return False, ("cannot read %s as committed on origin/main (%s): the exception is "
-                       "bound to a committed decision, never to a working copy"
-                      % (CAP_EXCEPTION_LOG, error)), None, None
-    rows = []
-    for line in text.split("\n"):
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if cells[0] == ref:
-            rows.append(cells)
+    ok, reason, commit, all_rows = _routing_committed_log(env)
+    if not ok:
+        return False, reason, None, None
+    rows = [row for row in all_rows if row[0] == ref]
     if not rows:
         return False, ("%s names no row in %s on origin/main -- a prose mention, and a "
                        "table line whose first cell is not exactly that id, are not rows"
@@ -7270,6 +7323,150 @@ def cap_exception_ok(ref, sha, env=None):
     if cap_error is not None:
         return False, ("row %s: %s" % (ref, cap_error)), None, None
     return True, "", commit, cap
+
+
+# AO-READY-D1143 (D-1143): a HIGH lane whose seats hold no tool cannot truthfully say
+# `ran=tests` -- the tests were run by the JUDGE, in its own detached run, and no seat typed
+# a command. So the rule gains a third counted value, `ran=judge:<run-ref>`, believed ONLY
+# against two committed facts in the routing repo, read through the same single resolution of
+# origin/main the cap exception already insists on: the judge's own record and the decision
+# that binds it to this lane.
+JUDGE_RAN_PREFIX = "judge:"
+JUDGE_RUN_LOG = "docs/judge-runs"
+JUDGE_DECISION_REF = "D-1143"
+# The run-ref is spliced into a path inside the routing repo, so it must be ONE flat token:
+# no `/`, no `..`, no space, no NUL, nothing outside ASCII -- anything else refuses here,
+# before a git call, rather than becoming one.
+JUDGE_RUN_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+JUDGE_RECORD_FIELDS = ("sha", "tree", "command", "pass", "judge-session")
+_JUDGE_RECORD_FIELD_RE = re.compile(r"^(?P<key>[a-z][a-z-]*): ?(?P<value>.*)$")
+_JUDGE_PASSED_RE = re.compile(r"\b[1-9][0-9]* passed\b")
+_JUDGE_FAILURE_RE = re.compile(r"\bfailed\b|\berrors?\b")
+
+
+def judge_run_record(text):
+    """``(fields, problem)`` -- the five fields one judge-run record must state, or why it did not.
+
+    A field is a line at COLUMN 0 spelled `key: value`, so the record's own prose, an indented
+    line and a heading name nothing. Each required field must be present, ONCE, with a value;
+    `sha` and `tree` must be full 40-hex lower-case ids; `pass` must state a count of passed
+    tests -- `[1-9]* passed`, so "0 passed" states none -- and must not state a failure or an
+    error, because a run that failed proves the lane broke, not that it was checked. The record
+    is written by an agent and read by a gate, so nothing here raises.
+    """
+    fields = {}
+    for line in (text or "").split("\n"):
+        match = _JUDGE_RECORD_FIELD_RE.match(line)
+        if match is None or match.group("key") not in JUDGE_RECORD_FIELDS:
+            continue
+        key = match.group("key")
+        if key in fields:
+            return None, "field %s is given twice" % key
+        fields[key] = match.group("value").strip()
+    for key in JUDGE_RECORD_FIELDS:
+        if key not in fields:
+            return None, "field %s is missing" % key
+        if not fields[key]:
+            return None, "field %s is empty" % key
+    for key in ("sha", "tree"):
+        if not _FULL_SHA_RE.fullmatch(fields[key]):
+            return None, ("field %s is %r, not a full 40-hex lower-case commit id"
+                          % (key, fields[key][:64]))
+    if not _JUDGE_PASSED_RE.search(fields["pass"]):
+        return None, ("field pass is %r, naming no '[1-9]* passed' count"
+                      % (fields["pass"][:80],))
+    if _JUDGE_FAILURE_RE.search(fields["pass"]):
+        return None, ("field pass is %r, which names a failure or an error: a judge run that "
+                      "did not pass is not evidence the lane was checked"
+                      % (fields["pass"][:80],))
+    return fields, None
+
+
+def _judge_run_binding(rows, run_ref, lane_sha):
+    """``(ok, reason)`` -- the ONE committed decisions-log row that binds this judge run.
+
+    The row is a table line of the text `_routing_committed_log` already split: its first cell
+    is a decision id (`_go_gate.REF_RE`, and a `D-` one), its 4th cell -- the `by` -- is exactly
+    `routing-00`, and its joined text carries, each word-bounded through `_go_gate._exact_id`,
+    the FULL 40-hex lane sha, the literal decision `D-1143` this value exists for, and the
+    run-ref. One row binds one sha: a 12-character prefix, another `by`, another decision, a
+    run-ref that only appears inside a longer token (`run-1` sitting in `run-12`) and two rows
+    that all bind all refuse.
+    """
+    try:
+        gate = go_gate()
+    except Exception as exc:
+        return False, "cannot load the routing gate: %s" % exc
+    bound = []
+    for cells in rows:
+        first = cells[0]
+        if not first.startswith("D-") or not gate.REF_RE.match(first):
+            continue
+        if len(cells) < 4 or cells[3] != CAP_EXCEPTION_BY:
+            continue
+        row_text = " | ".join(cells)
+        if all(gate._exact_id(needle).search(row_text)
+               for needle in (lane_sha, JUDGE_DECISION_REF, run_ref)):
+            bound.append(cells)
+    if not bound:
+        return False, ("no committed row in %s on origin/main binds judge run %s to lane sha %s:"
+                       " one D-<n> row signed %s must name %s, the full lane sha and the run-ref,"
+                       " each word-bounded -- a prose mention, a 12-character prefix, another"
+                       " `by`, no %s, and a run-ref inside a longer token all name nothing"
+                       % (CAP_EXCEPTION_LOG, run_ref, lane_sha[:12], CAP_EXCEPTION_BY,
+                          JUDGE_DECISION_REF, JUDGE_DECISION_REF))
+    if len(bound) > 1:
+        return False, ("%d rows bind judge run %s at lane sha %s; one row binds one sha"
+                       % (len(bound), run_ref, lane_sha[:12]))
+    return True, ""
+
+
+def judge_run_ok(run_ref, lane_sha, env=None):
+    """``(ok, reason)`` -- is `ran=judge:<run_ref>` backed by a committed run and a committed row?
+
+    Three facts, all read from the COMMITTED tree of the routing repo and from ONE resolution of
+    origin/main (`_routing_committed_log`, the reader `cap_exception_ok` shares, so neither a
+    second parser nor a second read of the ref): the run-ref is one flat token, the record
+    `docs/judge-runs/<run-ref>.md` committed THERE names the lane commit in its `sha:` field, and
+    exactly one committed decisions-log row binds that run to that commit under `D-1143`. The
+    record is shown at the very commit the log was read from, never from the routing working copy
+    and never from another ref: a record somebody wrote after the commit is a record nobody
+    signed.
+
+    `lane_sha` is the commit the `ready` gate certified. None -- the library callers and
+    `review-status`, which never see a `--sha` -- refuses, because a run bound to no commit is
+    evidence of nothing. The order is fixed: ref shape, committed log, committed record, sha
+    equality, row binding. Every failure is a refusal string; none of them raises.
+    """
+    env = os.environ if env is None else env
+    if (not isinstance(run_ref, str) or ".." in run_ref
+            or not JUDGE_RUN_REF_RE.fullmatch(run_ref)):
+        return False, ("judge run ref %r is not a run-ref: one flat token of "
+                       "[A-Za-z0-9][A-Za-z0-9._-]{0,63} with no '..' (it names a path inside "
+                       "the routing repo)" % ((run_ref if isinstance(run_ref, str) else "")[:80],))
+    if not isinstance(lane_sha, str) or not _FULL_SHA_RE.fullmatch(lane_sha):
+        return False, ("ran=judge:%s needs the ready --sha: the judge run binds to the full "
+                       "40-hex commit the gate certified" % (run_ref,))
+    ok, reason, commit, rows = _routing_committed_log(env)
+    if not ok:
+        return False, reason
+    path = "%s/%s.md" % (JUDGE_RUN_LOG, run_ref)
+    try:
+        dirpath = go_gate().routing_dir(env)
+    except Exception as exc:
+        return False, "cannot load the routing gate: %s" % exc
+    text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, path))
+    if error:
+        return False, ("cannot read %s as committed on origin/main (%s): the judge run is bound "
+                       "to a committed record, never to a working copy" % (path, error))
+    fields, problem = judge_run_record(text)
+    if problem:
+        return False, "judge-run record %s: %s" % (path, problem)
+    if fields["sha"] != lane_sha:
+        return False, ("judge-run record %s names sha %s, not the lane sha %s the gate certified:"
+                       " one run is evidence of one commit"
+                      % (path, fields["sha"][:12], lane_sha[:12]))
+    return _judge_run_binding(rows, run_ref, lane_sha)
 
 
 def _rejected_seat_present(text):
@@ -7470,8 +7667,11 @@ def cmd_ready(args) -> int:
     # AO-LEDGER-DRYRUN (P6c): the gate is a READ here. It used to record as it
     # checked, so a --dry-run and every refused lane left rows on the ledger —
     # measurements of decisions that were never made.
+    # AO-READY-D1143: it still names the lane and the sha, because a `ran=judge:<run-ref>`
+    # seat binds to the commit this gate certifies — read-only, as P6c made it.
     report = review_status(text, registry, root=args.repo or os.getcwd(),
-                           write_ledger=False, r_level=lane_level)
+                           write_ledger=False, lane_sha=(args.branch, args.sha),
+                           r_level=lane_level)
     print_review_report(label, report)
     if not report["ready"]:
         print("ready: not appended -- the record does not carry both reviews")

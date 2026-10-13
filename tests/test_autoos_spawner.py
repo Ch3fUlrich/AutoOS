@@ -13182,15 +13182,20 @@ class JudgeRanSeatTests(unittest.TestCase):
                      encoding="utf-8") as fh:
             fh.write(text)
 
-    def judge_record(self, sha, **overrides):
-        """The five required fields at column 0, plus prose the reader must ignore."""
+    def judge_record(self, sha, drop=(), **overrides):
+        """The five required fields at column 0, plus prose the reader must ignore.
+
+        `drop` omits a field entirely; an override of None does the same, and an empty
+        string states the field with no value -- the two shapes the reader refuses for
+        different reasons.
+        """
         fields = {"sha": sha, "tree": self.TREE,
                   "command": "python3 -m pytest tests -q -p no:cacheprovider",
                   "pass": "312 passed in 41.2s", "judge-session": "ses-judge-1"}
         fields.update(overrides)
         lines = ["# judge run %s" % self.REF]
         for key in ("sha", "tree", "command", "pass", "judge-session"):
-            if fields.get(key) is None:
+            if key in drop or fields.get(key) is None:
                 continue
             lines.append("%s: %s" % (key, fields[key]))
         lines.extend(["", "The judge ran the suite in its own detached run.", ""])
@@ -13208,6 +13213,15 @@ class JudgeRanSeatTests(unittest.TestCase):
         return self.agent.judge_run_ok(self.REF if run is None else run,
                                        self.SHA if sha is None else sha,
                                        env={"AUTOOS_ROUTING_DIR": d})
+
+    def use_repo(self, d):
+        """Point the ENVIRONMENT at `d` too, so the seat path reads the same repo the
+        direct `check()` was given (`judge_run_ok` reads os.environ when handed no env)."""
+        patch = mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": d})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.routing = d
+        return d
 
     def status(self, *lines, **kwargs):
         kwargs.setdefault("lane_sha", (self.LANE, self.SHA))
@@ -13258,15 +13272,15 @@ class JudgeRanSeatTests(unittest.TestCase):
     # --- (1)(2) the record is read committed, and nowhere else ---------------
 
     def test_a_run_ref_with_no_committed_record_is_refused(self):
-        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA)))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("docs/judge-runs/run-1.md", reason)
-        self.assertIn("never a working copy", reason)
+        self.assertIn("never to a working copy", reason)
         self.assertIn("ran=judge:run-1", self.seat_refused())
 
     def test_a_record_only_in_the_working_copy_is_refused(self):
-        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA)))
         self.write_judge_record(d, self.REF, self.judge_record(self.SHA))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
@@ -13303,8 +13317,8 @@ class JudgeRanSeatTests(unittest.TestCase):
     # --- (3) one record, one lane -------------------------------------------
 
     def test_a_record_naming_another_sha_is_refused_naming_both(self):
-        d = self.routing_repo(self.TABLE + self.row(self.SHA),
-                              [(self.REF, self.judge_record(self.OTHER))])
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA),
+                                            [(self.REF, self.judge_record(self.OTHER))]))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn(self.OTHER[:12], reason)
@@ -13319,7 +13333,8 @@ class JudgeRanSeatTests(unittest.TestCase):
                              r_level="R3", lane_sha=None)
         self.assertFalse(report["ready"], report)
         self.assertIn("needs the ready --sha", report["cross_family"]["detail"])
-        ok, reason = self.check(self.routing, sha=None)
+        ok, reason = self.agent.judge_run_ok(self.REF, None,
+                                             env={"AUTOOS_ROUTING_DIR": self.routing})
         self.assertFalse(ok, reason)
         self.assertIn("needs the ready --sha", reason)
 
@@ -13339,8 +13354,10 @@ class JudgeRanSeatTests(unittest.TestCase):
             ("the row names a 12-hex sha prefix", t + self.row(sha[:12])),
             ("the by cell is not routing-00", t + self.row(sha, by="routing-01")),
             ("the row does not name D-1143", t + self.row(
-                sha, decision="a decision about something else at %s naming %s"
+                sha, ref="D-999", decision="a different decision at %s naming %s"
                 % (sha, self.REF))),
+            ("the row is a date row of no decision", t + self.row(
+                sha, ref="20261013-052134-judge")),
             ("the run-ref sits inside a longer token", t + self.row(
                 sha, decision="relax judge run run-12 at %s naming %s" % (sha, self.DECISION))),
             ("the id is only prose", t + "judge run %s at %s %s\n"
@@ -13350,16 +13367,16 @@ class JudgeRanSeatTests(unittest.TestCase):
         )
         for label, text in cases:
             with self.subTest(case=label):
-                ok, reason = self.check(self.routing_repo(text, record))
+                d = self.use_repo(self.routing_repo(text, record))
+                ok, reason = self.check(d)
                 self.assertFalse(ok, reason)
                 self.assertIn("binds judge run run-1", reason)
-                detail = self.seat_refused()
-                self.assertIn("binds judge run run-1", detail)
+                self.assertIn("binds judge run run-1", self.seat_refused())
 
     def test_two_binding_rows_are_refused_as_two_claims(self):
-        d = self.routing_repo(self.TABLE + self.row(self.SHA)
-                              + self.row(self.SHA, ref="D-1144"), [(self.REF,
-                                                                    self.judge_record(self.SHA))])
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA)
+                              + self.row(self.SHA, ref="D-1144"),
+                              [(self.REF, self.judge_record(self.SHA))]))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("one row binds one sha", reason)
@@ -13368,7 +13385,7 @@ class JudgeRanSeatTests(unittest.TestCase):
     def test_a_binding_row_written_after_the_commit_is_not_read(self):
         # The row is read committed too: editing the working copy after the commit is
         # the same non-decision the cap-exception gate refuses.
-        d = self.routing_repo(self.TABLE, [(self.REF, self.judge_record(self.SHA))])
+        d = self.use_repo(self.routing_repo(self.TABLE, [(self.REF, self.judge_record(self.SHA))]))
         self.write_routing_log(d, self.TABLE + self.row(self.SHA))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
@@ -13438,13 +13455,14 @@ class JudgeRanSeatTests(unittest.TestCase):
 
     def test_a_record_missing_a_field_or_with_a_duplicate_is_refused(self):
         cases = (
-            ("no pass field", self.judge_record(self.SHA, **{"pass": None})),
-            ("no sha field", self.judge_record(self.SHA, sha=None)),
-            ("no tree field", self.judge_record(self.SHA, tree=None)),
-            ("no command field", self.judge_record(self.SHA, command=None)),
-            ("no judge-session field", self.judge_record(self.SHA, **{"judge-session": None})),
+            ("no pass field", self.judge_record(self.SHA, drop=("pass",))),
+            ("no sha field", self.judge_record(self.SHA, drop=("sha",))),
+            ("no tree field", self.judge_record(self.SHA, drop=("tree",))),
+            ("no command field", self.judge_record(self.SHA, drop=("command",))),
+            ("no judge-session field", self.judge_record(self.SHA,
+                                                         drop=("judge-session",))),
             ("an empty pass value", self.judge_record(self.SHA, **{"pass": ""})),
-            ("an empty command value", self.judge_record(self.SHA, command="")),
+            ("an empty command value", self.judge_record(self.SHA, **{"command": ""})),
             ("an empty session value", self.judge_record(self.SHA, **{"judge-session": ""})),
             ("a 12-hex record sha", self.judge_record(self.SHA[:12])),
             ("an upper-case record sha", self.judge_record(self.SHA.upper())),
@@ -13461,24 +13479,25 @@ class JudgeRanSeatTests(unittest.TestCase):
         )
         for label, text in cases:
             with self.subTest(case=label):
-                d = self.routing_repo(self.TABLE + self.row(self.SHA),
-                                      [(self.REF, text)])
+                d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA),
+                                                    [(self.REF, text)]))
                 ok, reason = self.check(d)
                 self.assertFalse(ok, reason)
                 self.assertIn("judge-run record", reason)
                 self.assertIn("ran=judge:run-1", self.seat_refused())
 
     def test_an_empty_pass_field_is_named_as_empty_not_missing(self):
-        d = self.routing_repo(self.TABLE + self.row(self.SHA),
-                              [(self.REF, self.judge_record(self.SHA, pass_=""))])
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA),
+                              [(self.REF, self.judge_record(self.SHA, **{"pass": ""}))]))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("pass", reason)
+        self.assertIn("is empty", reason)
 
     def test_a_duplicate_field_refuses_naming_the_field(self):
         text = ("sha: %s\ntree: %s\ncommand: pytest\npass: 5 passed\n"
                 "judge-session: ses-1\nsha: %s\n" % (self.SHA, self.TREE, self.SHA))
-        d = self.routing_repo(self.TABLE + self.row(self.SHA), [(self.REF, text)])
+        d = self.use_repo(self.routing_repo(self.TABLE + self.row(self.SHA), [(self.REF, text)]))
         ok, reason = self.check(d)
         self.assertFalse(ok, reason)
         self.assertIn("sha", reason)
@@ -13617,7 +13636,7 @@ class ReadyJudgeRanTests(ReadyWriterGuardsTests):
         self.use_repo(d)
         rc, out, err, _inbox, _calls = self.ready_r3()
         self.assertEqual(rc, 1, out + err)
-        self.assertIn("never a working copy", out + err)
+        self.assertIn("never to a working copy", out + err)
 
 
 class LaneDiffPathsTests(unittest.TestCase):
