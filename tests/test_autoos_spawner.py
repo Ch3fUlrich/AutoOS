@@ -12871,6 +12871,29 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
                 self.assertIsNone(commit)
                 self.assertIsNone(cap)
 
+    def test_a_digit_run_too_long_to_convert_refuses_the_band(self):
+        """A value the row cannot state at all: `int()` raises ValueError past the
+        interpreter's digit limit, so the band check must come BEFORE the conversion —
+        a refusal naming a few characters, never a traceback and never the whole run."""
+        for digits in ("9" * 4, "1" + "0" * 2, "9" * 4300, "9" * 5000):
+            with self.subTest(value=digits[:4] + "..." if len(digits) > 4 else digits):
+                cap, error = self.helper(self.REF, "autoos",
+                                         "relax files=%s atomic: x" % digits,
+                                         "routing-00", "2026-10-12")
+                self.assertIsNone(cap, error)
+                self.assertIn("7..8", error)
+                self.assertLess(len(error), 300)
+
+    def test_a_digit_run_too_long_to_convert_refuses_on_a_committed_row(self):
+        ok, reason, commit, cap = self.check(
+            self.routing_repo(self.TABLE + self.row(
+                self.SHA, extra="files=%s atomic: x" % ("9" * 5000))))
+        self.assertFalse(ok, reason)
+        self.assertIn("7..8", reason)
+        self.assertLess(len(reason), 300)
+        self.assertIsNone(commit)
+        self.assertIsNone(cap)
+
     def test_a_row_that_states_no_count_keeps_the_default_cap(self):
         for decision in ("an old row with no token at all",
                          "an old row atomic: two segments",
