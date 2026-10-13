@@ -385,24 +385,16 @@ class PinQualifyTests(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stdout)
         self.assertIn("not in the free pool", r.stderr)
 
-    def test_a_free_prefixed_pin_declared_in_opencode_jsonc_is_allowed(self):
-        # A --free pin with '/' that is declared in opencode.jsonc (e.g.
-        # omniroute/ovh-direct-qwen3.8-27b) should be allowed even if not in
-        # the registry's free_client_models (which only has opencode's zen models).
-        r = plan_of("--client", "opencode", "--free", "--model",
-                    QUALIFIED_OR, "t")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        # The plan should show the qualified model
-        self.assertIn("--model %s " % QUALIFIED_OR, r.stdout)
-
-    def test_a_free_prefixed_pin_undeclared_is_refused(self):
-        # A --free pin with '/' that is NOT declared in opencode.jsonc
-        # should be refused (not in free pool, not declared)
-        r = plan_of("--client", "opencode", "--free", "--model",
-                    "omniroute/or-nonexistent-free", "t")
-        self.assertNotEqual(r.returncode, 0, r.stdout)
-        # Should say not in free pool AND not declared
-        self.assertIn("not in the free pool", r.stderr)
+    def test_a_free_pin_on_an_omniroute_model_is_refused_as_keyless(self):
+        # D-1214: `--free` sends no gateway key, so pinning an omniroute/* model
+        # (declared in opencode.jsonc or not) onto it cannot be served - the
+        # authenticated gateway answered "Authentication required". It used to be
+        # allowed when the id was declared; it is now refused before any plan.
+        for model in (QUALIFIED_OR, "omniroute/or-nonexistent-free"):
+            r = plan_of("--client", "opencode", "--free", "--model", model, "t")
+            self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+            self.assertIn("--free cannot pin %s" % model, r.stderr)
+            self.assertIn("authenticated gateway", r.stderr)
 
     def test_a_free_opencode_pin_with_empty_pool_is_allowed(self):
         # An opencode/<anything>-free pin with an empty/absent free pool
