@@ -7054,41 +7054,46 @@ def _routing_git_out(dirpath, *tail):
         return None, "git %s answered with bytes that are not UTF-8" % tail[0]
 
 
-def cap_exception_row_cap(row_text):
-    """``(cap, error)`` -- the FILES count the bound routing row states for itself.
+def cap_exception_row_cap(cells):
+    """``(cap, error)`` -- the FILES count the bound routing row's DECISION cell states.
 
-    A row that names no `files=` token answers the default `CAP_EXCEPTION_MAX_FILES` and
-    nothing else changes, so every row committed before AO-READY-CAP-COUNT keeps binding
-    exactly as it did -- `atomic:` prose in such a row is prose, not a claim. The band a
-    row may state is `CAP_EXCEPTION_ROW_MIN_FILES`..`CAP_EXCEPTION_ROW_MAX_FILES`: below
-    it the plain exception already says more, and above it a FILES line is not one lane's
-    allow-list but several lanes' worth of them. A value outside the band is a refusal
-    naming it, never a clamp onto the nearest edge.
+    `cells` is the committed row as the sha binding already holds it: the list of stripped
+    cells of `| id | project | decision | by | ... |`. The count is honoured in the decision
+    cell -- index 2, after the id and the project -- and in no other cell, because the
+    decision is the thing a routing agent actually signed off on. A `files=` that sits in
+    the project, the `by` or the date cell is that cell's own prose and raises nothing.
 
-    Every other shape is a refusal too, because the row is written by an agent and read
-    by a gate: two `files=` tokens name two counts and this function does not choose
-    between them; the token is `(?<!\\w)files=`, so the `files=` inside `profiles=7` is
-    not one; the value is the WHOLE non-space run up to the end of its cell and must then
-    be `[1-9][0-9]*` -- an explicit `[0-9]`, never `\\d`, because a fullwidth `７` or an
-    arabic-indic `٧` is not a count of files, and `files=`, `files=07`, `files=7x` and
-    `files=7.5` name no number either (the run is taken whole precisely so that the dot
-    in `7.5` is not read as a value followed by a non-word character).
+    A decision cell that names no `files=` token answers the default
+    `CAP_EXCEPTION_MAX_FILES` and nothing else changes, so every row committed before
+    AO-READY-CAP-COUNT keeps binding exactly as it did -- `atomic:` prose in such a row is
+    prose, not a claim. The band a row may state is
+    `CAP_EXCEPTION_ROW_MIN_FILES`..`CAP_EXCEPTION_ROW_MAX_FILES`: below it the plain
+    exception already says more, and above it a FILES line is not one lane's allow-list but
+    several lanes' worth of them. A value outside the band is a refusal naming it, never a
+    clamp onto the nearest edge.
 
-    A stated count is an atomic exception, so the row must say so in the SAME cell: an
-    `atomic:` token -- again `(?<!\\w)`, so a word ending in it is not one -- with no `|`
-    between it and a reason of at least one non-space character. `atomic:` in a later
-    cell is another cell's business and buys nothing here."""
-    text = row_text or ""
-    tokens = list(_CAP_FILES_TOKEN_RE.finditer(text))
+    Every other shape is a refusal too, because the row is written by an agent and read by a
+    gate: two `files=` tokens ANYWHERE in the row name two counts and this function does not
+    choose between them -- the decision cell plus another cell is two; the token is
+    `(?<!\\w)files=`, so the `files=` inside `profiles=7` is not one; the value is the WHOLE
+    non-space run up to the end of the decision cell and must then be `[1-9][0-9]*` -- an
+    explicit `[0-9]`, never `\\d`, because a fullwidth `７` or an arabic-indic `٧` is not a
+    count of files, and `files=`, `files=07`, `files=7x` and `files=7.5` name no number
+    either (the run is taken whole precisely so that the dot in `7.5` is not read as a value
+    followed by a non-word character).
+
+    A stated count is an atomic exception, so the DECISION cell must say so itself: an
+    `atomic:` token inside that same cell -- again `(?<!\\w)`, so a word ending in it is not
+    one -- followed by a reason of at least one non-space character. `atomic:` in another
+    cell is that cell's business and buys nothing here."""
+    row = list(cells or ())
+    tokens = _CAP_FILES_TOKEN_RE.findall(" | ".join(row))
     if len(tokens) > 1:
         return None, ("two files= tokens in the row; one row states one count")
-    if not tokens:
-        return CAP_EXCEPTION_MAX_FILES, None
-    start = tokens[0].start()
-    cell_start = text.rfind("|", 0, start) + 1
-    cell_end = text.find("|", start)
-    cell = text[cell_start:len(text) if cell_end < 0 else cell_end]
+    cell = row[2] if len(row) > 2 else ""
     token = _CAP_FILES_TOKEN_RE.search(cell)
+    if token is None:
+        return CAP_EXCEPTION_MAX_FILES, None
     value = _CAP_FILES_RUN_RE.match(cell, token.end()).group(1)
     if not _CAP_FILES_VALUE_RE.fullmatch(value):
         return None, ("malformed files= value %r: the count is one ASCII integer, "
@@ -7124,12 +7129,14 @@ def cap_exception_ok(ref, sha, env=None):
     through `_go_gate._exact_id`, so a 12-character prefix, a spelling inside a longer hex
     run, an upper-cased sha and a sha that sits in another row all name nothing.
 
-    Once it is bound, the SAME row text -- the `" | ".join(row)` the sha was just matched
-    against, read once from the committed tree and never from the working copy -- states
-    the count (AO-READY-CAP-COUNT, see `cap_exception_row_cap`): a row with no `files=`
-    token answers `CAP_EXCEPTION_MAX_FILES` as it always did, and a row carrying a valid
-    `files=<N> atomic: <reason>` answers N. A token the row may not state is a refusal
-    here, with `cap` None, exactly like an unbound sha.
+    Once it is bound, the SAME row -- the cells whose `" | ".join(row)` the sha was just
+    matched against, read once from the committed tree and never from the working copy --
+    states the count (AO-READY-CAP-COUNT, see `cap_exception_row_cap`): a row whose DECISION
+    cell carries no `files=` token answers `CAP_EXCEPTION_MAX_FILES` as it always did, and a
+    decision cell carrying a valid `files=<N> atomic: <reason>` answers N. A `files=` in any
+    other cell is that cell's prose and raises nothing, unless the row then carries two
+    `files=` tokens in total, which is the two-counts refusal. A token the decision cell may
+    not state is a refusal here, with `cap` None, exactly like an unbound sha.
 
     Everything else `ready` checks still runs; this relaxes only the FILES cap."""
     env = os.environ if env is None else env
@@ -7180,7 +7187,7 @@ def cap_exception_ok(ref, sha, env=None):
     if not gate._exact_id(sha).search(row_text):
         return False, ("row %s does not name the full --sha %s; one row binds one sha"
                        % (ref, sha)), None, None
-    cap, cap_error = cap_exception_row_cap(row_text)
+    cap, cap_error = cap_exception_row_cap(row)
     if cap_error is not None:
         return False, ("row %s: %s" % (ref, cap_error)), None, None
     return True, "", commit, cap
@@ -7338,9 +7345,9 @@ def cmd_ready(args) -> int:
     AO-READY-CAP-EXCEPTION: `--cap-exception D-NNN` is checked FIRST, before the brief
     is read, and relaxes ONLY the FILES cap (see `cap_exception_ok`); the verdict, the
     commit it was read from and the count that row states are said on stdout, --dry-run
-    included. The cap is `CAP_EXCEPTION_MAX_FILES` unless the bound row itself carries a
-    valid `files=<N> atomic: <reason>` (AO-READY-CAP-COUNT), and the ready line always
-    says which: ` cap=<N>`."""
+    included. The cap is `CAP_EXCEPTION_MAX_FILES` unless the bound row's DECISION cell
+    carries a valid `files=<N> atomic: <reason>` (AO-READY-CAP-COUNT), and the ready line
+    always says which: ` cap=<N>`."""
     cap_ref = (getattr(args, "cap_exception", "") or "").strip()
     cap_field = ""
     cap_max_files = None
@@ -14977,9 +14984,10 @@ def _parser_ready(sub):
                               "the routing repo's %s, signed by routing-00, and name the "
                               "full --sha -- one row binds one sha. That SAME row may state "
                               "its own count, %d or %d, as a `files=<N> atomic: <reason>` "
-                              "token inside one cell (AO-READY-CAP-COUNT); a value outside "
-                              "that band, a second files= token or a missing reason is "
-                              "refused, never clamped. The scope fence, both reviews, the "
+                              "token inside its decision cell (AO-READY-CAP-COUNT); a value "
+                              "outside that band, a second files= token anywhere in the row "
+                              "or a missing reason is refused, never clamped. The scope "
+                              "fence, both reviews, the "
                               "pushed sha, the pre-push record and the CI gates all still "
                               "run; the line carries cap-exception=<D-NNN> "
                               "routing=<origin/main sha> cap=<N>"
