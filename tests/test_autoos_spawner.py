@@ -12623,9 +12623,11 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         return d
 
     def helper(self, *cells):
-        """`cap_exception_row_cap` on one row text — the same `" | ".join(row)` the sha
-        binding reads, which is the only thing the cap may come from."""
-        return self.agent.cap_exception_row_cap(" | ".join(cells))
+        """`cap_exception_row_cap` on one row's CELLS — the stripped cells of the
+        committed row, exactly what `cap_exception_ok` holds before it joins them into
+        the text the sha binding reads. The count comes from the DECISION cell (index 2)
+        alone; the other cells are the row's prose."""
+        return self.agent.cap_exception_row_cap(list(cells))
 
     # --- the committed routing row ------------------------------------------
 
@@ -12920,6 +12922,71 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
                                   "atomic: two segments")[1])
         row = ("| %s | autoos | relax the cap at %s files=7 | %s | atomic: two segments |\n"
                % (self.REF, self.SHA, self.agent.CAP_EXCEPTION_BY))
+        ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
+        self.assertFalse(ok, reason)
+        self.assertIn("needs atomic", reason)
+        self.assertIsNone(cap)
+
+    # --- the count sits in the DECISION cell and nowhere else (AO-READY-CAP-COUNT delta)
+
+    def test_a_files_token_in_the_date_cell_does_not_raise_the_cap(self):
+        """(a) the 5th cell is the row's date: a `files=` there is prose, not a claim."""
+        self.assertEqual(self.helper(self.REF, "autoos", "relax the cap", "routing-00",
+                                     "files=8 " + self.ATOMIC), (6, None))
+        row = ("| %s | autoos | relax the cap at %s | %s | files=8 %s |\n"
+               % (self.REF, self.SHA, self.agent.CAP_EXCEPTION_BY, self.ATOMIC))
+        d = self.routing_repo(self.TABLE + row)
+        ok, reason, commit, cap = self.check(d)
+        self.assertTrue(ok, reason)
+        self.assertEqual(cap, 6)
+        self.assertEqual(commit, self.git(d, "rev-parse", "refs/remotes/origin/main"))
+
+    def test_a_files_token_in_the_project_cell_does_not_raise_the_cap(self):
+        """(b) the 2nd cell is the project, and neither is the decision."""
+        self.assertEqual(self.helper(self.REF, "files=8 " + self.ATOMIC, "relax the cap",
+                                     "routing-00", "2026-10-12"), (6, None))
+        row = ("| %s | files=8 %s | relax the cap at %s | %s | 2026-10-12 |\n"
+               % (self.REF, self.ATOMIC, self.SHA, self.agent.CAP_EXCEPTION_BY))
+        ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
+        self.assertTrue(ok, reason)
+        self.assertEqual(cap, 6)
+
+    def test_a_files_token_in_the_by_cell_refuses_on_the_by_check(self):
+        """(c) the 4th cell is `by`, and `by` is checked before the count is read."""
+        self.assertEqual(self.helper(self.REF, "autoos", "relax the cap",
+                                     "routing-00 files=8 " + self.ATOMIC,
+                                     "2026-10-12"), (6, None))
+        row = ("| %s | autoos | relax the cap at %s | files=8 %s | 2026-10-12 |\n"
+               % (self.REF, self.SHA, self.ATOMIC))
+        ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
+        self.assertFalse(ok, reason)
+        self.assertIn("by cell", reason)
+        self.assertIsNone(cap)
+
+    def test_two_files_tokens_across_two_cells_still_refuse(self):
+        """(d) the count comes only from the decision cell, but the whole row carries two
+        `files=` tokens, and two tokens name two counts — that refusal is kept."""
+        cap, error = self.helper(self.REF, "autoos", "relax files=7 " + self.ATOMIC,
+                                 "routing-00", "files=8 " + self.ATOMIC)
+        self.assertIsNone(cap, error)
+        self.assertIn("two files= tokens", error)
+        row = ("| %s | autoos | relax the cap at %s files=7 %s | %s | files=8 %s |\n"
+               % (self.REF, self.SHA, self.ATOMIC, self.agent.CAP_EXCEPTION_BY,
+                  self.ATOMIC))
+        ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
+        self.assertFalse(ok, reason)
+        self.assertIn("two files= tokens", reason)
+        self.assertIsNone(cap)
+
+    def test_a_decision_cell_count_atomised_only_in_another_cell_refuses(self):
+        """(e) unchanged: a count the decision cell states must be declared atomic in
+        that SAME cell — an `atomic:` in the date cell buys nothing."""
+        cap, error = self.helper(self.REF, "autoos", "relax files=7", "routing-00",
+                                 self.ATOMIC)
+        self.assertIsNone(cap, error)
+        self.assertIn("needs atomic", error)
+        row = ("| %s | autoos | relax the cap at %s files=7 | %s | %s |\n"
+               % (self.REF, self.SHA, self.agent.CAP_EXCEPTION_BY, self.ATOMIC))
         ok, reason, commit, cap = self.check(self.routing_repo(self.TABLE + row))
         self.assertFalse(ok, reason)
         self.assertIn("needs atomic", reason)
