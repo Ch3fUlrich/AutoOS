@@ -108,7 +108,9 @@ Usage:
     python3 tools/autoos-agent.py ready status/<lane>.<name>.md --branch <B> --sha <SHA> \
         --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>   # both, always
         # --cap-exception D-NNN relaxes ONLY the brief's FILES cap, bound to one
-        # committed routing row naming this --sha (AO-READY-CAP-EXCEPTION)
+        # committed routing row naming this --sha (AO-READY-CAP-EXCEPTION); that same row
+        # may state the count itself as `files=<N> atomic: <reason>`, N in 7..8, else the
+        # cap is 6 (AO-READY-CAP-COUNT) -- the ready line always says `cap=<N>`
     python3 tools/autoos-agent.py inbox L1-routing --since-card status/L1-routing.card.md
     python3 tools/autoos-agent.py card check status/L1-routing.card.md
     python3 tools/autoos-agent.py route --card kind=review,paths=tools/registry.py --explain
@@ -7076,6 +7078,14 @@ def read_guards_text(path):
 CAP_EXCEPTION_LOG = "docs/decisions-log.md"
 CAP_EXCEPTION_BY = "routing-00"
 CAP_EXCEPTION_MAX_FILES = 6
+# AO-READY-CAP-COUNT: the band a routing row may state for ITSELF with
+# `files=<N> atomic: <reason>`. Anything outside it is a refusal, never a clamp.
+CAP_EXCEPTION_ROW_MIN_FILES = 7
+CAP_EXCEPTION_ROW_MAX_FILES = 8
+_CAP_FILES_TOKEN_RE = re.compile(r"(?<!\w)files=")
+_CAP_FILES_RUN_RE = re.compile(r"(\S*)")
+_CAP_FILES_VALUE_RE = re.compile(r"[1-9][0-9]*")
+_CAP_ATOMIC_TOKEN_RE = re.compile(r"(?<!\w)atomic:")
 GO_GATE_RELPATH = ("infra", "mcp-servers", "scripts", "_go_gate.py")
 ROUTING_GIT_TIMEOUT = 30
 _GO_GATE = None
@@ -7124,8 +7134,70 @@ def _routing_git_out(dirpath, *tail):
         return None, "git %s answered with bytes that are not UTF-8" % tail[0]
 
 
+def cap_exception_row_cap(cells):
+    """``(cap, error)`` -- the FILES count the bound routing row's DECISION cell states.
+
+    `cells` is the committed row as the sha binding already holds it: the list of stripped
+    cells of `| id | project | decision | by | ... |`. The count is honoured in the decision
+    cell -- index 2, after the id and the project -- and in no other cell, because the
+    decision is the thing a routing agent actually signed off on. A `files=` that sits in
+    the project, the `by` or the date cell is that cell's own prose and raises nothing.
+
+    A decision cell that names no `files=` token answers the default
+    `CAP_EXCEPTION_MAX_FILES` and nothing else changes, so every row committed before
+    AO-READY-CAP-COUNT keeps binding exactly as it did -- `atomic:` prose in such a row is
+    prose, not a claim. The band a row may state is
+    `CAP_EXCEPTION_ROW_MIN_FILES`..`CAP_EXCEPTION_ROW_MAX_FILES`: below it the plain
+    exception already says more, and above it a FILES line is not one lane's allow-list but
+    several lanes' worth of them. A value outside the band is a refusal naming it, never a
+    clamp onto the nearest edge.
+
+    Every other shape is a refusal too, because the row is written by an agent and read by a
+    gate: two `files=` tokens ANYWHERE in the row name two counts and this function does not
+    choose between them -- the decision cell plus another cell is two; the token is
+    `(?<!\\w)files=`, so the `files=` inside `profiles=7` is not one; the value is the WHOLE
+    non-space run up to the end of the decision cell and must then be `[1-9][0-9]*` -- an
+    explicit `[0-9]`, never `\\d`, because a fullwidth `７` or an arabic-indic `٧` is not a
+    count of files, and `files=`, `files=07`, `files=7x` and `files=7.5` name no number
+    either (the run is taken whole precisely so that the dot in `7.5` is not read as a value
+    followed by a non-word character).
+
+    A stated count is an atomic exception, so the DECISION cell must say so itself: an
+    `atomic:` token inside that same cell -- again `(?<!\\w)`, so a word ending in it is not
+    one -- followed by a reason of at least one non-space character. `atomic:` in another
+    cell is that cell's business and buys nothing here."""
+    row = list(cells or ())
+    tokens = _CAP_FILES_TOKEN_RE.findall(" | ".join(row))
+    if len(tokens) > 1:
+        return None, ("two files= tokens in the row; one row states one count")
+    cell = row[2] if len(row) > 2 else ""
+    token = _CAP_FILES_TOKEN_RE.search(cell)
+    if token is None:
+        return CAP_EXCEPTION_MAX_FILES, None
+    value = _CAP_FILES_RUN_RE.match(cell, token.end()).group(1)
+    if not _CAP_FILES_VALUE_RE.fullmatch(value):
+        return None, ("malformed files= value %r: the count is one ASCII integer, "
+                      "7 or 8, with no sign, padding, tail or fraction" % (value[:24],))
+    if len(value) > 3:
+        # A band value is at most two digits, so a run this long is refused on length
+        # alone: `int()` on 4300+ digits raises ValueError, and the refusal must never
+        # echo the run it refused.
+        return None, ("files=%s... is outside the range %d..%d a row may state for itself"
+                      % (value[:8], CAP_EXCEPTION_ROW_MIN_FILES,
+                         CAP_EXCEPTION_ROW_MAX_FILES))
+    cap = int(value)
+    if cap < CAP_EXCEPTION_ROW_MIN_FILES or cap > CAP_EXCEPTION_ROW_MAX_FILES:
+        return None, ("files=%d is outside the range %d..%d a row may state for itself"
+                      % (cap, CAP_EXCEPTION_ROW_MIN_FILES, CAP_EXCEPTION_ROW_MAX_FILES))
+    atomic = _CAP_ATOMIC_TOKEN_RE.search(cell)
+    if atomic is None or not cell[atomic.end():].strip():
+        return None, ("files=%d needs atomic: <reason> -- the count is only as safe as "
+                      "the one-row reason that says it was decided atomically" % (cap,))
+    return cap, None
+
+
 def cap_exception_ok(ref, sha, env=None):
-    """``(ok, reason, routing_commit)`` -- is `--cap-exception <ref>` bound to <sha>?
+    """``(ok, reason, routing_commit, cap)`` -- is `--cap-exception <ref>` bound to <sha>?
 
     The row is read from the COMMITTED tree and from nothing else: `git -C <routing
     dir> rev-parse origin/main^{commit}` FIRST, then `git show <that commit>:
@@ -7144,33 +7216,42 @@ def cap_exception_ok(ref, sha, env=None):
     through `_go_gate._exact_id`, so a 12-character prefix, a spelling inside a longer hex
     run, an upper-cased sha and a sha that sits in another row all name nothing.
 
+    Once it is bound, the SAME row -- the cells whose `" | ".join(row)` the sha was just
+    matched against, read once from the committed tree and never from the working copy --
+    states the count (AO-READY-CAP-COUNT, see `cap_exception_row_cap`): a row whose DECISION
+    cell carries no `files=` token answers `CAP_EXCEPTION_MAX_FILES` as it always did, and a
+    decision cell carrying a valid `files=<N> atomic: <reason>` answers N. A `files=` in any
+    other cell is that cell's prose and raises nothing, unless the row then carries two
+    `files=` tokens in total, which is the two-counts refusal. A token the decision cell may
+    not state is a refusal here, with `cap` None, exactly like an unbound sha.
+
     Everything else `ready` checks still runs; this relaxes only the FILES cap."""
     env = os.environ if env is None else env
     try:
         gate = go_gate()
     except Exception as exc:
-        return False, "cannot load the routing gate: %s" % exc, None
+        return False, "cannot load the routing gate: %s" % exc, None, None
     if (not isinstance(ref, str) or not ref.startswith("D-")
             or not gate.REF_RE.match(ref)):
-        return False, "%r is not a decision id of the shape D-<n>" % (ref,), None
+        return False, "%r is not a decision id of the shape D-<n>" % (ref,), None, None
     if not isinstance(sha, str) or not _FULL_SHA_RE.fullmatch(sha):
-        return False, "%r is not a full 40-hex commit id (--sha)" % (sha,), None
+        return False, "%r is not a full 40-hex commit id (--sha)" % (sha,), None, None
     dirpath = gate.routing_dir(env)
     if not os.path.exists(os.path.join(dirpath, ".git")):
         return False, ("the routing repo %r is missing or is not a git checkout"
-                       % (dirpath,)), None
+                       % (dirpath,)), None, None
     commit, error = _routing_git_out(dirpath, "rev-parse", "origin/main^{commit}")
     if error:
-        return False, "cannot read origin/main of the routing repo: %s" % error, None
+        return False, ("cannot read origin/main of the routing repo: %s" % error), None, None
     commit = (commit or "").strip().split("\n")[0]
     if not _FULL_SHA_RE.fullmatch(commit):
         return False, ("origin/main of the routing repo did not resolve to a commit id "
-                       "(read %r)" % (commit[:64],)), None
+                       "(read %r)" % (commit[:64],)), None, None
     text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, CAP_EXCEPTION_LOG))
     if error:
         return False, ("cannot read %s as committed on origin/main (%s): the exception is "
                        "bound to a committed decision, never to a working copy"
-                      % (CAP_EXCEPTION_LOG, error)), None
+                      % (CAP_EXCEPTION_LOG, error)), None, None
     rows = []
     for line in text.split("\n"):
         stripped = line.strip()
@@ -7182,17 +7263,21 @@ def cap_exception_ok(ref, sha, env=None):
     if not rows:
         return False, ("%s names no row in %s on origin/main -- a prose mention, and a "
                        "table line whose first cell is not exactly that id, are not rows"
-                      % (ref, CAP_EXCEPTION_LOG)), None
+                      % (ref, CAP_EXCEPTION_LOG)), None, None
     if len(rows) > 1:
-        return False, ("%s names %d rows; one row binds one sha" % (ref, len(rows))), None
+        return False, ("%s names %d rows; one row binds one sha" % (ref, len(rows))), None, None
     row = rows[0]
     if len(row) < 4 or row[3] != CAP_EXCEPTION_BY:
         return False, ("row's by cell is %r, not %r"
-                       % (row[3] if len(row) > 3 else "", CAP_EXCEPTION_BY)), None
-    if not gate._exact_id(sha).search(" | ".join(row)):
+                       % (row[3] if len(row) > 3 else "", CAP_EXCEPTION_BY)), None, None
+    row_text = " | ".join(row)
+    if not gate._exact_id(sha).search(row_text):
         return False, ("row %s does not name the full --sha %s; one row binds one sha"
-                       % (ref, sha)), None
-    return True, "", commit
+                       % (ref, sha)), None, None
+    cap, cap_error = cap_exception_row_cap(row)
+    if cap_error is not None:
+        return False, ("row %s: %s" % (ref, cap_error)), None, None
+    return True, "", commit, cap
 
 
 def _rejected_seat_present(text):
@@ -7345,22 +7430,26 @@ def cmd_ready(args) -> int:
     `--dry-run` changes nothing there: it refuses the same way and writes nothing.
 
     AO-READY-CAP-EXCEPTION: `--cap-exception D-NNN` is checked FIRST, before the brief
-    is read, and relaxes ONLY the FILES cap (see `cap_exception_ok`); the verdict and
-    the commit it was read from are said on stdout, --dry-run included."""
+    is read, and relaxes ONLY the FILES cap (see `cap_exception_ok`); the verdict, the
+    commit it was read from and the count that row states are said on stdout, --dry-run
+    included. The cap is `CAP_EXCEPTION_MAX_FILES` unless the bound row's DECISION cell
+    carries a valid `files=<N> atomic: <reason>` (AO-READY-CAP-COUNT), and the ready line
+    always says which: ` cap=<N>`."""
     cap_ref = (getattr(args, "cap_exception", "") or "").strip()
     cap_field = ""
     cap_max_files = None
     if cap_ref:
-        bound, cap_reason, routing_commit = cap_exception_ok(cap_ref, args.sha)
+        bound, cap_reason, routing_commit, cap_files = cap_exception_ok(cap_ref, args.sha)
         if not bound:
             print("ready: not appended -- cap-exception %s: %s" % (cap_ref, cap_reason))
             return 1
-        cap_field = " cap-exception=%s routing=%s" % (cap_ref, routing_commit)
-        cap_max_files = CAP_EXCEPTION_MAX_FILES
+        cap_field = " cap-exception=%s routing=%s cap=%d" % (cap_ref, routing_commit,
+                                                             cap_files)
+        cap_max_files = cap_files
         print("note: cap-exception %s is bound to %s by the committed routing row "
-              "(routing=%s); the FILES cap is %d counted entries, the scope fence and "
-              "every gate below still run"
-              % (cap_ref, args.sha[:12], routing_commit, CAP_EXCEPTION_MAX_FILES))
+              "(routing=%s); the FILES cap is %d counted entries (cap=%d), the scope "
+              "fence and every gate below still run"
+              % (cap_ref, args.sha[:12], routing_commit, cap_files, cap_files))
     try:
         text, label = read_lane_record(args.record)
     except OSError as exc:
@@ -15011,16 +15100,24 @@ def _parser_ready(sub):
                               "(report-checks)")
     ready_p.add_argument("--cap-exception", dest="cap_exception", metavar="D-NNN",
                          default="",
-                         help="relax ONLY the brief's FILES cap, to %d counted entries, "
-                              "for a lane built by several writer segments (AO-READY-CAP-"
-                              "EXCEPTION). Bound to this --sha and to one COMMITTED routing "
-                              "decision: the row `| D-NNN | project | decision | routing-00 "
-                              "| ... |` must exist on origin/main of the routing repo's "
-                              "%s, signed by routing-00, and name the full --sha — one row "
-                              "binds one sha. The scope fence, both reviews, the pushed "
-                              "sha, the pre-push record and the CI gates all still run; the "
-                              "line carries cap-exception=<D-NNN> routing=<origin/main sha>"
-                              % (CAP_EXCEPTION_MAX_FILES, CAP_EXCEPTION_LOG))
+                         help="relax ONLY the brief's FILES cap, to %d counted entries by "
+                              "default, for a lane built by several writer segments "
+                              "(AO-READY-CAP-EXCEPTION). Bound to this --sha and to one "
+                              "COMMITTED routing decision: the row `| D-NNN | project | "
+                              "decision | routing-00 | ... |` must exist on origin/main of "
+                              "the routing repo's %s, signed by routing-00, and name the "
+                              "full --sha -- one row binds one sha. That SAME row may state "
+                              "its own count, %d or %d, as a `files=<N> atomic: <reason>` "
+                              "token inside its decision cell (AO-READY-CAP-COUNT); a value "
+                              "outside that band, a second files= token anywhere in the row "
+                              "or a missing reason is refused, never clamped. The scope "
+                              "fence, both reviews, the "
+                              "pushed sha, the pre-push record and the CI gates all still "
+                              "run; the line carries cap-exception=<D-NNN> "
+                              "routing=<origin/main sha> cap=<N>"
+                              % (CAP_EXCEPTION_MAX_FILES, CAP_EXCEPTION_LOG,
+                                 CAP_EXCEPTION_ROW_MIN_FILES,
+                                 CAP_EXCEPTION_ROW_MAX_FILES))
     ready_p.add_argument("--base", default="origin/main",
                          help="the diff's other end for the writer-guards gate, compared at "
                              "its merge base with --sha (default: %(default)s). Must resolve "
