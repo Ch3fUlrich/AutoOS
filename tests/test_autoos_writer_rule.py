@@ -35,6 +35,11 @@ def reg():
                                    "R3": [VERTEX_LEG]}}}
 
 
+def committed():
+    with open(ROOT / "catalog" / "ai-registry.json", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 class RequiredLevelTests(unittest.TestCase):
     def test_the_level_table(self):
         cases = [  # (task_type, paths, diff_text, expected)
@@ -351,10 +356,25 @@ class WriterAllowedTests(unittest.TestCase):
 
 class WritersPolicyTests(unittest.TestCase):
     def test_the_committed_registry_is_clean(self):
-        with open(ROOT / "catalog" / "ai-registry.json", encoding="utf-8") as fh:
-            regd = json.load(fh)
+        regd = committed()
         self.assertIn("writers", regd["policy"])
         self.assertEqual(registry_mod._check_writers(regd), [])
+
+    def test_the_committed_registry_refuses_the_vertex_writer_leg(self):
+        """AO-MIMO-D1201 (2026-10-12): Vertex and Google AI Studio are off
+        everywhere, so neither vertex spelling of the retired R2 leg is a writer
+        any more. The shipped R2 chain carries no available leg, so R2 - and R3,
+        which falls back to it - fail closed for every model, while the sub40
+        free-model path keeps writing at R0/R1."""
+        regd = committed()
+        self.assertEqual(rule.r2_chain(regd), [])
+        for model in (VERTEX, "vertex_ai/gemini-3.8-flash"):
+            for level in ("R2", "R3"):
+                with self.subTest(model=model, level=level):
+                    self.assertFalse(rule.writer_allowed(model, level, "ops", regd))
+                    self.assertFalse(rule.writer_allowed(model, level, "code", regd))
+        self.assertFalse(rule.writer_allowed(QWEN, "R2", "ops", regd))
+        self.assertTrue(rule.writer_allowed(NEMOTRON, "R1", "code", regd))
 
     def test_malformed_writers_are_reported(self):
         bad = [{"policy": {"writers": ["R2"]}},

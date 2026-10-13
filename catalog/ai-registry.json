@@ -3035,11 +3035,11 @@
       "t4-rag"
       ],
     "writers": {
-      "$comment": "AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins (qoder/qwen3.8-max is out of credits, so vertex/gemini-3.8-flash at high effort writes).",
+      "$comment": "AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins. AO-MIMO-D1201 (operator 2026-10-12) holds Vertex AI and Google AI Studio off everywhere, so vertex/gemini-3.8-flash is available:false like the qoder/qwen3.8-max leg that was already out of credits: the R2 chain carries no available leg, so writer_allowed fails closed and denies every R2/R3 request, while sub40_models keep writing at R0/R1. Restoring an R2 writer is a flag flip on a leg here, not a code change.",
       "sub40_models": ["nemotron-3-super", "laguna", "north-mini-code", "gpt-oss"],
       "R2": [
         {"client": "qoder", "model": "qwen3.8-max", "available": false, "reason": "out of credits"},
-        {"client": "vertex", "model": "gemini-3.8-flash", "effort": "high"}
+        {"client": "vertex", "model": "gemini-3.8-flash", "effort": "high", "available": false, "reason": "D-1201 vertex off"}
       ]
     }
   },
