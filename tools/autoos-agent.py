@@ -7098,6 +7098,13 @@ def cap_exception_row_cap(cells):
     if not _CAP_FILES_VALUE_RE.fullmatch(value):
         return None, ("malformed files= value %r: the count is one ASCII integer, "
                       "7 or 8, with no sign, padding, tail or fraction" % (value[:24],))
+    if len(value) > 3:
+        # A band value is at most two digits, so a run this long is refused on length
+        # alone: `int()` on 4300+ digits raises ValueError, and the refusal must never
+        # echo the run it refused.
+        return None, ("files=%s... is outside the range %d..%d a row may state for itself"
+                      % (value[:8], CAP_EXCEPTION_ROW_MIN_FILES,
+                         CAP_EXCEPTION_ROW_MAX_FILES))
     cap = int(value)
     if cap < CAP_EXCEPTION_ROW_MIN_FILES or cap > CAP_EXCEPTION_ROW_MAX_FILES:
         return None, ("files=%d is outside the range %d..%d a row may state for itself"
