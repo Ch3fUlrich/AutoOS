@@ -13104,6 +13104,522 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         self.assertIn(">3 files not counting CHANGELOG.md", str(cm.exception))
 
 
+class JudgeRanSeatTests(unittest.TestCase):
+    """AO-READY-D1143 (D-1143): `ran=judge:<run-ref>` — the judge's OWN run as the
+    evidence a HIGH lane ran something.
+
+    A secret-adjacent lane (D-1143) reviews on tool-less seats, so not one of them can
+    truthfully say `ran=tests`: the tests were run by the judge, in its own detached
+    run, and no seat held a tool. The rule therefore accepts a THIRD value,
+    `ran=judge:<run-ref>`, and counts it only when two COMMITTED facts back it in the
+    routing repo — the judge-run record `docs/judge-runs/<run-ref>.md` on origin/main,
+    naming the lane's commit, and exactly one `D-<n>` decisions-log row signed
+    `routing-00` that names `D-1143`, the full 40-hex lane sha and the run-ref. Neither
+    is ever read from the working copy or from another ref, and both are read from ONE
+    resolution of `origin/main`: a record or a row somebody typed after the commit buys
+    nothing, exactly as a cap-exception row does.
+
+    The throwaway routing repo is real git, built the way `ReadyCapExceptionTests`
+    builds its own (`update-ref`-pinned `refs/remotes/origin/main`), and
+    `AUTOOS_ROUTING_DIR` points the gate at it.
+    """
+
+    LANE = "lane/work"
+    SHA = "b" * 40
+    OTHER = "d" * 40
+    TREE = "c" * 40
+    REF = "run-1"
+    DECISION = "D-1143"
+    TABLE = ("| id | project | decision | by | date |\n"
+             "| --- | --- | --- | --- | --- |\n")
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = _reviewer_registry()
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.work, True)
+        self.routing = self.routing_repo(self.TABLE + self.row(self.SHA),
+                                         [(self.REF, self.judge_record(self.SHA))])
+        env = mock.patch.dict(os.environ, {
+            "AUTOOS_ROUTING_DIR": self.routing, "AUTOOS_STATE_DIR": self.work,
+            "AUTOOS_LEDGER_PATH": os.path.join(self.work, "wl.jsonl")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    # --- the fixtures -------------------------------------------------------
+
+    def git(self, d, *argv):
+        return subprocess.run(["git", "-C", d, *argv], capture_output=True, text=True,
+                              check=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+    def routing_repo(self, log_text, records=()):
+        """A temp git repo whose origin/main holds `log_text` as the decisions log and
+        `records` (a list of `(run-ref, text)`) under `docs/judge-runs/`."""
+        d = tempfile.mkdtemp(prefix="judge-routing-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "docs", "judge-runs"))
+        self.write_routing_log(d, log_text)
+        for name, text in records:
+            with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % name), "w",
+                         encoding="utf-8") as fh:
+                fh.write(text)
+        self.git(d, "init", "-q")
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "row")
+        self.git(d, "update-ref", "refs/remotes/origin/main", self.git(d, "rev-parse", "HEAD"))
+        return d
+
+    def write_routing_log(self, d, text):
+        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(text)
+
+    def write_judge_record(self, d, name, text):
+        with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % name), "w",
+                     encoding="utf-8") as fh:
+            fh.write(text)
+
+    def judge_record(self, sha, **overrides):
+        """The five required fields at column 0, plus prose the reader must ignore."""
+        fields = {"sha": sha, "tree": self.TREE,
+                  "command": "python3 -m pytest tests -q -p no:cacheprovider",
+                  "pass": "312 passed in 41.2s", "judge-session": "ses-judge-1"}
+        fields.update(overrides)
+        lines = ["# judge run %s" % self.REF]
+        for key in ("sha", "tree", "command", "pass", "judge-session"):
+            if fields.get(key) is None:
+                continue
+            lines.append("%s: %s" % (key, fields[key]))
+        lines.extend(["", "The judge ran the suite in its own detached run.", ""])
+        return "\n".join(lines)
+
+    def row(self, sha, run=None, ref=None, by="routing-00", decision=None):
+        """One committed decisions-log row that binds `run` to `sha` under `ref`."""
+        if decision is None:
+            decision = ("judge-run evidence for the tool-less lane at %s naming %s %s"
+                        % (sha, self.DECISION, run or self.REF))
+        return ("| %s | autoos | %s | %s | 2026-10-13 |\n"
+                % (ref or self.DECISION, decision, by))
+
+    def check(self, d, run=None, sha=None):
+        return self.agent.judge_run_ok(self.REF if run is None else run,
+                                       self.SHA if sha is None else sha,
+                                       env={"AUTOOS_ROUTING_DIR": d})
+
+    def status(self, *lines, **kwargs):
+        kwargs.setdefault("lane_sha", (self.LANE, self.SHA))
+        return self.agent.review_status("\n".join(lines) + "\n", self.registry,
+                                        root=self.root, write_ledger=False, **kwargs)
+
+    def judge_seat_line(self, run=None):
+        return CROSS_FAMILY_LINE + (" ran=judge:%s" % (self.REF if run is None else run))
+
+    def seat_refused(self, run=None, **kwargs):
+        """The seat-level detail string for one `ran=judge:<run>` that does not count."""
+        report = self.status(self.judge_seat_line(run), CROSS_FAMILY_LINE_2, FINAL_LINE,
+                             r_level="R3", **kwargs)
+        self.assertFalse(report["ready"], report)
+        detail = report["cross_family"]["detail"]
+        self.assertIn("ran=judge:%s" % (self.REF if run is None else run), detail)
+        return detail
+
+    # --- the accepted seat ---------------------------------------------------
+
+    def test_a_committed_record_and_row_count_the_judge_seat(self):
+        report = self.status(self.judge_seat_line(), CROSS_FAMILY_LINE_2, FINAL_LINE,
+                             r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+        # B: the counted seat carries the WHOLE `judge:<run-ref>` value it was written
+        # with, so the gate says which run the evidence is, not merely that there was one.
+        self.assertEqual(report["cross_family"]["seats"][0]["ran"], "judge:run-1")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.agent.print_review_report("record.md", report)
+        self.assertIn("ran=judge:run-1", out.getvalue())
+
+    def test_the_r3_rule_is_satisfied_by_the_second_seat_too(self):
+        report = self.status(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2 + " ran=judge:run-1",
+                             FINAL_LINE, r_level="R3")
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+        self.assertEqual(report["cross_family"]["seats"][1]["ran"], "judge:run-1")
+
+    def test_the_hint_names_the_judge_value(self):
+        report = self.status(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2)
+        self.assertIn("judge:<run-ref>", report["hint"])
+
+    def test_judge_run_ok_answers_the_committed_pair(self):
+        ok, reason = self.check(self.routing)
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "")
+
+    # --- (1)(2) the record is read committed, and nowhere else ---------------
+
+    def test_a_run_ref_with_no_committed_record_is_refused(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("docs/judge-runs/run-1.md", reason)
+        self.assertIn("never a working copy", reason)
+        self.assertIn("ran=judge:run-1", self.seat_refused())
+
+    def test_a_record_only_in_the_working_copy_is_refused(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA))
+        self.write_judge_record(d, self.REF, self.judge_record(self.SHA))
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("docs/judge-runs/run-1.md", reason)
+        self.assertIn("ran=judge:run-1", self.seat_refused())
+
+    def test_a_record_committed_off_origin_main_is_refused(self):
+        d = self.routing_repo(self.TABLE)
+        self.write_judge_record(d, self.REF, self.judge_record(self.SHA))
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA))
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "late")
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("docs/judge-runs/run-1.md", reason)
+
+    def test_an_undecodable_record_is_a_refusal_not_a_crash(self):
+        d = tempfile.mkdtemp(prefix="judge-routing-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "docs", "judge-runs"))
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA))
+        with open(os.path.join(d, "docs", "judge-runs", "run-1.md"), "wb") as fh:
+            fh.write(b"sha: \xff\xfe\x00garbage")
+        self.git(d, "init", "-q")
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "bin")
+        self.git(d, "update-ref", "refs/remotes/origin/main", self.git(d, "rev-parse", "HEAD"))
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("UTF-8", reason)
+
+    # --- (3) one record, one lane -------------------------------------------
+
+    def test_a_record_naming_another_sha_is_refused_naming_both(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA),
+                              [(self.REF, self.judge_record(self.OTHER))])
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn(self.OTHER[:12], reason)
+        self.assertIn(self.SHA[:12], reason)
+        self.assertIn("not the lane", reason)
+        self.assertIn("ran=judge:run-1", self.seat_refused())
+
+    def test_a_judge_seat_needs_the_lane_sha_the_ready_gate_certified(self):
+        # The library callers and `review-status` never see `--sha`, so a judge seat
+        # they read cannot be bound to anything: it is refused, not counted.
+        report = self.status(self.judge_seat_line(), CROSS_FAMILY_LINE_2, FINAL_LINE,
+                             r_level="R3", lane_sha=None)
+        self.assertFalse(report["ready"], report)
+        self.assertIn("needs the ready --sha", report["cross_family"]["detail"])
+        ok, reason = self.check(self.routing, sha=None)
+        self.assertFalse(ok, reason)
+        self.assertIn("needs the ready --sha", reason)
+
+    def test_a_judge_seat_bound_to_a_short_sha_is_refused(self):
+        ok, reason = self.check(self.routing, sha=self.SHA[:12])
+        self.assertFalse(ok, reason)
+        self.assertIn("needs the ready --sha", reason)
+
+    # --- (4) the row that binds ---------------------------------------------
+
+    def test_every_row_that_does_not_bind_is_refused(self):
+        sha, t = self.SHA, self.TABLE
+        record = [(self.REF, self.judge_record(sha))]
+        cases = (
+            ("no D-row at all", t),
+            ("the row names another sha", t + self.row(self.OTHER)),
+            ("the row names a 12-hex sha prefix", t + self.row(sha[:12])),
+            ("the by cell is not routing-00", t + self.row(sha, by="routing-01")),
+            ("the row does not name D-1143", t + self.row(
+                sha, decision="a decision about something else at %s naming %s"
+                % (sha, self.REF))),
+            ("the run-ref sits inside a longer token", t + self.row(
+                sha, decision="relax judge run run-12 at %s naming %s" % (sha, self.DECISION))),
+            ("the id is only prose", t + "judge run %s at %s %s\n"
+             % (self.REF, sha, self.DECISION)),
+            ("the first cell is not a decision id", t + self.row(
+                sha, ref="judge-run")),
+        )
+        for label, text in cases:
+            with self.subTest(case=label):
+                ok, reason = self.check(self.routing_repo(text, record))
+                self.assertFalse(ok, reason)
+                self.assertIn("binds judge run run-1", reason)
+                detail = self.seat_refused()
+                self.assertIn("binds judge run run-1", detail)
+
+    def test_two_binding_rows_are_refused_as_two_claims(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA)
+                              + self.row(self.SHA, ref="D-1144"), [(self.REF,
+                                                                    self.judge_record(self.SHA))])
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("one row binds one sha", reason)
+        self.assertIn("one row binds one sha", self.seat_refused())
+
+    def test_a_binding_row_written_after_the_commit_is_not_read(self):
+        # The row is read committed too: editing the working copy after the commit is
+        # the same non-decision the cap-exception gate refuses.
+        d = self.routing_repo(self.TABLE, [(self.REF, self.judge_record(self.SHA))])
+        self.write_routing_log(d, self.TABLE + self.row(self.SHA))
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("binds judge run run-1", reason)
+
+    # --- (5) the rule the judge seat exists to serve ------------------------
+
+    def test_an_r3_lane_with_no_ran_and_no_judge_ref_is_still_refused(self):
+        report = self.status(CROSS_FAMILY_LINE, CROSS_FAMILY_LINE_2, FINAL_LINE,
+                             r_level="R3")
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertIn("ran=tests|live", report["cross_family"]["detail"])
+        self.assertNotIn("judge", report["cross_family"]["detail"])
+
+    def test_an_unbound_judge_seat_is_not_counted_at_all(self):
+        # Not a ran= seat and not a counted seat: below R3 the refusal still says why
+        # the entry did not count, rather than quietly dropping the value.
+        d = self.routing_repo(self.TABLE)
+        with mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": d}):
+            report = self.status(self.judge_seat_line(), CROSS_FAMILY_LINE_2, FINAL_LINE)
+        self.assertFalse(report["ready"], report["cross_family"]["detail"])
+        self.assertIn("2 cross-family seats required; have 1",
+                      report["cross_family"]["detail"])
+        self.assertIn("ran=judge:run-1", report["cross_family"]["detail"])
+
+    def test_a_bound_judge_seat_needs_no_ran_value_below_r3(self):
+        report = self.status(self.judge_seat_line(), CROSS_FAMILY_LINE_2, FINAL_LINE)
+        self.assertTrue(report["ready"], report["cross_family"]["detail"])
+
+    # --- (6) the run-ref shape ----------------------------------------------
+
+    def test_a_malformed_run_ref_is_refused_before_any_git(self):
+        bad = ("../x", "a/b", "Judge:x", "", "x" * 65, "a\x00b", "..", "a b", ".hidden",
+               "-lead", "run/../etc/passwd", "ünïcode", "a\nb")
+        for run in bad:
+            with self.subTest(run=repr(run)[:40]):
+                ok, reason = self.check(self.routing, run=run)
+                self.assertFalse(ok, reason)
+                self.assertIn("is not a run-ref", reason)
+
+    def test_a_malformed_run_ref_refuses_the_seat_without_raising(self):
+        for run in ("../x", "a/b", "", "x" * 65, "a\x00b"):
+            with self.subTest(run=repr(run)[:40]):
+                report = self.status(self.judge_seat_line(run), CROSS_FAMILY_LINE_2,
+                                     FINAL_LINE, r_level="R3")
+                self.assertFalse(report["ready"], report)
+                self.assertIn("is not a run-ref", report["cross_family"]["detail"])
+
+    def test_a_capitalised_judge_prefix_is_the_old_malformed_ran_refusal(self):
+        # A: `ran=` stays case-sensitive — `Judge:x` is not the new value, it is a typo
+        # of the old rule and gets the old message.
+        report = self.status(CROSS_FAMILY_LINE + " ran=Judge:x", CROSS_FAMILY_LINE_2,
+                             FINAL_LINE, r_level="R3")
+        self.assertFalse(report["ready"], report)
+        self.assertIn("ran=Judge:x is not one of tests, live",
+                      report["cross_family"]["detail"])
+
+    def test_a_run_ref_of_the_accepted_shape_is_read_to_the_end(self):
+        run = "a" + "0._-" * 15 + "xyz"        # exactly 64 characters, the longest accepted
+        self.assertEqual(len(run), 64)
+        d = self.routing_repo(self.TABLE + self.row(self.SHA, run=run),
+                              [(run, self.judge_record(self.SHA))])
+        ok, reason = self.check(d, run=run)
+        self.assertTrue(ok, reason)
+
+    # --- (7) the record's own fields ----------------------------------------
+
+    def test_a_record_missing_a_field_or_with_a_duplicate_is_refused(self):
+        cases = (
+            ("no pass field", self.judge_record(self.SHA, **{"pass": None})),
+            ("no sha field", self.judge_record(self.SHA, sha=None)),
+            ("no tree field", self.judge_record(self.SHA, tree=None)),
+            ("no command field", self.judge_record(self.SHA, command=None)),
+            ("no judge-session field", self.judge_record(self.SHA, **{"judge-session": None})),
+            ("an empty pass value", self.judge_record(self.SHA, **{"pass": ""})),
+            ("an empty command value", self.judge_record(self.SHA, command="")),
+            ("an empty session value", self.judge_record(self.SHA, **{"judge-session": ""})),
+            ("a 12-hex record sha", self.judge_record(self.SHA[:12])),
+            ("an upper-case record sha", self.judge_record(self.SHA.upper())),
+            ("a pass line naming no count", self.judge_record(
+                self.SHA, **{"pass": "all green, nothing counted"})),
+            ("a pass line naming zero passed", self.judge_record(
+                self.SHA, **{"pass": "0 passed in 1.0s"})),
+            ("a pass line that also says failed", self.judge_record(
+                self.SHA, **{"pass": "2 failed, 312 passed in 41.2s"})),
+            ("a pass line that says error", self.judge_record(
+                self.SHA, **{"pass": "312 passed, 1 error in 41.2s"})),
+            ("a sha field given twice", "sha: %s\nsha: %s\n" % (self.SHA, self.OTHER)),
+            ("a field indented is no field", " sha: %s\n" % self.SHA),
+        )
+        for label, text in cases:
+            with self.subTest(case=label):
+                d = self.routing_repo(self.TABLE + self.row(self.SHA),
+                                      [(self.REF, text)])
+                ok, reason = self.check(d)
+                self.assertFalse(ok, reason)
+                self.assertIn("judge-run record", reason)
+                self.assertIn("ran=judge:run-1", self.seat_refused())
+
+    def test_an_empty_pass_field_is_named_as_empty_not_missing(self):
+        d = self.routing_repo(self.TABLE + self.row(self.SHA),
+                              [(self.REF, self.judge_record(self.SHA, pass_=""))])
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("pass", reason)
+
+    def test_a_duplicate_field_refuses_naming_the_field(self):
+        text = ("sha: %s\ntree: %s\ncommand: pytest\npass: 5 passed\n"
+                "judge-session: ses-1\nsha: %s\n" % (self.SHA, self.TREE, self.SHA))
+        d = self.routing_repo(self.TABLE + self.row(self.SHA), [(self.REF, text)])
+        ok, reason = self.check(d)
+        self.assertFalse(ok, reason)
+        self.assertIn("sha", reason)
+        self.assertIn("twice", reason)
+
+    def test_a_well_formed_record_with_extra_prose_counts(self):
+        text = ("# judge run\n\nsha: %s\ntree: %s\ncommand: pytest -q\n"
+                "pass: 312 passed in 41.2s\njudge-session: ses-1\n"
+                "\nnotes: the judge's own words\n" % (self.SHA, self.TREE))
+        d = self.routing_repo(self.TABLE + self.row(self.SHA), [(self.REF, text)])
+        ok, reason = self.check(d)
+        self.assertTrue(ok, reason)
+
+
+class ReadyJudgeRanTests(ReadyWriterGuardsTests):
+    """AO-READY-D1143 at the `ready` CLI seam: the judge seat carries a real R3 lane.
+
+    It inherits the whole writer-guards driver, so every parent case still lands where
+    it landed with no `ran=judge:` rule in the file — the routing repo is built and
+    pointed at, never read by them. `ready` is the caller that DOES give the gate a
+    lane sha, which is what makes a judge seat bindable at all: `--sha` here is
+    `"a" * 40`, and the committed record and the committed row both name it.
+    """
+
+    REF = "run-1"
+    SHA_ALT = "e" * 40
+    TABLE = ("| id | project | decision | by | date |\n"
+             "| --- | --- | --- | --- | --- |\n")
+    R3_BRIEF = ("TASK: rotate the token store\n"
+                "FILES (only these; <= 3 files, <= 200 lines changed):"
+                " auth/tokens.yml. Do not touch other lines/files.\n")
+
+    def setUp(self):
+        super().setUp()
+        self.routing = self.judge_repo(self.TABLE + self.judge_row(self.SHA),
+                                       [(self.REF, self.judge_record(self.SHA))])
+        env = mock.patch.dict(os.environ, {
+            "AUTOOS_ROUTING_DIR": self.routing, "AUTOOS_STATE_DIR": self.work,
+            "AUTOOS_LEDGER_PATH": os.path.join(self.work, "wl.jsonl")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def git(self, d, *argv):
+        return subprocess.run(["git", "-C", d, *argv], capture_output=True, text=True,
+                              check=True, stdin=subprocess.DEVNULL).stdout.strip()
+
+    def judge_repo(self, log_text, records=()):
+        d = tempfile.mkdtemp(prefix="judge-routing-")
+        self.addCleanup(shutil.rmtree, d, True)
+        os.makedirs(os.path.join(d, "docs", "judge-runs"))
+        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(log_text)
+        for name, text in records:
+            with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % name), "w",
+                         encoding="utf-8") as fh:
+                fh.write(text)
+        self.git(d, "init", "-q")
+        self.git(d, "add", "-A")
+        self.git(d, "-c", "user.name=autoos-test",
+                 "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-q", "-m", "row")
+        self.git(d, "update-ref", "refs/remotes/origin/main", self.git(d, "rev-parse", "HEAD"))
+        return d
+
+    def judge_record(self, sha):
+        return ("# judge run %s\nsha: %s\ntree: %s\ncommand: python3 -m pytest -q\n"
+                "pass: 312 passed in 41.2s\njudge-session: ses-judge-1\n"
+                % (self.REF, sha, "c" * 40))
+
+    def judge_row(self, sha, run=None, by="routing-00"):
+        return ("| D-1143 | autoos | judge-run evidence for the tool-less lane at %s "
+                "naming D-1143 %s | %s | 2026-10-13 |\n"
+                % (sha, run or self.REF, by))
+
+    def judge_record_lane(self, ran=" ran=judge:run-1"):
+        with io.open(self.record, "w", encoding="utf-8") as fh:
+            fh.write("\n".join((CROSS_FAMILY_LINE + ran, CROSS_FAMILY_LINE_2, FINAL_LINE))
+                     + "\n")
+
+    def use_repo(self, d):
+        """Point `AUTOOS_ROUTING_DIR` at `d` for the rest of the test."""
+        patch = mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": d})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.routing = d
+        return d
+
+    def ready_r3(self, extra=("--dry-run",)):
+        return self.ready(diff_paths=["auth/tokens.yml"], extra=extra,
+                          brief=self.R3_BRIEF, report=self.report_text())
+
+    def test_the_judge_seat_carries_the_r3_lane_and_prints_its_ref(self):
+        self.judge_record_lane()
+        rc, out, err, _inbox, _calls = self.ready_r3()
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("ran=judge:run-1", out)
+        self.assertIn("ready: yes", out)
+
+    def test_the_judge_seat_writes_the_ready_line_with_its_ref(self):
+        self.judge_record_lane()
+        rc, out, err, inbox, _calls = self.ready_r3(extra=())
+        self.assertEqual(rc, 0, out + err)
+        self.assertIn("ran=judge:run-1", out)
+        self.assertIn("lane/work", inbox)
+
+    def test_an_r3_lane_with_a_judge_seat_that_has_no_record_is_refused(self):
+        self.judge_record_lane()
+        self.use_repo(self.judge_repo(self.TABLE + self.judge_row(self.SHA)))
+        rc, out, err, inbox, _calls = self.ready_r3()
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("ran=judge:run-1", out + err)
+        self.assertIn("docs/judge-runs/run-1.md", out + err)
+        self.assertEqual(inbox, "")
+
+    def test_an_r3_lane_with_a_judge_seat_bound_to_another_sha_is_refused(self):
+        self.judge_record_lane()
+        self.use_repo(self.judge_repo(self.TABLE + self.judge_row(self.SHA),
+                                      [(self.REF, self.judge_record(self.SHA_ALT))]))
+        rc, out, err, _inbox, _calls = self.ready_r3()
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("not the lane", out + err)
+
+    def test_an_r3_lane_with_a_judge_seat_and_no_binding_row_is_refused(self):
+        self.judge_record_lane()
+        self.use_repo(self.judge_repo(self.TABLE, [(self.REF, self.judge_record(self.SHA))]))
+        rc, out, err, _inbox, _calls = self.ready_r3()
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("binds judge run run-1", out + err)
+
+    def test_a_judge_record_written_after_the_commit_does_not_carry_the_lane(self):
+        self.judge_record_lane()
+        d = self.judge_repo(self.TABLE + self.judge_row(self.SHA))
+        with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % self.REF), "w",
+                     encoding="utf-8") as fh:
+            fh.write(self.judge_record(self.SHA))
+        self.use_repo(d)
+        rc, out, err, _inbox, _calls = self.ready_r3()
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("never a working copy", out + err)
+
+
 class LaneDiffPathsTests(unittest.TestCase):
     """`lane_diff_paths` (AO-WRITER-GUARDS P4b) reads the lane's diff through the
     injectable `subprocess.run` — the same shape `ci_run_status` uses, because
