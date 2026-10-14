@@ -1,6 +1,6 @@
 ---
 name: combo-create
-description: Create an OmniRoute combo (tier route) always done correctly - contexts, trial-free-credits-paid order with paid last and deepseek last, t1 >=600k 1M band, t2/t3 128k clamp, openrouter :free-only, contract gate fail-closed. Use whenever adding, reordering, or auditing a route in catalog/ai-registry.json, configuration/omniroute/combos.json, or any rendered surface.
+description: Create an OmniRoute combo (tier route) always done correctly - contexts, trial-free-credits-paid order with paid last and deepseek last, t1 >=600k 1M band, legacy t2/t3 (l2-worker, l3-driver bands) 128k clamp with D657 layer twins carrying their own windows, openrouter :free-only, contract gate fail-closed. Use whenever adding, reordering, or auditing a route in catalog/ai-registry.json, configuration/omniroute/combos.json, or any rendered surface.
 ---
 
 # Combo Create (tier order done correctly)
@@ -26,19 +26,26 @@ reference it; they do not restate it.
   test asserting the note). Verify each leg in live `/v1/models` before
   adding; if impossible without inventing, keep what exists and report
   D-TORDER-2 with measured windows.
-- **t2/t3 order = trial -> free -> credits -> paid, DEEPSEEK LAST, 128k clamp.**
+- **t2/t3 order = trial -> free -> credits -> paid, DEEPSEEK LAST; 128k clamp on the legacy bands only.**
   Free band head `gemini/gemini-3.8-flash`, then groq/huggingface/openrouter/
   free_ai legs; `scaleway/*` and `antigravity/*` kept but NEVER heads.
   Credits after all free: `ovhcloud/*` x3 + `vertex/gemini-3.8-flash` (NEW to
   t2/t3 full). Paid: `meta_api` then `deepseek` LAST. No free leg after a paid
-  leg. `-free-only` twins take NO credit/paid leg. `t2/t3` render `128k`
-  (lowest implementer window, do NOT raise); sub-1M legs allowed.
+  leg. `-free-only` twins take NO credit/paid leg. The legacy bands
+  (`l2-worker`, `l2-worker-free-only`, `l3-driver`, `l3-driver-free-only`)
+  render `128k` (lowest implementer window, do NOT raise); sub-1M legs
+  allowed. The D657 layer twins (`l2-orchestrator`, `l3-researcher`,
+  `l3-review-*`, + `-clean` twins) carry their OWN declared windows (1M) and
+  sit outside rule (d) - contract `T2T3_ROUTES` names only the four legacy
+  combos; the cache rule (contract (f), orchestrator-layer `l0-/l1-/l2-`)
+  is what binds orchestrator-layer combos. Never infer a window from the
+  tier name - read the route's declared limit.
 - **gemini context/output.** `models.gemini-3.8-flash`: `context_advertised`
   1048576, `output_max` 65536 (live), `context_usable.tokens` 1048576
   (source `default`, operator update 4). Twin
   `models.google/gemini-3.8-flash`: 1048576 / 65536 / usable 524288 (50%).
   `routes.gemini-3.8-flash` legs `[gemini, vertex, openrouter (gated/removed
-  per OR rule), deepinfra (gated)]`, `surfaces.omniroute.context` 1048576,
+  per OR rule)]`, `surfaces.omniroute.context` 1048576,
   label `1M`. `providers.google_ai_studio.available` true with backoff note:
   "gemini retained; usage governed by the repeated-429 backoff policy
   (3x429/120 s -> 300 s cooldown per leg; 30 min park)" (gateway 08:07Z ACTIVE).
@@ -68,7 +75,7 @@ paid, paid last, no free after paid, deepseek last, openrouter servable :free
 + declared-paid gated; (c) every leg resolves (live existence warn-only:
 apply skips unknown with warning, exit 0, so gate must not fail on dead
 huggingface/antigravity or apply -DryRun breaks); (d) t1 1M + >=600k,
-t2/t3 128k.
+legacy t2/t3 (l2-worker, l3-driver bands) 128k; D657 layer twins carry own windows.
 
 Wired fail-closed (non-zero exit, also under -DryRun): `configuration/
 omniroute/apply.ps1` + `apply.sh` (before creating anything), CI

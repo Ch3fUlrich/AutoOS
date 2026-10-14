@@ -2303,16 +2303,9 @@ class GatewayOrderTests(unittest.TestCase):
         # v4.1-flash (the two BYOK/zen V4.1 paths) are the only ones left
         # servable.
         registry = self.registry()
-        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro")
+        rejected_models = ("DeepSeek-V3.2", "deepseek/deepseek-v4-pro", "deepseek-v4-flash")
         for mid in rejected_models:
             self.assertNotIn(mid, registry["models"])
-        # DSAMEND2 (review 2): the third entry used to be the *leg* string
-        # "deepseek/deepseek-v4-flash", and `models` is keyed by model id, not by
-        # leg, so that limb could never fail. What DSAMEND actually left of that
-        # snapshot is a reseller row with no native `direct` block — assert that.
-        self.assertNotIn("direct", registry["models"].get("deepseek-v4-flash") or {})
-        self.assertIn("deepseek-v4-flash", registry["models"],
-                      "the reseller row keeps its model entry, only not a native one")
         for route_id, route in registry["routes"].items():
             for leg in route.get("legs") or []:
                 if leg == "cheaperinference/deepseek-v4-flash":
@@ -4256,9 +4249,9 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
     # moved all three small cards onto the probe-passed groq-qwen3.8-27b combo
     # (free, and the cheapest usable leg for these non-agentic kinds).
     BEFORE_AFTER = {
-        "review": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
-        "research": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
-        "plan": ("groq-qwen3.8-27b", "groq/qwen/qwen3.8-27b"),
+        "review": ("or-laguna-s-2.1-free", "openrouter/poolside/laguna-s-2.1:free"),
+        "research": ("or-laguna-s-2.1-free", "openrouter/poolside/laguna-s-2.1:free"),
+        "plan": ("or-laguna-s-2.1-free", "openrouter/poolside/laguna-s-2.1:free"),
     }
 
     def test_budget_off_routes_are_the_pinned_table(self):
@@ -5004,6 +4997,7 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertEqual(r.leg_tier("cc/claude-opus-4-6", shipped),
                          "subscription")
         shipped["providers"]["cc"]["available"] = True
+        shipped["providers"]["groq"]["available"] = True
         shipped["policy"]["claude_budget"]["mode"] = "normal"
         shipped["policy"]["claude_budget"]["weekly_share_left"] = 0.9
         route = {"id": "r-sub", "class": "cheap",

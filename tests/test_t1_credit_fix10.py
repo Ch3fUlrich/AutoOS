@@ -426,13 +426,11 @@ class M4CacheBillingTests(unittest.TestCase):
                                    model["price_in"] * 0.1, msg=mid)
 
     def test_new_price_rows_are_citable(self):
+        # DIRETIRED 2026-10-13: the DeepInfra row (models.'anthropic/claude-sonnet-4-6',
+        # deepinfra.com list price) is deleted with the provider; the Vertex half
+        # below is what this test still pins.
         reg = json.loads((_ROOT / "catalog" / "ai-registry.json")
                          .read_text(encoding="utf-8"))
-        di = reg["models"]["anthropic/claude-sonnet-4-6"]
-        self.assertEqual((di["price_in"], di["price_out"]), (3e-06, 1.5e-05))
-        self.assertIn("https://deepinfra.com/anthropic/claude-sonnet-4-6",
-                      di["price_source"])
-        self.assertIn("2026-10-01", di["price_source"])
         vx = reg["models"]["gemini-3.1-pro-preview"]["provider_prices"][
             "vertex_ai"]
         self.assertIn("https://cloud.google.com/vertex-ai/generative-ai/pricing",
@@ -652,7 +650,7 @@ class T1CreditFix11R4HelperDotDotTests(unittest.TestCase):
 class T1CreditFix11R5PrefixedCachePriceTests(unittest.TestCase):
     def test_prefixed_rows_carry_10_percent(self):
         reg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "catalog", "ai-registry.json")))
-        for mid in ("deepseek/deepseek-v4.1-flash", "deepseek-v4-flash", "meta/muse-spark-1.3-contributor", "muse-spark"):
+        for mid in ("deepseek/deepseek-v4.1-flash", "deepseek-flash", "meta/muse-spark-1.3-contributor", "muse-spark"):
             row = reg["models"][mid]
             self.assertIn("price_cache_read", row, mid)
             self.assertAlmostEqual(row["price_cache_read"], 0.1 * row["price_in"], places=12, msg=mid)

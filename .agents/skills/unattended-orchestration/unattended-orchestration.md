@@ -268,15 +268,18 @@ complexity per R-coord-03. The tier rows below are the structural contract only.
 
 | Tier | Role | Context |
 |---|---|---|
-| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only, xhigh effort (`#high`) |
+| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only |
 | `l1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only |
-| `t2` | smart worker: reasoning, reviews, mid-size codegen | ≤128k |
+| `t2` | smart worker: reasoning, reviews, mid-size codegen | per-combo: `l2-worker` band ≤128k, `l2-orchestrator` 1M |
 | `l2-worker-clean` | same, paid legs only (sensitive data) | ≤128k |
-| `t3` | cheap driver: small edits, probes, parallel reviews | ≤128k |
+| `l2-researcher` | read-only research | ≤128k |
+| `t3` | cheap driver: small edits, probes, parallel reviews | per-combo: `l3-driver`/`l3-implementer` bands ≤128k; `l3-researcher`, `l3-review-tests`, `l3-review-codebase` 1M; `l3-review-diff` ≤128k |
 | `l3-driver-clean` | same, paid legs only (sensitive data) | ≤128k |
 
-Rule: anything under 1M context belongs in t2/t3, never t1
-(`opencode.jsonc` limits enforce this: 1M vs 128k). Small-context models
+Rule: orchestrator seats (L0/L1/L2) run 1M combos only; ≤128k combos
+are L3 leaves. Windows are per-route data (`catalog/ide-models.json`,
+rendered from the registry) - never infer a window from the tier name
+(D657-CHAINS added 1M layer twins inside t2/t3). Small-context models
 CAN sub-orchestrate — slice their tasks small instead of promoting them.
 
 ## The 3-tier run pattern

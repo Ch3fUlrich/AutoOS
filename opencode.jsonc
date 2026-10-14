@@ -483,11 +483,6 @@
           "name": "ovh-direct-qwen3.8-27b — direct OVH AI Endpoints (private-safe (T1-CLEAN, D-502); trial credit; cap per D-567)",
           "limit": { "context": 128000, "output": 32768 }
         },
-        "deepinfra-mimo-v2.6-flash": {
-          "modelID": "deepinfra/XiaomiMiMo/MiMo-V2.6-Flash",
-          "name": "deepinfra-mimo-v2.6-flash — direct DeepInfra (prepaid $5, hard stop; public work only, not private-safe)",
-          "limit": { "context": 131072, "output": 16384 }
-        },
         "vertex-3.8-flash": {
           "modelID": "vertex/gemini-3.8-flash",
           "name": "vertex-3.8-flash - direct Gemini 3.8 Flash (Vertex AI, no combo); trial credit; site data only after T1-CLEAN",
@@ -604,6 +599,11 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
+        "l2-worker-1m": {
+          "modelID": "l2-worker-1m",
+          "name": "L2 · l2-worker-1m · 1M",
+          "limit": { "context": 1048576, "output": 32768 }
+        },
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
@@ -623,6 +623,16 @@
           "modelID": "l3-driver-free-only",
           "name": "L3 · l3-driver-free-only · 128k",
           "limit": { "context": 131072, "output": 16384 }
+        },
+        "l3-driver-1m": {
+          "modelID": "l3-driver-1m",
+          "name": "L3 · l3-driver-1m · 1M",
+          "limit": { "context": 1000000, "output": 16384 }
+        },
+        "l3-driver-256k": {
+          "modelID": "l3-driver-256k",
+          "name": "L3 · l3-driver-256k · 256k",
+          "limit": { "context": 256000, "output": 16384 }
         },
         "l3-implementer": {
           "modelID": "l3-implementer",
@@ -709,11 +719,6 @@
           "name": "Laguna-S-2.1 via OpenRouter :free",
           "limit": { "context": 262144, "output": 32768 }
         },
-        "groq-qwen3.8-27b": {
-          "modelID": "groq-qwen3.8-27b",
-          "name": "Qwen3.8-27B via Groq (free)",
-          "limit": { "context": 131072, "output": 16384 }
-        },
         "ovh-qwen3.8-27b": {
           "modelID": "ovh-qwen3.8-27b",
           "name": "Qwen3.8-27B via OVH (credit)",
@@ -728,6 +733,16 @@
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
+        },
+        "mimo-v2.6-flash": {
+          "modelID": "mimo-v2.6-flash",
+          "name": "Xiaomi MiMo v2.6 Flash · 1M",
+          "limit": { "context": 1048576, "output": 65536 }
+        },
+        "mimo-v2.6-pro": {
+          "modelID": "mimo-v2.6-pro",
+          "name": "Xiaomi MiMo v2.6 Pro · 1M",
+          "limit": { "context": 1048576, "output": 65536 }
         },
         "auto/smart": {
           "modelID": "auto/smart",

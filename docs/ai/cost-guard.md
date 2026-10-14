@@ -167,7 +167,7 @@ The MCP spawn path is gated the same way: the MCP server's preflight and detache
     * `not a JSON object`
   and permits the start. A block written for another UTC day stays stale even inside the 2-hour mtime window: yesterday's block must not ride into today.
 - The daily budget cannot be overridden at the spawner. To raise the daily budget, the operator must write a new gate file using `run_budget.py day --budget N`.
-- `agy`/`antigravity` and `ovh`/`ovhcloud` model strings are never blocked by this gate; wholly agy/ovh/free legs pass the gate. The gate never blocks an `agy` client: it is asked first and returns no refusal for one (`is_google_paid_start` is false for the agy/antigravity client), and agy and ovh legs add $0 to the day total. The capability refusal ('lacks shell and write') comes after the gate and only fires for tasks that need shell and write (for example with `--isolate`); a plain dry run with `--client agy` goes through.
+- `agy`/`antigravity` and `ovh`/`ovhcloud` model strings are never blocked by this gate; wholly agy/ovh/free legs pass the gate. The gate never blocks an `agy` client: it is asked first and returns no refusal for one (`is_google_paid_start` is false for the agy/antigravity client), and agy and ovh legs add $0 to the day total. AGYFIX2 2026-10-13: the old capability refusal ('lacks shell and write') for `--isolate` agy runs is gone - headless agy runs shell/write with `--dangerously-skip-permissions`, which the spawner passes for every agy run; a plain dry run with `--client agy` goes through as before.
 
 ---
 

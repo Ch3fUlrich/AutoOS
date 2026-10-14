@@ -11108,6 +11108,28 @@ def cmd_run(args, cfg: dict) -> int:
         refusal = capability_refusal(args.client, required, registry)
         if refusal is not None:
             return refuse(refusal)
+    # CLIENTAVAIL (operator 2026-10-13, codex off): a registry-disabled
+    # client is refused here, beside the capability gate, so every path
+    # (card, tier, pin, dry-run, MCP preflight) gets the same answer before
+    # anything is planned or started. The resolver's own filter
+    # (autoos_resolver._client_reason) only covers resolver-routed (v2)
+    # plans; the tier/v1 paths never consult it, so this gate is what
+    # actually benches the client. Wording mirrors _client_reason.
+    try:
+        _avail_registry = (registry if registry is not None
+                           else load_registry(getattr(args, "registry", None) or REGISTRY_PATH))
+    except (OSError, ValueError) as exc:
+        return refuse("cannot load client availability: %s" % exc)
+    _avail_entry = ((_avail_registry.get("clients") or {}).get(args.client) or {})
+    _avail_now = datetime.datetime.now(datetime.timezone.utc)
+    if unavailable_now(_avail_entry, _avail_now):
+        _avail_until = _avail_entry.get("unavailable_until")
+        if _avail_until is not None:
+            return refuse("client: %s unavailable until %s" % (args.client, _avail_until))
+        return refuse("client: %s unavailable" % args.client)
+    if (_avail_entry.get("available") is False
+            and _avail_entry.get("unavailable_until") is not None):
+        return refuse("re-probe: %s unavailable_until passed" % args.client)
     client = clients.CLIENTS[args.client]
     # CLAUDEBUDGET-b item 3(d): the client is a spend, so it is gated here --
     # ahead of build_plan, so a refused Claude spawn clones no sandbox, writes no

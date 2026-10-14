@@ -5,7 +5,7 @@
   "revision": 1,
   "mcp_server_refs": null,
   "agent_kind": "openhands",
-  "llm_profile_ref": "openrouter-nemotron-ultra",
+  "llm_profile_ref": "l1-orchestrator-free-only",
   "agent": "CodeActAgent",
   "tools": null,
   "system_message_suffix": null,

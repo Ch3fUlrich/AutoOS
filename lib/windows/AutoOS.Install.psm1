@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provider dispatch and post-install steps for AutoOS on Windows.
@@ -3256,10 +3256,16 @@ else:
 llm['drop_params'] = True
 llm['modify_params'] = True
 
-agent_context = agent_settings.setdefault('agent_context', {})
+agent_context = agent_settings.get('agent_context')
+if not isinstance(agent_context, dict):
+    agent_context = {}
+    agent_settings['agent_context'] = agent_context
 agent_context['load_user_skills'] = True
 
-mcp_cfg = agent_settings.setdefault('mcp_config', {})
+mcp_cfg = agent_settings.get('mcp_config')
+if not isinstance(mcp_cfg, dict):
+    mcp_cfg = {}
+    agent_settings['mcp_config'] = mcp_cfg
 # No 'enabled' key on any entry: the live MCPServer schema
 # (openhands.sdk.mcp.config, additionalProperties false) rejects it with
 # extra_forbidden and 500s /api/v1/settings (measured 2026-09-21). Presence
@@ -3343,22 +3349,6 @@ profiles_dir = os.path.join(openhands_dir, 'profiles')
 profiles = dict([
     _profile_for('deepseek-flash', deepseek_key),
     _profile_for('muse-spark', muse_key, 'muse-spark-1.3-contributor'),
-    _profile_for('openrouter-free', openrouter_key),
-    _profile_for('openrouter-nemotron-ultra', openrouter_key),
-    _profile_for('openrouter-nemotron-super', openrouter_key),
-    _profile_for('openrouter-nemotron-lightning', openrouter_key),
-    _profile_for('openrouter-nemotron-nano-omni', openrouter_key),
-    _profile_for('openrouter-laguna', openrouter_key),
-    _profile_for('openrouter-laguna-xs', openrouter_key),
-    _profile_for('openrouter-north-mini-code', openrouter_key),
-    _profile_for('openrouter-nex-pro', openrouter_key),
-    _profile_for('openrouter-nex-mini', openrouter_key),
-    _profile_for('openrouter-inkling', openrouter_key),
-    _profile_for('openrouter-inkling-small', openrouter_key),
-    _profile_for('openrouter-dots3-note', openrouter_key),
-    _profile_for('openrouter-ling-fin', openrouter_key),
-    _profile_for('openrouter-ling-sante', openrouter_key),
-    _profile_for('openrouter-ling-vl', openrouter_key),
     _profile_for('ollama-qwen2.5-coder', None),
 ])
 for name, p_data in profiles.items():
@@ -3543,6 +3533,18 @@ if _files_written:
                 foreach ($line in $harnessOut) {
                     Write-AutoOSLine $line -Level muted
                     if ("$line" -match '^agent-harness openhands: (updated|installed) ') { $ohChanged = $true }
+                }
+            }
+            $syncScript = Join-Path $script:RepoRoot 'tools\sync-openhands-profiles.py'
+            if (Test-Path $syncScript) {
+                $syncOut = & $pythonCmd.Source $syncScript --openhands-dir $openhandsDir --consumer native
+                if ($LASTEXITCODE -ne 0) {
+                    Write-AutoOSLine "live profile sync not applied to OpenHands (exit $LASTEXITCODE)" -Level warn
+                } else {
+                    foreach ($line in $syncOut) {
+                        Write-AutoOSLine $line -Level muted
+                        if ("$line" -match '^sync-openhands-profiles: (updated|installed) ') { $ohChanged = $true }
+                    }
                 }
             }
         }
@@ -4312,7 +4314,7 @@ Export-ModuleMember -Function `
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
-    Install-AutoOSOterm
+    Install-AutoOSOterm, Set-AutoOSZcodeGatewayEnv
 
 # NOTE: defined after the Export-ModuleMember list above on purpose - new code is
 # appended at the end of this file, and a function defined after an export is not
@@ -4351,5 +4353,3 @@ function Set-AutoOSZcodeGatewayEnv {
     }
     Write-AutoOSLine 'Nothing was changed on this Windows host: no file, no environment variable, no credentials copied.' -Level muted
 }
-
-Export-ModuleMember -Function Set-AutoOSZcodeGatewayEnv
