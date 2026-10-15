@@ -1,0 +1,213 @@
+import unittest
+import tempfile
+import pathlib
+import json
+import os
+import sys
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+import runner_pool_proc as proc
+import runner_pool_core as rpc
+
+class TestConstants(unittest.TestCase):
+    def test_constant_values(self):
+        self.assertEqual(proc.JOB_MEMORY_MB, 8192)
+        self.assertEqual(proc.JOB_FLAG_KILL_ON_CLOSE, 0x2000)
+        self.assertEqual(proc.JOB_FLAG_JOB_MEMORY, 0x200)
+        self.assertEqual(proc.JOB_FLAG_BREAKAWAY_OK, 0x800)
+        self.assertEqual(proc.JOB_FLAG_SILENT_BREAKAWAY, 0x1000)
+
+    def test_job_limit_flags(self):
+        flags = proc.job_limit_flags()
+        self.assertIsInstance(flags, int)
+        expected = proc.JOB_FLAG_KILL_ON_CLOSE | proc.JOB_FLAG_JOB_MEMORY
+        self.assertEqual(flags, expected)
+
+    def test_job_memory_bytes(self):
+        self.assertEqual(proc.job_memory_bytes(),
+                         proc.JOB_MEMORY_MB * 1024 * 1024)
+
+class TestWriteReadRunPrivate(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.slot_dir = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _valid_params(self):
+        return {
+            "run_id": "validID_123",
+            "pid": 4242,
+            "filetime": 123456,
+            "mode": "toolless",
+        }
+
+    def test_roundtrip_success(self):
+        p = self._valid_params()
+        written = proc.write_run_private(
+            self.slot_dir, p["run_id"], p["pid"], p["filetime"], p["mode"]
+        )
+        self.assertTrue(written)
+        read = proc.read_run_private(self.slot_dir)
+        self.assertEqual(read, p)
+
+    def test_write_invalid_run_id(self):
+        p = self._valid_params()
+        for bad in ["", "a"*65, "invalid!", "space id"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    proc.write_run_private(
+                        self.slot_dir, bad, p["pid"], p["filetime"], p["mode"]
+                    )
+
+    def test_write_invalid_pid(self):
+        p = self._valid_params()
+        for bad in [0, -1, True, False, "12"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    proc.write_run_private(
+                        self.slot_dir, p["run_id"], bad, p["filetime"], p["mode"]
+                    )
+
+    def test_write_invalid_filetime(self):
+        p = self._valid_params()
+        for bad in [-1, "0"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    proc.write_run_private(
+                        self.slot_dir, p["run_id"], p["pid"], bad, p["mode"]
+                    )
+
+    def test_write_invalid_mode(self):
+        p = self._valid_params()
+        for bad in ["", "unknown", "TOOLUSE"]:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    proc.write_run_private(
+                        self.slot_dir, p["run_id"], p["pid"], p["filetime"], bad
+                    )
+
+    def test_write_json_atomic_returned(self):
+        p = self._valid_params()
+        with mock.patch.object(rpc, "write_json_atomic", return_value=False) as mock_write:
+            result = proc.write_run_private(
+                self.slot_dir, p["run_id"], p["pid"], p["filetime"], p["mode"]
+            )
+            self.assertFalse(result)
+            mock_write.assert_called_once()
+
+    def test_read_missing_key(self):
+        # write a file missing 'pid'
+        data = {"run_id": "id", "filetime": 0, "mode": "toolless"}
+        path = self.slot_dir / "run.private"
+        path.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            proc.read_run_private(self.slot_dir)
+
+    def test_read_extra_key(self):
+        data = {"run_id": "id", "pid": 1, "filetime": 0, "mode": "toolless", "extra": 5}
+        path = self.slot_dir / "run.private"
+        path.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            proc.read_run_private(self.slot_dir)
+
+    def test_read_bad_types(self):
+        bad_cases = [
+            {"run_id": "id", "pid": "1", "filetime": 0, "mode": "toolless"},
+            {"run_id": "id", "pid": True, "filetime": 0, "mode": "toolless"},
+            {"run_id": "id", "pid": -5, "filetime": 0, "mode": "toolless"},
+            {"run_id": "id", "pid": 0, "filetime": 0, "mode": "toolless"},
+            {"run_id": "id", "pid": 1, "filetime": -1, "mode": "toolless"},
+            {"run_id": "id", "pid": 1, "filetime": 0, "mode": "badmode"},
+        ]
+        for i, data in enumerate(bad_cases):
+            with self.subTest(i=i):
+                path = self.slot_dir / "run.private"
+                path.write_text(json.dumps(data))
+                with self.assertRaises(ValueError):
+                    proc.read_run_private(self.slot_dir)
+
+    def test_read_invalid_json(self):
+        path = self.slot_dir / "run.private"
+        path.write_text("{ not json")
+        with self.assertRaises(ValueError):
+            proc.read_run_private(self.slot_dir)
+
+class TestKillJob(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.slot_dir = pathlib.Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _make_run_private(self, pid, filetime, mode="toolless"):
+        proc.write_run_private(self.slot_dir, "run1", pid, filetime, mode)
+
+    def test_not_nt(self):
+        with self.assertRaises(NotImplementedError):
+            proc.kill_job(self.slot_dir, lambda _: None, lambda _: None, os_name="posix")
+
+    def test_process_gone(self):
+        self._make_run_private(4242, 111)
+        ft_of = mock.Mock(return_value=None)
+        kt = mock.Mock()
+        result = proc.kill_job(self.slot_dir, ft_of, kt, os_name="nt")
+        self.assertEqual(result, "gone")
+        kt.assert_not_called()
+
+    def test_filetime_mismatch(self):
+        self._make_run_private(4242, 111)
+        ft_of = mock.Mock(return_value=222)
+        kt = mock.Mock()
+        result = proc.kill_job(self.slot_dir, ft_of, kt, os_name="nt")
+        self.assertEqual(result, "filetime-mismatch")
+        kt.assert_not_called()
+
+    def test_killed(self):
+        self._make_run_private(4242, 111)
+        ft_of = mock.Mock(return_value=111)
+        kt = mock.Mock()
+        result = proc.kill_job(self.slot_dir, ft_of, kt, os_name="nt")
+        self.assertEqual(result, "killed")
+        kt.assert_called_once_with(['taskkill', '/T', '/F', '/PID', '4242'])
+
+    def test_poisoned_job_json_ignored(self):
+        # create a misleading job.json
+        (self.slot_dir / "job.json").write_text(json.dumps({"pid": 999, "filetime": 0}))
+        self._make_run_private(4242, 111)
+        ft_of = mock.Mock(return_value=111)
+        kt = mock.Mock()
+        result = proc.kill_job(self.slot_dir, ft_of, kt, os_name="nt")
+        self.assertEqual(result, "killed")
+        kt.assert_called_once()
+        args = kt.call_args[0][0]
+        self.assertIn('4242', args)
+        self.assertNotIn('999', args)
+
+    def test_corrupt_run_private(self):
+        path = self.slot_dir / "run.private"
+        path.write_text("{ not json")
+        ft_of = mock.Mock()
+        kt = mock.Mock()
+        with self.assertRaises(ValueError):
+            proc.kill_job(self.slot_dir, ft_of, kt, os_name="nt")
+        kt.assert_not_called()
+
+class TestCreateJobNt(unittest.TestCase):
+    def test_posix_raises(self):
+        with self.assertRaises(NotImplementedError):
+            proc.create_job_nt(os_name="posix")
+
+    def test_assign_flow_order(self):
+        expected = [
+            "CreateProcess(CREATE_SUSPENDED)",
+            "AssignProcessToJobObject",
+            "ResumeThread",
+        ]
+        self.assertEqual(proc.assign_flow_order(), expected)
+
+if __name__ == '__main__':
+    unittest.main()
