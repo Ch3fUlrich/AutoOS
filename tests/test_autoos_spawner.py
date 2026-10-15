@@ -596,6 +596,7 @@ class InProcessEquivalenceTests(unittest.TestCase):
         text = re.sub(r"\d{8}-\d{6}", "DATETIME", text)
         return text
 
+    @unittest.skipIf(os.name == "nt", "sh stubs; tests/run-tests.sh runs these on Linux")
     def test_in_process_matches_subprocess(self):
         # `list` live-probes any installed signin-probe CLI (agy: 15 s timeout), so
         # the two runs can disagree on a loaded host (measured: yes vs broken);
