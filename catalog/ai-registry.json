@@ -4437,9 +4437,8 @@
       "class": "cheap",
       "id": "l1-orchestrator",
       "legs": [
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4589,9 +4588,8 @@
       "class": "frontier",
       "id": "l2-orchestrator",
       "legs": [
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4620,10 +4618,9 @@
       "class": "mid",
       "id": "l2-worker",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4766,8 +4763,7 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.5-397B-A17B",
-        "vertex/gemini-3.8-flash"
+        "ovhcloud/Qwen3.5-397B-A17B"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4967,9 +4963,9 @@
       "id": "l2-researcher",
       "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors l3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): an l2-* route is cache-gated like the worker band, so the read-only researcher tier is the two cached free legs (bazaarlink ds-v4-flash :free 1M, openrouter nemotron-3-super :free 256k) - wide context, $0, distinct providers. gemini/gemini-3.8-flash (401), opencode_gateway/glm-5.3-flash (402), ainative/llama-4-maverick (429) and free_ai/qwen7b (tool call failed on both gateways, and spec SS2 drops free-ai) all left.",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -5087,8 +5083,7 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash"
+        "ovhcloud/Qwen3.8-27B"
       ],
       "surfaces": {
         "omniroute": {
@@ -5132,8 +5127,7 @@
       "strategy": "priority",
       "legs": [
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ],
       "surfaces": {
         "omniroute": {
@@ -5198,9 +5192,8 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
       ],
       "surfaces": {
         "omniroute": {
@@ -5221,8 +5214,7 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ],
       "surfaces": {
         "omniroute": {
@@ -5340,10 +5332,9 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ],
       "surfaces": {
         "omniroute": {
@@ -5370,12 +5361,10 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+        "xiaomi_mimo/mimo-v2.6-flash",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "openrouter/cohere/north-mini-code:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/poolside/laguna-s-2.1:free"
       ],
       "surfaces": {
         "omniroute": {
@@ -5402,9 +5391,8 @@
       "class": "mid",
       "strategy": "priority",
       "legs": [
-        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
       ],
       "surfaces": {
         "omniroute": {

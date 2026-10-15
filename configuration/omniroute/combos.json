@@ -82,9 +82,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "mimo/mimo-v2.6-flash",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -109,9 +108,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "mimo/mimo-v2.6-flash",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -128,9 +126,9 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "mimo/mimo-v2.6-flash",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ]
     },
     {
@@ -138,10 +136,9 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
+        "mimo/mimo-v2.6-flash",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
       ]
     },
     {
@@ -149,9 +146,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "mimo/mimo-v2.6-flash",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {
@@ -184,8 +180,7 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovh/Qwen3.5-397B-A17B",
-        "vertex/gemini-3.8-flash"
+        "ovh/Qwen3.5-397B-A17B"
       ]
     },
     {
@@ -193,10 +188,9 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
+        "mimo/mimo-v2.6-flash",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -204,12 +198,10 @@
       "strategy": "priority",
       "context": "256k",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "mimo/mimo-v2.6-flash",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "openrouter/poolside/laguna-s-2.1:free",
-        "openrouter/cohere/north-mini-code:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/poolside/laguna-s-2.1:free"
       ]
     },
     {
@@ -247,8 +239,7 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovh/Qwen3.8-27B",
-        "vertex/gemini-3.8-flash"
+        "ovh/Qwen3.8-27B"
       ]
     },
     {
@@ -266,8 +257,7 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -284,8 +274,7 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
-        "vertex/gemini-3.8-flash"
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free"
       ]
     },
     {
@@ -302,9 +291,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash",
-        "mimo/mimo-v2.6-flash"
+        "mimo/mimo-v2.6-flash",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
       ]
     },
     {

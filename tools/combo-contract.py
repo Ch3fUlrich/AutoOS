@@ -194,6 +194,54 @@ def leg_window(registry, leg):
 
 TIER_ORDER = {"trial": 0, "free": 1, "credit": 2, "paid": 3, "subscription": 3}
 
+def _subscription_head_exempt(registry, legs):
+    """True when legs[0] is a subscription-tier leg: D-1351 puts mimo-v2.6-flash
+    first for the fleet's L3 writers and fixes-L1 (gen-11, 2026-10-15) ruled live
+    order over rule (b)'s old "subscription counts as paid, goes last"."""
+    if not legs:
+        return False
+    try:
+        return leg_tier(registry, legs[0]) == "subscription"
+    except ValueError:
+        return False
+
+
+def tier_order_findings(registry, combo_id, legs):
+    """[(tag, message)] for rule (b) of one combo; a subscription HEAD leg is
+    exempt from the paid-goes-last arm only (D-1351), nowhere else in the chain."""
+    findings = []
+    tiers = []
+    for leg in legs:
+        try:
+            tiers.append(leg_tier(registry, leg))
+        except ValueError as exc:
+            findings.append(("c-unresolvable", "%s: (c) unresolvable leg %r (%s)" % (combo_id, leg, exc)))
+            tiers.append("paid")
+    if _subscription_head_exempt(registry, legs):
+        legs, tiers = legs[1:], tiers[1:]
+    order = [TIER_ORDER.get(t, 3) for t in tiers]
+    if order != sorted(order):
+        findings.append(("b-order", "%s: (b) order %s not trial->free->credits->paid %s" % (combo_id, tiers, legs)))
+    paid_idx = [i for i, t in enumerate(tiers) if t in ("paid", "subscription")]
+    free_idx = [i for i, t in enumerate(tiers) if t == "free"]
+    if paid_idx and free_idx and max(paid_idx) < max(free_idx) and min(free_idx) < max(paid_idx):
+        first_paid = min(paid_idx)
+        if any(i > first_paid for i in free_idx):
+            findings.append(("b-free-after-paid", "%s: (b) free leg after paid leg %s" % (combo_id, legs)))
+    if tiers and any(t in ("paid", "subscription") for t in tiers):
+        if tiers[-1] not in ("paid", "subscription"):
+            findings.append(("b-paid-not-last", "%s: (b) paid not last %s" % (combo_id, tiers)))
+    low = [l.lower() for l in legs]
+    if any("deepseek/deepseek-flash" in l for l in low):
+        if not low[-1].endswith("deepseek/deepseek-flash"):
+            findings.append(("b-deepseek-not-last", "%s: (b) deepseek not last %s" % (combo_id, legs)))
+    return findings
+
+
+def check_tier_order(registry, combo_id, legs):
+    return [msg for _tag, msg in tier_order_findings(registry, combo_id, legs)]
+
+
 # ---- D1 / D-657 checks (f)-(i): each is one function, each names its rule ----
 
 # The orchestrator layers, by combo-id prefix: L0–L2 are input-heavy and run
@@ -476,41 +524,9 @@ def main(argv=None):
                 per.append("a-ide-mismatch")
         # (b) order
         legs = combo.get("models") or []
-        tiers = []
-        for leg in legs:
-            try:
-                tiers.append(leg_tier(registry, leg))
-            except ValueError as exc:
-                failures.append("%s: (c) unresolvable leg %r (%s)" % (name, leg, exc))
-                per.append("c-unresolvable")
-                tiers.append("paid")
-        order = [TIER_ORDER.get(t, 3) for t in tiers]
-        if order != sorted(order):
-            failures.append("%s: (b) order %s not trial->free->credits->paid %s" % (name, tiers, legs))
-            per.append("b-order")
-        # no free after paid
-        paid_idx = [i for i, t in enumerate(tiers) if t in ("paid", "subscription")]
-        free_idx = [i for i, t in enumerate(tiers) if t == "free"]
-        if paid_idx and free_idx and max(paid_idx) < max(free_idx) and min(free_idx) < max(paid_idx):
-            # free leg after a paid leg (free-only all-free exempt: no paid_idx)
-            # credit-single all-credit exempt: no free_idx
-            if not (len(paid_idx) == 0 or len(free_idx) == 0):
-                # check any free after first paid
-                first_paid = min(paid_idx)
-                if any(i > first_paid for i in free_idx):
-                    failures.append("%s: (b) free leg after paid leg %s" % (name, legs))
-                    per.append("b-free-after-paid")
-        # paid last (exempt all-free, all-credit)
-        if tiers and any(t in ("paid", "subscription") for t in tiers):
-            if tiers[-1] not in ("paid", "subscription"):
-                failures.append("%s: (b) paid not last %s" % (name, tiers))
-                per.append("b-paid-not-last")
-        # deepseek last
-        low = [l.lower() for l in legs]
-        if any("deepseek/deepseek-flash" in l for l in low):
-            if not low[-1].endswith("deepseek/deepseek-flash"):
-                failures.append("%s: (b) deepseek not last %s" % (name, legs))
-                per.append("b-deepseek-not-last")
+        for tag, msg in tier_order_findings(registry, name, legs):
+            failures.append(msg)
+            per.append(tag)
         # openrouter servable :free
         for leg in legs:
             if leg.startswith("openrouter/") and not leg.endswith(":free"):

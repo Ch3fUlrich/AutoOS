@@ -312,10 +312,15 @@ class GatewayRefTests(unittest.TestCase):
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertNotIn("groq/qwen/qwen3.8-27b", by_name["l3-driver"]["models"])  # retired
         self.assertIn("cohere/command-a-03-2025", by_name["l3-driver"]["models"])
-        self.assertIn("vertex/gemini-3.8-flash",
-                      by_name["l2-worker-clean"]["models"])
-        for gone in ("mistral/mistral-code-latest", "deepseek/deepseek-flash"):
-            self.assertNotIn(gone, json.dumps(rendered))
+        # D-1349 (2026-10-15): the *-clean routes are mimo + deepseek-flash,
+        # vertex is out of the clean band (forbidden fleet-wide).
+        self.assertEqual(by_name["l2-worker-clean"]["models"],
+                         ["mimo/mimo-v2.6-flash", "deepseek/deepseek-flash"])
+        self.assertNotIn("mistral/mistral-code-latest", json.dumps(rendered))
+        # deepseek-flash appears only in the six *-clean combos (clean-leg exemption).
+        with_ds = sorted(n for n, c in by_name.items()
+                         if "deepseek/deepseek-flash" in c["models"])
+        self.assertTrue(with_ds and all(n.endswith("-clean") for n in with_ds), with_ds)
 
     def test_registry_legs_keep_their_own_spelling(self):
         # CIGREEN: expectation moved by aced9915 (B2-AGY deleted the
@@ -471,8 +476,9 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # nothing, so it belongs to no set here (pinned in
         # test_ovh_coder_leg_is_retired_not_merged).
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
+        # D-1349: the *-clean routes now carry a servable deepseek-flash leg,
+        # so they render a block (one leg) and left this set.
         for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3",
-                     "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean",
                      "ovh-gpt-oss-120b"):
             self.assertNotIn(gone, rendered)
         self.assertIn("ovh-qwen3.8-27b", rendered)
@@ -841,14 +847,17 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # documents an EMPTY ladder, so the fixture is l2-orchestrator-clean (one
         # vertex leg, ladder low/medium/high) and l1-orchestrator is counter-pinned
         # as the no-ladder head case.
-        route = reg["routes"]["l2-orchestrator-clean"]
+        # D-1349 2026-10-15: the *-clean routes head mimo (no documented ladder)
+        # and the deepseek-flash exemption leg, so the only route left that heads
+        # a ladder model is l3-review-codebase (openrouter nemotron-3-ultra :free).
+        route = reg["routes"]["l3-review-codebase"]
         _pid, mid = registry.resolve_leg(route["legs"][0], reg)
         model_entry = reg["models"][mid]
         self.assertIn("effort_ladder", model_entry)
         self.assertTrue(model_entry["effort_ladder"])
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["l2-orchestrator-clean"]["effort_ladder"],
+        self.assertEqual(by_id["l3-review-codebase"]["effort_ladder"],
                          [e for e in model_entry["effort_ladder"] if e != "none"])
         _pid, head_mid = registry.resolve_leg(
             registry.gateway_legs(reg["routes"]["l1-orchestrator"], reg)[0], reg)
@@ -886,6 +895,9 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # the control before that, until GLM55 2026-10-05).
         t2_route = reg["routes"]["l2-orchestrator-clean"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
+        # D-1349: the clean routes head mimo, which documents no ladder; give
+        # the control one so it still proves a ladder survives next to the popped one.
+        reg["models"][t2_mid]["effort_ladder"] = ["low", "medium", "high"]
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
@@ -904,6 +916,9 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # l2-orchestrator control moved with D657-CHAIN, see above).
         t2_route = reg["routes"]["l2-orchestrator-clean"]
         _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
+        # D-1349: the clean routes head mimo, which documents no ladder; give
+        # the control one so it still proves a ladder survives next to the popped one.
+        reg["models"][t2_mid]["effort_ladder"] = ["low", "medium", "high"]
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
