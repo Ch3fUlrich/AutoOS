@@ -192,7 +192,7 @@ def openhands_route_names(registry_doc: dict) -> set[str]:
     """Route ids OpenHands actually serves: routes whose
     surfaces.omniroute.clients contains "openhands" (catalog/ai-registry.json,
     read via tools/registry.py's loader). Only these need an
-    `omniroute-<name>` tier profile - opencode/zed-only pinned routes do not."""
+    tier profile named <name> (PREFIX-STRIP: no `omniroute-` prefix) - opencode/zed-only pinned routes do not."""
     out = set()
     routes = registry_doc.get("routes") or {}
     for rid, route in routes.items():
@@ -212,8 +212,8 @@ def tier_profile_drift(names: list[str], tier_ids: set[str],
     """Tier-profile drift lines for `names`, restricted to the routes
     OpenHands actually serves (see openhands_route_names)."""
     need = openhands_route_names(registry_doc)
-    return [f"tier-profiles.json lacks 'omniroute-{c}'" for c in names
-            if c in need and f"omniroute-{c}" not in tier_ids]
+    return [f"tier-profiles.json lacks '{c}'" for c in names
+            if c in need and c not in tier_ids]
 
 
 def litellm_declared() -> list[str]:
@@ -380,8 +380,8 @@ def main(argv=None) -> int:
         # Registry unreadable: fall back to requiring a profile for every
         # combo (the old, stricter rule) rather than silently skipping.
         for c in names:
-            if f"omniroute-{c}" not in tp:
-                drift.append(f"tier-profiles.json lacks 'omniroute-{c}'")
+            if c not in tp:
+                drift.append(f"tier-profiles.json lacks '{c}'")
     else:
         drift.extend(tier_profile_drift(names, tp, reg_doc))
 

@@ -34,7 +34,7 @@ This tool regenerates the static copies:
       follows the END marker, and the line before START must already end in
       `{` or `,`. The result is parsed before anything is written.
   configuration/openhands/tier-profiles.json
-      max_input_tokens / max_output_tokens of every omniroute-/litellm- tier.
+      max_input_tokens / max_output_tokens of every omniroute (bare id) / litellm- tier.
       Membership is checked both ways against the catalog's `openhands`
       surface but never rewritten: the spec's ORDER is the OpenHands push
       priority (the app keeps at most 10 profiles), a human decision.
@@ -344,6 +344,11 @@ def rewrite_opencode(text, models, warn=None):
 # ------------------------------------------------------- tier-profiles.json
 
 
+def tier_profile_id(gateway, mid):
+    """PREFIX-STRIP 2026-10-14: omniroute tiers carry the bare route id."""
+    return mid if gateway == "omniroute" else f"{gateway}-{mid}"
+
+
 def rewrite_tier_profiles(text, models, warn=None):
     """(new_text, changed): mirror token windows, check membership both ways."""
     try:
@@ -364,16 +369,17 @@ def rewrite_tier_profiles(text, models, warn=None):
             raise ConfigError(
                 f"tier-profiles.json: {tier.get('id')} names {model_ref!r}, which "
                 f"catalog/ide-models.json does not offer to openhands through {gateway}")
-        if tier.get("id") != f"{gateway}-{mid}":
-            raise ConfigError(f"tier-profiles.json: {tier.get('id')} should be named {gateway}-{mid}")
+        if tier.get("id") != tier_profile_id(gateway, mid):
+            raise ConfigError(
+                f"tier-profiles.json: {tier.get('id')} should be named {tier_profile_id(gateway, mid)}")
         tier["max_input_tokens"] = m["context"]
         tier["max_output_tokens"] = m["output"]
         seen.add(tier["id"])
     for gateway in GATEWAYS:
         for m in offered(models, gateway, "openhands"):
-            if f"{gateway}-{m['id']}" not in seen:
+            if tier_profile_id(gateway, m['id']) not in seen:
                 raise ConfigError(
-                    f"tier-profiles.json has no {gateway}-{m['id']} but the catalog offers it to "
+                    f"tier-profiles.json has no {tier_profile_id(gateway, m['id'])} but the catalog offers it to "
                     "openhands - add it where it belongs in the push order (or drop the surface)")
     newline = "\r\n" if "\r\n" in text else "\n"
     new_text = json.dumps(spec, indent=2, ensure_ascii=False).replace("\n", newline) + newline

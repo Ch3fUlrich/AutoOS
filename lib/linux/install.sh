@@ -6553,7 +6553,7 @@ if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_fil
                 _gp["reasoning_effort"] = "none"
                 _gp["enable_encrypted_reasoning"] = False
                 _gp["extended_thinking_budget"] = None
-            if not (repo_root and os.path.isfile(os.path.join(repo_root, "tools", "sync-openhands-profiles.py"))):
+            if not (REPO_ROOT and os.path.isfile(os.path.join(REPO_ROOT, "tools", "sync-openhands-profiles.py"))):
                 _put_json(os.path.join(profiles_dir, "%s.json" % _t["id"]), _gp)
     except Exception:
         pass
@@ -6570,6 +6570,21 @@ agent_profiles_dir = os.path.join(openhands_dir, "agent-profiles")
 # never yanked. The fossil Default (ollama fallback this installer wrote before
 # any key existed) is refreshed to mirror the current default llm; anything
 # else stays untouched.
+# The tier sidecars come from tools/sync-openhands-profiles.py when the repo
+# carries it (the loop above defers to it), so run it BEFORE the merge: the
+# bash step after this script would write them too late for llm_profiles.
+_sync_tool = os.path.join(REPO_ROOT, "tools", "sync-openhands-profiles.py") if REPO_ROOT else ""
+_sync_failed = False
+if _sync_tool and os.path.isfile(_sync_tool):
+    import subprocess
+    try:
+        _sr = subprocess.run([sys.executable, _sync_tool, "--openhands-dir", openhands_dir, "--consumer", "container"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=False)
+        _sync_failed = _sr.returncode != 0
+    except Exception:
+        _sync_failed = True
+    if _sync_failed:
+        print("sync-openhands-profiles failed; llm_profiles may lack the tier sidecars", file=sys.stderr)
 _lp = settings.setdefault("llm_profiles", {})
 _managed = _lp.setdefault("profiles", {})
 for _fn in sorted(os.listdir(profiles_dir)):
@@ -6617,6 +6632,8 @@ if os.path.isdir(_vendored_agents):
         except Exception:
             pass
 print("changed" if _changed else "unchanged")
+if _sync_failed:
+    sys.exit(1)  # the bash side warns and records the component as failed
 PY
 )" || oh_rc=$?
     if (( oh_rc != 0 )); then
