@@ -293,8 +293,10 @@ class GatewayRefTests(unittest.TestCase):
         self.assertIs(real_registry()["providers"]["ovhcloud"].get("available"), True)
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertEqual(by_name["l1-orchestrator"]["models"][0],
-                         "bzl/deepseek/deepseek-v4-flash-0731free:free")
+        # mimo leads since fixes-L1 gen-11 (live order wins, D-1351); bzl follows.
+        self.assertEqual(by_name["l1-orchestrator"]["models"][:2],
+                         ["mimo/mimo-v2.6-flash",
+                          "bzl/deepseek/deepseek-v4-flash-0731free:free"])
         self.assertIn("ovh/Qwen3.8-27B", by_name["l3-implementer"]["models"])
         # and no orchestrator layer renders it (OVH documents no prompt cache)
         for name, combo in by_name.items():
@@ -1500,14 +1502,17 @@ class GatewayLegsFilterTests(unittest.TestCase):
                   registry.render_omniroute(real_registry())["combos"]}
         self.assertEqual(
             combos["l2-worker"]["models"],
-            ["bzl/deepseek/deepseek-v4-flash-0731free:free",
-             "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-             "vertex/gemini-3.8-flash"])
-        self.assertEqual(combos["l2-worker-clean"]["models"], ["vertex/gemini-3.8-flash"])
+            ["mimo/mimo-v2.6-flash",
+             "bzl/deepseek/deepseek-v4-flash-0731free:free",
+             "openrouter/nvidia/nemotron-3-super-120b-a12b:free"])
+        # D-1349: the clean band is mimo + the exempt deepseek-flash leg; vertex left.
+        self.assertEqual(combos["l2-worker-clean"]["models"],
+                         ["mimo/mimo-v2.6-flash", "deepseek/deepseek-flash"])
         # A gated leg is dropped while the route survives on its other leg:
         # l1-orchestrator-clean's contributor copy is probe-denied (402/403), the
-        # vertex leg serves, so the combo carries one model, not none.
-        self.assertEqual(combos["l1-orchestrator-clean"]["models"], ["vertex/gemini-3.8-flash"])
+        # mimo and deepseek-flash serve, so the combo carries two models.
+        self.assertEqual(combos["l1-orchestrator-clean"]["models"],
+                         ["mimo/mimo-v2.6-flash", "deepseek/deepseek-flash"])
         self.assertNotIn("openrouter/meta/muse-spark-1.3-contributor",
                          combos["l1-orchestrator-clean"]["models"])
         # samba/SambaNova is available: false, so every one of its legs goes -
@@ -1549,10 +1554,10 @@ class GatewayLegsFilterTests(unittest.TestCase):
                      "model: openai/deepseek-v4.1-flash",
                      "model: openrouter/deepseek/deepseek-v4.1-flash"):
             self.assertNotIn(gone, rendered["l2-worker"], gone)
-        # vertex/gemini-3.8-flash IS a live leg but authenticates without a LiteLLM
-        # api_key, so it lands as a litellm-skip comment, never a model line.
-        self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", rendered["l2-worker"])
-        self.assertNotIn("model: vertex/gemini-3.8-flash", rendered["l2-worker"])
+        # vertex is out of every managed chain (fixes-L1 gen-11: forbidden
+        # fleet-wide, absent from the live gateway) - neither a model line nor a
+        # litellm-skip comment (the comment path is pinned in VertexNoKeyLitellmSkipTests).
+        self.assertNotIn("vertex/gemini-3.8-flash", rendered["l2-worker"])
         # l3-driver keeps the proven free band: groq retired 2026-10-14
         # (7k TPM cap), so the pinned servable legs are the cohere pair;
         # nothing of the dead providers (samba/cerebras/groq) or of the
@@ -1572,7 +1577,7 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # human reader, which no gateway render mirrors.
         row = row_for(registry.render_models_doc(real_registry()), "l1-orchestrator-clean")
         self.assertIn("~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable)", row)
-        self.assertIn("vertex `gemini-3.8-flash`", row)
+        self.assertIn("deepseek `deepseek-flash`", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
@@ -1886,7 +1891,7 @@ class FreeAiRenderTests(unittest.TestCase):
                  if m.startswith(("free-ai/", "free_ai/"))],
                 combo["name"])
 
-    def test_l2_worker_combo_closes_with_the_vertex_leg(self):
+    def test_l2_worker_combo_closes_with_the_nemotron_leg(self):
         # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:
         # paid last, deepseek last). D657-CHAIN supersedes that tail again - SS8
         # removed deepseek/deepseek-flash from every chain, so the combo closes
@@ -1894,7 +1899,9 @@ class FreeAiRenderTests(unittest.TestCase):
         combos = {c["name"]: c for c in
                   registry.render_omniroute(real_registry())["combos"]}
         models = combos["l2-worker"]["models"]
-        self.assertEqual(models[-1], "vertex/gemini-3.8-flash")
+        # fixes-L1 gen-11: vertex left every chain, mimo leads (live order).
+        self.assertEqual(models[-1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertNotIn("vertex/gemini-3.8-flash", models)
         self.assertNotIn("deepseek/deepseek-flash", models)
         self.assertNotIn("free-ai/qwen7b", models)
 
@@ -2190,8 +2197,9 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
             entry = self._ide_entry(real_registry(), route_id)
             self.assertNotIn("effort_ladder", entry, route_id)
             self.assertNotIn("reasoning_effort", entry, route_id)
+        # D-1349: the clean band heads mimo (no documented ladder) - no rungs either.
         entry = self._ide_entry(real_registry(), "l1-orchestrator-clean")
-        self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
+        self.assertNotIn("effort_ladder", entry)
 
     def test_openhands_max_input_tokens_is_clamped(self):
         # CIGREEN: expectation moved by 20c4a816 (TASK3 window raise) +
@@ -2230,6 +2238,11 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
         self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
         self.text = LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
         self.blocks = registry.render_litellm_blocks(self.reg, self.text)
+        # vertex left every managed chain (fixes-L1 gen-11); the drop path is
+        # exercised on a copy that puts the leg back on one route.
+        self.vreg = copy.deepcopy(self.reg)
+        self.vreg["routes"]["l2-worker"]["legs"].append("vertex/gemini-3.8-flash")
+        self.vblocks = registry.render_litellm_blocks(self.vreg, self.text)
 
     def test_no_keyless_provider_leg_is_rendered(self):
         for tier, block in sorted(self.blocks.items()):
@@ -2237,14 +2250,8 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
             self.assertNotIn("VERTEX_API_KEY", block, tier)
 
     def test_a_dropped_leg_is_named_in_a_rendered_comment(self):
-        tiers = [t for t, r in self.reg["routes"].items()
-                 if isinstance(r, dict)
-                 and any(l.startswith("vertex/") for l in (r.get("legs") or []))]
-        self.assertTrue(tiers, "no route carries a vertex leg any more?")
-        named = [t for t in tiers if t in self.blocks]
-        self.assertTrue(named, "no managed tier carries the vertex leg: %s" % tiers)
-        for tier in named:
-            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", self.blocks[tier], tier)
+        self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", self.vblocks["l2-worker"])
+        self.assertNotIn("model: vertex/", self.vblocks["l2-worker"])
 
     def test_the_committed_config_matches_the_render(self):
         self.assertEqual(registry.litellm_diff(self.blocks, self.text), [])

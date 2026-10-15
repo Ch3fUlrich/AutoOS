@@ -1696,8 +1696,11 @@ class FreeAiProviderTests(unittest.TestCase):
         it closes the chain after the vertex credit leg."""
         route = self.reg["routes"]["l2-worker"]
         legs_live = live_legs(self.reg, "l2-worker")
-        self.assertEqual(legs_live[-1], "xiaomi_mimo/mimo-v2.6-flash")
-        self.assertEqual(legs_live[-2], "vertex/gemini-3.8-flash")
+        # fixes-L1 gen-11 (2026-10-15): live order wins (D-1351), so MiMo leads
+        # and vertex (forbidden fleet-wide, absent live) is out of the chain.
+        self.assertEqual(legs_live[0], "xiaomi_mimo/mimo-v2.6-flash")
+        self.assertNotIn("vertex/gemini-3.8-flash", legs_live)
+        self.assertEqual(legs_live[-1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
         legs = route["legs"]
         for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
                      "ovhcloud/gpt-oss-120b",
@@ -2809,7 +2812,7 @@ class MistralPlanLimitsTests(unittest.TestCase):
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
         self.assertNotIn("mistral/mistral-code-latest", legs)
-        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+        self.assertNotIn("vertex/gemini-3.8-flash", legs)  # fixes-L1 gen-11
 
     # -- the invariant ------------------------------------------------------
 
@@ -3653,12 +3656,13 @@ class ComboCrossProviderTests(unittest.TestCase):
         # second providers are all either paid (banned from a free-only band) or
         # unproven, so two is what passes.
         # OR-DRIFT 2026-10-15: plus the folded MiMo subscription leg (cache documented).
-        "l1-orchestrator": 3,
+        # fixes-L1 gen-11 2026-10-15: vertex left every chain, so MiMo + bazaarlink.
+        "l1-orchestrator": 2,
         # the openrouter :free legs top out at 262144 < the route's 1M need, so
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
-        "l2-worker": 4,
-        "l3-driver": 8,
+        "l2-worker": 3,
+        "l3-driver": 7,
         "l3-driver-free-only": 7,
     }
 
@@ -3767,7 +3771,7 @@ class ComboCrossProviderTests(unittest.TestCase):
         # — the band that remains still carries the promise, head and paid tail included.
         self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
         self.assertIn("cohere/command-a-plus-05-2026", after)
-        self.assertIn("vertex/gemini-3.8-flash", after)
+        self.assertNotIn("vertex/gemini-3.8-flash", after)  # fixes-L1 gen-11
         self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
@@ -4043,15 +4047,16 @@ class CleanTierRouteTests(unittest.TestCase):
         # and agy is never a head per the D-657 rules) with the bazaarlink free
         # leg, and drops the paid deepseek tail (spec SS8).
         legs = self.reg["routes"]["l2-orchestrator"]["legs"]
-        # OR-DRIFT 2026-10-15 folded the hand-added MiMo leg last (subscription = paid).
-        self.assertEqual(legs, ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-                                "vertex/gemini-3.8-flash",
-                                "xiaomi_mimo/mimo-v2.6-flash"])
+        # OR-DRIFT 2026-10-15 folded the hand-added MiMo leg; fixes-L1 gen-11:
+        # live order wins (mimo first, combo-contract (b) subscription-head
+        # exemption) and vertex is out of every chain.
+        self.assertEqual(legs, ["xiaomi_mimo/mimo-v2.6-flash",
+                                "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"])
         self.assertEqual(
             self.reg["routes"]["l2-orchestrator"]["surfaces"]["omniroute"]
             ["context_declared"], "1M")
         self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
-        self.assertEqual(legs[-1], "xiaomi_mimo/mimo-v2.6-flash")
+        self.assertEqual(legs[0], "xiaomi_mimo/mimo-v2.6-flash")
 
     def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
         # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
@@ -4138,9 +4143,10 @@ class CleanTierRouteTests(unittest.TestCase):
             carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
             self.assertEqual(len(carried), 1, (rid, carried))
             self.assertIn(carried[0], priced, rid)
-            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
-        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
-                            routes["l3-implementer"]["legs"][-2],
+            # fixes-L1 gen-11: vertex left the chain, so the OVH id closes it.
+            self.assertEqual(legs[-1:], carried, rid)
+        self.assertNotEqual(routes["l3-driver"]["legs"][-1],
+                            routes["l3-implementer"]["legs"][-1],
                             "both L3 chains carry the same OVH id: one grant, "
                             "not two seats")
 
