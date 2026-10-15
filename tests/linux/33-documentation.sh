@@ -198,6 +198,16 @@ if it "registry loader: the shared by-path loader and its consumers (unit tests)
     out="$(python3 tests/test_registry_loader.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# Gateway combo drift guard (apply.sh --live-lines / exit-4 guard, tools/combo_drift.py,
+# the daily export units). pytest-style files: CI's runner installs no pytest,
+# so this skips there; tools/prepush.py runs them under pytest on every push.
+if it "combo drift: apply guard, drift check, export units (pytest)"; then
+    if ! python3 -c "import pytest" 2>/dev/null; then skip "pytest is not installed on this runner"
+    else
+        out="$(python3 tests/test_apply_guard.py 2>&1 && python3 tests/test_combo_drift.py 2>&1 && python3 tests/test_combo_drift_units.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 if it "every leg of a combo carries a provider prefix"; then
     bad="$(python3 - 2>&1 <<'PY'
 import json

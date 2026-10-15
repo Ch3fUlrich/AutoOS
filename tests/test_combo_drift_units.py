@@ -32,3 +32,8 @@ def test_timer():
         for val in tmr[key].values():
             assert not re.search(r"/home/|10\.\d+\.\d+\.\d+|192\.168\.", val)
 
+
+
+if __name__ == "__main__":
+    import pytest
+    raise SystemExit(pytest.main(["-q", __file__]))

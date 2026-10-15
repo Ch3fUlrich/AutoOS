@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unittest
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -40,6 +41,8 @@ def _start_http_server():
     return srv, port
 
 def _write_fake_omniroute(bin_dir: Path, combos_json_path: Path, log_path: Path):
+    if os.name == "nt":
+        raise unittest.SkipTest("the fake omniroute CLI is a bash script")
     script = bin_dir / "omniroute"
     script.write_text(f"""#!/usr/bin/env bash
 set -e
@@ -205,3 +208,8 @@ def test_dry_run_and_drift_no_refused(harness):
     res_drift = harness["run_mutating"](["--drift"])
     assert "refused" not in res_drift.stdout
     assert "refused" not in res_drift.stderr
+
+
+if __name__ == "__main__":
+    import pytest
+    raise SystemExit(pytest.main(["-q", __file__]))

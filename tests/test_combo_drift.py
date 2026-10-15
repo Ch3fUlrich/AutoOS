@@ -473,3 +473,8 @@ def test_cli_export_without_out_writes_the_snapshot_option_not_the_repo_file(tmp
     assert json.loads((tmp_path / "snapshot.json").read_text(encoding="utf-8"))["count"] == 1
     assert (repo_snap.read_bytes() if repo_snap.exists() else None) == before
 
+
+
+if __name__ == "__main__":
+    import pytest
+    raise SystemExit(pytest.main(["-q", __file__]))
