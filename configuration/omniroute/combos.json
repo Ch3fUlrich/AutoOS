@@ -198,9 +198,7 @@
       "context": "256k",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "openrouter/poolside/laguna-s-2.1:free",
-        "openrouter/cohere/north-mini-code:free",
         "vertex/gemini-3.8-flash",
         "mimo/mimo-v2.6-flash"
       ]

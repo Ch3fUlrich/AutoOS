@@ -485,8 +485,15 @@ class CliDryRunTests(unittest.TestCase):
         for line in lines:
             first = line.split("\t")[0]
             self.assertTrue("/" in first or first == "plan", line)
-        self.assertTrue(any("rungs=" in l for l in lines),
-                        "no probeable free reasoning leg in the plan")
+        # The committed registry decides whether any free reasoning leg is
+        # probeable (none since the unproven effort rung was dropped,
+        # AO-DENYLEGS D2): the plan line is always there, rung lines only when
+        # the plan names at least one leg.
+        plan = next(l for l in lines if l.split("\t")[0] == "plan")
+        planned_legs = int(plan.split("legs=")[1].split("\t")[0])
+        if planned_legs:
+            self.assertTrue(any("rungs=" in l for l in lines),
+                            "no probeable free reasoning leg in the plan")
         self.assertTrue(any("trials=5" in l for l in lines))
         self.assertTrue(any("completion_tokens_est=" in l for l in lines))
 

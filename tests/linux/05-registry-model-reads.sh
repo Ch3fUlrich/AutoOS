@@ -185,26 +185,47 @@ if it "setup_openhands_config writes gateway tier profiles with a key, none with
         python3 - "$tmp/.openhands" <<'PY'
 import json, os, sys
 d = sys.argv[1]
-t1 = json.load(open(os.path.join(d, "profiles", "omniroute-l1-orchestrator.json"), encoding="utf-8"))
-t3 = json.load(open(os.path.join(d, "profiles", "omniroute-l3-driver.json"), encoding="utf-8"))
+t1 = json.load(open(os.path.join(d, "profiles", "l1-orchestrator.json"), encoding="utf-8"))
+t3 = json.load(open(os.path.join(d, "profiles", "l3-driver.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], t1["reasoning_effort"],
       t3["model"], t3["reasoning_effort"], t3["enable_encrypted_reasoning"],
-      lp["active"], "omniroute-l1-orchestrator" in lp["profiles"])
+      lp["active"], "l1-orchestrator" in lp["profiles"])
 PY
     )"
     rm -rf "$tmp"
-    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/l3-driver none False omniroute-l1-orchestrator True"
+    assert_eq "$out" "openai/l1-orchestrator http://host.docker.internal:20128/v1 test-omni-key high openai/l3-driver none False l1-orchestrator True"
     tmp="$(mktemp -d)"
     out="$(
         SYS_HOME="$tmp"; AUTOOS_DRY_RUN=0
         unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
         curl() { return 6; }
         OLLAMA_BASE_URL="http://ollama:11434" setup_openhands_config >/dev/null 2>&1
-        test -e "$tmp/.openhands/profiles/omniroute-l1-orchestrator.json" && echo PRESENT || echo ABSENT
+        test -e "$tmp/.openhands/profiles/l1-orchestrator.json" && echo PRESENT || echo ABSENT
     )"
     rm -rf "$tmp"
     assert_eq "$out" "ABSENT"
+fi
+
+if it "setup_openhands_config reports a failing tier-profile sync as a failure (not swallowed)"; then
+    # install.sh finds the repo from its own path, so run it from a tmp tree of
+    # symlinks whose sync tool exits 3. The embedded writer must not swallow it.
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/r/lib/linux" "$tmp/r/tools" "$tmp/home"
+    for f in "$ROOT"/*; do case "$f" in */lib|*/tools) ;; *) ln -s "$f" "$tmp/r/";; esac; done
+    for f in "$ROOT"/lib/*; do [[ "$f" == */linux ]] || ln -s "$f" "$tmp/r/lib/"; done
+    for f in "$ROOT"/lib/linux/*; do ln -s "$f" "$tmp/r/lib/linux/"; done
+    for f in "$ROOT"/tools/*; do ln -s "$f" "$tmp/r/tools/"; done
+    rm "$tmp/r/tools/sync-openhands-profiles.py"; printf 'import sys\nsys.exit(3)\n' > "$tmp/r/tools/sync-openhands-profiles.py"
+    out="$(
+        source "$tmp/r/lib/linux/install.sh"
+        SYS_HOME="$tmp/home"; AUTOOS_DRY_RUN=0; AUTOOS_EXTRA_FAILURES=()
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-omni-key" setup_openhands_config >/dev/null 2>&1
+        echo "${AUTOOS_EXTRA_FAILURES[*]:-none}"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "openhands"
 fi
 
 if it "setup_openhands_config writes litellm fallback tiers with a litellm key only"; then
@@ -220,7 +241,7 @@ d = sys.argv[1]
 t1 = json.load(open(os.path.join(d, "profiles", "litellm-l1-orchestrator.json"), encoding="utf-8"))
 lp = json.load(open(os.path.join(d, "settings.json"), encoding="utf-8"))["llm_profiles"]
 print(t1["model"], t1["base_url"], t1["api_key"], lp["active"],
-      os.path.exists(os.path.join(d, "profiles", "omniroute-l1-orchestrator.json")))
+      os.path.exists(os.path.join(d, "profiles", "l1-orchestrator.json")))
 PY
     )"
     rm -rf "$tmp"
