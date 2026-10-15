@@ -8,34 +8,45 @@ Separately, spawner host admission (`catalog/ai-registry.json` `host_admission`,
 is one pair for every run, so D-1317's coding.vm room for tool-less runs (4 / 3072 MB) cannot be
 expressed without loosening tool-using runs too.
 
-## A. Runner pool (new `tools/runner_pool.py`, stdlib only)
-- **Dispatch.** Task-card field `host: "workstation"` on `autoos-agent run` / MCP `spawn`. The
-  spawner does not launch locally: it calls `runner_pool.py submit` (card + brief path + submitter lane),
-  prints the job id, exits 0. `status`/`result`/`ps` read pool status for that id. Admission refusal 13
-  ("queue or run on workstation") is the cue to re-issue with `host: workstation`.
-- **N.** Registry top-level `runner_pool {workers: 8, mem_floor_mb: 6144, sample_every: 4}`;
-  `AUTOOS_POOL_N` overrides on the workstation. N slots = N systemd user units `autoos-pool@<n>.service`
-  (live-step packet, not run by me). A slot claims only while MemAvailable >= `mem_floor_mb`.
-- **Queue + status.** Spool `$AUTOOS_POOL_DIR` (default `~/.autoos/pool`): `queue/<id>.json` ->
-  atomic `rename` into `slots/<n>/` = the claim (no lock, one winner). Each slot rewrites
-  `status.json` entry atomically each tick: `{slot, state: idle|running|breaker-open, job, since,
-  heartbeat}`; top-level `queue_depth`, `oldest_wait_s`. Finished: `done/<id>.json` (rc, failure class,
-  run id, sha, guard verdicts the spawner already writes). `runner_pool.py status [--json]`.
+## A. Runner pool (new `tools/runner_pool.py`, stdlib + ctypes, Windows-first)
+Workstation = WINDOWS (judge finding; projects.yaml paths, runner = `run_handoff_sessions.ps1`). Nothing
+below uses systemd, /proc, killpg or ProtectHome. The spawner already carries the Windows primitives
+(`os.name == "nt"` branches: msvcrt lock, `_proc_starttime` = GetProcessTimes creation FILETIME,
+`CREATE_NEW_PROCESS_GROUP`); the pool reuses them rather than adding new ones.
+- **Dispatch.** Task-card field `host: "workstation"` on `autoos-agent run` / MCP `spawn`. The spawner
+  does not launch locally: it calls `runner_pool.py submit` (card + brief path + submitter lane), prints
+  the job id, exits 0. `status`/`result`/`ps` read pool status. Admission refusal 13 ("queue or run on
+  workstation") is the cue to re-issue with `host: workstation`.
+- **N.** Registry top-level `runner_pool {workers: 8, mem_floor_mb: 6144, sample_every: 4}`; env
+  `AUTOOS_POOL_N` overrides. N slots = N Windows Scheduled Tasks `AutoOS-Pool-<n>` (trigger: at logon +
+  restart-on-failure; registered by a live-step packet, not by me), each running `python runner_pool.py
+  slot <n>`. A slot claims only while available physical memory >= `mem_floor_mb`; the number comes from
+  ctypes `GlobalMemoryStatusEx` (the spawner's `mem_available_mb` returns None off Linux = fails open, so
+  the pool brings its own reader and fails CLOSED when it cannot read).
+- **Queue + status.** Spool `%AUTOOS_POOL_DIR%` (default `%LOCALAPPDATA%\autoos\pool`):
+  `queue\<id>.json` -> `os.rename` into `slots\<n>\` is the claim (atomic on NTFS, one winner; a loser
+  gets WinError 32/183 and moves on). Each slot rewrites its `status.json` entry (write temp +
+  `os.replace`) per tick: `{slot, state: idle|running|breaker-open, job, since, heartbeat}`; top-level
+  `queue_depth`, `oldest_wait_s`. Finished: `done\<id>.json` (rc, failure class, run id, sha, guard
+  verdicts the spawner already writes). `runner_pool.py status [--json]`.
 - **Sampling (workst-L1).** Mechanical check of EVERY done record (rc, failure class, leak check,
-  ready/review-status fields present) - cheap, no model. Deep review 1 in `sample_every` jobs (counter
-  in `done/`), PLUS every rc != 0, every job whose diff autoos_risk rates R2+, and each submitter's
-  first 3 jobs. Deep = read diff vs brief + tests ran; same rules as today, fewer jobs.
-- **Failure / restart.** Slot unit ExecStart wrapped in `tools/unit_breaker.py --unit
-  autoos-pool@N.service -- <slot loop>` + `breaker.conf.in` (5 failures / 600 s -> disabled, BREAKER line
-  to `AUTOOS_ALERT_INBOX`, `status` shows breaker-open). A job in `slots/<n>/` whose slot is dead
-  (private pid gone / start-time mismatch) is renamed back to `queue/` once, then to `failed/`
-  (never loops).
-- **Kill path (R-orch-17).** `runner_pool.py kill <id>` reads ONLY the slot-private record
-  `slots/<n>/run.private` (0600, written by the slot: pid, pgid, /proc start-time, mode, run id). It never
-  opens the submitted job json. Identity re-verified (start-time) before `killpg`; mismatch = refuse.
-- **Scope.** Job = `autoos-agent run --isolate` in a private clone (existing leak check). Slot unit:
-  no sudo, `ProtectHome=read-only` except pool dir + clone root, `MemoryMax` per slot. `submit`
-  validates card fields against an allowlist; secrets never enter the queue (env from the unit).
+  ready/review-status fields present) - no model. Deep review 1 in `sample_every` (counter in `done\`),
+  PLUS every rc != 0, every job autoos_risk rates R2+, and each submitter's first 3 jobs.
+- **Failure / restart.** Scheduled Task restarts a crashed slot; `unit_breaker.py` gets an `nt` branch
+  (today it calls `systemctl --user disable`): after 5 identical failures in the same state dir it runs
+  `schtasks /Change /TN AutoOS-Pool-<n> /DISABLE`, appends ONE `BREAKER` line to `AUTOOS_ALERT_INBOX`, and
+  `status` shows breaker-open (state dir: `%LOCALAPPDATA%\autoos\breaker`). A job in `slots\<n>\` whose
+  slot is dead (private pid gone / creation-time mismatch) goes back to `queue\` once, then `failed\`.
+- **Kill (R-orch-17).** Each slot puts its job's process tree in a Windows Job Object
+  (`KILL_ON_JOB_CLOSE` + per-job memory limit, ctypes; slot death takes the tree with it - no orphans) and
+  writes `slots\<n>\run.private` (pid, creation FILETIME, run id, mode; owner-only ACL). `runner_pool.py
+  kill <id>` reads ONLY that record, never the submitted job json, re-checks the creation FILETIME
+  (pid reuse), then `taskkill /T /F /PID`; mismatch = refuse.
+- **Scope.** Job = `autoos-agent run --isolate` in a private clone (existing leak check). Tasks run as a
+  dedicated non-admin local account (live-step packet) whose ACLs allow only the pool dir + clone root.
+  `submit` validates card fields against an allowlist; secrets never enter the queue.
+- **If the workstation also runs WSL** (D-112 mentions a WSL writer host): not assumed; slots run native
+  Windows. A WSL slot variant is out of scope unless fixes-L1 asks.
 
 ## B. Admission per kind (`tools/autoos-agent.py`, registry)
 - Registry `host_admission.kinds.toolless = {max_live_workers: 4, mem_available_floor_mb: 3072}`;
@@ -49,17 +60,16 @@ expressed without loosening tool-using runs too.
   renderer `--checks`.
 
 ## Tests (failing-first)
-pool: claim race (2 slots, 1 job -> 1 winner), requeue-once, status schema, kill refuses mismatched
-start-time and ignores a poisoned job json, unmocked Popen slot run + one live scoped spawn.
+pool (Windows cases skipped off nt, portable ones run everywhere): claim race (2 slots, 1 job -> 1 winner), requeue-once, status schema, kill refuses mismatched
+creation-time and ignores a poisoned job json, unmocked Popen slot run + one live scoped spawn.
 admission: toolless 5th refused, tool-using floor unchanged at 3072<=free<4608, kind not spoofable by
 card, malformed `kinds` -> defaults.
 
-## Questions for fixes-L1 (default = proceed with it)
-1. **No toolless client exists** - the spawner has only tool-using CLIs; `tools/review-call.py` (single
-   chat completion) is outside the spawner and unadmitted. Options: (a, DEFAULT) add registry client
-   `api` wrapping review-call.py with capabilities shell/write false, kind derived from it; (b) admission
-   table + derivation only, `api` client in a later lane; (c) caller flag `--toolless` (rejected: spoofable).
-2. **Transport coding.vm -> workstation.** (a, DEFAULT) SSH forced command running only
-   `runner_pool.py submit|status`, target from env `AUTOOS_POOL_SSH` (no hostname committed); (b) workst-L1
-   inbox relay as today (keeps the bottleneck).
-3. N=8 initial (62 GB / ~2 GB per job headroom); measure >3 parallel on the workstation (live packet).
+## Questions / status (fixes-L1 reply folded in)
+1. Toolless client: (a) accepted provisionally - registry client `api` wrapping review-call.py.
+2. Transport: SSH forced command = HIGH access surface; 2 distinct-family seats (incl. non-Claude) on the
+   forced-command script + the `authorized_keys` line BEFORE any key is placed. Windows OpenSSH: the
+   line is `command="<python> runner_pool.py submit-only",no-pty,no-port-forwarding,...` in
+   `administrators_authorized_keys` or the user's file; live step via workst-L1-autoos. Evidence that
+   Windows OpenSSH honours `command=` goes with the packet.
+3. N=8 as config; >3-parallel measured later (live packet).
