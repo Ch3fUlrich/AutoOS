@@ -9397,12 +9397,14 @@ class GatewayCooldownStopTests(unittest.TestCase):
             "zen")
 
     def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
-        # D657-D2: the model l2-worker names from exactly one provider is the
-        # vertex tail (the chain's head is bazaarlink's deepseek, so a guess at
-        # the first live leg would bench the wrong provider). The measured wrong
-        # answer was antigravity (the next live leg of l2-worker).
+        # D657-D2: the model a route names from exactly one provider is the one
+        # to bench; a guess at the first live leg would bench the wrong provider
+        # (the measured wrong answer was antigravity). fixes-L1 gen-11
+        # (2026-10-15): vertex left l2-worker, so the gemini cooldown is pinned
+        # on the pinned vertex route that still serves the model, and on
+        # l2-worker it falls back to the first live leg (MiMo) as an unnamed stop.
         recorded = self.agent.record_reset_stop(
-            self.GEMINI_COOLDOWN, "l2-worker", self.registry,
+            self.GEMINI_COOLDOWN, "vertex-gemini-3.8-flash", self.registry,
             now=self.NOW, path=self.state_path)
         self.assertEqual(recorded, ("vertex_ai", "2026-09-28T12:00:37Z"))
         self.assertEqual(list(self.state()["providers"]), ["vertex_ai"],
@@ -9528,8 +9530,9 @@ class GatewayCooldownStopTests(unittest.TestCase):
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
         # this file in and skips the leg. D657-D2: the recorded line names the
-        # vertex tail of l2-worker (the free-ai qwen7b grant is gated out).
-        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "l2-worker",
+        # vertex tail of l2-worker (the free-ai qwen7b grant is gated out); fixes-L1
+        # gen-11 moved it to the pinned vertex route (vertex left l2-worker).
+        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "vertex-gemini-3.8-flash",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
@@ -21644,7 +21647,11 @@ class FreeOnlyComboTests(unittest.TestCase):
         for name in ("l1-orchestrator", "l2-worker", "l3-driver"):
             self.assertIn(name + "-free-only", names, name)
             self.assertEqual(agent.free_only_combo(name), name + "-free-only", name)
-        self.assertEqual(set(kept), set(),
+        # D-1349 (2026-10-15): the six *-clean twins carry the operator's exempt
+        # deepseek-flash leg (paid). They have no free-only twin by design: a
+        # --free run on a privacy=sensitive card is refused before the label
+        # matters, and nothing else may keep a paid leg without a twin.
+        self.assertEqual(set(kept), {n for n in names if n.endswith("-clean")},
                          "a combo with a paid leg and no free-only twin: a free "
                          "run would stay on it and pay")
         self.assertEqual(agent.free_only_combo("l2-worker-clean"),
