@@ -108,7 +108,7 @@ refuses, placeholder carries kind.
 1. Toolless client: (a) accepted provisionally - registry client `api` wrapping review-call.py.
 2. Transport: SSH forced command = HIGH access surface; 2 distinct-family seats (incl. non-Claude) on the
    forced-command script + the `authorized_keys` line BEFORE any key is placed. Windows OpenSSH: the
-   line is `command="<python> runner_pool.py submit-only",no-pty,no-port-forwarding,...` in
-   `administrators_authorized_keys` or the user's file; live step via workst-L1-autoos. Evidence that
+   line is the ONE verbatim line in section A (SSH surface); in `administrators_authorized_keys` or the user file;
+   live step via workst-L1-autoos. Evidence that
    Windows OpenSSH honours `command=` goes with the packet.
 3. N=6 (= admission cap, F5); >3-parallel measured later (live packet). Above 6 = separate R-orch-16 gate change.
