@@ -449,12 +449,14 @@ class SecretScopeTests(unittest.TestCase):
 # contradiction (A1-D5)
 
 
-# Leaf-only push/commit fences (bash_deny_leaf) with one command each that
+# Leaf-only push/commit/merge fences (bash_deny_leaf) with one command each that
 # the entry matches. The push rows reuse the lane push the leaf must never
 # make; the rest name their own verb.
 LEAF_CONTRADICTION_TARGETS = {
     "Bash(git push*)": "git push origin wt-example-1",
     "Bash(*git *push*)": "git push origin wt-example-1",
+    "Bash(git merge*)": "git merge origin/wt-example-1",
+    "Bash(*git *merge*)": "git merge origin/wt-example-1",
     "Bash(git commit*)": "git commit -m wt-example-1",
     "Bash(*git *commit*)": "git commit -m wt-example-1",
     "Bash(*git *tag*)": "git tag wt-example-1",

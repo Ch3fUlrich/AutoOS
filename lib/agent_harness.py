@@ -79,13 +79,18 @@ def validate(harness):
     for key in ("bash_deny_all", "bash_deny_leaf", "bash_allow_all"):
         if key not in fences:
             problems.append("missing key: fences.%s" % key)
-    # Push is a leaf fence, not a global one (operator 2026-09-22): leaves
-    # must never push, but the interactive top-level session and spawning
-    # roles may. It must live in exactly one fence list.
+    # Push and merge are leaf fences, not global ones (operator 2026-09-22
+    # for push, 2026-10-15 for merge): leaves must never push or merge, but
+    # the interactive top-level session and spawning roles may. Each must
+    # live in exactly one fence list.
     _push_all = "git push*" in (fences.get("bash_deny_all") or [])
     _push_leaf = "git push*" in (fences.get("bash_deny_leaf") or [])
     if _push_all == _push_leaf:
         problems.append("fences: 'git push*' must be in exactly one of bash_deny_all / bash_deny_leaf")
+    _merge_all = "git merge*" in (fences.get("bash_deny_all") or [])
+    _merge_leaf = "git merge*" in (fences.get("bash_deny_leaf") or [])
+    if _merge_all == _merge_leaf:
+        problems.append("fences: 'git merge*' must be in exactly one of bash_deny_all / bash_deny_leaf")
     if "git commit*" not in (fences.get("bash_deny_leaf") or []):
         problems.append("fences.bash_deny_leaf must contain 'git commit*'")
 
@@ -366,12 +371,14 @@ def desired_opencode(user, harness, repo_root, skills_source):
     permission = doc.setdefault("permission", {})
     if "skill" not in permission:
         permission["skill"] = "allow"
-    # Top level gets deny_all ONLY. The leaf fences (commit/checkout/stash/…)
-    # are per-agent (see _role_bash): the top-level session is the interactive
-    # user, and the V2 tier agents inherit top-level bash since they define no
-    # bash rules of their own — denying commit/checkout there breaks everyday
-    # git inside any agent run (measured 2026-09-22). Leaves still deny via
-    # their own blocks; push/merge/destructive stays denied for everyone.
+    # Top level gets deny_all ONLY. The leaf fences (push/merge/commit/
+    # checkout/stash/…) are per-agent (see _role_bash): the top-level
+    # session is the interactive user, and the V2 tier agents inherit
+    # top-level bash since they define no bash rules of their own — denying
+    # commit/checkout there breaks everyday git inside any agent run
+    # (measured 2026-09-22). Leaves still deny via their own blocks;
+    # destructive verbs (rebase/reset/branch -D/clean/worktree) stay denied
+    # for everyone.
     permission["bash"] = _rebuild_patterns(
         _drop_stale_leaf_denies(permission.get("bash"), deny_leaf),
         deny_all,
