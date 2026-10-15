@@ -398,3 +398,65 @@ def test_cli_outputs_never_contain_sk(tmp_path):
     for cmd in ["check", "export", "guard"]:
         res = subprocess.run([sys.executable, str(REPO / "tools" / "combo_drift.py"), cmd, *base_args], env=env, capture_output=True, text=True)
         assert "sk-" not in res.stdout and "sk-" not in res.stderr
+
+import pytest
+
+def test_clean_violations_flags_free_bzl_groq_openrouter_vertex():
+    file_doc = {
+        "combos": [
+            {
+                "name": "test-clean",
+                "models": [
+                    "bzl/model-a",
+                    "bazaarlink/model-b",
+                    "groq/model-c",
+                    "openrouter/model-d",
+                    "vertex/model-e",
+                    "other/model-f:free",
+                    "allowed/model-g",
+                ],
+            },
+            {
+                "name": "other-combo",
+                "models": ["bzl/bad-model"],
+            },
+        ]
+    }
+    violations = load_module().clean_violations(file_doc)
+    assert violations == sorted([
+        "forbidden leg in clean combo: test-clean: bzl/model-a",
+        "forbidden leg in clean combo: test-clean: bazaarlink/model-b",
+        "forbidden leg in clean combo: test-clean: groq/model-c",
+        "forbidden leg in clean combo: test-clean: openrouter/model-d",
+        "forbidden leg in clean combo: test-clean: vertex/model-e",
+        "forbidden leg in clean combo: test-clean: other/model-f:free",
+    ])
+
+def test_guard_refuses_forbidden_leg_in_clean_combo(tmp_path):
+    mod = load_module()
+    live = {"test-clean": {"models": ["bzl/bad"], "strategy": "round-robin", "dropped": 0}}
+    file_doc = {"combos": [{"name": "test-clean", "models": ["bzl/bad"]}], "retired": []}
+    snapshot_doc = mod.snapshot_build(live)
+    ok, reasons = mod.guard(live, snapshot_doc, file_doc, set())
+    assert ok is False
+    assert any("forbidden leg in clean combo" in r for r in reasons)
+    assert len(reasons) == 1
+
+def test_cli_guard_exit4_forbidden_clean_leg(tmp_path):
+    snap = load_module().snapshot_build({"x-clean": {"strategy": "priority", "models": ["bzl/bad"], "dropped": 0}})
+    env, base_args, _ = make_cli(tmp_path, live_lines=["x-clean\x1fpriority\x1fbzl/bad\x1f0"],
+                                 combos_models=[("x-clean", "priority", ["bzl/bad"])], snapshot=snap)
+    result = subprocess.run([sys.executable, str(REPO / "tools" / "combo_drift.py"), "guard", *base_args],
+                            capture_output=True, text=True, env=env)
+    assert result.returncode == 4
+    assert "forbidden leg in clean combo" in result.stdout
+
+@pytest.mark.xfail(strict=True, reason="clean fold waits on privacy evidence (D-1344 follow-up)")
+def test_real_combos_json_clean_combos_have_no_forbidden_leg():
+    import json
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[2]
+    combos_path = repo / "configuration" / "omniroute" / "combos.json"
+    with open(combos_path) as f:
+        file_doc = json.load(f)
+    assert clean_violations(file_doc) == []

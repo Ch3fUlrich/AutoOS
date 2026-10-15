@@ -148,6 +148,19 @@ def snapshot_verify(doc: Any) -> bool:
     combo_bytes = _combos_json_bytes(combos)
     return doc["sha256"] == _compute_sha256(combo_bytes)
 
+CLEAN_FORBIDDEN_PREFIXES = ("bzl/", "bazaarlink/", "groq/", "openrouter/", "vertex/")
+
+def clean_violations(file_doc: dict[str, Any]) -> list[str]:
+    violations: list[str] = []
+    for combo in file_doc.get("combos", []):
+        name = combo.get("name", "")
+        if not name.endswith("-clean"):
+            continue
+        for ref in combo.get("models", []):
+            if ref.endswith(":free") or any(ref.startswith(p) for p in CLEAN_FORBIDDEN_PREFIXES):
+                violations.append(f"forbidden leg in clean combo: {name}: {ref}")
+    return sorted(violations)
+
 def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
           file_doc: dict[str, Any], unmanaged: set[str],
           unreadable_reason: str | None = None) -> tuple[bool, list[str]]:
@@ -158,8 +171,11 @@ def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
         reasons.append(f"live store unreadable: {unreadable_reason}")
         return False, reasons
 
+    clean_viols = clean_violations(file_doc)
+
     if not snapshot_verify(snapshot_doc):
         reasons.append("snapshot missing or does not verify")
+        reasons.extend(clean_viols)
         return False, reasons
 
     retired = set(file_doc.get("retired", []))
@@ -196,6 +212,7 @@ def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
         if not (snap_match or file_match):
             reasons.append(f"unexported live change: {name}")
 
+    reasons.extend(clean_viols)
     return len(reasons) == 0, reasons
 
 def _read_live_text(live_lines_path: str | None, repo_root: Path) -> tuple[str | None, str | None]:
