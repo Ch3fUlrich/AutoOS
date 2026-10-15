@@ -90,7 +90,11 @@
     { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebiuswave2", "effect": "allow" },
     { "action": "shell", "resource": "git merge --continue", "effect": "allow" },
     { "action": "shell", "resource": "git merge --abort", "effect": "allow" },
-    { "action": "shell", "resource": "git fetch origin", "effect": "allow" }
+    { "action": "shell", "resource": "git fetch origin", "effect": "allow" },
+    // BOOTSTRAP (2026-10-15, removed after the pending merges land):
+    // the pre-pushgate file has no merge allow, so branch merges resolve
+    // to `ask`. lane/pushgate-retirement carries the real rules.
+    { "action": "shell", "resource": "git merge *", "effect": "allow" }
   ],
   // Tier enforcement (hard, runtime-checked): unattended runs select these
   // agents, and the `subagent` permissions below make the depth mandatory —
