@@ -3282,7 +3282,7 @@
           }
         ],
         "caveats": [
-          "opt-out only as a regional right via privacy@deepseek.com",
+          "opt-out only as a regional right via the vendor privacy contact",
           "data is stored in the PRC",
           "evidence lightly verified by fetch through fixes-L1, not by a lawyer"
         ]
