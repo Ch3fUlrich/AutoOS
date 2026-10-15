@@ -84,6 +84,8 @@
       "Write(*.claude.json*)",
       "Bash(git push*)",
       "Bash(*git *push*)",
+      "Bash(git merge*)",
+      "Bash(*git *merge*)",
       "Bash(git commit*)",
       "Bash(*git *commit*)",
       "Bash(*git *tag*)",

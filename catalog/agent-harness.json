@@ -10,13 +10,11 @@
   },
   "fences": {
     "bash_deny_all": [
-      "git merge*",
       "git rebase*",
       "git reset --hard*",
       "git branch -D*",
       "git clean*",
       "git worktree remove*",
-      "*git *merge*",
       "*git *rebase*",
       "*git *reset --hard*",
       "*git *branch -D*",
@@ -46,6 +44,8 @@
     "bash_deny_leaf": [
       "git push*",
       "*git *push*",
+      "git merge*",
+      "*git *merge*",
       "git commit*",
       "*git *commit*",
       "*git *tag*",

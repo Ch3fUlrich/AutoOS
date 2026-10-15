@@ -48,15 +48,16 @@
   },
   // Shell permissions (opencode v2 `permissions`; last match wins): routine
   // git is always allowed so agent sessions can stage and commit. PUSHGATE
-  // (operator 2026-10-01): the L0 session merges the take loop and pushes
-  // origin/main, so the broad push deny re-opens ONLY for the plain
-  // `git push origin main` forms below; every option form (--force / -f /
-  // --delete / <src>:<dst>) does not match an allow and stays denied by the
-  // `git push *` rule. Merge allows exist only for the L1-backlog take loop.
-  // Everything destructive (reset --hard, rebase, branch -D, clean,
-  // worktree remove) remains denied. Without these, unmatched shell commands
-  // resolve to `ask`, which a non-interactive session cannot answer and the
-  // harness reports as permission.rejected.
+  // was retired (operator 2026-10-15): the main session pushes and merges
+  // generally - there is no reason to block it there. Only spawned
+  // subagents are fenced: the l1-orchestrator / l2-worker / t3-reviewer
+  // blocks below deny push and merge, and the installed user config gets
+  // the same split from catalog/agent-harness.json (push/merge live in
+  // bash_deny_leaf, denied on leaf roles only). Everything destructive
+  // (reset --hard, rebase, branch -D, clean, worktree remove) remains
+  // denied. Without these, unmatched shell commands resolve to `ask`,
+  // which a non-interactive session cannot answer and the harness reports
+  // as permission.rejected.
   "permissions": [
     { "action": "shell", "resource": "git status *", "effect": "allow" },
     { "action": "shell", "resource": "git diff *", "effect": "allow" },
@@ -65,13 +66,9 @@
     { "action": "shell", "resource": "git commit *", "effect": "allow" },
     { "action": "shell", "resource": "git stash *", "effect": "allow" },
     { "action": "shell", "resource": "git rebase *", "effect": "allow" },
-    { "action": "shell", "resource": "git push *", "effect": "deny" },
-    { "action": "shell", "resource": "git push origin main", "effect": "allow" },
-    { "action": "shell", "resource": "git push origin main 2>&1", "effect": "allow" },
-    { "action": "shell", "resource": "git push origin main --dry-run", "effect": "allow" },
-    { "action": "shell", "resource": "git merge --no-ff L1-backlog/*", "effect": "allow" },
-    { "action": "shell", "resource": "git merge --no-ff origin/main*", "effect": "allow" },
-    { "action": "shell", "resource": "git merge --ff-only origin/main", "effect": "allow" },
+    { "action": "shell", "resource": "git push *", "effect": "allow" },
+    { "action": "shell", "resource": "git merge *", "effect": "allow" },
+    { "action": "shell", "resource": "git fetch origin", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebius2-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebiuswave-20260930", "effect": "allow" },
     { "action": "shell", "resource": "git branch -D L1-backlog/ws-nebiuswave2-20260930", "effect": "allow" },
@@ -89,12 +86,7 @@
     { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebiuswave", "effect": "allow" },
     { "action": "shell", "resource": "git worktree remove C:/Users/mauls/Documents/Code/AutoOS-worktrees/AutoOS-ws-nebiuswave2", "effect": "allow" },
     { "action": "shell", "resource": "git merge --continue", "effect": "allow" },
-    { "action": "shell", "resource": "git merge --abort", "effect": "allow" },
-    { "action": "shell", "resource": "git fetch origin", "effect": "allow" },
-    // BOOTSTRAP (2026-10-15, removed after the pending merges land):
-    // the pre-pushgate file has no merge allow, so branch merges resolve
-    // to `ask`. lane/pushgate-retirement carries the real rules.
-    { "action": "shell", "resource": "git merge *", "effect": "allow" }
+    { "action": "shell", "resource": "git merge --abort", "effect": "allow" }
   ],
   // Tier enforcement (hard, runtime-checked): unattended runs select these
   // agents, and the `subagent` permissions below make the depth mandatory —
@@ -119,7 +111,14 @@
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "subagent", "resource": "l2-worker", "effect": "allow" },
         { "action": "task", "resource": "*", "effect": "deny" },
-        { "action": "task", "resource": "l2-worker", "effect": "allow" }
+        { "action": "task", "resource": "l2-worker", "effect": "allow" },
+        // PUSHGATE-retirement (2026-10-15): the top level pushes and merges
+        // generally, so spawned agents carry their own denies (t3-reviewer
+        // has them below; a `bash` rule would match nothing in v2).
+        { "action": "shell", "resource": "git push*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *push*", "effect": "deny" },
+        { "action": "shell", "resource": "git merge*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *merge*", "effect": "deny" }
       ]
     },
     "l2-worker": {
@@ -144,7 +143,12 @@
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "subagent", "resource": "t3-reviewer", "effect": "allow" },
         { "action": "task", "resource": "*", "effect": "deny" },
-        { "action": "task", "resource": "t3-reviewer", "effect": "allow" }
+        { "action": "task", "resource": "t3-reviewer", "effect": "allow" },
+        // PUSHGATE-retirement (2026-10-15): see l1-orchestrator above.
+        { "action": "shell", "resource": "git push*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *push*", "effect": "deny" },
+        { "action": "shell", "resource": "git merge*", "effect": "deny" },
+        { "action": "shell", "resource": "*git *merge*", "effect": "deny" }
       ]
     },
     "t3-reviewer": {

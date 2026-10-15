@@ -566,6 +566,7 @@ class OpencodeMergeTests(unittest.TestCase):
                 self.assertEqual(block["permission"]["task"], "deny", name)
                 self.assertEqual(block["permission"]["bash"]["git commit*"], "deny", name)
                 self.assertEqual(block["permission"]["bash"]["git push*"], "deny", name)
+                self.assertEqual(block["permission"]["bash"]["git merge*"], "deny", name)
 
     def test_only_spawning_roles_get_task_allow(self):
         harness = harness_data()
@@ -649,8 +650,9 @@ class OpencodeMergeTests(unittest.TestCase):
 
     def test_user_keys_survive_the_fence_beats_merge_but_push_is_per_role(self):
         # Push moved from the global fence to the leaf fence (operator
-        # 2026-09-22): the fixture user's explicit push allow survives at top
-        # level, while a global-fence pattern still beats the user.
+        # 2026-09-22); merge followed (operator 2026-10-15): the fixture
+        # user's explicit push/merge allows survive at top level, while a
+        # global-fence pattern still beats the user.
         user = read_ordered(FIXTURES / "opencode.user.json")
         with tempfile.TemporaryDirectory() as tmp:
             config, _ = self.merge_fixture(tmp)
@@ -668,7 +670,7 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertIn("my-rules.md", doc["instructions"])
             self.assertEqual(doc["permission"]["bash"]["npm *"], "ask")
             self.assertEqual(doc["permission"]["bash"]["git push*"], "allow")
-            self.assertEqual(doc["permission"]["bash"]["git merge*"], "deny")
+            self.assertEqual(doc["permission"]["bash"]["git merge*"], "allow")
 
     def test_second_run_skips_and_makes_no_second_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
