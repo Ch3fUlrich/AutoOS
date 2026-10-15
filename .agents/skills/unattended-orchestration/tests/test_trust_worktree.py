@@ -188,3 +188,73 @@ def test_lane_mcp_check_reports_unchanged_when_current(sandbox, capsys):
     capsys.readouterr()
     assert trust_worktree.main(args + ["--check"]) == 0
     assert "unchanged:" in capsys.readouterr().out
+
+
+def test_trust_windows_style_creates_both_keys(sandbox, tmp_path, monkeypatch):
+    repo, _ = sandbox
+    # Use a Windows-style worktree path with backslashes
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    changed, msg = trust_worktree.trust(worktree, repo, mcpjson=[], force=False, check=False)
+    assert changed is True
+    claude_json = Path(os.environ["CLAUDE_CONFIG_PATH"])
+    data = json.loads(claude_json.read_text())
+    projects = data.get("projects", {})
+    key1 = str(worktree)
+    key2 = key1.replace("\\", "/")
+    assert key1 in projects
+    assert key2 in projects
+    assert projects[key1].get("hasTrustDialogAccepted") is True
+    assert projects[key2].get("hasTrustDialogAccepted") is True
+
+
+def test_trust_preexisting_forward_slash_flipped_to_true(sandbox, tmp_path, monkeypatch):
+    repo, _ = sandbox
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    key_forward = str(worktree).replace("\\", "/")
+    claude_json = Path(os.environ["CLAUDE_CONFIG_PATH"])
+    data = json.loads(claude_json.read_text())
+    projects = data.setdefault("projects", {})
+    # Pre-existing forward-slash entry with hasTrustDialogAccepted=False and other field
+    projects[key_forward] = {"hasTrustDialogAccepted": False, "foo": "bar"}
+    # Ensure repo entry exists for template (set by sandbox fixture)
+    claude_json.write_text(json.dumps(data, indent=2))
+    changed, msg = trust_worktree.trust(worktree, repo, mcpjson=[], force=False, check=False)
+    assert changed is True
+    data = json.loads(claude_json.read_text())
+    projects = data.get("projects", {})
+    entry_forward = projects[key_forward]
+    assert entry_forward.get("hasTrustDialogAccepted") is True
+    assert entry_forward.get("foo") == "bar"
+
+
+def test_trust_path_without_backslashes_writes_one_key(sandbox, tmp_path):
+    repo, _ = sandbox
+    worktree = tmp_path / "normal_worktree"
+    worktree.mkdir()
+    changed, msg = trust_worktree.trust(worktree, repo, mcpjson=[], force=False, check=False)
+    assert changed is True
+    claude_json = Path(os.environ["CLAUDE_CONFIG_PATH"])
+    data = json.loads(claude_json.read_text())
+    projects = data.get("projects", {})
+    key = str(worktree)
+    assert key in projects
+    assert projects[key].get("hasTrustDialogAccepted") is True
+
+
+def test_trust_second_call_reports_already_trusted(sandbox, tmp_path, monkeypatch):
+    repo, _ = sandbox
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    # First trust
+    changed1, msg1 = trust_worktree.trust(worktree, repo, mcpjson=[], force=False, check=False)
+    assert changed1 is True
+    claude_json = Path(os.environ["CLAUDE_CONFIG_PATH"])
+    content1 = claude_json.read_text()
+    # Second trust
+    changed2, msg2 = trust_worktree.trust(worktree, repo, mcpjson=[], force=False, check=False)
+    assert changed2 is False
+    assert msg2.startswith("already trusted: ")
+    content2 = claude_json.read_text()
+    assert content1 == content2

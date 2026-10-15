@@ -164,23 +164,36 @@ def trust(worktree: Path, repo: Path, *, mcpjson: list[str], force: bool = False
         return False, f"no config at {path}"
     data = load(path)
     projects = data.setdefault("projects", {})
-    key = str(worktree)
-    entry = projects.get(key)
-    already = bool(entry) and all(entry.get(k) == v for k, v in TRUST_FLAGS.items())
-    enabled = list((entry or {}).get("enabledMcpjsonServers") or [])
-    missing_mcp = [m for m in mcpjson if m not in enabled]
-    if already and not missing_mcp and not force:
-        return False, f"already trusted: {key}"
+    key1 = str(worktree)
+    key2 = str(worktree).replace("\\", "/")
+    keys_to_write = {key1, key2}
+    all_enabled = set()
+    for k in keys_to_write:
+        entry_k = projects.get(k, {})
+        all_enabled |= set(entry_k.get("enabledMcpjsonServers", []))
+    missing_mcp = [m for m in mcpjson if m not in all_enabled]
+    final_enabled = sorted(set(all_enabled) | set(mcpjson))
+    already_trusted = True
+    for k in keys_to_write:
+        entry_k = projects.get(k)
+        if not entry_k:
+            already_trusted = False
+            break
+        if not all(entry_k.get(trust_flag_key) == trust_flag_value for trust_flag_key, trust_flag_value in TRUST_FLAGS.items()):
+            already_trusted = False
+            break
+    if already_trusted and not missing_mcp and not force:
+        return False, f"already trusted: {key1}"
     if check:
-        return False, f"WOULD trust: {key}" + (f" (+mcpjson {missing_mcp})" if missing_mcp else "")
-    merged = template(data, repo)
-    merged.update(entry or {})
-    merged.update(TRUST_FLAGS)
-    if mcpjson:
-        merged["enabledMcpjsonServers"] = sorted(set(enabled) | set(mcpjson))
-    projects[key] = merged
+        return False, f"WOULD trust: {key1}" + (f" (+mcpjson {missing_mcp})" if missing_mcp else "")
+    for k in keys_to_write:
+        merged = template(data, repo)
+        merged.update(projects.get(k, {}))
+        merged.update(TRUST_FLAGS)
+        merged["enabledMcpjsonServers"] = final_enabled
+        projects[k] = merged
     save(path, data)
-    return True, f"trusted: {key}" + (f" (mcpjson {sorted(set(enabled) | set(mcpjson))})" if mcpjson else "")
+    return True, f"trusted: {key1}" + (f" (mcpjson {final_enabled})" if mcpjson else "")
 
 
 def copy_local_settings(worktree: Path, repo: Path, *, mcpjson: list[str],
