@@ -250,14 +250,16 @@ _is_readonly_run() {
 # _go_flags <root> — the --go/--go-sha flags that clear apply.sh's D-825 gate for a
 # mutating run against this checkout, as an array (empty for a read-only run). <ref>
 # is OS-0, a valid OS-<n> item; the sha is the real HEAD so apply.sh's own
-# `git rev-parse HEAD` matches it.
+# `git rev-parse HEAD` matches it. --overwrite-live: these sandboxes test provider
+# registration and combo writes, not the live-store guard (tests/test_apply_guard.py
+# owns that), and their stand-in store holds combos git never saw.
 _go_flags() {
     local root="$1"
     shift
     if _is_readonly_run "$@"; then
         return
     fi
-    printf '%s\0' "--go=OS-0" "--go-sha=$(git -C "$root" rev-parse HEAD)"
+    printf '%s\0' "--go=OS-0" "--go-sha=$(git -C "$root" rev-parse HEAD)" "--overwrite-live"
 }
 
 _prune_sandbox() {
@@ -1099,7 +1101,7 @@ if it "svc: apply removes the REST temp files when a call is interrupted"; then
     PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
         AUTOOS_REGISTRY_FILE="$d/registry.json" \
         OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
-        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" >"$d/run.out" 2>&1 &
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" --overwrite-live >"$d/run.out" 2>&1 &
     apply_pid=$!
     set +m
     ok=1
@@ -1337,7 +1339,7 @@ json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
           open(sys.argv[1], "w"), indent=1)
 PY
     out="$(PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" 2>&1)"
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" --overwrite-live 2>&1)"
     ok=1
     grep -q '^providers list' "$d/calls.log" \
         || { ok=0; echo "the CLI list never decided: $(cat "$d/calls.log")" >&2; }

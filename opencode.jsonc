@@ -560,12 +560,7 @@
         "l1-orchestrator-clean": {
           "modelID": "l1-orchestrator-clean",
           "name": "L1 · l1-orchestrator-clean · 1M",
-          "limit": { "context": 1000000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "l1-orchestrator-free-only": {
           "modelID": "l1-orchestrator-free-only",
@@ -580,12 +575,7 @@
         "l2-worker-clean": {
           "modelID": "l2-worker-clean",
           "name": "L2 · l2-worker-clean · 128k",
-          "limit": { "context": 128000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 128000, "output": 32768 }
         },
         "l2-worker-free-only": {
           "modelID": "l2-worker-free-only",
@@ -600,12 +590,7 @@
         "l2-orchestrator-clean": {
           "modelID": "l2-orchestrator-clean",
           "name": "L2 · l2-orchestrator-clean · 1M",
-          "limit": { "context": 1048576, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 1048576, "output": 32768 }
         },
         "l2-worker-1m": {
           "modelID": "l2-worker-1m",
@@ -620,12 +605,7 @@
         "l3-driver-clean": {
           "modelID": "l3-driver-clean",
           "name": "L3 · l3-driver-clean · 128k",
-          "limit": { "context": 128000, "output": 16384 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 128000, "output": 16384 }
         },
         "l3-driver-free-only": {
           "modelID": "l3-driver-free-only",
@@ -650,12 +630,7 @@
         "l3-implementer-clean": {
           "modelID": "l3-implementer-clean",
           "name": "L3 · l3-implementer-clean · 128k",
-          "limit": { "context": 128000, "output": 8192 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 128000, "output": 8192 }
         },
         "l3-researcher": {
           "modelID": "l3-researcher",
@@ -665,12 +640,7 @@
         "l3-researcher-clean": {
           "modelID": "l3-researcher-clean",
           "name": "L3 · l3-researcher-clean · 1M",
-          "limit": { "context": 1000000, "output": 32768 },
-          "variants": [
-            { "id": "low", "settings": { "reasoningEffort": "low" } },
-            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
-            { "id": "high", "settings": { "reasoningEffort": "high" } }
-          ]
+          "limit": { "context": 1000000, "output": 32768 }
         },
         "l3-review-diff": {
           "modelID": "l3-review-diff",
@@ -743,12 +713,12 @@
           ]
         },
         "mimo-v2.6-flash": {
-          "modelID": "mimo-v2.6-flash",
+          "modelID": "mimo/mimo-v2.6-flash",
           "name": "Xiaomi MiMo v2.6 Flash · 1M",
           "limit": { "context": 1048576, "output": 65536 }
         },
         "mimo-v2.6-pro": {
-          "modelID": "mimo-v2.6-pro",
+          "modelID": "mimo/mimo-v2.6-pro",
           "name": "Xiaomi MiMo v2.6 Pro · 1M",
           "limit": { "context": 1048576, "output": 65536 }
         },

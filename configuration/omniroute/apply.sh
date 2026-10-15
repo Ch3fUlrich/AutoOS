@@ -40,6 +40,9 @@
 #
 # --probe sends one tiny request per combo and reports what answered
 # (spends a few hundred tokens; skipped under --dry-run).
+# --live-lines (read-only) prints the normalised live combo rows for tools/combo_drift.py; a mutating
+# run first applies the guard (exit 4 on unexported live changes, an unreadable reachable store or a
+# forbidden leg in a -clean combo); --overwrite-live skips it (GO still required).
 # --drift is read-only: it compares the live combos with combos.json (name +
 # ordered models; retired ids ignored), prints one line per difference and
 # exits 0 in sync, 1 on drift, 3 when the live store is unreadable. It skips
@@ -77,6 +80,8 @@ OVERRIDES_FILE="$HERE/context-overrides.json"
 DRY=0
 PROBE=0
 DRIFT=0
+LIVE_LINES=0
+OVERWRITE_LIVE=0
 GO_REF=""
 GO_SHA=""
 GO_OFFLINE=0
@@ -85,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY=1 ;;
         --probe)   PROBE=1 ;;
         --drift)   DRIFT=1 ;;
+        --live-lines) LIVE_LINES=1 ;;
+        --overwrite-live) OVERWRITE_LIVE=1 ;;
         --go)
             [[ $# -ge 2 ]] || { echo "apply.sh: --go needs a reference (a judge run id YYYYMMDD-HHMMSS-…, a decision id D-<n> or an OS-<n> item)." >&2; exit 2; }
             GO_REF="$2"; shift ;;
@@ -98,7 +105,7 @@ while [[ $# -gt 0 ]]; do
         # `apply.sh --bogus` fell through to a live run, and a typo'd --go-sha or a
         # stale --apply was swallowed exactly that way. apply-cluster.sh has always
         # refused unknown arguments; apply.sh now does the same.
-        *) echo "apply.sh: unknown argument '$1' (--dry-run --probe --drift --go <ref> --go-sha <sha> --go-offline are the flags)." >&2
+        *) echo "apply.sh: unknown argument '$1' (--dry-run --probe --drift --live-lines --overwrite-live --go <ref> --go-sha <sha> --go-offline are the flags)." >&2
            exit 2 ;;
     esac
     shift
@@ -111,7 +118,7 @@ PROBE_COMBOS=()
 # gateway (not --dry-run, not --drift) now refuses unless --go names the approving
 # artefact AND --go-sha equals this checkout's HEAD, so the GO covers the exact
 # code being applied. Read-only runs are unchanged; a --go there is echoed only.
-if [[ $DRY -ne 1 && $DRIFT -ne 1 ]]; then
+if [[ $DRY -ne 1 && $DRIFT -ne 1 && $LIVE_LINES -ne 1 ]]; then
     [[ -n "$GO_REF" ]] || {
         echo "apply.sh: refusing to change live gateway state without --go <ref> (fleet rule D-825)." >&2
         echo "  Registering providers, creating or pruning combos, patching resilience and" >&2
@@ -180,11 +187,11 @@ command -v python3 >/dev/null || {
 # --drift reads no provider keys and never registers, so neither a missing
 # key file nor a missing CLI stops it here: its own block below reports an
 # unreadable store and exits 3.
-if [[ ! -f "$KEYS_FILE" && $DRIFT -ne 1 ]]; then
+if [[ ! -f "$KEYS_FILE" && $DRIFT -ne 1 && $LIVE_LINES -ne 1 ]]; then
     echo "Missing $KEYS_FILE — copy configuration/api-keys.example.yml and fill it in."
     [[ $DRY -eq 1 ]] || exit 1
 fi
-if ! command -v omniroute >/dev/null && [[ $DRIFT -ne 1 ]]; then
+if ! command -v omniroute >/dev/null && [[ $DRIFT -ne 1 && $LIVE_LINES -ne 1 ]]; then
     if [[ $DRY -eq 1 ]]; then
         echo "OmniRoute CLI not installed - dry run continues with the static plan (nothing started, registered or created)."
     else
@@ -554,6 +561,41 @@ PY
     exit "$drift_rc"
 fi
 
+# ─── RT-P0-OR-DRIFT: --live-lines (read-only export of the live rows, consumed by
+# tools/combo_drift.py) and the apply guard: a mutating run refuses (exit 4) when live holds
+# combo changes git never saw (not in the committed snapshot, not equal to the file), when the
+# live store is reachable but unreadable, or when a -clean combo carries a forbidden leg.
+# --overwrite-live is the explicit way through (the GO gate above still applies).
+guard_read_live() {
+    local raw failed=0 norm
+    if ! raw="$(omni_json combo list)"; then
+        failed=1
+    fi
+    if ! norm="$(live_combo_norm "$raw" "$failed")"; then
+        GUARD_REASON="${norm#live store unreadable - }"
+        return 3
+    fi
+    GUARD_ROWS="$norm"
+    return 0
+}
+
+if [[ $LIVE_LINES -eq 1 ]]; then
+    if ! command -v omniroute >/dev/null; then
+        echo "live store unreadable - the omniroute CLI is not installed"
+        exit 3
+    fi
+    if ! gateway_up; then
+        echo "live store unreadable - the gateway does not answer on $GATEWAY"
+        exit 3
+    fi
+    if ! guard_read_live; then
+        echo "live store unreadable - $GUARD_REASON"
+        exit 3
+    fi
+    printf '%s\n' "$GUARD_ROWS"
+    exit 0
+fi
+
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
         echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
@@ -588,6 +630,30 @@ if ! gateway_up; then
     fi
 fi
 if gateway_up; then echo "Gateway OK on $GATEWAY"; fi
+# The guard runs only AFTER the gateway is up: a stopped gateway used to skip it, then get
+# started below and be mutated unchecked (seat finding, 2026-10-15). Starting the gateway
+# changes no combo; a gateway that never comes up exits above, before any mutation.
+if [[ $DRY -eq 0 && $DRIFT -eq 0 && $LIVE_LINES -eq 0 ]]; then
+    if [[ $OVERWRITE_LIVE -eq 1 ]]; then
+        echo "guard: skipped (--overwrite-live)"
+    elif ! command -v omniroute >/dev/null || ! gateway_up; then  # dry runs never reach here; a real run has both
+        echo "guard: skipped (no reachable live store)"
+    else
+        if ! guard_read_live; then
+            echo "apply.sh: refused - live store unreadable ($GUARD_REASON); nothing was changed. Re-run with --overwrite-live to replace anyway." >&2
+            exit 4
+        fi
+        guard_rc=0
+        guard_out=$(printf '%s\n' "$GUARD_ROWS" | python3 "$ROOT/tools/combo_drift.py" guard --live-lines - ) || guard_rc=$?
+        if [[ $guard_rc -ne 0 ]]; then
+            echo "$guard_out" >&2
+            echo "apply.sh: refused (exit 4) - live holds changes git never saw, or a policy leg is forbidden in a -clean combo; nothing was changed. Export with: python3 tools/combo_drift.py export; or re-run with --overwrite-live (GO still required)." >&2
+            exit 4
+        fi
+        echo "guard: ok"
+    fi
+fi
+
 
 # ─── Register providers ─────────────────────────────────────────────────────
 # The manage key for the REST calls below: the same one omni() puts into the

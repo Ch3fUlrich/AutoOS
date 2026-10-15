@@ -1487,7 +1487,7 @@ def filter_routes(card, features, client_state, registry, overlay,
             # leg (close-priv 2026-09-26; same rule as registry.py check).
             for leg in route.get("legs") or []:
                 provider_id, model_id = resolve_leg(leg, registry)
-                safe, why = private_safe(provider_id, model_id, registry)
+                safe, why = private_safe(provider_id, model_id, registry, route_id)
                 if not safe:
                     reasons.append("privacy: %s/%s %s" % (provider_id, model_id, why))
 

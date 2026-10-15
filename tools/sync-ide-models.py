@@ -272,7 +272,7 @@ def render_entries(models, indent, trailing_comma):
         ladder = m.get("effort_ladder")
         entry = [
             f"{indent}{json.dumps(m['id'], ensure_ascii=False)}: {{",
-            f'{indent}  "modelID": {json.dumps(m["id"], ensure_ascii=False)},',
+            f'{indent}  "modelID": {json.dumps(m.get("modelID", m["id"]), ensure_ascii=False)},',
             f'{indent}  "name": {json.dumps(m["name"], ensure_ascii=False)},',
             f'{indent}  "limit": {limit}' + ("," if ladder else ""),
         ]
@@ -335,7 +335,7 @@ def rewrite_opencode(text, models, warn=None):
         got = ((parsed.get("providers") or {}).get(gateway) or {}).get("models") or {}
         for m in members:
             entry = got.get(m["id"]) or {}
-            if entry.get("modelID") != m["id"]:
+            if entry.get("modelID") != m.get("modelID", m["id"]):
                 raise ConfigError(
                     f"opencode.jsonc: {START} {gateway} is not inside providers.{gateway}.models")
     return new_text, changed

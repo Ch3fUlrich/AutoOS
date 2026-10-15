@@ -1684,17 +1684,23 @@ class FreeAiProviderTests(unittest.TestCase):
                     if leg.startswith(("free_ai/", "free-ai/"))]
             self.assertFalse(hits, "route %s still declares %s" % (rid, hits))
 
-    def test_l2_worker_closes_with_the_vertex_leg(self):
+    def test_l2_worker_closes_with_the_mimo_leg(self):
         """BRIEF T2FREE (S1, urgent stopgap 2026-09-28) put the leg that
         measured answering 200 last, so a request always fell through to
         something. D657-D2 (2026-10-08) keeps that shape and changes the name:
         probe D-657 measured `vertex/gemini-3.8-flash` answering on both
         gateways with a documented cache, and spec SS8's paid-deepseek ban took
         the old tail out, so the vertex leg is now the last leg a real request
-        can fall through to."""
+        can fall through to. OR-DRIFT (2026-10-15) folded the hand-added MiMo
+        subscription leg in: combo-contract (b) counts a subscription as paid, so
+        it closes the chain after the vertex credit leg."""
         route = self.reg["routes"]["l2-worker"]
-        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
-                         "vertex/gemini-3.8-flash")
+        legs_live = live_legs(self.reg, "l2-worker")
+        # fixes-L1 gen-11 (2026-10-15): live order wins (D-1351), so MiMo leads
+        # and vertex (forbidden fleet-wide, absent live) is out of the chain.
+        self.assertEqual(legs_live[0], "xiaomi_mimo/mimo-v2.6-flash")
+        self.assertNotIn("vertex/gemini-3.8-flash", legs_live)
+        self.assertEqual(legs_live[-1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
         legs = route["legs"]
         for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
                      "ovhcloud/gpt-oss-120b",
@@ -2317,22 +2323,27 @@ class DeepSeekBackTests(unittest.TestCase):
             registry._leg_is_unavailable("deepseek/deepseek-flash",
                                          reg["routes"]["l2-worker-clean"], reg))
 
-    def test_the_clean_twins_close_with_the_private_safe_leg(self):
+    def test_the_clean_twins_close_with_the_exempt_deepseek_leg(self):
         # L1-CLEAN (2026-10-01) put the native DeepSeek leg last as the paid
-        # fallback. SS8 (D657-D2 2026-10-08) bans paid DeepSeek from every chain,
-        # so the -clean twins now render exactly the one leg that is both
-        # private-safe and probe-acked. The render, not the registry list, is
-        # what the gateway serves.
+        # fallback; SS8 (D657-D2 2026-10-08) banned paid DeepSeek from every
+        # chain; operator D-1349 (2026-10-15) re-admitted deepseek-flash to the
+        # six -clean twins ONLY (CLEAN_LEG_EXEMPTIONS), after MiMo. The render,
+        # not the registry list, is what the gateway serves.
         rendered = {c["name"]: c for c in
                     registry.render_omniroute(self.reg)["combos"]}
+        head = {"l3-driver-clean": "mimo/mimo-v2.6-pro",
+                "l3-implementer-clean": "mimo/mimo-v2.6-pro"}
         for name in ("l1-orchestrator-clean", "l2-orchestrator-clean",
                      "l2-worker-clean", "l3-driver-clean",
                      "l3-implementer-clean", "l3-researcher-clean"):
             self.assertEqual(rendered[name]["models"],
-                             ["vertex/gemini-3.8-flash"], name)
-        served = [model for combo in rendered.values()
-                  for model in combo["models"]]
-        self.assertNotIn("deepseek/deepseek-flash", served)
+                             [head.get(name, "mimo/mimo-v2.6-flash"),
+                              "deepseek/deepseek-flash"], name)
+        carriers = sorted(name for name, combo in rendered.items()
+                          if "deepseek/deepseek-flash" in combo["models"])
+        self.assertEqual(carriers, sorted(
+            n for n in rendered if n.endswith("-clean")
+            and n in registry.CLEAN_LEG_EXEMPTIONS[("deepseek", "deepseek-flash")]["routes"]))
 
     def test_the_deepseek_route_is_gated_out_of_every_surface(self):
         # The route whose ONLY served leg was deepseek/* failed closed during the
@@ -2346,15 +2357,17 @@ class DeepSeekBackTests(unittest.TestCase):
             registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
                                   self.reg), [])
 
-    def test_models_doc_no_longers_lists_the_paid_deepseek_leg(self):
-        # The leg DSBACK un-struck is gone from the chain the doc prints, so the
-        # row cannot promise it to a reader any more.
+    def test_models_doc_lists_the_d1349_clean_legs(self):
+        # SS8 took the paid DeepSeek leg out of every chain; operator D-1349
+        # (2026-10-15) put deepseek-flash back into the *-clean twins only, next
+        # to MiMo, and the vertex leg left them, so the row prints that pair.
         rows = [r for r in registry.render_models_doc(self.reg).splitlines()
-                if "l2-worker-clean" in r]
+                if "`l2-worker-clean`" in r]
         self.assertTrue(rows)
         for row in rows:
-            self.assertNotIn("deepseek-flash", row)
-            self.assertIn("gemini-3.8-flash", row)
+            self.assertIn("deepseek-flash", row)
+            self.assertIn("mimo-v2.6-flash", row)
+            self.assertNotIn("gemini-3.8-flash", row)
 
     def test_real_registry_passes_check_after_the_flip(self):
         self.assertEqual(registry.check_registry(self.reg), [])
@@ -2771,12 +2784,13 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
         # chain, so the -clean twins are now the single probe-acked, private-safe
         # leg -- and it is live, which is what the route-liveness invariant needs.
-        for route_id in ("l2-worker-clean", "l3-driver-clean"):
+        # D-1349 (2026-10-15) re-admitted it to the -clean twins as the
+        # exempt second leg (CLEAN_LEG_EXEMPTIONS); mimo leads, vertex is gone.
+        for route_id, head in (("l2-worker-clean", "xiaomi_mimo/mimo-v2.6-flash"),
+                               ("l3-driver-clean", "xiaomi_mimo/mimo-v2.6-pro")):
             self.assertEqual(self.reg["routes"][route_id]["legs"],
-                             ["vertex/gemini-3.8-flash"], route_id)
+                             [head, "deepseek/deepseek-flash"], route_id)
             self.assertTrue(live_legs(self.reg, route_id), route_id)
-            self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(self.reg, route_id), route_id)
 
     def test_t3_driver_heads_with_the_free_band(self):
         # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
@@ -2798,7 +2812,7 @@ class MistralPlanLimitsTests(unittest.TestCase):
         self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
         self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
         self.assertNotIn("mistral/mistral-code-latest", legs)
-        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+        self.assertNotIn("vertex/gemini-3.8-flash", legs)  # fixes-L1 gen-11
 
     # -- the invariant ------------------------------------------------------
 
@@ -2873,16 +2887,16 @@ class MistralReplaceTests(unittest.TestCase):
             self.assertFalse(safe, route_id)
             self.assertEqual(reason, "model trains on prompts", route_id)
 
-    def test_the_clean_twins_still_live_without_the_deepseek_tail(self):
+    def test_the_clean_twins_still_live_with_mimo_and_the_exempt_deepseek_leg(self):
         # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
-        # twins. They still serve -- one leg each, the probe-acked private-safe
-        # vertex row -- which is what the route-liveness invariant needs.
+        # twins; D-1349 (2026-10-15) put it back as the exempt second leg after
+        # MiMo, and vertex left. Every twin still serves (route liveness).
         reg = self.reg
         for route_id in self.CLEAN_TWINS:
-            self.assertEqual(live_legs(reg, route_id),
-                             ["vertex/gemini-3.8-flash"], route_id)
-            self.assertNotIn("deepseek/deepseek-flash",
-                             live_legs(reg, route_id), route_id)
+            legs = live_legs(reg, route_id)
+            self.assertEqual(legs[-1], "deepseek/deepseek-flash", route_id)
+            self.assertTrue(legs[0].startswith("xiaomi_mimo/"), (route_id, legs))
+            self.assertNotIn("vertex/gemini-3.8-flash", legs, route_id)
 
     # -- the registered tested alternative ----------------------------------
 
@@ -3641,12 +3655,14 @@ class ComboCrossProviderTests(unittest.TestCase):
         # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
         # second providers are all either paid (banned from a free-only band) or
         # unproven, so two is what passes.
+        # OR-DRIFT 2026-10-15: plus the folded MiMo subscription leg (cache documented).
+        # fixes-L1 gen-11 2026-10-15: vertex left every chain, so MiMo + bazaarlink.
         "l1-orchestrator": 2,
         # the openrouter :free legs top out at 262144 < the route's 1M need, so
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
         "l2-worker": 3,
-        "l3-driver": 8,
+        "l3-driver": 7,
         "l3-driver-free-only": 7,
     }
 
@@ -3755,7 +3771,7 @@ class ComboCrossProviderTests(unittest.TestCase):
         # — the band that remains still carries the promise, head and paid tail included.
         self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
         self.assertIn("cohere/command-a-plus-05-2026", after)
-        self.assertIn("vertex/gemini-3.8-flash", after)
+        self.assertNotIn("vertex/gemini-3.8-flash", after)  # fixes-L1 gen-11
         self.assertEqual(len(after), len(before) - 1)
         # and the promise it is measured against is the route's own declaration,
         # not an invention of the filter: l3-driver sells 128k (combos.json
@@ -3988,21 +4004,25 @@ class CleanTierRouteTests(unittest.TestCase):
     TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
                   "vertex/gemini-3.8-flash")
     SENSITIVE = ("l2-worker-clean", "l3-driver-clean")
+    #: D-1349: the one training leg the operator keeps in the -clean twins.
+    DS = "deepseek/deepseek-flash"
     TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
 
     @classmethod
     def setUpClass(cls):
         cls.reg = load_registry()
 
-    def _leg(self, leg):
+    def _leg(self, leg, rid=None):
         pid, mid = registry.resolve_leg(leg, self.reg)
+        if rid is not None and registry.clean_leg_exempt(rid, pid, mid):
+            return pid, mid  # D-1349 exemption, asserted in CleanLegExemptionTests
         self.assertIs(self.reg["providers"][pid].get("trains_on_prompts"), False, leg)
         return pid, mid
 
     def test_every_clean_route_leg_trains_nothing(self):
         for rid in ("l2-worker-clean", "l3-driver-clean"):
             for leg in self.reg["routes"][rid]["legs"]:
-                self._leg(leg)
+                self._leg(leg, rid)
 
     def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
         # D657-D2: the ovhcloud legs 404'd out of every chain (probe ack fail on
@@ -4010,9 +4030,11 @@ class CleanTierRouteTests(unittest.TestCase):
         # 2026-10-08 brought them back one layer up: an OVH leg rides L3 chains
         # only, never a -clean or l0-/l1-/l2- chain (no documented cache). A clean
         # route may never fall back onto a leg that trains on prompts.
+        # OR-DRIFT 2026-10-15 (operator D-1344/D-1348/D-1349): vertex left the
+        # -clean twins; MiMo (subscription, cited privacy block) leads.
         for rid in self.SENSITIVE:
             legs = self.reg["routes"][rid]["legs"]
-            self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
+            self.assertTrue(legs[0].startswith("xiaomi_mimo/"), rid)
             self.assertNotIn("ovhcloud/gpt-oss-120b", legs, rid)
             self.assertNotIn("ovhcloud/Qwen3.8-27B", legs, rid)
 
@@ -4025,13 +4047,16 @@ class CleanTierRouteTests(unittest.TestCase):
         # and agy is never a head per the D-657 rules) with the bazaarlink free
         # leg, and drops the paid deepseek tail (spec SS8).
         legs = self.reg["routes"]["l2-orchestrator"]["legs"]
-        self.assertEqual(legs, ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-                                "vertex/gemini-3.8-flash"])
+        # OR-DRIFT 2026-10-15 folded the hand-added MiMo leg; fixes-L1 gen-11:
+        # live order wins (mimo first, combo-contract (b) subscription-head
+        # exemption) and vertex is out of every chain.
+        self.assertEqual(legs, ["xiaomi_mimo/mimo-v2.6-flash",
+                                "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"])
         self.assertEqual(
             self.reg["routes"]["l2-orchestrator"]["surfaces"]["omniroute"]
             ["context_declared"], "1M")
         self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
-        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+        self.assertEqual(legs[0], "xiaomi_mimo/mimo-v2.6-flash")
 
     def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
         # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
@@ -4039,13 +4064,12 @@ class CleanTierRouteTests(unittest.TestCase):
         # credit and the banned tail is asserted absent instead of pinned last.
         for rid in self.SENSITIVE:
             legs = self.reg["routes"][rid]["legs"]
-            self.assertEqual(legs[-1], "vertex/gemini-3.8-flash", rid)
-            for banned in ("deepseek/deepseek-flash",
-                           "antigravity/claude-sonnet-5-5-medium"):
-                self.assertNotIn(banned, legs, "%s carries the SS8-banned %s"
-                                 % (rid, banned))
+            # D-1349: the exempt DeepSeek leg closes the twin (combo-contract:
+            # a combo holding deepseek-flash ends with it).
+            self.assertEqual(legs[-1], self.DS, rid)
+            self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs, rid)
             for leg in legs:
-                self._leg(leg)
+                self._leg(leg, rid)
 
     def test_clean_trial_legs_span_at_least_two_families(self):
         # D657-D2 serves only the vertex leg on a clean chain, so this pins the
@@ -4119,9 +4143,10 @@ class CleanTierRouteTests(unittest.TestCase):
             carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
             self.assertEqual(len(carried), 1, (rid, carried))
             self.assertIn(carried[0], priced, rid)
-            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
-        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
-                            routes["l3-implementer"]["legs"][-2],
+            # fixes-L1 gen-11: vertex left the chain, so the OVH id closes it.
+            self.assertEqual(legs[-1:], carried, rid)
+        self.assertNotEqual(routes["l3-driver"]["legs"][-1],
+                            routes["l3-implementer"]["legs"][-1],
                             "both L3 chains carry the same OVH id: one grant, "
                             "not two seats")
 
@@ -4305,6 +4330,80 @@ class ModelKeyCaseHygieneTests(unittest.TestCase):
 
 
 
+class CleanLegExemptionTests(unittest.TestCase):
+    """D-1349 (operator, 2026-10-15, "Keep DeepSeek, exemption"): DeepSeek direct
+    stays in the six *-clean routes although its policy trains on user input.
+    Rule 3 passes ONLY through registry.CLEAN_LEG_EXEMPTIONS, scoped to one
+    provider/model pair in six named routes."""
+
+    LEG = "deepseek/deepseek-flash"
+    ROUTES = ("l1-orchestrator-clean", "l2-orchestrator-clean", "l2-worker-clean",
+              "l3-driver-clean", "l3-implementer-clean", "l3-researcher-clean")
+
+    def test_every_clean_route_carries_the_exempt_leg(self):
+        reg = load_registry()
+        for route_id in self.ROUTES:
+            self.assertIn(self.LEG, reg["routes"][route_id]["legs"], route_id)
+
+    def test_the_provider_is_recorded_as_training_with_cited_evidence(self):
+        provider = load_registry()["providers"]["deepseek"]
+        self.assertIs(provider["trains_on_prompts"], True)
+        urls = [e["url"] for e in provider["privacy"]["evidence"]]
+        self.assertEqual(len(urls), 3, urls)
+        self.assertTrue(all(u.startswith("https://cdn.deepseek.com/policies/") for u in urls), urls)
+
+    def test_the_exemption_names_the_operator_decision(self):
+        entry = registry.CLEAN_LEG_EXEMPTIONS[("deepseek", "deepseek-flash")]
+        self.assertIn("D-1349", entry["reason"])
+        self.assertEqual(tuple(entry["routes"]), self.ROUTES)
+
+    def test_rule_three_passes_only_through_the_exemption(self):
+        reg = load_registry()
+        self.assertEqual([p for p in registry.check_registry(reg) if p.startswith("privacy:")], [])
+        saved = dict(registry.CLEAN_LEG_EXEMPTIONS)
+        registry.CLEAN_LEG_EXEMPTIONS.clear()
+        try:
+            problems = [p for p in registry.check_registry(reg) if p.startswith("privacy:")]
+        finally:
+            registry.CLEAN_LEG_EXEMPTIONS.update(saved)
+        self.assertTrue(problems, "the leg trains: without the exemption rule 3 must fail")
+        self.assertTrue(all(self.LEG in p and "trains on prompts" in p for p in problems), problems)
+
+    def test_the_exemption_is_per_route_and_never_without_a_route(self):
+        reg = load_registry()
+        self.assertEqual(registry.private_safe("deepseek", "deepseek-flash", reg),
+                         (False, "trains on prompts"))
+        self.assertEqual(registry.private_safe("deepseek", "deepseek-flash", reg, "l2-worker"),
+                         (False, "trains on prompts"))
+        for route_id in self.ROUTES:
+            self.assertEqual(registry.private_safe("deepseek", "deepseek-flash", reg, route_id),
+                             (True, None), route_id)
+
+    def test_no_other_deepseek_leg_is_exempt(self):
+        reg = load_registry()
+        reg["routes"]["l2-worker-clean"]["legs"].append("deepseek/deepseek-v4.1-flash")
+        problems = [p for p in registry.check_registry(reg) if p.startswith("privacy:")]
+        self.assertTrue(any("deepseek-v4.1-flash" in p for p in problems), problems)
+
+    def test_pro_stays_denied_in_every_clean_route(self):
+        reg = load_registry()
+        for route_id in self.ROUTES:
+            for leg in reg["routes"][route_id]["legs"]:
+                self.assertFalse(registry.leg_denied(leg, reg), (route_id, leg))
+                self.assertNotIn("pro", leg.split("/")[-1].replace("mimo-v2.6-pro", ""), leg)
+
+    def test_the_resolver_still_offers_the_clean_routes_to_a_sensitive_card(self):
+        # filter_routes calls exactly this predicate with the route id.
+        reg = load_registry()
+        for route_id in self.ROUTES:
+            for leg in reg["routes"][route_id]["legs"]:
+                provider_id, model_id = registry.resolve_leg(leg, reg)
+                if route_id == "l1-orchestrator-clean" and "muse" in leg:
+                    continue  # the route-level contributor exemption, resolver stays strict
+                safe, why = registry.private_safe(provider_id, model_id, reg, route_id)
+                self.assertTrue(safe, (route_id, leg, why))
+
+
 class CreditPrivacyEvidenceGateTests(unittest.TestCase):
     """T1-CLEAN-4 K2 (2026-10-01): the registry's own words - "a credit leg is
     admitted because its provider now proves no-training with a cited
@@ -4339,7 +4438,10 @@ class CreditPrivacyEvidenceGateTests(unittest.TestCase):
     def test_a_paid_provider_needs_no_block(self):
         # the gate is credit-only: a paid leg was never asked to cite terms.
         reg = load_registry()
-        self.assertNotIn("privacy", reg["providers"]["deepseek"])
+        # D-1349 gave deepseek a cited (training) block and trains_on_prompts true;
+        # model a plain paid, non-training provider on the same rows instead.
+        reg["providers"]["deepseek"]["trains_on_prompts"] = False
+        reg["providers"]["deepseek"].pop("privacy")
         safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
         self.assertTrue(safe, reason)
 
@@ -4362,6 +4464,9 @@ class CreditPrivacyEvidenceGateTests(unittest.TestCase):
         # check_registry - one rule, two readings.
         reg = mutated()
         self.assertEqual(reg["providers"]["deepseek"]["tier"], "paid")
+        # a paid, non-training provider with no cited block (see the test above)
+        reg["providers"]["deepseek"]["trains_on_prompts"] = False
+        reg["providers"]["deepseek"].pop("privacy")
         reg["models"]["deepseek-flash"]["tier"] = "credit"
         safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
         self.assertFalse(safe)

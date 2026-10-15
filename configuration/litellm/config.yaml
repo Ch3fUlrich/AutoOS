@@ -59,7 +59,6 @@ model_list:
     litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
       api_key: os.environ/OPENROUTER_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l2-worker
 
   # ── l2-worker-clean: no free/hand legs, gateway-only stripped ─────────────
@@ -86,7 +85,6 @@ model_list:
     litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
       api_key: os.environ/BAZAARLINK_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l2-worker-1m
 
   # ── l2-worker-paid / l3-driver-paid: hand-curated, deepseek-funded again ────
@@ -139,7 +137,6 @@ model_list:
     litellm_params:
       model: ovhcloud/Qwen3.5-397B-A17B
       api_key: os.environ/OVHCLOUD_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver
 
   # ── l3-driver-clean: gateway-only legs stripped ────────────────────────────
@@ -189,7 +186,6 @@ model_list:
     litellm_params:
       model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
       api_key: os.environ/OPENROUTER_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver-1m
 
   # ── l3-driver-256k: 256k context driver ────────────────────────────────────
@@ -202,7 +198,6 @@ model_list:
     litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver-256k
 
   # AUTOOS-MANAGED-START l3-implementer
@@ -238,7 +233,6 @@ model_list:
     litellm_params:
       model: ovhcloud/Qwen3.8-27B
       api_key: os.environ/OVHCLOUD_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-implementer
 
   # AUTOOS-MANAGED-START l3-researcher
@@ -250,7 +244,6 @@ model_list:
     litellm_params:
       model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
       api_key: os.environ/OPENROUTER_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-researcher
 
   # AUTOOS-MANAGED-START l3-review-diff
@@ -269,7 +262,6 @@ model_list:
     litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
       api_key: os.environ/BAZAARLINK_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-review-tests
 
   # AUTOOS-MANAGED-START l3-review-codebase
@@ -277,7 +269,6 @@ model_list:
     litellm_params:
       model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
       api_key: os.environ/OPENROUTER_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-review-codebase
 
 
@@ -322,13 +313,50 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END l2-researcher
 
+  # ── *-clean twins: mimo + deepseek direct (operator D-1349 exemption, tools/registry.py CLEAN_LEG_EXEMPTIONS) ──
+  # AUTOOS-MANAGED-START l1-orchestrator-clean
+  - model_name: l1-orchestrator-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l1-orchestrator-clean
+  # AUTOOS-MANAGED-START l2-orchestrator-clean
+  - model_name: l2-orchestrator-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l2-orchestrator-clean
+  # AUTOOS-MANAGED-START l2-worker-clean
+  - model_name: l2-worker-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l2-worker-clean
+  # AUTOOS-MANAGED-START l3-driver-clean
+  - model_name: l3-driver-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-driver-clean
+  # AUTOOS-MANAGED-START l3-implementer-clean
+  - model_name: l3-implementer-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-implementer-clean
+  # AUTOOS-MANAGED-START l3-researcher-clean
+  - model_name: l3-researcher-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-researcher-clean
+
   # ── l1-orchestrator: orchestrator-1M, meta_api first then free gemini fallback ─────────
   # AUTOOS-MANAGED-START l1-orchestrator
   - model_name: l1-orchestrator
     litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
       api_key: os.environ/BAZAARLINK_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l1-orchestrator
 
   # ── l1-orchestrator-free-only: zero spend, gemini free leg ──────────────────────
@@ -365,7 +393,6 @@ model_list:
     litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
       api_key: os.environ/BAZAARLINK_API_KEY
-    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l2-orchestrator
 
   # ── deepseek-v4.1-flash / gemini-3.8-flash: bare model aliases ────────────

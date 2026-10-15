@@ -1,0 +1,12 @@
+# Wall-clock OnCalendar with Persistent=true, not cron.
+[Unit]
+Description=Daily AutoOS combo drift check
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15min
+Unit=autoos-combo-drift.service
+
+[Install]
+WantedBy=timers.target

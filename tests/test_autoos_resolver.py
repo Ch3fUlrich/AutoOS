@@ -2147,7 +2147,8 @@ class PlanTests(unittest.TestCase):
         self.assertIsNotNone(result["route"], result)
         route = registry["routes"][result["route"]]
         for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry,
+                                                       result["route"])
             self.assertTrue(
                 safe, "%s/%s on route %s is not private-safe: %s"
                      % (provider_id, model_id, result["route"], reason))
@@ -2165,7 +2166,8 @@ class PlanTests(unittest.TestCase):
         self.assertIsNotNone(result["route"], result)
         route = registry["routes"][result["route"]]
         for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry,
+                                                       result["route"])
             self.assertTrue(
                 safe, "%s/%s on route %s is not private-safe: %s"
                      % (provider_id, model_id, result["route"], reason))
@@ -2210,7 +2212,8 @@ class PlanTests(unittest.TestCase):
             return
         route = registry["routes"][result["route"]]
         for provider_id, model_id in r.serving_legs(route, registry):
-            safe, reason = registry_tool.private_safe(provider_id, model_id, registry)
+            safe, reason = registry_tool.private_safe(provider_id, model_id, registry,
+                                                       result["route"])
             self.assertTrue(
                 safe, "%s/%s on route %s is not private-safe: %s"
                      % (provider_id, model_id, result["route"], reason))
@@ -2265,10 +2268,11 @@ class GatewayOrderTests(unittest.TestCase):
         free = [i for i, t in enumerate(tiers) if t == "free"]
         priced = [i for i, t in enumerate(tiers) if t != "free"]
         self.assertTrue(free, legs)
+        # fixes-L1 gen-11 2026-10-15: vertex left every chain, so the OVH grant is
+        # the one priced leg and closes it.
         self.assertEqual([legs[i] for i in priced],
-                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash"],
-                         "l3-driver must keep exactly two credit legs, the OVH "
-                         "grant ahead of the probe-confirmed vertex tail")
+                         ["ovhcloud/Qwen3.5-397B-A17B"],
+                         "l3-driver must keep exactly one credit leg, the OVH grant")
         self.assertEqual(priced[-1], len(legs) - 1,
                          "%s: a priced leg anywhere but last breaks the "
                          "trial->free->credits->paid order" % tiers)
@@ -2785,6 +2789,9 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "bazaarlink": "2026-09-28T12:10:00Z",
         "openrouter": "2026-09-28T12:20:00Z",
         "vertex_ai": "2026-09-28T12:30:00Z",
+        # fixes-L1 gen-11 2026-10-15: MiMo leads l2-worker (live order), so the
+        # cooled set must name it or the insisted route still has an answer.
+        "xiaomi_mimo": "2026-09-28T12:35:00Z",
         "groq": "2026-09-28T12:40:00Z",
         "cohere": "2026-09-28T12:50:00Z",
         "antigravity": "2026-09-28T12:25:00Z",
@@ -2853,7 +2860,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         self.assertIn("l2-worker", result["reason"])
         self.assertIn("unavailable: bazaarlink until 2026-09-28T12:10:00Z",
                       result["reason"])
-        self.assertIn("unavailable: vertex_ai until 2026-09-28T12:30:00Z",
+        self.assertIn("unavailable: xiaomi_mimo until 2026-09-28T12:35:00Z",
                       result["reason"])
         self.assertIn("unavailable: openrouter until 2026-09-28T12:20:00Z",
                       result["reason"])
@@ -4381,7 +4388,10 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
+        # fixes-L1 gen-11: vertex is out of the chain; MiMo leads (live order).
+        self.assertNotIn(("vertex_ai", "gemini-3.8-flash"), kept)
+        # MiMo (subscription) is last-resort-held while the free head is healthy;
+        # that is the resolver's paid-last rule, not a claude_budget hold (below).
         self.assertIn(("bazaarlink", "deepseek/deepseek-v4-flash-0731free:free"),
                       kept)
         self.assertEqual(
@@ -4935,12 +4945,14 @@ class PaidLastResortTests(unittest.TestCase):
         route = shipped["routes"]["l1-orchestrator"]
         self.assertTrue(route["legs"], "l1-orchestrator must serve a card")
         paid = [leg for leg in route["legs"]
-                if r.leg_tier(leg, shipped) in ("paid", "subscription")]
+                if r.leg_tier(leg, shipped) == "paid"]
         self.assertEqual(paid, [],
                          "§8 keeps a paid leg out of every chain: %s" % route["legs"])
         tiers = [r.leg_tier(leg, shipped) for leg in route["legs"]]
-        self.assertEqual(tiers, ["free", "credit"],
-                         "the chain is a free head and one priced tail: %s" % tiers)
+        # fixes-L1 gen-11 2026-10-15: MiMo (subscription, $0 marginal) leads by
+        # D-1351 / live order, then the free bazaarlink mirror; vertex left.
+        self.assertEqual(tiers, ["subscription", "free"],
+                         "the chain is a subscription head and a free tail: %s" % tiers)
         overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
                             for leg in route["legs"]}}
         legs, _skipped, _notes = r.usable_legs(
@@ -4950,7 +4962,10 @@ class PaidLastResortTests(unittest.TestCase):
         provider_id, model_id = legs[0]
         tier = r.leg_tier("%s/%s" % (provider_id, model_id), shipped)
         self.assertIn(tier, ("free", "trial", "credit"))
+        # the chain now leads with MiMo (subscription), but the resolver keeps a
+        # subscription leg as last resort while the free head is healthy.
         self.assertEqual(tier, "free", legs)
+        self.assertIn("xiaomi_mimo/mimo-v2.6-flash", _skipped)
 
     def unknown_tier_fixture(self):
         providers = {"myst-p": {"id": "myst-p",

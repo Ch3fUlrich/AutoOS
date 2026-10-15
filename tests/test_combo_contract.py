@@ -241,6 +241,34 @@ class LegBanTests(unittest.TestCase):
         self.assertIn("position 1", problems[0])
 
 
+class SubscriptionLeadTests(unittest.TestCase):
+    """(b) subscription counts as paid and goes last - except the head leg of a
+    chain may be a subscription leg (D-1351: the fleet's L3 writers lead with
+    mimo-v2.6-flash; fixes-L1 gen-11 ruled live order wins over the old rule)."""
+
+    @staticmethod
+    def _reg():
+        reg = mini_registry()
+        reg["providers"]["xiaomi_mimo"] = {"model_prefix": "mimo", "tier": "subscription"}
+        reg["models"]["mimo-v2.6-flash"] = {"prompt_cache": "true"}
+        return reg
+
+    def test_a_subscription_head_ahead_of_free_legs_passes(self):
+        self.assertEqual(cc.check_tier_order(
+            self._reg(), "l3-driver", ["mimo/mimo-v2.6-flash", "bzl/ds-v4-flash-free"]), [])
+
+    def test_a_subscription_leg_not_at_the_head_still_fails(self):
+        problems = cc.check_tier_order(
+            self._reg(), "l3-driver", ["bzl/ds-v4-flash-free", "mimo/mimo-v2.6-flash",
+                                       "bzl/ds-cached"])
+        self.assertTrue(any("(b)" in p for p in problems), problems)
+
+    def test_a_paid_head_ahead_of_free_legs_still_fails(self):
+        problems = cc.check_tier_order(
+            self._reg(), "l3-driver", ["deepseek/ds-flash", "bzl/ds-v4-flash-free"])
+        self.assertTrue(any("(b)" in p for p in problems), problems)
+
+
 class StrictGateTests(unittest.TestCase):
     """(f)-(i) judge only the combos a reviewer opted in by name. D1 shipped the
     gate with an empty list; D2 re-chained the layers and listed them, so the

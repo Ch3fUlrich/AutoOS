@@ -259,7 +259,7 @@ class WriteTests(SandboxCase):
             self.assertEqual(got, want, gateway)
             for mid in want:
                 entry = oc["providers"][gateway]["models"][mid]
-                self.assertEqual(entry["modelID"], mid)
+                self.assertEqual(entry["modelID"], model(doc, mid).get("modelID", mid))
                 self.assertEqual(entry["name"], model(doc, mid)["name"])
 
     def test_variants_blocks_are_generated_from_effort_ladder(self):
@@ -304,15 +304,13 @@ class WriteTests(SandboxCase):
             self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
         for gone in ("l1-orchestrator", "l1-orchestrator-free-only", "l2-orchestrator"):
             self.assertNotIn("variants", oc["providers"]["omniroute"]["models"][gone], gone)
+        # OR-DRIFT 2026-10-15 (D-1349/D-1351): the clean twins now head xiaomi mimo
+        # (live order wins), whose model row documents no ladder, so the clean band
+        # carries no variants either - an undeclared rung must not survive.
         clean = oc["providers"]["omniroute"]["models"]["l2-worker-clean"]
-        self.assertEqual([v["id"] for v in clean["variants"]],
-                         ["low", "medium", "high"])
-        for v in clean["variants"]:
-            self.assertEqual(v["settings"], {"reasoningEffort": v["id"]})
-        self.assertEqual(
-            [v["id"] for v in
-             oc["providers"]["omniroute"]["models"]["l3-driver-clean"]["variants"]],
-            ["low", "medium", "high"])
+        self.assertNotIn("variants", clean)
+        self.assertNotIn("variants",
+                         oc["providers"]["omniroute"]["models"]["l3-driver-clean"])
         # GLM55 2026-10-05 (operator): l3-driver heads on oc/glm-5.3-flash,
         # whose model row carries no effort ladder - the variants block drops
         # (the render's rule), and l2-worker moves with it.

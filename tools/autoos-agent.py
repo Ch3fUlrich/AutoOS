@@ -8145,6 +8145,14 @@ class GeminiRefused(ValueError):
     """A run aimed at a Gemini model the operator's allow-list does not name (D-255)."""
 
 
+# opencode.jsonc hand entries that pass one native leg straight through (no combo
+# of their own) -> the registry route that declares that leg, so a sensitive run
+# aimed at one is judged on the leg instead of refused as an unknown id. The
+# route_id given to private_safe stays the entry's own id: the D-1349 deepseek
+# exemption covers the six *-clean twins and nothing else.
+DIRECT_ENTRY_ROUTES = {"deepseek-direct-flash": "deepseek-v4.1-flash"}
+
+
 def sensitive_combo_refusal(combo: str, registry: dict):
     """Why `combo` may not carry privacy=sensitive work, or None when it may.
 
@@ -8152,7 +8160,7 @@ def sensitive_combo_refusal(combo: str, registry: dict):
     combos.json keeps them and OmniRoute can still fall through to them. An id
     that is not a registry route is refused: nothing proves it private-safe.
     """
-    route = (registry.get("routes") or {}).get(combo)
+    route = (registry.get("routes") or {}).get(DIRECT_ENTRY_ROUTES.get(combo, combo))
     if route is None:
         return "privacy: %r is not a registry route, so nothing proves it private-safe" % combo
     for leg in route.get("legs") or []:
@@ -8160,7 +8168,7 @@ def sensitive_combo_refusal(combo: str, registry: dict):
             provider_id, model_id = resolve_leg(leg, registry)
         except ValueError as exc:
             return "privacy: %s: %s" % (leg, exc)
-        safe, why = private_safe(provider_id, model_id, registry)
+        safe, why = private_safe(provider_id, model_id, registry, combo)
         if not safe:
             return "privacy: --model %s serves %s, which is not private-safe (%s)" % (combo, leg, why)
     return None
