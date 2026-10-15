@@ -1,0 +1,14 @@
+{
+  "count": 1,
+  "sha256": "cb18f3590167c1fffb495dca0b55c26715bd24ba4ab6ffd80604d30ac2e09d29",
+  "combos": [
+    {
+      "name": "a",
+      "strategy": "s",
+      "models": [
+        "x",
+        "y"
+      ]
+    }
+  ]
+}
