@@ -423,8 +423,22 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
     elif client.name == "agy":
         # AGYFIX item 1 (measured 2026-09-27, K3 CLI audit): agy 1.2.12 reads
         # "--model" as the -p prompt when -p comes first, so the model goes
-        # BEFORE -p. Working form measured: `agy --model <m> -p <task>`.
-        return ["agy", "--model", model or AGY_DEFAULT_MODEL, "-p"] + deny + [task]
+        # BEFORE -p.
+        # AGYFIX2 (measured 2026-10-13, probe run
+        # 20261013-111255-agy-capability-reprobe-16edc5): headless agy
+        # auto-denies shell/write tools (the 2026-09-25 SPAWNCAP finding
+        # reproduces without the flag), but runs both with
+        # --dangerously-skip-permissions (shell `echo agy-shell-probe` exit 0,
+        # file probe.txt created and read back - both measured with `--print`;
+        # the `--model <m> -p <task>` composition below is UNMEASURED until a
+        # live ack run proves it, and stays the merge blocker). The flag rides
+        # every agy run, like qoder's bypass_permissions; containment is the
+        # spawner's forced --isolate sandbox, same as qoder's. Residual risk,
+        # operator to accept: a tier-1 orchestrate-role agy in a shared
+        # checkout keeps full tool access (bare-machine text-only tasks per
+        # docs/handoff/2026-09-17-installer-usb-rescue.md:26 stay out of scope).
+        return (["agy", "--dangerously-skip-permissions", "--model",
+                 model or AGY_DEFAULT_MODEL, "-p"] + deny + [task])
     elif client.name == "gemini":
         # Headless gemini exits 55 in a folder it does not trust (live
         # 2026-09-25); --skip-trust trusts the spawn cwd for this session only.

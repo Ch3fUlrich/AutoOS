@@ -182,6 +182,51 @@ def build_profile(tier: dict, base_url: str, key: str) -> dict:
     return profile
 
 
+def clamp_to_live_windows(tiers: list, live_models: list) -> list:
+    """Adjust tier max_input_tokens and max_output_tokens to match live gateway windows."""
+    if not live_models:
+        return [dict(t) for t in tiers]
+    live_map = {}
+    for m in live_models:
+        if isinstance(m, dict) and "id" in m:
+            ctx = m.get("context_length") or m.get("max_input_tokens")
+            if ctx:
+                live_map[m["id"]] = ctx
+                if "/" in m["id"]:
+                    live_map[m["id"].split("/", 1)[-1]] = ctx
+
+    out = []
+    for tier in tiers:
+        t = dict(tier)
+        model = t.get("model", "")
+        bare_model = model.split("/", 1)[-1] if "/" in model else model
+        ctx = live_map.get(model) or live_map.get(bare_model)
+        if ctx is not None:
+            t["max_input_tokens"] = ctx
+            out_tokens = t.get("max_output_tokens", 32768)
+            if out_tokens > ctx // 2:
+                t["max_output_tokens"] = max(1024, ctx // 2)
+        out.append(t)
+    return out
+
+
+def fetch_live_models(gateway_base_url: str, key: str | None = None) -> list:
+    """Fetch live models list from the gateway, or return [] if unreachable."""
+    if not gateway_base_url or not key:
+        return []
+    url = gateway_base_url.rstrip("/") + "/models"
+    import urllib.request
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                return data["data"]
+    except Exception:
+        pass
+    return []
+
+
 def tier_base_url(tier: dict, spec: dict) -> str:
     gateway = tier.get("gateway")
     if gateway == "litellm":
@@ -199,16 +244,28 @@ def container_host_resolves() -> bool:
     """True when host.docker.internal resolves on THIS host (Docker Desktop).
 
     AUTOOS_FAKE_HDI_RESOLVES=0/1 stands in for the lookup in tests.
+
+    Only loopback/private answers count. Without Docker Desktop the name can
+    fall through to public DNS (seen 2026-10-14); keeping it then would send the
+    gateway key to an address that is not this machine.
     """
     fake = os.environ.get("AUTOOS_FAKE_HDI_RESOLVES")
     if fake is not None:
         return fake == "1"
+    import ipaddress
     import socket
     try:
-        socket.getaddrinfo(CONTAINER_HOST, None)
-        return True
+        infos = socket.getaddrinfo(CONTAINER_HOST, None)
     except OSError:
         return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return False
+        if not (ip.is_loopback or ip.is_private):
+            return False
+    return bool(infos)
 
 
 def for_consumer(url: str, consumer: str) -> str:
@@ -497,6 +554,12 @@ def main(argv=None):
     if not omni_key and not litellm_key and not openrouter_key:
         print("sync-openhands-profiles: no client key (env/key file/.env) - tier profiles skipped")
         return 0
+    live_models = []
+    if omni_key:
+        gw_probe_url = for_consumer(spec.get("gateway_base_url", ""), "native")
+        live_models = fetch_live_models(gw_probe_url, omni_key)
+    if live_models:
+        tiers = clamp_to_live_windows(tiers, live_models)
     profiles_dir = Path(args.openhands_dir) / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     keys = {"litellm": litellm_key, "openrouter": openrouter_key}

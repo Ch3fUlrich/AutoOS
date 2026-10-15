@@ -70,7 +70,6 @@ which entry to fill in (`meta_api` is that case today).
 | `novita_ai` | `novita` | FREEKEYS-1: free tier, 121 canonical ids, **every probe 403** (stopped at 3 consecutive) → `available: false`: the key authenticates at the connection level but the account has no model entitlement |
 | `scaleway` | `scaleway` | FREEKEYS-1: free tier (EU "🆓" pool), catalog prefix **`scw`**. 6 ids, **3 proven** (`qwen3-235b-a22b-instruct-2507`, `gpt-oss-120b`, `mistral-small-3.2-24b-instruct-2506`) |
 | `nebius` | `nebius` | FREEKEYS-1: free tier, 27 canonical ids, **3 proven** (`zai-org/GLM-5.1`, `/GLM-5.2`, `/GLM-5.3-Flash`); the Moonshot ids 404 (listed but not served) |
-| `deepinfra` | `deepinfra` | FREEKEYS-1: **$5 vendor grant** (`tier: credit`, `monthly_cap_usd: 5`, warns at 80 %). 235 canonical ids, **6/6 probed legs proven** (gemini-flash family, `DeepSeek-V4-Flash-0731`, `Ling-3.0-flash`) — cheapest first, prices still not on file |
 | `together_ai` | `together` | FREEKEYS-1: **$5 vendor grant** (`tier: credit`, `monthly_cap_usd: 5`, warns at 80 %). 277 canonical ids, **every probe 403** → `available: false` (the grant is not yet usable through this connection) |
 | `omniroute` | — | the **client** key apps use; not a provider |
 

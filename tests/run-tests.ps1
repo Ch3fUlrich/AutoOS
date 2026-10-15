@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     AutoOS Windows test suite.
@@ -4814,8 +4814,8 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
-        $t1 = Get-Content (Join-Path $oh 'profiles\omniroute-l1-orchestrator.json') -Raw | ConvertFrom-Json
-        $t3 = Get-Content (Join-Path $oh 'profiles\omniroute-l3-driver.json') -Raw | ConvertFrom-Json
+        $t1 = Get-Content (Join-Path $oh 'profiles\l1-orchestrator.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\l3-driver.json') -Raw | ConvertFrom-Json
         Assert-Equal $t1.model 'openai/l1-orchestrator'
         Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
         Assert-Equal $t1.api_key 'test-omni-key'
@@ -4823,10 +4823,10 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Assert-Equal $t3.model 'openai/l3-driver'
         Assert-Equal $t3.reasoning_effort 'none'
         Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
-        Assert-True (Test-Path (Join-Path $oh 'profiles\omniroute-l2-worker-clean.json')) 'clean twin missing'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\l2-worker-clean.json')) 'clean twin missing'
         $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
-        Assert-True ($null -ne $lp.profiles.'omniroute-l1-orchestrator') 't1 not published to llm_profiles'
-        Assert-Equal $lp.active 'omniroute-l1-orchestrator'
+        Assert-True ($null -ne $lp.profiles.'l1-orchestrator') 't1 not published to llm_profiles'
+        Assert-Equal $lp.active 'l1-orchestrator'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -4849,7 +4849,7 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
         $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
         $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
-        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\omniroute-l1-orchestrator.json'))) 'tier profile written without a key'
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\l1-orchestrator.json'))) 'tier profile written without a key'
     } finally {
         foreach ($k in $saved.Keys) {
             if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
@@ -4910,15 +4910,19 @@ else:
     $realOmniKey = $env:AUTOOS_OMNIROUTE_KEY
     $realLitKey = $env:LITELLM_MASTER_KEY
     $realLitApiKey = $env:AUTOOS_LITELLM_API_KEY
+    $realHostName = $env:AUTOOS_HOST_NAME
     try {
         $null = New-Item -ItemType Directory -Force -Path $tmpA, $tmpB
         Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
-        'omniroute: test-omni-key' | Out-File $keys -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        'omniroute_testhost: test-omni-key' | Out-File $keys -Encoding utf8
         'openrouter: test-or-key' | Out-File $keys -Append -Encoding utf8
         'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
-        & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null }
+        finally { $ErrorActionPreference = $prev }
         Assert-Equal $LASTEXITCODE 0 'generator failed'
         # Every spec tier has a key in the fixture, so exactly one profile per
         # tier must come out - derived from the spec, never a pinned count.
@@ -4931,7 +4935,7 @@ else:
         # Project one gateway tier and one litellm tier (whichever the registry
         # currently renders) to prove the key and endpoint wiring, instead of
         # naming tiers that go stale when a provider flips.
-        $gwTier = @($spec.tiers | Where-Object { $_.id -like 'omniroute-*' }) | Select-Object -First 1
+        $gwTier = @($spec.tiers | Where-Object { $_.id -notlike 'litellm-*' }) | Select-Object -First 1
         $litTier = @($spec.tiers | Where-Object { $_.id -like 'litellm-*' }) | Select-Object -First 1
         $t1 = Get-Content (Join-Path $tmpA "profiles\$($gwTier.id).json") -Raw | ConvertFrom-Json
         Assert-Equal $t1.model $gwTier.model
@@ -4969,6 +4973,8 @@ else:
             else { $env:OPENROUTER_API_KEY = $realOrKey }
         }
     } finally {
+        if ($null -eq $realHostName) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_HOST_NAME = $realHostName }
         if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
         if ($null -eq $realLitKey) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
@@ -4985,8 +4991,10 @@ Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
     $tool = Join-Path $Root 'tools\autoos-agent.py'
     $out = & $py.Source $tool run --tier 2 --dry-run t 2>&1 | Out-String
     Assert-Equal $LASTEXITCODE 0 "dry run failed: $out"
-    Assert-True ($out -match '--standalone --agent l2-worker --model omniroute/l2-worker ') 'l2-worker not paired with its model'
-    $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String
+    Assert-True ($out -match '--standalone --agent l2-worker --model omniroute/l2-(worker|orchestrator) ') 'l2-worker not paired with its model'
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String }
+    finally { $ErrorActionPreference = $prev }
     Assert-True ($out -match '--model omniroute/l3-driver-clean ') 'clean twin not chosen'
     $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
     try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }

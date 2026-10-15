@@ -1677,8 +1677,9 @@ IDE_MODEL_ORDER = (
     "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
     "l1-orchestrator-free-only",
     "l2-worker", "l2-worker-clean", "l2-worker-paid", "l2-worker-free-only",
-    "l2-orchestrator", "l2-orchestrator-clean",
+    "l2-orchestrator", "l2-orchestrator-clean", "l2-worker-1m",
     "l3-driver", "l3-driver-clean", "l3-driver-paid", "l3-driver-free-only",
+    "l3-driver-1m", "l3-driver-256k",
     # D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the SS2 layer twins and the SS3
     # review lenses named by operator D-657. Listed here because render_ide()
     # requires this constant to name every route id.
@@ -1710,6 +1711,7 @@ IDE_MODEL_ORDER = (
     # TORDER's ovh x3 is now ovh x2.
     "ovh-qwen3.8-27b", "ovh-gpt-oss-120b",
     "vertex-gemini-3.8-flash",
+    "mimo-v2.6-flash", "mimo-v2.6-pro",
     # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
     # within the $6 grant; legs gated until per-token prices land).
     "faik-gpt-6-sol",
@@ -1940,18 +1942,26 @@ OPENHANDS_RETIRED_IDS = [
     "litellm-t3-driver", "litellm-t3-driver-clean",
     "litellm-t3-driver-free-only", "litellm-t3-driver-paid",
     "litellm-t4-researcher",
+    # PREFIX-STRIP 2026-10-14: omniroute prefix stripped; direct openrouter profiles retired.
+    "omniroute-l1-orchestrator", "omniroute-l2-worker", "omniroute-l3-driver",
+    "omniroute-l2-orchestrator", "omniroute-l2-worker-clean", "omniroute-l3-driver-clean",
+    "omniroute-t4-rag", "omniroute-opus-5-5", "omniroute-gemini-3.8-flash",
+    "omniroute-l2-worker-1m", "omniroute-l3-driver-1m", "omniroute-l3-driver-256k",
+    "omniroute-mimo-v2.6-flash", "omniroute-mimo-v2.6-pro", "omniroute-l2-worker-free-only",
+    "omniroute-deepseek-v4.1-flash", "omniroute-l3-driver-free-only",
+    "omniroute-l1-orchestrator-clean", "omniroute-spark-1.3-contributor",
+    "omniroute-l1-orchestrator-free-only",
+    "openrouter-muse-spark-1.3-contributor",
+    "openrouter-dots3-note", "openrouter-free", "openrouter-inkling",
+    "openrouter-inkling-small", "openrouter-laguna", "openrouter-laguna-xs",
+    "openrouter-ling-fin", "openrouter-ling-sante", "openrouter-ling-vl",
+    "openrouter-nemotron-lightning", "openrouter-nemotron-nano-omni",
+    "openrouter-nemotron-super", "openrouter-nemotron-ultra",
+    "openrouter-nex-mini", "openrouter-nex-pro", "openrouter-north-mini-code",
+    "deepseek-v4-flash",
 ]
 
-# The one standalone routes.<id>.surfaces.openhands.direct_profile tier
-# (mapping doc section 6: today only spark-1.3-contributor) is named after
-# the OpenRouter leg's own bare model spelling ("muse-spark-1.3-contributor"),
-# not the route id ("spark-1.3-contributor") - so, unlike every gateway tier
-# below, its tiers[].id cannot be computed as "<gateway>-<route id>". A
-# literal, hand-maintained {tier id: route id} table, the same convention as
-# OPENHANDS_RETIRED_IDS/OPENHANDS_TIER_ORDER for a fact no rule derives.
-OPENHANDS_DIRECT_PROFILE_IDS = {
-    "openrouter-muse-spark-1.3-contributor": "spark-1.3-contributor",
-}
+OPENHANDS_DIRECT_PROFILE_IDS = {}
 
 # tiers[] push order: tier-profiles.json's own $comment, "ORDER IS THE PUSH
 # PRIORITY (reordered 2026-09-25) ... a human decision" - not derivable from
@@ -1961,43 +1971,32 @@ OPENHANDS_DIRECT_PROFILE_IDS = {
 # raises, naming every id at once, if a future openhands profile is added or
 # removed without updating this list - never a silent reorder or drop.
 OPENHANDS_TIER_ORDER = (
-    "omniroute-l1-orchestrator",
-    "omniroute-l2-worker",
-    "omniroute-l3-driver",
-    "omniroute-l2-orchestrator",
-    "omniroute-l2-worker-clean",
-    "omniroute-l3-driver-clean",
-    "omniroute-t4-rag",
-    "omniroute-opus-5-5",
-    "omniroute-gemini-3.8-flash",
-    "omniroute-l2-worker-free-only",
-    "omniroute-deepseek-v4.1-flash",
-    "omniroute-l3-driver-free-only",
-    "omniroute-l1-orchestrator-clean",
-    "omniroute-spark-1.3-contributor",
-    "openrouter-muse-spark-1.3-contributor",
+    "l1-orchestrator",
+    "l2-worker",
+    "l3-driver",
+    "l2-orchestrator",
+    "l2-worker-clean",
+    "l3-driver-clean",
+    "t4-rag",
+    "opus-5-5",
+    "gemini-3.8-flash",
+    "l2-worker-1m",
+    "l3-driver-1m",
+    "l3-driver-256k",
+    "mimo-v2.6-flash",
+    "mimo-v2.6-pro",
+    "l2-worker-free-only",
+    "deepseek-v4.1-flash",
+    "l3-driver-free-only",
+    "l1-orchestrator-clean",
+    "spark-1.3-contributor",
     "litellm-l1-orchestrator",
     "litellm-l2-worker",
     "litellm-l3-driver",
     "litellm-l2-worker-free-only",
     "litellm-l3-driver-free-only",
     "litellm-l1-orchestrator-free-only",
-    "omniroute-l1-orchestrator-free-only",
-    # NOTE (Q1, 2026-09-26 16:4xZ "Claude budget" revision): the 4 new pinned
-    # single-leg credit routes (cheaperinference/kimi-k3, cheaperinference/
-    # glm-5.2, samba/gpt-oss-120b, samba/MiniMax-M3) deliberately carry NO
-    # openhands_profile and are NOT listed here. tools/sync-openhands-
-    # profiles.py writes each tier to profiles/<tier id>.json as a literal
-    # filesystem path (measured: FileNotFoundError - it does not mkdir a
-    # nested directory), and an id of the form "omniroute-cheaperinference/
-    # kimi-k3" would create one; a route id containing "/" cannot safely get
-    # an OpenHands profile under that tool's current (unfixed) file-writing
-    # scheme. tools/audit-router.py --offline therefore never reports these 4
-    # combos as missing a tier-profiles.json entry: openhands_route_names()/
-    # tier_profile_drift() restrict the check to openhands-served routes, so
-    # these opencode/zed-only pinned routes are out of scope - a known,
-    # deliberate gap (see this lane's REPORT), not something to route around
-    # by picking a different, unrelated tier id.
+    "l1-orchestrator-free-only",
 )
 
 OPENHANDS_GATEWAYS = ("omniroute", "litellm")
@@ -2023,7 +2022,8 @@ def _openhands_tier_membership(registry: dict) -> dict:
         for gw in OPENHANDS_GATEWAYS:
             surface = surfaces.get(gw)
             if isinstance(surface, dict) and isinstance(surface.get("openhands_profile"), dict):
-                wanted["%s-%s" % (gw, route_id)] = (gw, route_id)
+                tier_id = route_id if gw == "omniroute" else "%s-%s" % (gw, route_id)
+                wanted[tier_id] = (gw, route_id)
         openhands_surface = surfaces.get("openhands")
         if isinstance(openhands_surface, dict) and isinstance(openhands_surface.get("direct_profile"), dict):
             tier_id = next(

@@ -172,11 +172,11 @@ class RenderMatchesTodayTests(unittest.TestCase):
         self.assertIn("do not edit", rendered["$comment"])
 
     def test_generated_marker_is_new_not_borrowed_from_the_committed_file(self):
-        # today's hand-edited $comment predates spec 3.2's marker line - if this
-        # ever appears in the committed file, omniroute_diff's "$comment is
-        # entirely ignored" exception would be masking a real accidental match.
-        self.assertNotIn("generated from catalog/ai-registry.json",
-                         json.dumps(real_combos()["$comment"]))
+        # combos.json is now itself written by the render (2026-10-14 cutover),
+        # so the committed $comment carries the generated marker; the diff
+        # still ignores $comment, which is why the check below is on the file.
+        self.assertIn("generated from catalog/ai-registry.json",
+                      json.dumps(real_combos()["$comment"]))
 
     def test_retired_ids_match_todays_file(self):
         rendered = registry.render_omniroute(real_registry())
@@ -193,10 +193,12 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # bazaarlink -> openrouter nemotron -> vertex now, so the served-leg example
         # moves to l3-driver, which still carries the re-opened groq leg
         # (FREEWIRE 2026-09-30: allow-groq-gpt-oss proved it on a tool-call probe).
-        self.assertIn("groq/openai/gpt-oss-120b",
+        # Groq is retired (7k TPM cap, 2026-10-14), so the served-leg example is
+        # the cohere leg l3-driver still carries.
+        self.assertIn("cohere/command-a-03-2025",
                       combos_by_name["l3-driver"]["models"])
-        # the OpenRouter BYOK gpt-oss-120b leg is gated (measured 401,
-        # credits exhausted 2026-09-27), so it does not reach the combo.
+        self.assertNotIn("groq/openai/gpt-oss-120b",
+                         combos_by_name["l3-driver"]["models"])
         self.assertNotIn("openrouter/openai/gpt-oss-120b",
                          combos_by_name["l2-worker"]["models"])
         # FREEWIRE 2026-09-30: the DSMAX provider-level gate moved to the route
@@ -308,7 +310,7 @@ class GatewayRefTests(unittest.TestCase):
         # unprefixed spellings pinned here are groq, cohere and vertex.
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertIn("groq/qwen/qwen3.8-27b", by_name["l3-driver"]["models"])
+        self.assertNotIn("groq/qwen/qwen3.8-27b", by_name["l3-driver"]["models"])  # retired
         self.assertIn("cohere/command-a-03-2025", by_name["l3-driver"]["models"])
         self.assertIn("vertex/gemini-3.8-flash",
                       by_name["l2-worker-clean"]["models"])
@@ -994,8 +996,9 @@ class OpenhandsRenderMatchesTodayTests(unittest.TestCase):
         self.assertIn("do not edit", rendered["$comment"])
 
     def test_generated_marker_is_new_not_borrowed_from_the_committed_file(self):
-        self.assertNotIn("generated from catalog/ai-registry.json",
-                         json.dumps(real_tier_profiles()["$comment"]))
+        # tier-profiles.json is written by the render now (2026-10-14).
+        self.assertIn("generated from catalog/ai-registry.json",
+                      json.dumps(real_tier_profiles()["$comment"]))
 
     def test_render_order_matches_todays_push_priority(self):
         rendered = registry.render_openhands(real_registry())
@@ -1013,21 +1016,13 @@ class OpenhandsRenderMatchesTodayTests(unittest.TestCase):
         self.assertEqual(rendered["litellm_base_url"], current["litellm_base_url"])
 
     def test_direct_profile_tier_carries_its_own_gateway_and_key_surface(self):
-        # spark-1.3-contributor's standalone surfaces.openhands.direct_profile
-        # (mapping doc section 6) becomes the one tier with "gateway":
-        # "openrouter" - its own endpoint/key, not the gateway client's.
-        # SS8 (operator D-657) gated every spark leg, so OR1d drops the tier from
-        # the real render (asserted in test_the_contributor_ladder...); exercise
-        # the mapping on a copy with the gates lifted, as this test always did for
-        # the DSMAX gate.
+        # Operator 2026-10-14: OpenRouter goes through OmniRoute only, so no
+        # direct openrouter tier is rendered even with the gates lifted.
         reg = copy.deepcopy(real_registry())
         reg["routes"]["spark-1.3-contributor"]["unavailable_legs"] = {}
         rendered = registry.render_openhands(reg)
-        by_id = {t["id"]: t for t in rendered["tiers"]}
-        direct = by_id["openrouter-muse-spark-1.3-contributor"]
-        self.assertEqual(direct["gateway"], "openrouter")
-        self.assertEqual(direct["model"], "openrouter/meta/muse-spark-1.3-contributor")
-        self.assertEqual(direct["base_url"], "https://openrouter.ai/api/v1")
+        self.assertFalse([t for t in rendered["tiers"]
+                          if t.get("gateway") == "openrouter"])
 
     def test_or1d_drops_the_direct_profile_tier_with_its_gated_route(self):
         # The other side of the same rule: OR1d is keyed on the ROUTE, so a route
@@ -1068,7 +1063,7 @@ class ChangedFieldFailsOpenhandsCheckTests(unittest.TestCase):
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("tiers.omniroute-l3-driver", proc.stdout)
+        self.assertIn("tiers.l3-driver", proc.stdout)
 
     def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
         proc = run_cli("render", "openhands", "--check")
@@ -1092,7 +1087,7 @@ class MissingTierFailsOpenhandsRenderTests(unittest.TestCase):
         del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["openhands_profile"]
         with self.assertRaises(ValueError) as ctx:
             registry.render_openhands(reg)
-        self.assertIn("omniroute-l3-driver", str(ctx.exception))
+        self.assertIn("l3-driver", str(ctx.exception))
 
     def test_an_unexpected_extra_profile_raises_and_names_it(self):
         reg = copy.deepcopy(real_registry())
@@ -1148,7 +1143,7 @@ class SyncOpenhandsProfilesSourcesFromRegistryTests(unittest.TestCase):
             # l1-orchestrator was the canary until it fail-closed 2026-09-27
             # (omitted: Zen client-bound, OpenRouter off); l2-worker is the
             # servable equivalent.
-            written = Path(d) / "profiles" / "omniroute-l2-worker.json"
+            written = Path(d) / "profiles" / "l2-worker.json"
             self.assertTrue(written.exists())
             self.assertEqual(json.loads(written.read_text())["model"], "openai/l2-worker")
 
@@ -1543,11 +1538,13 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # api_key, so it lands as a litellm-skip comment, never a model line.
         self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", rendered["l2-worker"])
         self.assertNotIn("model: vertex/gemini-3.8-flash", rendered["l2-worker"])
-        # l3-driver keeps the proven free band: groq carries both the qwen3.8-27b
-        # and the gpt-oss-120b spelling, and nothing of the dead providers
-        # (samba/cerebras) or of the retired mistral leg survives.
-        self.assertIn("qwen3.8-27b", rendered["l3-driver"])
-        self.assertIn("groq/openai/gpt-oss-120b", rendered["l3-driver"])
+        # l3-driver keeps the proven free band: groq retired 2026-10-14
+        # (7k TPM cap), so the pinned servable legs are the cohere pair;
+        # nothing of the dead providers (samba/cerebras/groq) or of the
+        # retired mistral leg survives.
+        self.assertIn("cohere/command-a-03-2025", rendered["l3-driver"])
+        self.assertIn("cohere/command-a-plus-05-2026", rendered["l3-driver"])
+        self.assertNotIn("groq/", rendered["l3-driver"])
         self.assertNotIn("MiniMax-M3", rendered["l3-driver"])
         self.assertNotIn("mistral-code-latest", rendered["l3-driver"])
         self.assertNotIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
@@ -1616,7 +1613,7 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
             route["unavailable_legs"][leg] = {"available": False}
         self.assertEqual(registry.gateway_legs(route, reg), [])
         ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
-        self.assertNotIn("omniroute-l1-orchestrator", ids)
+        self.assertNotIn("l1-orchestrator", ids)
         self.assertNotIn("litellm-l1-orchestrator", ids)
         # every other openhands declaration is untouched by the gate
         self.assertEqual(len(ids), len(registry.render_openhands(real_registry())["tiers"]) - 2)
@@ -1627,7 +1624,7 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
         reg = copy.deepcopy(real_registry())
         reg["routes"]["l1-orchestrator"]["legs"] = []
         ids = {t["id"] for t in registry.render_openhands(reg)["tiers"]}
-        self.assertIn("omniroute-l1-orchestrator", ids)
+        self.assertIn("l1-orchestrator", ids)
         self.assertIn("litellm-l1-orchestrator", ids)
 
     def test_openhands_tier_returns_when_its_leg_becomes_servable(self):
@@ -1641,14 +1638,14 @@ class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
             route["unavailable_legs"][leg] = {"available": False}
         self.assertEqual(registry.gateway_legs(route, gated), [])
         gone = {t["id"] for t in registry.render_openhands(gated)["tiers"]}
-        self.assertNotIn("omniroute-l3-driver-free-only", gone)
+        self.assertNotIn("l3-driver-free-only", gone)
         self.assertNotIn("litellm-l3-driver-free-only", gone)
 
         served = copy.deepcopy(gated)
         for leg in list(served["routes"]["l3-driver-free-only"]["legs"]):
             served["routes"]["l3-driver-free-only"]["unavailable_legs"].pop(leg, None)
         ids = {t["id"] for t in registry.render_openhands(served)["tiers"]}
-        self.assertIn("omniroute-l3-driver-free-only", ids)
+        self.assertIn("l3-driver-free-only", ids)
         self.assertIn("litellm-l3-driver-free-only", ids)
 
     def test_models_doc_is_not_filtered(self):
@@ -1853,13 +1850,14 @@ class FreeAiRenderTests(unittest.TestCase):
         combos = {c["name"]: c for c in rendered["combos"]}
         self.assertIn("l3-driver-free-only", combos)
         models = combos["l3-driver-free-only"]["models"]
-        # D657-CHAIN: the route heads the probe-confirmed bazaarlink DeepSeek
-        # mirror (free, cache hit measured) and closes with the cohere leg, which
-        # is the tail the free band has once SCWREMOVAL's grants and free-ai are
-        # gone. The GLM55/AINATIVE leaders were agy/trial legs SS8 keeps out of
-        # position 1 or that expire 2026-11-02.
-        self.assertEqual(models[0], "bzl/deepseek/deepseek-v4-flash-0731free:free")
-        self.assertEqual(models[-1], "cohere/command-a-plus-05-2026")
+        # Registry is the source of truth: the route heads the openrouter
+        # nemotron free leg and closes with north-mini-code (verified against
+        # routes.l3-driver-free-only.legs 2026-10-14); the bazaarlink mirror
+        # rides mid-chain. The D657-CHAIN bazaarlink-head comment described a
+        # reorder that never landed in the registry.
+        self.assertEqual(models[0], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertEqual(models[-1], "openrouter/cohere/north-mini-code:free")
+        self.assertIn("bzl/deepseek/deepseek-v4-flash-0731free:free", models)
         self.assertNotIn("free-ai/qwen7b", models)
 
     def test_free_ai_rides_no_chain_after_the_d657_tool_probe(self):
@@ -1919,7 +1917,7 @@ class FreeAiRenderTests(unittest.TestCase):
     def test_openhands_lists_both_t3_driver_free_only_tiers_again(self):
         ids = {t["id"] for t in
                registry.render_openhands(real_registry())["tiers"]}
-        self.assertIn("omniroute-l3-driver-free-only", ids)
+        self.assertIn("l3-driver-free-only", ids)
         self.assertIn("litellm-l3-driver-free-only", ids)
 
     def test_combos_file_matches_the_render(self):
@@ -2188,8 +2186,13 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         reg = real_registry()
         tiers = {t["id"]: t for t in
                  registry.render_openhands(reg)["tiers"]}
-        for tier_id in ("omniroute-l1-orchestrator", "litellm-l1-orchestrator"):
-            gw, route_id = tier_id.split("-", 1)
+        for tier_id in ("l1-orchestrator", "litellm-l1-orchestrator"):
+            # PREFIX-STRIP 2026-10-14: omniroute tiers are unprefixed, so the
+            # gateway is the litellm- prefix when present, else omniroute.
+            if tier_id.startswith("litellm-"):
+                gw, route_id = "litellm", tier_id[len("litellm-"):]
+            else:
+                gw, route_id = "omniroute", tier_id
             route = reg["routes"][route_id]
             profile = route["surfaces"][gw]["openhands_profile"]
             self.assertEqual(
@@ -2236,13 +2239,13 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
         # (the <UPPER>_API_KEY convention) must keep rendering, or this "fix"
         # would silently gut the mirror. D657-CHAIN 2026-10-08 moved the example
         # off ovhcloud, whose credit legs SS8 took out of every chain: the keys
-        # the served chains actually reach through are bazaarlink, openrouter,
-        # groq and cohere.
+        # the served chains actually reach through are bazaarlink, openrouter
+        # and cohere (groq retired 2026-10-14, 7k TPM cap).
         joined = "\n".join(self.blocks.values())
         self.assertIn("model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free", joined)
         self.assertIn("BAZAARLINK_API_KEY", joined)
-        self.assertIn("model: groq/qwen/qwen3.8-27b", joined)
-        self.assertIn("GROQ_API_KEY", joined)
+        self.assertIn("model: cohere/command-a-03-2025", joined)
+        self.assertIn("COHERE_API_KEY", joined)
 
 
 class CombosDeclaredAuthSkipTests(unittest.TestCase):

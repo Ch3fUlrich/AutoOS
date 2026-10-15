@@ -222,9 +222,9 @@ are single-leg by design. `omitted` routes render no combo.
 | `cohere` | `command-r-plus-08-2024` | free | t4-rag (#2) |  |
 | `cohere` | `north-mini-code:free` | free | — | not wired into any band (see route $comments) |
 | `cxa` | — | tier subscription, available False | none | no legs reference it |
-| `deepinfra` | `google/gemini-3.1-flash-lite` | credit | — | not wired into any band (see route $comments) |
-| `deepinfra` | `google/gemini-3.5-flash` | credit | — | not wired into any band (see route $comments) |
-| `deepinfra` | `google/gemini-3.7-flash` | credit | — | not wired into any band (see route $comments) |
+| `deepinfra` | `google/gemini-3.1-flash-lite` | credit | — | RETIRED 2026-10-13 (provider removed) |
+| `deepinfra` | `google/gemini-3.5-flash` | credit | — | RETIRED 2026-10-13 (provider removed) |
+| `deepinfra` | `google/gemini-3.7-flash` | credit | — | RETIRED 2026-10-13 (provider removed) |
 | `deepseek` | `deepseek-flash` | paid $3e-07 | deepseek-v4.1-flash (#1); l1-orchestrator (#6); l1-orchestrator-paid (#2); l2-orchestrator (#3); l2-worker (#14); l2-worker-clean (#4); l3-driver (#15); l3-driver-clean (#4) |  |
 | `deepseek` | `deepseek-v4-flash-0731free:free` | paid | — | not wired into any band (see route $comments) |
 | `deepseek` | `deepseek-v4.1-flash` | paid $3e-07 | — | not wired into any band (see route $comments) |

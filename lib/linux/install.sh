@@ -6390,10 +6390,16 @@ else:
 llm["drop_params"] = True
 llm["modify_params"] = True
 
-agent_context = agent_settings.setdefault("agent_context", {})
+agent_context = agent_settings.get("agent_context")
+if not isinstance(agent_context, dict):
+    agent_context = {}
+    agent_settings["agent_context"] = agent_context
 agent_context["load_user_skills"] = True
 
-mcp_cfg = agent_settings.setdefault("mcp_config", {})
+mcp_cfg = agent_settings.get("mcp_config")
+if not isinstance(mcp_cfg, dict):
+    mcp_cfg = {}
+    agent_settings["mcp_config"] = mcp_cfg
 # No "enabled" key on any entry: the live MCPServer schema
 # (openhands.sdk.mcp.config, additionalProperties false) rejects it with
 # extra_forbidden and 500s /api/v1/settings (measured 2026-09-21). Presence
@@ -6480,22 +6486,6 @@ profiles_dir = os.path.join(openhands_dir, "profiles")
 profiles = dict([
     _profile_for("deepseek-flash", deepseek_key),
     _profile_for("muse-spark", muse_key, "muse-spark-1.3-contributor"),
-    _profile_for("openrouter-free", openrouter_key),
-    _profile_for("openrouter-nemotron-ultra", openrouter_key),
-    _profile_for("openrouter-nemotron-super", openrouter_key),
-    _profile_for("openrouter-nemotron-lightning", openrouter_key),
-    _profile_for("openrouter-nemotron-nano-omni", openrouter_key),
-    _profile_for("openrouter-laguna", openrouter_key),
-    _profile_for("openrouter-laguna-xs", openrouter_key),
-    _profile_for("openrouter-north-mini-code", openrouter_key),
-    _profile_for("openrouter-nex-pro", openrouter_key),
-    _profile_for("openrouter-nex-mini", openrouter_key),
-    _profile_for("openrouter-inkling", openrouter_key),
-    _profile_for("openrouter-inkling-small", openrouter_key),
-    _profile_for("openrouter-dots3-note", openrouter_key),
-    _profile_for("openrouter-ling-fin", openrouter_key),
-    _profile_for("openrouter-ling-sante", openrouter_key),
-    _profile_for("openrouter-ling-vl", openrouter_key),
     _profile_for("ollama-qwen2.5-coder", None),
 ])
 for name, p_data in profiles.items():
@@ -6563,7 +6553,8 @@ if (omni_key or _lit_key or _or_key) and _spec_file and os.path.isfile(_spec_fil
                 _gp["reasoning_effort"] = "none"
                 _gp["enable_encrypted_reasoning"] = False
                 _gp["extended_thinking_budget"] = None
-            _put_json(os.path.join(profiles_dir, "%s.json" % _t["id"]), _gp)
+            if not (repo_root and os.path.isfile(os.path.join(repo_root, "tools", "sync-openhands-profiles.py"))):
+                _put_json(os.path.join(profiles_dir, "%s.json" % _t["id"]), _gp)
     except Exception:
         pass
 
@@ -6658,6 +6649,20 @@ PY
         # The generator reports skipped / updated / installed per file.
         if [[ "$harness_out" == *"agent-harness openhands: updated "* || "$harness_out" == *"agent-harness openhands: installed "* ]]; then
             oh_changed=1
+        fi
+        if [[ -f "$harness_root/tools/sync-openhands-profiles.py" ]]; then
+            local sync_out sync_rc=0
+            sync_out="$(python3 "$harness_root/tools/sync-openhands-profiles.py" --openhands-dir "$openhands_dir" --consumer container 2>&1)" || sync_rc=$?
+            if (( sync_rc != 0 )); then
+                ui_warn "live profile sync not applied to OpenHands (exit $sync_rc)"
+            else
+                while IFS= read -r _sync_line; do
+                    [[ -n "$_sync_line" ]] && ui_muted "$_sync_line"
+                done <<< "$sync_out"
+                if [[ "$sync_out" == *"sync-openhands-profiles: updated "* || "$sync_out" == *"sync-openhands-profiles: installed "* ]]; then
+                    oh_changed=1
+                fi
+            fi
         fi
     fi
 

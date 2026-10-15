@@ -957,7 +957,8 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
 
     def test_missing_available_on_client_is_flagged(self):
         reg = mutated()
-        del reg["clients"]["agy"]["available"]
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        reg["clients"]["agy"].pop("available", None)
         problems = registry.check_registry(reg)
         self.assertTrue(
             any("entry with unavailable_until but no available: false: clients.agy"
@@ -996,7 +997,7 @@ class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
         # Explicit available: true is still not available: false, and the
         # resolver needs the flag to emit the re-probe note.
         reg = mutated()
-        del reg["clients"]["agy"]["available"]
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
         reg["clients"]["agy"]["available"] = True
         problems = registry.check_registry(reg)
         self.assertTrue(
@@ -1021,13 +1022,12 @@ class OpenRouterByokLegTests(unittest.TestCase):
         # TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): paid
         # openrouter/openai/gpt-oss-120b removed from l2-worker (was already
         # unavailable/gated; combos clean).
-        # D657-D2 2026-10-08 (spec combo-v2 SS2, judge rule "groq unknown cache
-        # -> L3 only"): the groq leg left the L2 chain and rides the L3 driver,
-        # so the presence pin moves there.
+        # GROQRETIRED 2026-10-14: groq retired and purged from routes; neither
+        # l2-worker nor l3-driver carries the groq leg.
         self.assertNotIn("openrouter/openai/gpt-oss-120b", self.t2_worker_legs)
         self.assertNotIn("groq/openai/gpt-oss-120b", self.t2_worker_legs)
-        self.assertIn("groq/openai/gpt-oss-120b",
-                      self.reg["routes"]["l3-driver"]["legs"])
+        self.assertNotIn("groq/openai/gpt-oss-120b",
+                         self.reg["routes"]["l3-driver"]["legs"])
 
     def test_leg_resolves_to_a_model(self):
         # resolve_leg ignores route membership, so this pins the spelling only;
@@ -2268,11 +2268,7 @@ class DeepSeekBackTests(unittest.TestCase):
         models = self.reg["models"]
         for mid in self.LADDERED:
             self.assertEqual(models[mid]["effort_ladder"], self.LADDER, mid)
-        # The v4 (not v4.1) snapshot stays exactly as it was: an empty ladder
-        # and reasoning off. Pinning it here keeps "unchanged" honest for the
-        # whole family instead of only for the models we wanted flipped.
-        self.assertEqual(models["deepseek-v4-flash"]["effort_ladder"], [])
-        self.assertIs(models["deepseek-v4-flash"]["reasoning"], False)
+        self.assertNotIn("deepseek-v4-flash", models)
 
     def test_the_zen_leg_keeps_its_own_route_gate(self):
         # DSBACK changes the PROVIDER, not the per-leg operator flags: the
@@ -2787,18 +2783,15 @@ class MistralPlanLimitsTests(unittest.TestCase):
         # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
         # agentic combo, and a 429 on the head falls through the combo, so the
         # head must be a grant, not the operator's money.
-        # D657-D2 (2026-10-08) kept the rule and changed who qualifies: the
-        # judge admits only a leg the D-657 probe saw answer, so the expiring
-        # grants that used to head the band (opencode_gateway glm-5.3-flash,
-        # ainative llama-4-maverick -- kimi/glm off under SS8 -- and the AI-Studio
-        # gemini leg, 401/402 on both gateways) are out, and the free band starts
-        # at the bazaarlink $0 copy. No paid leg rides the chain at all, so the
-        # "first PAID leg" question this test used to answer has no subject.
+        # GROQRETIRED 2026-10-14: with groq retired, the free band alternates
+        # openrouter and non-openrouter legs to preserve rule (g) provider
+        # diversity (OR -> Cohere -> OR -> Cohere -> OR -> BazaarLink -> OR).
         legs = self.reg["routes"]["l3-driver"]["legs"]
         self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
         self.assertEqual(legs[0],
-                         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free")
-        self.assertEqual(legs[1], "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+                         "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertEqual(legs[1], "cohere/command-a-03-2025")
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", legs)
         self.assertNotIn("opencode_gateway/glm-5.3-flash", legs)
         self.assertNotIn("ainative/llama-4-maverick", legs)
         self.assertNotIn("gemini/gemini-3.8-flash", legs)
@@ -3097,7 +3090,7 @@ class CreditSpendGuardTests(unittest.TestCase):
         granted = {pid: entry["credit_usd"] for pid, entry in
                    load_registry()["providers"].items()
                    if isinstance(entry, dict) and entry.get("tier") == "credit"}
-        self.assertEqual(granted, {"morph": 10.0, "deepinfra": 5.0, "together_ai": 5.0,
+        self.assertEqual(granted, {"morph": 10.0, "together_ai": 5.0,
                                    "vertex_ai": 250.0, "ovhcloud": 200.0,
                                    "freeaiapikey": 6.0})
 
@@ -3112,14 +3105,14 @@ class CreditSpendGuardTests(unittest.TestCase):
         # the TRAINING check, not on the tier, which is why the old
         # `assertIn("credit", reason)` is gone.
         reg = load_registry()
-        for pid in ("morph", "deepinfra", "together_ai"):
+        for pid in ("morph", "together_ai"):
             self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
-            safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
+            safe, reason = registry.private_safe(pid, "deepseek-flash", reg)
             self.assertFalse(safe, pid)
             self.assertIn("trains on prompts", reason, pid)
         for pid in ("vertex_ai", "ovhcloud"):
             self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
-            safe, reason = registry.private_safe(pid, "deepseek-v4-flash", reg)
+            safe, reason = registry.private_safe(pid, "deepseek-flash", reg)
             self.assertTrue(safe, "%s: %s" % (pid, reason))
 
     # --- the validator -----------------------------------------------------
@@ -3165,7 +3158,7 @@ class CreditSpendGuardTests(unittest.TestCase):
         """`check_registry` runs it: a guard only its own unit test reads
         protects nothing from the next edit to the data."""
         reg = mutated()
-        del reg["providers"]["deepinfra"]["monthly_cap_usd"]
+        del reg["providers"]["morph"]["monthly_cap_usd"]
         self.assertTrue(self.credit_problems(reg))
 
     def test_a_dated_manual_spend_pair_is_accepted(self):
@@ -3467,7 +3460,6 @@ class ModelPrefixTests(unittest.TestCase):
     def test_the_measured_providers_declare_their_namespace(self):
         reg = load_registry()
         self.assertEqual(self.prefix_of(reg, "morph"), "morph")
-        self.assertEqual(self.prefix_of(reg, "deepinfra"), "deepinfra")
         self.assertEqual(self.prefix_of(reg, "nebius"), "nebius")
 
     def test_every_registered_model_of_a_prefixed_provider_starts_with_it(self):
@@ -3488,14 +3480,14 @@ class ModelPrefixTests(unittest.TestCase):
 
     def test_the_prefixed_providers_carry_model_rows_at_all(self):
         reg = load_registry()
-        for pid in ("morph", "deepinfra", "nebius"):
+        for pid in ("morph", "nebius"):
             self.assertTrue(self.models_of(reg, pid), pid)
 
     def test_a_null_prefix_on_a_namespaced_provider_is_flagged(self):
         reg = mutated()
-        reg["providers"]["deepinfra"]["model_prefix"] = None
+        reg["providers"]["nebius"]["model_prefix"] = None
         problems = [p for p in registry.check_registry(reg)
-                    if "deepinfra" in p and "model_prefix" in p]
+                    if "nebius" in p and "model_prefix" in p]
         self.assertTrue(problems, "a namespaced provider with no declared prefix passed")
 
     def test_a_prefix_that_is_not_the_served_namespace_is_flagged(self):
@@ -3654,8 +3646,8 @@ class ComboCrossProviderTests(unittest.TestCase):
         # only the two below are counted for a full-size card.
         "l2-worker-free-only": 2,
         "l2-worker": 3,
-        "l3-driver": 10,
-        "l3-driver-free-only": 9,
+        "l3-driver": 8,
+        "l3-driver-free-only": 7,
     }
 
     def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
@@ -3750,17 +3742,17 @@ class ComboCrossProviderTests(unittest.TestCase):
         counting it, while the legs that do carry the promise stay counted.
         The small leg is the weak link, not the band."""
         reg = copy.deepcopy(self.reg)
-        small = "groq/qwen/qwen3.8-27b"
+        small = "cohere/command-a-03-2025"
         before = usable_legs(self.reg, "l3-driver")
         self.assertIn(small, before)
-        reg["models"]["qwen/qwen3.8-27b"]["context_advertised"] = 32000
+        reg["models"]["command-a-03-2025"]["context_advertised"] = 32000
         after = usable_legs(reg, "l3-driver")
         self.assertNotIn(small, after,
                          "a 32k leg was still counted usable for a 128k route")
         # TORDER: nebius removed (6 legs); SCWREMOVAL 2026-10-06: scaleway gone
         # too; D657-D2: the ovhcloud leg leaves every chain (OVH credits out of
-        # L0-L2, no documented cache) — the band that remains still carries the
-        # promise, head and paid tail included.
+        # L0-L2, no documented cache); GROQRETIRED 2026-10-14: groq retired (2 legs)
+        # — the band that remains still carries the promise, head and paid tail included.
         self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
         self.assertIn("cohere/command-a-plus-05-2026", after)
         self.assertIn("vertex/gemini-3.8-flash", after)

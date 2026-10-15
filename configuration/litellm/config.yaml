@@ -80,6 +80,15 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END l2-worker-free-only
 
+  # ── l2-worker-1m: 1M context smart worker ──────────────────────────────────
+  # AUTOOS-MANAGED-START l2-worker-1m
+  - model_name: l2-worker-1m
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
+  # AUTOOS-MANAGED-END l2-worker-1m
+
   # ── l2-worker-paid / l3-driver-paid: hand-curated, deepseek-funded again ────
   # These two groups declare no registry `legs`, so they stay hand-curated.
   # Their only deployment is deepseek/deepseek-flash, which was inert while its
@@ -100,19 +109,7 @@ model_list:
   # AUTOOS-MANAGED-START l3-driver
   - model_name: l3-driver
     litellm_params:
-      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
-      api_key: os.environ/BAZAARLINK_API_KEY
-  - model_name: l3-driver
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver
-    litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-driver
-    litellm_params:
-      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-driver
     litellm_params:
@@ -120,20 +117,24 @@ model_list:
       api_key: os.environ/COHERE_API_KEY
   - model_name: l3-driver
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver
-    litellm_params:
-      model: groq/openai/gpt-oss-120b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-driver
-    litellm_params:
-      model: openrouter/cohere/north-mini-code:free
+      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-driver
     litellm_params:
       model: cohere/command-a-plus-05-2026
       api_key: os.environ/COHERE_API_KEY
+  - model_name: l3-driver
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: l3-driver
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+  - model_name: l3-driver
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-driver
     litellm_params:
       model: ovhcloud/Qwen3.5-397B-A17B
@@ -150,19 +151,7 @@ model_list:
   # AUTOOS-MANAGED-START l3-driver-free-only
   - model_name: l3-driver-free-only
     litellm_params:
-      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
-      api_key: os.environ/BAZAARLINK_API_KEY
-  - model_name: l3-driver-free-only
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver-free-only
-    litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-driver-free-only
-    litellm_params:
-      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-driver-free-only
     litellm_params:
@@ -170,38 +159,64 @@ model_list:
       api_key: os.environ/COHERE_API_KEY
   - model_name: l3-driver-free-only
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver-free-only
-    litellm_params:
-      model: groq/openai/gpt-oss-120b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-driver-free-only
-    litellm_params:
-      model: openrouter/cohere/north-mini-code:free
+      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-driver-free-only
     litellm_params:
       model: cohere/command-a-plus-05-2026
       api_key: os.environ/COHERE_API_KEY
+  - model_name: l3-driver-free-only
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: l3-driver-free-only
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+  - model_name: l3-driver-free-only
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END l3-driver-free-only
+
+  # ── l3-driver-1m: 1M context driver ────────────────────────────────────────
+  # AUTOOS-MANAGED-START l3-driver-1m
+  - model_name: l3-driver-1m
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+  - model_name: l3-driver-1m
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
+  # AUTOOS-MANAGED-END l3-driver-1m
+
+  # ── l3-driver-256k: 256k context driver ────────────────────────────────────
+  # AUTOOS-MANAGED-START l3-driver-256k
+  - model_name: l3-driver-256k
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+  - model_name: l3-driver-256k
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: l3-driver-256k
+    litellm_params:
+      model: openrouter/poolside/laguna-s-2.1:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: l3-driver-256k
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
+    # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
+  # AUTOOS-MANAGED-END l3-driver-256k
 
   # AUTOOS-MANAGED-START l3-implementer
   - model_name: l3-implementer
     litellm_params:
-      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
-      api_key: os.environ/BAZAARLINK_API_KEY
-  - model_name: l3-implementer
-    litellm_params:
       model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-implementer
-    litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-implementer
-    litellm_params:
-      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-implementer
     litellm_params:
@@ -209,20 +224,24 @@ model_list:
       api_key: os.environ/COHERE_API_KEY
   - model_name: l3-implementer
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-implementer
-    litellm_params:
-      model: groq/openai/gpt-oss-120b
-      api_key: os.environ/GROQ_API_KEY
-  - model_name: l3-implementer
-    litellm_params:
-      model: openrouter/cohere/north-mini-code:free
+      model: openrouter/poolside/laguna-s-2.1:free
       api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-implementer
     litellm_params:
       model: cohere/command-a-plus-05-2026
       api_key: os.environ/COHERE_API_KEY
+  - model_name: l3-implementer
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+  - model_name: l3-implementer
+    litellm_params:
+      model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
+      api_key: os.environ/BAZAARLINK_API_KEY
+  - model_name: l3-implementer
+    litellm_params:
+      model: openrouter/cohere/north-mini-code:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: l3-implementer
     litellm_params:
       model: ovhcloud/Qwen3.8-27B
@@ -243,10 +262,6 @@ model_list:
   # AUTOOS-MANAGED-END l3-researcher
 
   # AUTOOS-MANAGED-START l3-review-diff
-  - model_name: l3-review-diff
-    litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
   - model_name: l3-review-diff
     litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
@@ -372,12 +387,6 @@ model_list:
   # Probe-passed free legs (L1-backlog/ws-free-probe-20260930) that get their
   # own omniroute combo; their providers carry a LiteLLM transport/key, so each
   # is a managed tier here too. Legs are filled by tools/sync-router-tiers.py.
-  # AUTOOS-MANAGED-START groq-qwen3.8-27b
-  - model_name: groq-qwen3.8-27b
-    litellm_params:
-      model: groq/qwen/qwen3.8-27b
-      api_key: os.environ/GROQ_API_KEY
-  # AUTOOS-MANAGED-END groq-qwen3.8-27b
 
 
 

@@ -69,7 +69,7 @@ REGISTRY_FILE = ROOT / "catalog" / "ai-registry.json"
 # AGYCANON 2026-09-30 - live combos rendered before that may still spell it, and
 # the gateway still aliases both). Missing either lets a gateway-only leg leak
 # into a managed LiteLLM block.
-GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc"})
+GATEWAY_ONLY = frozenset({"antigravity", "agy", "cc", "xiaomi_mimo", "mimo"})
 
 # Filled from the registry providers by main(); Leg reads them at call time.
 # They are module state because Leg is constructed in several code paths and

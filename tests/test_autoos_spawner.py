@@ -44,11 +44,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 
-def load_agent():
-    spec = importlib.util.spec_from_file_location("autoos_agent", AGENT)
+def load_agent(path=None):
+    # NOTE (FASTLANE 2026-10-14): this deliberately loads a FRESH module per
+    # call. Dozens of tests below assign directly onto the returned module
+    # (isolate() helpers set MEASURED_OVERLAY_PATH/TRACK_RECORD/clients with
+    # no cleanup); a shared instance would leak those across tests. The
+    # runner's own fast path uses the private _runner_agent() cache instead -
+    # that instance is never handed to a test, so it cannot be mutated.
+    spec = importlib.util.spec_from_file_location("autoos_agent", str(path or AGENT))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+_RUNNER_AGENT = None
+
+
+def _runner_agent():
+    """The one cached agent module for run_agent's in-process path. Private:
+    never hand this to a test (see load_agent's note). In-process CLI runs
+    (main/cmd_run) read module globals but never assign them, so reuse is
+    state-free; registry/overlay/track state lives in files, re-read per run."""
+    global _RUNNER_AGENT
+    if _RUNNER_AGENT is None:
+        spec = importlib.util.spec_from_file_location("autoos_agent_runner", str(AGENT))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["autoos_agent_runner"] = module
+        spec.loader.exec_module(module)
+        _RUNNER_AGENT = module
+    return _RUNNER_AGENT
 
 
 def allow_in_place(case, agent):
@@ -213,7 +237,32 @@ def budget_on_root():
     return tmp
 
 
+def _run_agent_in_process(agent, args, env):
+    # FASTLANE 2026-10-14: same invocation the subprocess path performs
+    # (argv + whole-environment + empty stdin + captured stdio), without the
+    # ~4 s interpreter+import cost. Returns a real CompletedProcess so the
+    # type callers see is unchanged. main() returns int; argparse failures
+    # raise SystemExit (2 for usage errors, 0/None for --help).
+    out, err = io.StringIO(), io.StringIO()
+    old_stdin = sys.stdin
+    sys.stdin = io.StringIO("")
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with mock.patch.dict(os.environ, env, clear=True):
+                try:
+                    rc = agent.main(list(args))
+                except SystemExit as e:
+                    rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 2)
+    finally:
+        sys.stdin = old_stdin
+    if not isinstance(rc, int):
+        rc = 2
+    return subprocess.CompletedProcess(list(args), rc, out.getvalue(), err.getvalue())
+
+
 def run_agent(*args, env=None, root=None):
+    if root is None and os.environ.get("AUTOOS_SPAWNER_ISOLATED") != "1":
+        return _run_agent_in_process(_runner_agent(), args, env or clean_env())
     agent = str(AGENT) if root is None else os.path.join(root, "tools", "autoos-agent.py")
     return subprocess.run([sys.executable, agent, *args], capture_output=True,
                           text=True, env=env or clean_env(), stdin=subprocess.DEVNULL)
@@ -511,6 +560,43 @@ def plan_of(*args, env=None):
     return r
 
 
+class InProcessEquivalenceTests(unittest.TestCase):
+    """FASTLANE guard (2026-10-14): run_agent's in-process path must print
+    exactly what the old subprocess path printed. Each case runs both ways;
+    run-ids, timestamps and uuids are volatile and normalized away. If this
+    fails, the fast path drifted from production behavior - fix the runner,
+    not the normalization."""
+
+    CASES = [
+        (("list",), {}),
+        (("run", "--dry-run", "--client", "qwen", "--card", "role=review", "t"), {}),
+        (("run", "--dry-run", "--client", "gemini", "t"), {}),
+        (("run", "--dry-run", "--client", "codex", "t"), {}),
+        (("run", "--dry-run", "--tier", "2", "t"), {}),
+        (("run", "--dry-run", "--client", "agy", "t"),
+         {"AUTOOS_CLAUDE_CRITICAL": "test: equivalence"}),
+        (("route", "--card", "role=review"), {}),
+    ]
+
+    @staticmethod
+    def _norm(text):
+        text = re.sub(r"run-id: \S+", "run-id: X", text)
+        text = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                      "UUID", text)
+        text = re.sub(r"\d{8}-\d{6}", "DATETIME", text)
+        return text
+
+    def test_in_process_matches_subprocess(self):
+        for argv, extra in self.CASES:
+            env = clean_env(**extra)
+            fast = run_agent(*argv, env=env)
+            with mock.patch.dict(os.environ, {"AUTOOS_SPAWNER_ISOLATED": "1"}):
+                slow = run_agent(*argv, env=env)
+            self.assertEqual(fast.returncode, slow.returncode, argv)
+            self.assertEqual(self._norm(fast.stdout), self._norm(slow.stdout), argv)
+            self.assertEqual(self._norm(fast.stderr), self._norm(slow.stderr), argv)
+
+
 class ClientCommandTests(unittest.TestCase):
     def test_qwen_goes_through_omniroute_run_with_the_card_combo(self):
         r = plan_of("--client", "qwen", "--card", "role=review", "t")
@@ -530,11 +616,25 @@ class ClientCommandTests(unittest.TestCase):
         r = plan_of("--client", "gemini", "t")
         self.assertIn("-- --skip-trust --approval-mode auto_edit -p t", r.stdout)
 
-    def test_codex_runs_exec_through_omniroute(self):
+    def test_codex_stays_refused_while_registry_disabled(self):
+        # CODEXOFF (operator 2026-10-13): no subscription; the binary's own
+        # refresh token is invalid (spawn 20261013-110824 rc 1,
+        # invalid_refresh_token, before any gateway call). available:false
+        # refuses every path with the resolver's own wording; the exec argv
+        # mechanics stay pinned by build_command (next test), so re-enable is
+        # deleting the flag plus one passing spawn probe.
         r = plan_of("--client", "codex", "t")
-        self.assertIn("omniroute run codex --model l2-worker --api-key-env AUTOOS_OMNIROUTE_KEY --",
-                      r.stdout)
-        self.assertIn("exec --sandbox workspace-write --skip-git-repo-check t", r.stdout)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("client: codex unavailable", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
+        # The exec argv mechanics stay pinned at the adapter level (no
+        # registry read), so the form survives the disable for re-enable day.
+        cmd = clients.build_command(clients.CLIENTS["codex"], "t", "l2-worker",
+                                     "edit", None, None, None)
+        self.assertEqual(cmd, ["omniroute", "run", "codex", "--model", "l2-worker",
+                               "--api-key-env", "AUTOOS_OMNIROUTE_KEY", "--",
+                               "exec", "--sandbox", "workspace-write",
+                               "--skip-git-repo-check", "t"])
 
     def test_codex_header_overrides_precede_the_exec_subcommand(self):
         # FLEETP0 review item 4, measured 2026-09-28 against a listener the
@@ -602,7 +702,7 @@ class ClientCommandTests(unittest.TestCase):
         r = plan_of("--client", "agy", "t", env=claude_env())
         # CLAUDE55 2026-10-05 (operator): the 4-6 generation is retired upstream;
         # the default is the balanced 5-5 rung (see AGY_DEFAULT_MODEL).
-        self.assertIn("would run: agy --model claude-opus-5-5-medium -p t", r.stdout)
+        self.assertIn("would run: agy --dangerously-skip-permissions --model claude-opus-5-5-medium -p t", r.stdout)
         self.assertNotIn("omniroute run", r.stdout)
 
     def test_agy_puts_an_explicit_model_before_the_print_prompt(self):
@@ -611,7 +711,8 @@ class ClientCommandTests(unittest.TestCase):
         # take "--model" as the prompt and ignore the task.
         cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit",
                                     "claude-sonnet-4-6")
-        self.assertEqual(cmd, ["agy", "--model", "claude-sonnet-4-6", "-p", "task"])
+        self.assertEqual(cmd, ["agy", "--dangerously-skip-permissions", "--model",
+                               "claude-sonnet-4-6", "-p", "task"])
 
     def test_agy_default_model_is_the_measured_working_one(self):
         # AGYFIX item 2 (K3 audit addendum 08:1xZ): agy with no --model runs
@@ -622,7 +723,8 @@ class ClientCommandTests(unittest.TestCase):
         # generation - so the default is the balanced 5-5 rung.
         self.assertEqual(clients.AGY_DEFAULT_MODEL, "claude-opus-5-5-medium")
         cmd = clients.build_command(clients.CLIENTS["agy"], "task", None, "edit", None)
-        self.assertEqual(cmd, ["agy", "--model", "claude-opus-5-5-medium", "-p", "task"])
+        self.assertEqual(cmd, ["agy", "--dangerously-skip-permissions", "--model",
+                               "claude-opus-5-5-medium", "-p", "task"])
 
     def test_free_default_is_the_operators_muse_spark_leg(self):
         # AGYFIX item 4 (operator 2026-09-26): the free default is Zen Muse
@@ -719,8 +821,14 @@ class ClientCapabilityTests(unittest.TestCase):
 
     # QOFIX 2026-09-27: qoder writes + runs shell headless with bypass_permissions
     # (measured; the old false came from the invalid mode accept_edits).
-    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen", "qoder"}
-    INCAPABLE = {"agy"}
+    # AGYFIX2 2026-10-13 (probe run 20261013-111255-agy-capability-reprobe-16edc5):
+    # headless agy runs shell + write with --dangerously-skip-permissions
+    # (which the spawner now passes for every agy run); without the flag the
+    # 2026-09-25 auto-deny reproduces. So agy joins the capable set and no
+    # client is incapable - the INCAPABLE loop below stays as the guard for
+    # the next client that loses a capability.
+    CAPABLE = {"opencode", "claude", "codex", "gemini", "qwen", "qoder", "agy"}
+    INCAPABLE = set()
 
     def setUp(self):
         self.agent = load_agent()
@@ -737,7 +845,7 @@ class ClientCapabilityTests(unittest.TestCase):
                 self.assertIsInstance(caps["shell"], bool, name)
                 self.assertIsInstance(caps["write"], bool, name)
 
-    def test_the_capable_client_set_is_the_six_measured_ones(self):
+    def test_the_capable_client_set_is_the_seven_measured_ones(self):
         capable = {name for name, client in self.registry["clients"].items()
                    if client["capabilities"]["shell"] and client["capabilities"]["write"]}
         self.assertEqual(capable, self.CAPABLE)
@@ -750,7 +858,7 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertEqual(self.agent.client_capabilities("qoder", self.registry),
                          {"shell": True, "write": True})
         self.assertEqual(self.agent.client_capabilities("agy", self.registry),
-                         {"shell": False, "write": False})
+                         {"shell": True, "write": True})
 
     def test_isolate_needs_shell_and_write(self):
         self.assertEqual(self.agent.required_capabilities(_cap_args(isolate=True)),
@@ -794,7 +902,12 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertEqual(self.agent.choose_client(("shell", "write"), registry), "claude")
 
     def test_capability_refusal_names_the_missing_capability_and_the_capable_clients(self):
-        msg = self.agent.capability_refusal("agy", ("shell", "write"), self.registry)
+        # AGYFIX2 2026-10-13: agy is capable now (see CAPABLE above), so the
+        # refusal example declares a client incapable on a copy - the shipped
+        # registry must stay exactly as the other tests read it.
+        registry = json.loads(json.dumps(self.registry))
+        registry["clients"]["agy"]["capabilities"] = {"shell": False, "write": False}
+        msg = self.agent.capability_refusal("agy", ("shell", "write"), registry)
         self.assertIsNotNone(msg)
         self.assertIn("agy", msg)
         self.assertIn("shell", msg)
@@ -804,12 +917,15 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertIsNone(
             self.agent.capability_refusal("opencode", ("shell", "write"), self.registry))
 
-    def test_agy_is_refused_for_an_isolated_write_before_it_starts(self):
+    def test_agy_takes_an_isolated_write(self):
+        # AGYFIX2 2026-10-13: capabilities measured true with
+        # --dangerously-skip-permissions (probe run
+        # 20261013-111255-agy-capability-reprobe-16edc5), which the spawner
+        # passes for every agy run - so an isolated write plans like qoder's.
         r = plan_of("--client", "agy", "--isolate", "edit README.md")
-        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
-        self.assertIn("agy", r.stderr)
-        self.assertIn("opencode", r.stderr)
-        self.assertNotIn("would run:", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--dangerously-skip-permissions", r.stdout)
+        self.assertIn("sandbox from", r.stdout)
 
     def test_qoder_takes_an_isolated_write(self):
         r = plan_of("--client", "qoder", "--isolate", "edit README.md")
@@ -1096,8 +1212,9 @@ class SignInProbeTests(unittest.TestCase):
         # `agy --model <m> -p <task>`, and with no caller model the spawner
         # supplies the AGY_DEFAULT_MODEL (claude-opus-5-5-medium since
         # CLAUDE55 2026-10-05: the 4-6 generation is retired upstream) rather
-        # than agy's default Gemini.
-        self.assertEqual(self.calls(d), ["models", "--model claude-opus-5-5-medium -p t"])
+        # than agy's default Gemini. AGYFIX2 2026-10-13: plus
+        # --dangerously-skip-permissions on every run (probe-measured).
+        self.assertEqual(self.calls(d), ["models", "--dangerously-skip-permissions --model claude-opus-5-5-medium -p t"])
 
     def test_mcp_list_clients_carries_usability(self):
         d, env = self.stub(self.SIGNED_OUT)
@@ -1162,6 +1279,7 @@ class McpToolTests(unittest.TestCase):
         for name in ("job.json", "output.log", "exit.json"):
             self.assertTrue(os.path.isfile(os.path.join(out["dir"], name)), name)
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: umask and chmod mode bits")
     def test_spawn_run_dir_is_0700_under_a_shared_umask(self):
         """The run dir carries the task brief, the worker's output and the
         question.json / answer.json pair autoos-ask.py uses for ask-back: a
@@ -1485,7 +1603,11 @@ class McpToolTests(unittest.TestCase):
             return 0
 
         with mock.patch.object(mcp_server.subprocess, "call", fake_call):
-            with mock.patch.dict(os.environ, {"GH_TOKEN": "gh-secret",
+            # HOME is named explicitly (not ambient): the claim is that
+            # run_job passes it through, which must hold on machines where
+            # the caller's own environment has no HOME (Windows).
+            with mock.patch.dict(os.environ, {"HOME": "/tmp/home-test",
+                                               "GH_TOKEN": "gh-secret",
                                               "GITHUB_TOKEN": "ghs-secret",
                                               "SSH_AUTH_SOCK": "/run/user/4242/a.sock",
                                               "AUTOOS_KEYS_FILE": "/x/api-keys.yml",
@@ -3530,7 +3652,11 @@ class SessionTagTests(unittest.TestCase):
     def test_a_client_that_carries_headers_prints_its_session_tag(self):
         # FLEETP0 review item 4: the tag is not opencode's alone, so the two
         # other gateway clients that can send it say so in the plan.
-        for client in ("gemini", "codex"):
+        # CODEXOFF 2026-10-13: codex left this loop (registry-disabled; its
+        # refusal is pinned by
+        # test_codex_stays_refused_while_registry_disabled) - gemini carries
+        # the headed-client claim alone.
+        for client in ("gemini",):
             r = run_agent("run", "--dry-run", "--client", client, "--tier", "2",
                           "t", env=clean_env(AUTOOS_SESSION_TAG="lane/one"))
             self.assertEqual(r.returncode, 0, r.stderr)
@@ -3883,9 +4009,12 @@ class SharedRedactPatternTests(unittest.TestCase):
         # REDACTMERGE resolution rule: ONE home for the patterns. hostexec keeps
         # only what is audit-specific (its "***" mask and argv_sha256 over the
         # redacted form); the carriers are the shared module's functions.
-        from hostexec import audit
-        self.assertIs(audit.redact_argv, self.r.redact_argv)
-        self.assertIs(audit.sanitize_text, self.r.sanitize_text)
+        # hostexec.audit imports fcntl (Linux-only), so the identity half runs
+        # on POSIX; the duplication half is a file read and runs everywhere.
+        if os.name != "nt":
+            from hostexec import audit
+            self.assertIs(audit.redact_argv, self.r.redact_argv)
+            self.assertIs(audit.sanitize_text, self.r.sanitize_text)
         src = (Path(__file__).resolve().parent.parent / "tools" / "hostexec"
                / "audit.py").read_text(encoding="utf-8")
         for own in ("_CONTROL_RE =", "_SECRET_PREFIX_RE =", "_BEARER_IN_TOKEN_RE =",
@@ -6093,7 +6222,15 @@ class IsolateContainmentTests(unittest.TestCase):
                 "The run is headless: nobody will answer questions or approve "
                 "anything - decide, commit, and report."
                 % (plan["sandbox"]["path"], agent.ROOT))
-        self.assertEqual(plan["cmd"][-1], line + "\n" + "do the thing")
+        # On Windows git's --show-toplevel (isolate_source) spells the root
+        # with forward slashes while agent.ROOT uses os.path separators -
+        # same directory, different spelling. The claim is that the prompt
+        # names the sandbox and the root, not the separator style.
+        if os.name == "nt":
+            self.assertEqual(os.path.normpath(plan["cmd"][-1]),
+                             os.path.normpath(line + "\n" + "do the thing"))
+        else:
+            self.assertEqual(plan["cmd"][-1], line + "\n" + "do the thing")
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": state}):
             plain = agent.build_plan(args(False), cfg)
         self.assertEqual(plain["cmd"][-1], "do the thing")
@@ -7863,6 +8000,7 @@ class _WorkerRecordBase(unittest.TestCase):
 class WorkerRecordTests(_WorkerRecordBase):
     """list_workers / workers_dir: state, the pid-reuse guard and pruning."""
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod mode bits")
     def test_workers_dir_honours_the_env_override_and_is_0700(self):
         self.assertEqual(self.agent.workers_dir(), self.workers)
         self.assertTrue(os.path.isdir(self.workers))
@@ -7895,6 +8033,7 @@ class WorkerRecordTests(_WorkerRecordBase):
         rows = self.agent.list_workers(self.workers)
         self.assertEqual([r["state"] for r in rows], ["running"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod mode bits")
     def test_worker_record_file_is_0600_and_leaves_no_tmp(self):
         os.makedirs(self.workers, mode=0o700, exist_ok=True)
         path = os.path.join(self.workers, "w9.json")
@@ -8540,8 +8679,15 @@ class ReviewerGateTests(unittest.TestCase):
         self.client_state["claude"] = {"installed": False}
         calls = []
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.dict(os.environ, pinned_env(AUTOOS_STATE_DIR=self.tmp,
-                                                    AUTOOS_WORKERS_DIR=self.tmp), clear=True):
+        # pinned_env with clear=True drops PATH: POSIX execvp still finds git
+        # on its default path, Win32 CreateProcess does not (WinError 2). The
+        # gate ordering is the claim here, not PATH hermeticity, so PATH (and
+        # SystemRoot, which Windows process creation needs) ride along.
+        pins = pinned_env(AUTOOS_STATE_DIR=self.tmp, AUTOOS_WORKERS_DIR=self.tmp,
+                          PATH=os.environ.get("PATH", ""))
+        if os.name == "nt" and "SystemRoot" in os.environ:
+            pins["SystemRoot"] = os.environ["SystemRoot"]
+        with mock.patch.dict(os.environ, pins, clear=True):
             with mock.patch.object(agent, "run_client", lambda *a, **k: calls.append(1)):
                 with mock.patch.object(agent.clients, "signin_state",
                                        lambda client, env=None: (None, "")):
@@ -11319,13 +11465,15 @@ class EffortRungPlumbingTests(unittest.TestCase):
         # gemini-3.8-flash with a [low, medium, high] ladder, so the render
         # declares those variants and #high is correctly appended. The intent
         # stands -- a rung the config declares no variant for is dropped, never
-        # invented -- pinned here on groq-qwen3.8-27b, a single-provider route
-        # whose head leg carries no effort ladder, so the render declares no
-        # variants for it (PROVFIX3 finding 8 is exactly this class of
-        # forwarded effort the leg rejects).
-        self.assertEqual(self.plan_of_resolver("high", combo="groq-qwen3.8-27b")["model"],
-                         "omniroute/groq-qwen3.8-27b")
-        self.assertEqual(self.variants_of("omniroute/groq-qwen3.8-27b"), {})
+        # invented -- pinned here on or-north-mini-code-free, a single-provider
+        # route whose head leg carries no effort ladder, so the render declares
+        # no variants for it (PROVFIX3 finding 8 is exactly this class of
+        # forwarded effort the leg rejects). groq-qwen3.8-27b held this pin
+        # until groq retired 2026-10-14 (7k TPM cap; route no longer rendered
+        # or declared).
+        self.assertEqual(self.plan_of_resolver("high", combo="or-north-mini-code-free")["model"],
+                         "omniroute/or-north-mini-code-free")
+        self.assertEqual(self.variants_of("omniroute/or-north-mini-code-free"), {})
 
     def test_an_explicit_model_variant_wins_over_the_resolvers_rung(self):
         # --model omniroute/deepseek-v4.1-flash#low is an operator choice; the
@@ -11469,8 +11617,25 @@ class IsolateCloneCarriesNoSecretsTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, True)
         clone = os.path.join(tmp, "sandbox")
         self.cli.isolate_clone(root, clone, "agent/keydeny3b")
-        hits = subprocess.run(["grep", "-rl", "sk-", clone],
-                              capture_output=True, text=True).stdout
+        if shutil.which("grep") is not None:
+            hits = subprocess.run(["grep", "-rl", "sk-", clone],
+                                  capture_output=True, text=True).stdout
+        else:
+            # No POSIX grep on this host (Windows): the same recursive byte
+            # search in-process. Matches `grep -rl` closely enough for the
+            # claim (regular files; .git included, symlinks not followed).
+            found = []
+            for dirpath, _dirnames, filenames in os.walk(clone):
+                for fn in filenames:
+                    path = os.path.join(dirpath, fn)
+                    try:
+                        with io.open(path, "rb") as fh:
+                            data = fh.read()
+                    except OSError:
+                        continue
+                    if b"sk-" in data:
+                        found.append(os.path.relpath(path, clone))
+            hits = "\n".join(found)
         self.assertNotIn("api-keys.yml", hits)
 
 
@@ -11914,8 +12079,13 @@ class IsolateSourceTests(unittest.TestCase):
 
     def test_isolate_source_resolves_the_callers_repo(self):
         main, worktree = self.two_head_repos()
-        self.assertEqual(self.cli.isolate_source(worktree), worktree)
-        self.assertEqual(self.cli.isolate_source(main), main)
+        # isolate_source returns git's own --show-toplevel spelling, which on
+        # Windows uses forward slashes while os.path uses backslashes: same
+        # directory, so compare case- and separator-normalized.
+        self.assertEqual(os.path.normcase(self.cli.isolate_source(worktree)),
+                         os.path.normcase(worktree))
+        self.assertEqual(os.path.normcase(self.cli.isolate_source(main)),
+                         os.path.normcase(main))
         # A directory that is not a repo at all falls back to the spawner's own.
         not_a_repo = os.path.join(self.tmp, "plain")
         os.makedirs(not_a_repo)
@@ -11962,7 +12132,10 @@ class IsolateSourceTests(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
-        self.assertIn("sandbox from %s" % worktree, text)
+        # The sandbox line carries git's --show-toplevel spelling (forward
+        # slashes on Windows); worktree is os.path-spelled. Normalize the
+        # expected side to git's spelling - a no-op on POSIX.
+        self.assertIn("sandbox from %s" % worktree.replace(os.sep, "/"), text)
         self.assertNotIn("sandbox from %s" % str(ROOT), text)
 
 
@@ -13185,8 +13358,14 @@ class SpawnerChildEnvTests(_EnvScrubBase):
 
     def run_with_secrets(self, stops):
         self.agent = load_agent()
-        rc, out, err, calls, names = _fallthrough_run(
-            self, ["r-a", "r-b"], stops, env_over=self.secrets())
+        # assertScrubbed requires HOME in the worker env, which the scrub
+        # inherits from the ambient shell - unset on a Windows host. Name one
+        # explicitly so the claim (pass-through, not synthesis) is
+        # deterministic on every OS.
+        home = os.environ.get("HOME") or os.path.expanduser("~") or tempfile.gettempdir()
+        with mock.patch.dict(os.environ, {"HOME": home}):
+            rc, out, err, calls, names = _fallthrough_run(
+                self, ["r-a", "r-b"], stops, env_over=self.secrets())
         self.assertEqual(stops + 1, len(calls["envs"]),
                          "expected one captured env per attempt "
                          "(rc=%s out=%s err=%s)" % (rc, out, err))
@@ -13299,7 +13478,8 @@ class SandboxPushFenceTests(unittest.TestCase):
         rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
         self.assertEqual(0, rc, out + err)
         sb = calls["cwds"][0]
-        self.assertIn("/sandboxes/", sb)
+        # Separator-aware: the sandbox path uses os.path separators.
+        self.assertIn("sandboxes" + os.sep, sb)
         # T2-ISOLATE-SECRETS: the archive sandbox carries no remotes and the
         # accident-guard hook, so a push fails for want of a destination.
         self.assertEqual("",
@@ -13485,6 +13665,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
     def setUpClass(cls):
         cls.agent = load_agent()
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod mode bits")
     def test_provisioning_creates_an_empty_0700_dir_and_is_idempotent(self):
         import stat
         tmp = tempfile.mkdtemp()
@@ -13529,6 +13710,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertIsNone(self.agent.provision_runtime_dir(target))
         self.assertTrue(os.path.isfile(target))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: os.getuid owner checks")
     def test_provisioning_refuses_a_directory_it_does_not_own(self):
         # The owner check is the other half of the symlink story: an existing
         # dir of another uid is never chmod 0700'd (that would be a denial of
@@ -13541,6 +13723,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
             self.assertIsNone(self.agent.provision_runtime_dir(target))
         self.assertTrue(os.path.isdir(target))
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: chmod mode bits")
     def test_provisioning_does_not_widen_the_parent(self):
         # makedirs(mode) applies the mode to the leaf only, so a 0755 parent
         # beside a 0700 leaf is the shape that let a sibling read in.
@@ -13577,6 +13760,7 @@ class ChildRuntimeDirTests(unittest.TestCase):
                          "the parent chmod landed through the link, on a "
                          "directory it never owned")
 
+    @unittest.skipIf(os.name == "nt", "POSIX-only: os.getuid owner checks")
     def test_provisioning_refuses_a_parent_it_does_not_own(self):
         # The other half of the same rule: a parent of another uid is somebody
         # else's tree, and the leaf inside it is the write, not the chmod.
@@ -13615,7 +13799,10 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertTrue(runtime, "the worker got no runtime dir: %s" % sorted(env))
         self.assertNotEqual("/run/user/4242", runtime)
         self.assertTrue(os.path.isdir(runtime), runtime)
-        self.assertEqual(0o700, stat.S_IMODE(os.stat(runtime).st_mode))
+        # Mode bits are POSIX-only (chmod is a no-op on Windows); the
+        # existence/emptiness/ownership claims above run everywhere.
+        if os.name != "nt":
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(runtime).st_mode))
         self.assertEqual([], os.listdir(runtime))
         # FF1c item 1: the config home is provisioned the same way — named in
         # the plan, created at the launch site, private, and empty.
@@ -13623,7 +13810,8 @@ class ChildRuntimeDirTests(unittest.TestCase):
         self.assertTrue(config, "the worker got no config home: %s" % sorted(env))
         self.assertNotEqual("/home/dev/.config", config)
         self.assertTrue(os.path.isdir(config), config)
-        self.assertEqual(0o700, stat.S_IMODE(os.stat(config).st_mode))
+        if os.name != "nt":
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(config).st_mode))
 
     def test_a_fallthrough_rerun_provisions_its_own_dirs(self):
         # FF1 Sonnet LOW: the re-plan mints a fresh run id, and the private XDG
@@ -13656,9 +13844,11 @@ class ChildRuntimeDirTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(rerun[name]),
                             "%s was never created for the re-run: %s"
                             % (name, rerun[name]))
-            self.assertEqual(0o700, stat.S_IMODE(os.stat(rerun[name]).st_mode),
-                             "%s: %o" % (name, stat.S_IMODE(
-                                 os.stat(rerun[name]).st_mode)))
+            # Mode bits are POSIX-only; existence/ownership run everywhere.
+            if os.name != "nt":
+                self.assertEqual(0o700, stat.S_IMODE(os.stat(rerun[name]).st_mode),
+                                 "%s: %o" % (name, stat.S_IMODE(
+                                     os.stat(rerun[name]).st_mode)))
             self.assertEqual([], os.listdir(rerun[name]), name)
 
 
@@ -13823,7 +14013,7 @@ class PushFenceHonestyTests(unittest.TestCase):
         rc, out, err, calls, names = _fallthrough_run(self, ["r-a"], 0)
         self.assertEqual(0, rc, out + err)
         sb = calls["cwds"][0]
-        self.assertIn("/sandboxes/", sb)
+        self.assertIn("sandboxes" + os.sep, sb)
         self.assertTrue(os.path.exists(os.path.join(sb, ".git", "hooks", "pre-push")),
                         "the sandbox was created without the hook the code claims")
 
@@ -14450,7 +14640,10 @@ class ClaudeBudgetSameModelTests(unittest.TestCase):
                         or cli.resolver.claude_budget_of(registry)["on"],
                         "the shipped registry must be in budget mode for this test")
         for name in ("deepseek-flash",            # the native id, models row
-                     "deepseek-v4-flash",          # the vendor alias, own row
+                     # "deepseek-v4-flash" held this pin as the vendor alias
+                     # until DIRETIRED 2026-10-13 deleted its row (a reseller
+                     # alias, never a direct leg) - now correctly refused as
+                     # unknowable, covered by test_an_unknown_combo_... above.
                      "omniroute/deepseek-flash#low"):  # prefixed+stamped
             with self.subTest(name=name):
                 refusal, note = cli.claude_spawn_refusal(
@@ -15627,13 +15820,20 @@ class CommittedWorkNotANoOpTests(unittest.TestCase):
                              % (card or "writer", len(calls), rc))
 
 
+@unittest.skipIf(os.name == "nt", "kill store refused on nt: verdict branch keys on the record")
 class ReviewVerdictRecoveryTests(unittest.TestCase):
     """SB-A (D-103) items 3 and 4 (REPORTLESS, T3REVIEW). A review run's
     deliverable is its verdict, and the lifecycle said nothing about it: a
     reviewer that wrote `VERDICT: not ready` and died before its REPORT was
     `failed/incomplete`, so the dispatcher threw the review away and re-ran it;
     a reviewer that exited 0 having said nothing was `completed`, so the
-    dispatcher never re-routed at all."""
+    dispatcher never re-routed at all.
+
+    Windows: write_kill_record refuses on nt (no POSIX process groups, so no
+    runner-private store), the verdict branch keys on the record's mode, and
+    every verdict case below reads empty - skipped as a class, the way the
+    kill-record fence tests already are.
+    """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -17902,6 +18102,7 @@ class RunFamilyRecordTests(unittest.TestCase):
     def test_the_planned_label_is_the_one_string_every_reader_of_it_sees(self):
         self.assertEqual(self.agent.FAMILY_SOURCE_PLANNED, "planned-model")
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_a_planned_family_does_not_count_as_the_writers_family(self):
         # The gate half: `--review-of` a run that never answered. Its record names a
         # family, but the family came from the plan, so the fence gets no writer
@@ -17929,6 +18130,7 @@ class RunFamilyRecordTests(unittest.TestCase):
             self.assertIn("CROSS-FAMILY: unknown", line)
             self.assertNotIn("CROSS-FAMILY: yes", line)
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_a_served_family_still_counts_and_a_record_that_said_nothing_is_kept(self):
         agent = self.agent
         tmp = tempfile.mkdtemp()
@@ -18018,7 +18220,10 @@ class NativeSessionIdTests(unittest.TestCase):
         self.assertNotIn("--session-id", r.stdout)
 
     def test_a_gateway_run_mints_no_session_id(self):
-        for client in ("qwen", "gemini", "codex", "agy"):
+        # CODEXOFF 2026-10-13: codex is registry-disabled (available:false),
+        # so it left this loop - its refusal is pinned by
+        # test_codex_stays_refused_while_registry_disabled.
+        for client in ("qwen", "gemini", "agy"):
             r = plan_of("--client", client, "t", env=claude_env())
             self.assertEqual(r.returncode, 0, "%s: %s" % (client, r.stderr))
             self.assertNotIn("--session-id", r.stdout, client)
@@ -18426,6 +18631,7 @@ class PsWriterRowTests(unittest.TestCase):
             self.agent._print_worker_table(rows)
         return out.getvalue()
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_a_run_the_client_answered_for_shows_the_model_that_answered(self):
         wid = self._row()
         self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
@@ -18441,6 +18647,7 @@ class PsWriterRowTests(unittest.TestCase):
         self.assertIn("qwen", table)
         self.assertNotIn("qwen?", table)
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_an_assumed_writer_is_marked_unproven_in_the_table(self):
         wid = self._row()
         self.assertTrue(self.agent.write_kill_record(wid, {"mode": "write", "writer": {
@@ -18458,6 +18665,7 @@ class PsWriterRowTests(unittest.TestCase):
         self.assertFalse(rows[0]["model_proven"])
         self.assertIn("Efficient", self._table(rows))
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_a_record_written_for_another_run_never_answers_this_one(self):
         # The store is keyed by the run id, so the join cannot be talked into
         # lending another run its writer — and the other run keeps its own, or the
@@ -18473,6 +18681,7 @@ class PsWriterRowTests(unittest.TestCase):
         self.assertIsNone(by_id[self.RUN_ID]["writer"])
         self.assertEqual(by_id[other]["writer"]["model"], "Qwen3.8-Max")
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_the_mcp_ps_rows_carry_the_same_writer(self):
         wid = self._row()
         self.agent.write_kill_record(wid, {"mode": "write", "writer": {
@@ -18483,6 +18692,7 @@ class PsWriterRowTests(unittest.TestCase):
         self.assertEqual(row["writer"]["model"], "Qwen3.8-Flash")
         self.assertEqual(row["family"], "qwen")
 
+    @unittest.skipIf(os.name == "nt", "kill store refused on nt: writer lives in the record")
     def test_a_forged_job_json_writer_is_ignored_by_status(self):
         path = os.path.join(mcp_server.state_root(), self.RUN_ID)
         os.makedirs(path)

@@ -52,7 +52,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `deepseek-v4.1-flash` | cheap | 1M | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → vertex `gemini-3.8-flash` |
-| `groq-qwen3.8-27b` | free | 128k | groq `qwen/qwen3.8-27b` |
+| `groq-qwen3.8-27b` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |
 | `hf-qwen3.8-27b` | free | 128k | ~~huggingface `Qwen/Qwen3.8-27B`~~ (unavailable) |
 | `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
@@ -63,21 +63,26 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `l2-orchestrator-clean` | frontier | 1M | vertex `gemini-3.8-flash` |
 | `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` |
+| `l2-worker-1m` | mid | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
 | `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
-| `l3-driver` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` |
+| `l3-driver` | cheap | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` |
+| `l3-driver-1m` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
+| `l3-driver-256k` | cheap | 256k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → openrouter `poolside/laguna-s-2.1:free` → openrouter `cohere/north-mini-code:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
 | `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
-| `l3-driver-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` |
+| `l3-driver-free-only` | free | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
-| `l3-implementer` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → groq `qwen/qwen3.8-27b` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-03-2025` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → groq `openai/gpt-oss-120b` → openrouter `cohere/north-mini-code:free` → cohere `command-a-plus-05-2026` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
+| `l3-implementer` | cheap | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
 | `l3-implementer-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
 | `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
 | `l3-researcher-clean` | cheap | 1M | vertex `gemini-3.8-flash` |
 | `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
-| `l3-review-diff` | cheap | 128k | groq `qwen/qwen3.8-27b` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
+| `l3-review-diff` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
 | `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
 | `l3-review-transcript` | cheap | 1M | (none) |
+| `mimo-v2.6-flash` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` |
+| `mimo-v2.6-pro` | mid | 1M | xiaomi_mimo `mimo-v2.6-pro` |
 | `opus-5-5` | frontier | 1M | ~~antigravity `claude-opus-5-5-medium`~~ (unavailable) |
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
 | `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
@@ -344,10 +349,8 @@ Operator D-255 bounds this whole surface: **no Gemini Pro model, and only Gemini
 `modelID` and the route's legs — which is why `vertex-pro`, `vertex-flash`,
 `vertex-flash-lite` and `gemini-2.5-flash` are gone from this file's hand entries,
 and why naming a combo is refused only when EVERY leg of it is off-list:
-`--model omniroute/l2-worker`, whose data still carries
-`deepinfra/google/gemini-3.1-flash-lite` next to allowed legs, spawns. An off-list
-leg inside such a combo is registry data that stage 2 removes (D-256), not
-something the spawn door refuses.
+an off-list leg alongside allowed legs is registry data that stage 2 removes (D-256),
+not something the spawn door refuses.
 `tests/test_autoos_spawner.py::GeminiAllowListTests` pins the list; the registry and
 combos rows on the list's far side are reported for the orchestrator, not edited here.
 Under D-284, `gemini-3.8-flash` and `openrouter/google/` spawn pins were held back. Under D-505/D-507, the spawn-pin hold lifts for exactly `omniroute/gemini-3.8-flash` (paid tier, $200 hard stop / $180 warn, private-safe per the cited paid terms); training-leg classification of this pool is F0's business. All other `openrouter/google/*` pins remain refused.

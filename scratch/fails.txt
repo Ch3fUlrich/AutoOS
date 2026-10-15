@@ -1,0 +1,54 @@
+tests\test_registry_render.py:178: in test_generated_marker_is_new_not_borrowed_from_the_committed_file
+E   AssertionError: 'generated from catalog/ai-registry.json' unexpectedly found in '"generated from catalog/ai-registry.json - do not edit"'
+tests\test_registry_render.py:196: in test_operator_flagged_dead_leg_is_not_mirrored_into_combos
+E   AssertionError: 'groq/openai/gpt-oss-120b' not found in ['openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'cohere/command-a-03-2025', 'openrouter/poolside/laguna-s-2.1:free', 'cohere/command-a-plus-05-2026', 'ope
+tests\test_registry_render.py:311: in test_render_omniroute_leaves_other_providers_unchanged
+E   AssertionError: 'groq/qwen/qwen3.8-27b' not found in ['openrouter/nvidia/nemotron-3-super-120b-a12b:free', 'cohere/command-a-03-2025', 'openrouter/poolside/laguna-s-2.1:free', 'cohere/command-a-plus-05-2026', 'openro
+tests\test_registry_render.py:1027: in test_direct_profile_tier_carries_its_own_gateway_and_key_surface
+E   KeyError: 'openrouter-muse-spark-1.3-contributor'
+tests\test_registry_render.py:997: in test_generated_marker_is_new_not_borrowed_from_the_committed_file
+E   AssertionError: 'generated from catalog/ai-registry.json' unexpectedly found in '"generated from catalog/ai-registry.json - do not edit"'
+tests\test_registry_render.py:1071: in test_changed_tokens_exits_one_and_names_the_tier
+E   AssertionError: 'tiers.omniroute-l3-driver' not found in 'differs: tiers.l3-driver\n'
+tests\test_registry_render.py:1095: in test_a_profile_missing_from_the_registry_raises_and_names_it
+E   AssertionError: 'omniroute-l3-driver' not found in "OPENHANDS_TIER_ORDER is out of sync with the registry's openhands profiles - missing: none; unexpected: l3-driver"
+tests\test_registry_render.py:1152: in test_cli_default_run_still_matches_the_committed_spec
+E   AssertionError: False is not true
+tests\test_registry_render.py:1167: in test_render_matches_committed_models_doc_block
+E   AssertionError: Lists differ: ['routes[] membership: missing l2-worker-1[204 chars]iff'] != []
+E   
+E   First list contains 6 additional elements.
+E   First extra element 0:
+E   'routes[] membership: missing l2-worker-1m, l3-driver-1m, l3-driver-256k, mimo-v2.6-flash, mimo-v2.6-pro; unexpected none'
+E   
+E   + []
+E   - ['routes[] membership: missing l2-worker-1m, l3-driver-1m, l3-driver-256k, '
+E   -  'mimo-v2.6-flash, mimo-v2.6-pro; unexpected none',
+E   -  'routes.groq-qwen3.8-27b',
+E   -  'routes.l3-driver',
+E   -  'routes.l3-driver-free-only',
+E   -  'routes.l3-implementer',
+E   -  'routes.l3-review-diff']
+tests\test_registry_render.py:1361: in test_unmodified_registry_check_exits_zero_on_the_real_files
+E   AssertionError: 1 != 0 : differs: routes[] membership: missing l2-worker-1m, l3-driver-1m, l3-driver-256k, mimo-v2.6-flash, mimo-v2.6-pro; unexpected none
+E   differs: routes.groq-qwen3.8-27b
+E   differs: routes.l3-driver
+E   differs: routes.l3-driver-free-only
+E   differs: routes.l3-implementer
+E   differs: routes.l3-review-diff
+tests\test_registry_render.py:1549: in test_real_litellm_drops_gated_legs
+E   AssertionError: 'qwen3.8-27b' not found in '  # AUTOOS-MANAGED-START l3-driver\n  - model_name: l3-driver\n    litellm_params:\n      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free\n      api_key: os.enviro
+tests\test_registry_render.py:1630: in test_openhands_keeps_a_tier_whose_route_now_declares_no_legs
+E   AssertionError: 'omniroute-l1-orchestrator' not found in {'l1-orchestrator-free-only', 'l2-worker-free-only', 'litellm-l1-orchestrator-free-only', 'litellm-l3-driver-free-only', 'l3-driver-clean', 'litellm-l1-orchest
+tests\test_registry_render.py:1651: in test_openhands_tier_returns_when_its_leg_becomes_servable
+E   AssertionError: 'omniroute-l3-driver-free-only' not found in {'l1-orchestrator-free-only', 'l2-worker-free-only', 'litellm-l1-orchestrator-free-only', 'litellm-l3-driver-free-only', 'l3-driver-clean', 'litellm-l1-orc
+tests\test_registry_render.py:1922: in test_openhands_lists_both_t3_driver_free_only_tiers_again
+E   AssertionError: 'omniroute-l3-driver-free-only' not found in {'l1-orchestrator-free-only', 'l2-worker-free-only', 'litellm-l1-orchestrator-free-only', 'litellm-l3-driver-free-only', 'l3-driver-clean', 'litellm-l1-orc
+tests\test_registry_render.py:1861: in test_t3_driver_free_only_leaves_omitted_and_gains_a_combo
+E   AssertionError: 'openrouter/nvidia/nemotron-3-super-120b-a12b:free' != 'bzl/deepseek/deepseek-v4-flash-0731free:free'
+E   - openrouter/nvidia/nemotron-3-super-120b-a12b:free
+E   + bzl/deepseek/deepseek-v4-flash-0731free:free
+tests\test_registry_render.py:2196: in test_openhands_max_input_tokens_is_clamped
+E   KeyError: 'omniroute-l1-orchestrator'
+tests\test_registry_render.py:2244: in test_a_key_provider_keeps_its_leg
+E   AssertionError: 'model: groq/qwen/qwen3.8-27b' not found in '  # AUTOOS-MANAGED-START or-laguna-s-2.1-free\n  - model_name: or-laguna-s-2.1-free\n    litellm_params:\n      model: openrouter/poolside/laguna-s-2.1:fre

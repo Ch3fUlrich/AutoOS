@@ -164,6 +164,19 @@
       }
     },
     {
+      "id": "l2-worker-1m",
+      "name": "L2 · l2-worker-1m · 1M",
+      "context": 1048576,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
       "id": "l3-driver",
       "name": "L3 · l3-driver · 128k",
       "context": 128000,
@@ -223,6 +236,32 @@
           "openhands"
         ],
         "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-1m",
+      "name": "L3 · l3-driver-1m · 1M",
+      "context": 1000000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-256k",
+      "name": "L3 · l3-driver-256k · 256k",
+      "context": 256000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
           "opencode",
           "zed",
           "openhands"
@@ -416,18 +455,6 @@
       }
     },
     {
-      "id": "groq-qwen3.8-27b",
-      "name": "Qwen3.8-27B via Groq (free)",
-      "context": 131072,
-      "output": 16384,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
       "id": "ovh-qwen3.8-27b",
       "name": "Qwen3.8-27B via OVH (credit)",
       "context": 128000,
@@ -453,6 +480,32 @@
         "omniroute": [
           "opencode",
           "zed"
+        ]
+      }
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "Xiaomi MiMo v2.6 Flash · 1M",
+      "context": 1048576,
+      "output": 65536,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "Xiaomi MiMo v2.6 Pro · 1M",
+      "context": 1048576,
+      "output": 65536,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
         ]
       }
     },
