@@ -25,3 +25,6 @@ On coding.vm only TOOL-LESS L3 from now: POST brief + pasted files via `python3 
 
 ## Remaining to brief done
 integrate W1,W2a-d,W4 -> unmocked Popen test + one live scoped spawn (R-orch-19) -> `tools/prepush.py` green -> push lane -> CI green (cite run id) -> 2 non-Claude code seats, different families, on the admission change (+ attacker brief: weakened admission/memory guard, kill path reading job.json, runner escape; seat-model-evidence) -> packet to fixes-L1: lane sha+tree, CI run id, prepush record, per-item diff summary, seat run ids + answer/evidence sha256, live-step packet (Scheduled Tasks AutoOS-Pool-<n>, pool-slot/pool-job accounts, authorized_keys verbatim line + evidence Windows OpenSSH honours command=, >3-parallel measurement), questions.
+
+## Push status (16:40Z)
+Lane NOT pushed: prepush refused, 2 reds on files this lane does not touch (pre-existing on origin/main, the lane-main-green fix): test_suite_wiring (test_benchmark_toolcalls.py, test_sync_openhands_hdi.py unwired) and test_windows_portability BOM (lib/windows/AutoOS.Install.psm1, tests/run-tests.ps1). Re-merge origin/main once main-green lands, then prepush + push. No override used.
