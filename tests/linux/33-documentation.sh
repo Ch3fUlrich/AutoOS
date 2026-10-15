@@ -1066,6 +1066,14 @@ if it "probe-effort: effort-ladder probe writes the overlay (unit tests)"; then
     out="$(python3 tests/test_probe_effort.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "benchmark-toolcalls: tool-call benchmark cases and scoring (unit tests)"; then
+    out="$(python3 tests/test_benchmark_toolcalls.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "sync-openhands-profiles: host.docker.internal counts only when it resolves to this machine (unit tests)"; then
+    out="$(python3 tests/test_sync_openhands_hdi.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/probe-ledger.py: the availability ledger - measured per-leg serving
 # state, so lanes stop re-probing known-good and known-dead legs. Every case
 # runs against a temp state file; logs/routing/availability.json is never read.
