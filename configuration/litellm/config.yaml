@@ -330,6 +330,44 @@ model_list:
       api_key: os.environ/OPENROUTER_API_KEY
   # AUTOOS-MANAGED-END l2-researcher
 
+  # ── *-clean twins: mimo + deepseek direct (operator D-1349 exemption, tools/registry.py CLEAN_LEG_EXEMPTIONS) ──
+  # AUTOOS-MANAGED-START l1-orchestrator-clean
+  - model_name: l1-orchestrator-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l1-orchestrator-clean
+  # AUTOOS-MANAGED-START l2-orchestrator-clean
+  - model_name: l2-orchestrator-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l2-orchestrator-clean
+  # AUTOOS-MANAGED-START l2-worker-clean
+  - model_name: l2-worker-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l2-worker-clean
+  # AUTOOS-MANAGED-START l3-driver-clean
+  - model_name: l3-driver-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-driver-clean
+  # AUTOOS-MANAGED-START l3-implementer-clean
+  - model_name: l3-implementer-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-implementer-clean
+  # AUTOOS-MANAGED-START l3-researcher-clean
+  - model_name: l3-researcher-clean
+    litellm_params:
+      model: deepseek/deepseek-flash
+      api_key: os.environ/DEEPSEEK_API_KEY
+  # AUTOOS-MANAGED-END l3-researcher-clean
+
   # ── l1-orchestrator: orchestrator-1M, meta_api first then free gemini fallback ─────────
   # AUTOOS-MANAGED-START l1-orchestrator
   - model_name: l1-orchestrator

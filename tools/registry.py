@@ -27,8 +27,10 @@ Three subcommands:
        OmniRoute gateway does not consult that registry-only flag, and
        combos.json/apply.sh still push the leg verbatim). CLEAN_ROUTE_
        EXEMPTIONS names the one route (l1-orchestrator-clean) deliberately
-       exempted from this rule; `check`/`validate` still report it, as an
-       info line, never silently;
+       exempted from this rule, and CLEAN_LEG_EXEMPTIONS the one leg
+       (deepseek/deepseek-flash, operator D-1349) admitted in six named
+       routes; `check`/`validate` still report both, as info lines, never
+       silently;
     4. providers.<id>.api_base and models.<id>.direct.base_url hold only a public
        vendor endpoint. Loopback (127.0.0.1 / localhost / ::1) is allowed ONLY in
        a model's direct.base_url; private IPv4 ranges, single-label hosts,
@@ -703,7 +705,7 @@ def _check_model_key_case(registry) -> list:
 # ===========================================================================
 
 
-def private_safe(provider_id, model_id, registry) -> tuple:
+def private_safe(provider_id, model_id, registry, route_id=None) -> tuple:
     """Whether `provider_id`/`model_id` is private-safe (spec 3.1 rule 3, tightened
     by the PRIV finding of 2026-09-26: `autoos-agent.py route --card
     kind=implement,...,privacy=sensitive` chose a FREE pool because only a
@@ -757,6 +759,11 @@ def private_safe(provider_id, model_id, registry) -> tuple:
     model = _section(registry, "models").get(model_id)
     if not isinstance(model, dict):
         return False, "unknown model %r" % (model_id,)
+    if clean_leg_exempt(route_id, provider_id, model_id):
+        # D-1349: the operator's recorded choice, scoped to one leg in named
+        # -clean routes (CLEAN_LEG_EXEMPTIONS); a caller that passes no
+        # route_id (a pinned model, an arbitrary combo) never gets it.
+        return True, None
 
     effective_tier = model["tier"] if "tier" in model else provider.get("tier")
     if effective_tier not in ("paid", "subscription", "credit"):
@@ -806,6 +813,35 @@ CLEAN_ROUTE_EXEMPTIONS = {
 }
 
 
+# D-1349 (operator, 2026-10-15, verbatim "Keep DeepSeek, exemption"): DeepSeek
+# direct stays in the six *-clean routes although it does NOT meet rule 3.
+# providers.deepseek.trains_on_prompts is true and its privacy block holds the
+# policy evidence. Scope: exactly this provider/model pair in exactly these
+# routes - the same model anywhere else in a -clean route, or any other DeepSeek
+# spelling, still fails rule 3. D-1201 context: no sensitive repo content and
+# no secret is ever sent to a model, so the residual risk is the operator's.
+_CLEAN_LEG_ROUTES = (
+    "l1-orchestrator-clean", "l2-orchestrator-clean", "l2-worker-clean",
+    "l3-driver-clean", "l3-implementer-clean", "l3-researcher-clean",
+)
+CLEAN_LEG_EXEMPTIONS = {
+    ("deepseek", "deepseek-flash"): {
+        "routes": _CLEAN_LEG_ROUTES,
+        "reason": (
+            "operator D-1349 (2026-10-15, 'Keep DeepSeek, exemption'; context "
+            "D-1201): deepseek direct stays a -clean leg although its policy "
+            "does not promise no-training (providers.deepseek.privacy.evidence)"
+        ),
+    },
+}
+
+
+def clean_leg_exempt(route_id, provider_id, model_id) -> bool:
+    """Whether CLEAN_LEG_EXEMPTIONS admits this leg in this route (False for no route)."""
+    entry = CLEAN_LEG_EXEMPTIONS.get((provider_id, model_id))
+    return bool(entry) and route_id in entry["routes"]
+
+
 def _check_privacy(registry) -> list:
     problems = []
     for route_id, route in _section(registry, "routes").items():
@@ -822,7 +858,7 @@ def _check_privacy(registry) -> list:
             # provider-wide available:false included (PRIV2, 2026-09-26): the
             # OmniRoute gateway does not consult that registry-only flag, and
             # combos.json/apply.sh push the leg verbatim regardless.
-            safe, reason = private_safe(provider_id, model_id, registry)
+            safe, reason = private_safe(provider_id, model_id, registry, route_id)
             if not safe:
                 problems.append("privacy: %s leg %s %s" % (route_id, leg, reason))
     return problems
@@ -840,6 +876,11 @@ def privacy_exemption_lines(registry) -> list:
     for route_id, reason in CLEAN_ROUTE_EXEMPTIONS.items():
         if route_id in routes:
             lines.append("info: %s exempt from privacy rule 3 - %s" % (route_id, reason))
+    for (provider_id, model_id), entry in CLEAN_LEG_EXEMPTIONS.items():
+        for route_id in entry["routes"]:
+            if route_id in routes:
+                lines.append("info: %s leg %s/%s exempt from privacy rule 3 - %s"
+                             % (route_id, provider_id, model_id, entry["reason"]))
     return lines
 
 

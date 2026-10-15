@@ -8160,7 +8160,7 @@ def sensitive_combo_refusal(combo: str, registry: dict):
             provider_id, model_id = resolve_leg(leg, registry)
         except ValueError as exc:
             return "privacy: %s: %s" % (leg, exc)
-        safe, why = private_safe(provider_id, model_id, registry)
+        safe, why = private_safe(provider_id, model_id, registry, combo)
         if not safe:
             return "privacy: --model %s serves %s, which is not private-safe (%s)" % (combo, leg, why)
     return None

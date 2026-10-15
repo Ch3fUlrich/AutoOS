@@ -1,6 +1,6 @@
 {
   "count": 29,
-  "sha256": "d7c37af49d1e9052161b8fca11b196dba20180d73f80dc8ba10c86cce373e240",
+  "sha256": "a1032bd56e65f4531d26d09c6613e850b5af53bd546d1731aecc0d486e5fe3eb",
   "combos": [
     {
       "name": "deepseek-v4.1-flash",
@@ -30,7 +30,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-flash",
-        "deepseek/deepseek-v4-pro"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -55,7 +55,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-flash",
-        "deepseek/deepseek-v4-pro"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -81,7 +81,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-flash",
-        "deepseek/deepseek-v4-flash"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -113,7 +113,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-pro",
-        "deepseek/deepseek-v4-pro"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -152,7 +152,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-pro",
-        "deepseek/deepseek-v4-pro"
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -168,7 +168,7 @@
       "strategy": "priority",
       "models": [
         "xiaomi-mimo/mimo-v2.6-flash",
-        "deepseek/deepseek-v4-flash"
+        "deepseek/deepseek-flash"
       ]
     },
     {

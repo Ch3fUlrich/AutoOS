@@ -15,6 +15,41 @@ from typing import Any
 
 UNIT_SEP = "\x1f"
 
+_SPELLINGS: dict[str, str] | None = None
+
+def _spelling_map() -> dict[str, str]:
+    """Lower-cased provider spelling -> provider id, from catalog/ai-registry.json.
+
+    The gateway stores a leg under whatever prefix was written (xiaomi-mimo/x live,
+    mimo/x in the rendered file; both reach the same provider). A spelling claimed
+    by two providers maps to nothing, so a refusal never rests on a guess."""
+    global _SPELLINGS
+    if _SPELLINGS is None:
+        owners: dict[str, set[str]] = {}
+        try:
+            reg = json.loads((Path(__file__).resolve().parents[1] / "catalog" / "ai-registry.json")
+                             .read_text(encoding="utf-8"))
+            for pid, prov in (reg.get("providers") or {}).items():
+                names = [pid]
+                if isinstance(prov, dict):
+                    names += [prov.get("omniroute_id"), prov.get("model_prefix")]
+                for n in names:
+                    if isinstance(n, str) and n.strip():
+                        owners.setdefault(n.strip().lower(), set()).add(pid)
+        except (OSError, ValueError):
+            owners = {}
+        _SPELLINGS = {n: next(iter(o)) for n, o in owners.items() if len(o) == 1}
+    return _SPELLINGS
+
+def canon_ref(ref: str) -> str:
+    """The leg with its provider prefix spelled as the provider id (unknown prefix: unchanged)."""
+    prefix, sep, rest = ref.partition("/")
+    pid = _spelling_map().get(prefix.lower()) if sep else None
+    return f"{pid}/{rest}" if pid else ref
+
+def canon_refs(refs: list[str]) -> list[str]:
+    return [canon_ref(r) for r in refs]
+
 def parse_live(text: str) -> dict[str, dict[str, Any]]:
     """Parse live text lines into dict name -> {strategy, models, dropped}."""
     result: dict[str, dict[str, Any]] = {}
@@ -93,7 +128,7 @@ def diff(file_doc: dict[str, Any], live: dict[str, dict[str, Any]],
             continue
 
         lmodels = lcombo["models"]
-        if filtered_fmodels != lmodels:
+        if canon_refs(filtered_fmodels) != canon_refs(lmodels):
             diffs.append(("drift", name,
                           f"live={', '.join(lmodels)} file={', '.join(filtered_fmodels)}"))
         else:
@@ -197,14 +232,14 @@ def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
         snap_match = False
         if name in snap_combos:
             sc = snap_combos[name]
-            if sc["models"] == lmodels and (not lstrat or not sc["strategy"] or sc["strategy"] == lstrat):
+            if canon_refs(sc["models"]) == canon_refs(lmodels) and (not lstrat or not sc["strategy"] or sc["strategy"] == lstrat):
                 snap_match = True
 
         # Check against file
         file_match = False
         if name in file_combos:
             fc = file_combos[name]
-            if fc.get("models", []) == lmodels:
+            if canon_refs(fc.get("models", [])) == canon_refs(lmodels):
                 file_match = True
 
         if not (snap_match or file_match):

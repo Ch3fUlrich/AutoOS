@@ -458,15 +458,11 @@ def test_cli_guard_exit4_forbidden_clean_leg(tmp_path):
     assert result.returncode == 4
     assert "forbidden leg in clean combo" in result.stdout
 
-@pytest.mark.xfail(strict=True, reason="clean fold waits on privacy evidence (D-1344 follow-up)")
 def test_real_combos_json_clean_combos_have_no_forbidden_leg():
-    import json
-    from pathlib import Path
-    repo = Path(__file__).resolve().parents[2]
-    combos_path = repo / "configuration" / "omniroute" / "combos.json"
+    combos_path = REPO / "configuration" / "omniroute" / "combos.json"
     with open(combos_path) as f:
         file_doc = json.load(f)
-    assert clean_violations(file_doc) == []
+    assert load_module().clean_violations(file_doc) == []
 
 def test_cli_export_without_out_writes_the_snapshot_option_not_the_repo_file(tmp_path):
     env, base_args, _ = make_cli(tmp_path, live_lines=["a\x1fs\x1fx\x1f0"], combos_models=[("a", "s", ["x"])])

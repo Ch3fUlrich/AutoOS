@@ -260,6 +260,12 @@ def leg_resolves(registry, leg):
         return None
 
 
+def _clean_leg_exempt(registry, combo_id, leg):
+    """Whether tools/registry.py CLEAN_LEG_EXEMPTIONS (operator D-1349) admits `leg` in `combo_id`."""
+    resolved = leg_resolves(registry, leg)
+    return resolved is not None and REGISTRY_TOOL.clean_leg_exempt(combo_id, *resolved)
+
+
 def check_cache_gate(registry, combo_id, legs):
     """(f) an orchestrator-layer combo (l0-/l1-/l2-) has no uncached leg.
 
@@ -270,6 +276,8 @@ def check_cache_gate(registry, combo_id, legs):
         return []
     failures = []
     for leg in legs:
+        if _clean_leg_exempt(registry, combo_id, leg):
+            continue  # D-1349: the operator's recorded -clean DeepSeek leg
         verdict = REGISTRY_TOOL.leg_prompt_cache(registry, leg)
         if verdict not in CACHEABLE_VERDICTS:
             failures.append("%s: (f) leg %r is prompt_cache=%r, not %s"
@@ -341,6 +349,8 @@ def check_leg_bans(registry, combo_id, legs):
         if resolved is None:
             continue
         pid, mid = resolved
+        if REGISTRY_TOOL.clean_leg_exempt(combo_id, pid, mid):
+            continue  # D-1349: deepseek-flash in the six -clean twins only
         if pid in SPAWNER_ONLY_PROVIDERS:
             failures.append("%s: (i) leg %r is provider %s, which runs only as "
                             "the spawner's own client (§7b: no Qoder PAT in the "

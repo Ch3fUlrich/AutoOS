@@ -83,7 +83,8 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
       ]
     },
     {
@@ -91,7 +92,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-flash",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -108,7 +110,8 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
       ]
     },
     {
@@ -116,7 +119,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-flash",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -125,7 +129,8 @@
       "context": "128k",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "mimo/mimo-v2.6-flash"
       ]
     },
     {
@@ -135,7 +140,8 @@
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
       ]
     },
     {
@@ -153,7 +159,8 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-flash",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -210,7 +217,8 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-pro",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -248,7 +256,8 @@
       "strategy": "priority",
       "context": "128k",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-pro",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -266,7 +275,8 @@
       "strategy": "priority",
       "context": "1M",
       "models": [
-        "vertex/gemini-3.8-flash"
+        "mimo/mimo-v2.6-flash",
+        "deepseek/deepseek-flash"
       ]
     },
     {
@@ -293,7 +303,8 @@
       "context": "1M",
       "models": [
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
-        "vertex/gemini-3.8-flash"
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
       ]
     },
     {

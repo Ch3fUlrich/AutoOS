@@ -24,11 +24,6 @@
       "name": "L1 · l1-orchestrator-clean · 1M",
       "context": 1000000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -90,11 +85,6 @@
       "name": "L2 · l2-worker-clean · 128k",
       "context": 128000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -151,11 +141,6 @@
       "name": "L2 · l2-orchestrator-clean · 1M",
       "context": 1048576,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -199,11 +184,6 @@
       "name": "L3 · l3-driver-clean · 128k",
       "context": 128000,
       "output": 16384,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -285,11 +265,6 @@
       "name": "L3 · l3-implementer-clean · 128k",
       "context": 128000,
       "output": 8192,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",
@@ -314,11 +289,6 @@
       "name": "L3 · l3-researcher-clean · 1M",
       "context": 1000000,
       "output": 32768,
-      "effort_ladder": [
-        "low",
-        "medium",
-        "high"
-      ],
       "surfaces": {
         "omniroute": [
           "opencode",

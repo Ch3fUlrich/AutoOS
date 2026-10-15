@@ -55,31 +55,31 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `groq-qwen3.8-27b` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |
 | `hf-qwen3.8-27b` | free | 128k | ~~huggingface `Qwen/Qwen3.8-27B`~~ (unavailable) |
-| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l1-orchestrator-clean` | cheap | 1M | vertex `gemini-3.8-flash` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) |
+| `l1-orchestrator` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
+| `l1-orchestrator-clean` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` → ~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable) → deepseek `deepseek-flash` |
 | `l1-orchestrator-free-only` | free | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` |
 | `l1-orchestrator-paid` | cheap | 1M | (none) |
-| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
-| `l2-orchestrator-clean` | frontier | 1M | vertex `gemini-3.8-flash` |
-| `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
-| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` |
+| `l2-orchestrator` | frontier | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
+| `l2-orchestrator-clean` | frontier | 1M | xiaomi_mimo `mimo-v2.6-flash` → deepseek `deepseek-flash` |
+| `l2-researcher` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → xiaomi_mimo `mimo-v2.6-flash` |
+| `l2-worker` | mid | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
 | `l2-worker-1m` | mid | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
-| `l2-worker-clean` | mid | 128k | vertex `gemini-3.8-flash` |
+| `l2-worker-clean` | mid | 128k | xiaomi_mimo `mimo-v2.6-flash` → deepseek `deepseek-flash` |
 | `l2-worker-free-only` | free | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `l2-worker-paid` | mid | 131,072 | (none) |
 | `l3-driver` | cheap | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` → ovhcloud `Qwen3.5-397B-A17B` → vertex `gemini-3.8-flash` |
 | `l3-driver-1m` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
 | `l3-driver-256k` | cheap | 256k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → openrouter `poolside/laguna-s-2.1:free` → openrouter `cohere/north-mini-code:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
-| `l3-driver-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
+| `l3-driver-clean` | cheap | 128k | xiaomi_mimo `mimo-v2.6-pro` → deepseek `deepseek-flash` |
 | `l3-driver-free-only` | free | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |
 | `l3-implementer` | cheap | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` → ovhcloud `Qwen3.8-27B` → vertex `gemini-3.8-flash` |
-| `l3-implementer-clean` | cheap | 128k | vertex `gemini-3.8-flash` |
+| `l3-implementer-clean` | cheap | 128k | xiaomi_mimo `mimo-v2.6-pro` → deepseek `deepseek-flash` |
 | `l3-researcher` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
-| `l3-researcher-clean` | cheap | 1M | vertex `gemini-3.8-flash` |
+| `l3-researcher-clean` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` → deepseek `deepseek-flash` |
 | `l3-review-codebase` | cheap | 1M | openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → vertex `gemini-3.8-flash` |
 | `l3-review-diff` | cheap | 128k | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
-| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` |
+| `l3-review-tests` | cheap | 1M | bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → vertex `gemini-3.8-flash` → xiaomi_mimo `mimo-v2.6-flash` |
 | `l3-review-transcript` | cheap | 1M | (none) |
 | `mimo-v2.6-flash` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` |
 | `mimo-v2.6-pro` | mid | 1M | xiaomi_mimo `mimo-v2.6-pro` |
@@ -467,6 +467,14 @@ contract ($0.10 pricing is the tell) — they stay in `l1-orchestrator`, never `
 OmniRoute's own free-tier catalog flags the known trainers; we additionally
 curate them out. If in doubt, use `tierN-clean` and check the provider's
 current policy.
+
+Since 2026-10-15 the six `*-clean` routes hold Xiaomi MiMo (subscription;
+`privacy.mi.com` quote and caveats in `providers.xiaomi_mimo.privacy`) plus
+`deepseek/deepseek-flash` direct. DeepSeek is **not** a no-training leg — its
+policy trains on user input — and stays by operator exemption D-1349
+(`tools/registry.py` `CLEAN_LEG_EXEMPTIONS`, evidence in
+`providers.deepseek.privacy`): that one leg in those six routes only; V4 Pro stays
+denied (`deny-deepseek-pro`).
 
 **Meta direct:** unregistered since 2026-09-23 (openrouter-first decision):
 `apply.*` no longer maps the Meta key to `muse-code` — the installed
