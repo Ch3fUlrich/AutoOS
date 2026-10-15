@@ -4,6 +4,7 @@ import json
 import re
 import time
 import secrets
+import threading
 from pathlib import Path
 
 # ensure runner_pool_core can be imported when this file is run directly
@@ -37,9 +38,27 @@ def valid_id(s: str) -> bool:
         return False
     return bool(re.fullmatch(r'[A-Za-z0-9_-]{1,64}', s))
 
-def read_capped(stream, cap: int) -> bytes:
-    """Read up to cap bytes; raise if more data is present."""
-    data = stream.read(cap + 1)
+def read_capped(stream, cap: int, timeout: float = 30.0) -> bytes:
+    """Read up to cap bytes; raise if more data is present or the channel stalls.
+
+    stream.read(cap + 1) blocks until cap + 1 bytes or EOF, so a client that
+    sends a little and holds the channel open would pin the gate: read in a
+    daemon thread and give up after `timeout` seconds.
+    """
+    box = []
+    def _read():
+        try:
+            box.append(stream.read(cap + 1))
+        except Exception as exc:  # surfaced below
+            box.append(exc)
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise GateError('read timeout')
+    data = box[0]
+    if isinstance(data, Exception):
+        raise GateError('read failed')
     if len(data) > cap:
         raise GateError('input exceeds size limit')
     return data
@@ -50,6 +69,22 @@ def _check_str(value: str):
     if value.startswith('-') or '\0' in value:
         raise GateError('invalid string value')
 
+_RESERVED_NT = {'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$'} | \
+    {'COM%d' % i for i in range(1, 10)} | {'LPT%d' % i for i in range(1, 10)}
+
+def _check_path(value):
+    """A card path is a plain relative path inside the pool: no .., no anchor, no NT tricks."""
+    _check_str(value)
+    if value == '' or value.startswith(('/', '\\', '~')) or re.match(r'^[A-Za-z]:', value):
+        raise GateError('invalid path')
+    for part in re.split(r'[\\/]', value):
+        if part in ('', '..'):
+            raise GateError('invalid path')
+        if part != '.' and part.endswith((' ', '.')):
+            raise GateError('invalid path')
+        if part.split('.')[0].upper() in _RESERVED_NT:
+            raise GateError('invalid path')
+
 def validate_card(card):
     """Validate the job card."""
     if not isinstance(card, dict):
@@ -59,7 +94,12 @@ def validate_card(card):
     if unknown:
         raise GateError('unknown card fields')
     for k, v in card.items():
-        if isinstance(v, list):
+        if k == 'paths':
+            if not isinstance(v, list):
+                raise GateError('paths must be a list')
+            for item in v:
+                _check_path(item)
+        elif isinstance(v, list):
             for item in v:
                 _check_str(item)
         else:

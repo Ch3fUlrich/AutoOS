@@ -1,0 +1,48 @@
+## Findings
+
+**[HIGH] `runner_pool_proc.kill_job` — kill-target redirect (run.private tampering) + TOCTOU/pid-reuse → arbitrary process-tree kill**
+`kill_job` reads `run.private` (`read_run_private`) and uses `info['pid']` as the `taskkill /T /F /PID` target. Nothing ties that pid to the job's own process: `read_run_private`/`_validate_params` only check *shape* (pid is an int > 0), not that the pid is the process the pool spawned or is inside the job object. And the verification `cur_ft = filetime_of(pid)` is done via `_nt_filetime`, which *opens, queries, and closes* the handle; then `kill_tree(['taskkill',...,'/PID',str(pid)])` re-resolves the pid by number.
+- Exploit (wrong-tree): pool spawns job as pid 1234/FT1 and writes `slot/run.private={run_id:r,pid:1234,filetime:FT1,mode:toolless}`. The job account (same account as pool, or any account with write access to `slot_dir`) enumerates a victim V (e.g. pid 700, creation FTv) and overwrites `slot/run.private={run_id:r,pid:700,filetime:FTv,mode:toolless}`. `kill_job` → `filetime_of(700)==FTv` (match) → `taskkill /T /F /PID 700` kills V and its whole tree.
+- Exploit (pid reuse/TOCTOU): `run.private={pid:1234,filetime:FT1}`; between `filetime_of(1234)==FT1` and `taskkill`, pid 1234 exits and is reused by Q (FT2); `taskkill /PID 1234` kills Q.
+- Fix: never kill by pid number. The process is already in a JobObject with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; call `TerminateJobObject(hJob)` (or close `hJob`) which kills exactly the job's processes and is immune to pid reuse. If a per-pid kill is unavoidable, hold the `OpenProcess` handle across check-and-kill and `TerminateProcess(that handle)`. Add an ACL so the job account cannot write `run.private`, and cross-check the pid is assigned to the job object. (Note: the kill metadata in this code is `run.private`, not `job.json`; same class of bug.)
+
+**[MEDIUM] `runner_pool_gate.validate_card` / `_check_str` — zero path confinement for `card.paths`/`spec` (traversal, absolute, drive letters, reserved names, junctions)**
+`_check_str` only rejects a leading `-` and embedded NUL. Concrete accepted card:
+`{"client":"x","model":"y","kind":"z","task_type":"t","title":"T","paths":["..\\..\\..\\Windows\\System32\\config\\SAM","C:\\secrets\\key.pem","\\\\attacker\\share\\x","CON","foo."],"spec":"s"}`
+submitted via `ssh <lane> submit` with body `{"card":{...},"brief":"hello"}` passes `validate_card` and lands in `queue/<id>.json`. The gate performs no `pool_root` confinement: `..` segments, absolute paths, drive/UNC letters, NT reserved device names (`CON`,`NUL`,`COM1`), trailing-dot/space names, and symlink/junction escapes are all accepted. Any consumer that resolves `card.paths` relative to the pool escapes it.
+- Fix: resolve each path against `pool_root` with `Path.resolve()` and require `pool_root in resolved.parents` (or `resolved == pool_root`); reject `..`, absolute, drive-anchored, UNC, reserved names, and re-check after resolving symlinks/junctions.
+
+**[MEDIUM] `runner_pool_core.strip_env` (and `gate_env`) — single-case blacklist; Windows case-insensitive bypass; secrets/PATH/PYTHONPATH pass-through; and `gate_env` is never called**
+`strip_env` does `result.pop('AUTOOS_ADMISSION_OFF', None)` only. (1) On Windows the process env is case-insensitive but `dict.pop` is not: host/job env `autoos_admission_off=1` survives the pop and `os.environ.get('AUTOOS_ADMISSION_OFF')` later returns `1`, disabling admission (`may_claim`). (2) It passes through everything else — `PYTHONPATH`/`PYTHONHOME`/`PATH` (module/exe hijack for spawned `python`), `SSH_AUTH_SOCK`, service tokens, etc. — so secrets in the account env leak to attacker-influenced job processes. (3) In `run_gate`, `gate_env`/`strip_env` is defined but **never invoked**; the env is not sanitized before use. Concrete: run the forced command on a host with `PYTHONPATH=C:\attacker` and `autoos_admission_off=1`; both reach spawned jobs.
+- Fix: use a strict *allow-list* of env keys for jobs; normalize keys to a canonical case before filtering (or drop-and-re-add); never forward `PYTHONPATH/PYTHONHOME/PATH` unmodified; actually call the sanitizer in the spawn path.
+
+**[MEDIUM] `runner_pool_proc.spawn_in_job` — `bInheritHandles=True` inherits every inheritable parent handle (handle-leak escape)**
+When `stdout_fd` is set, `spawn_in_job` marks the stdout handle inheritable and passes `bInheritHandles=True` to `CreateProcessW`. `True` inherits *all* inheritable handles in the parent into the child — not just the intended stdout/NUL. If the pool runner holds any other inheritable handle (a job-object handle, another slot's file, a socket), the malicious child receives and can use it. The NUL stdin handle is created with `lpSecurityAttributes=None` (non-inheritable) yet assigned to `hStdInput`, so stdin may not even be NUL. Concrete: parent has an inheritable handle to `slot_b\output`; job A (attacker content) spawned via `spawn_in_job(argv, hJob, stdout_fd=o)` receives that handle and reads/writes another job's output.
+- Fix: use `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` to pass exactly the intended std handles; create the NUL handle inheritable; avoid blanket `bInheritHandles=True`.
+
+**[LOW] `runner_pool_gate.parse_submit` — brief "is a path?" guard trivially bypassed by embedding a newline**
+The path heuristic runs only when `'\n' not in brief`, and then only inspects the single stripped line. Concrete body `{"card":{...},"brief":"ok\n/etc/passwd"}` (or `{"brief":"C:\\secrets\nx"}`) is accepted because `'\n' in brief` skips the check. If any downstream ever treats `brief` as a path/argument, this guard is void.
+- Fix: validate each line, or drop the check and never use `brief` as a path.
+
+**[LOW] submitter identity / accounting collision on case-insensitive NTFS (`runner_pool_core.sample_decision`, `submitters/<name>.count`; `runner_pool_gate.run_gate` queue file names)**
+`valid_id` is case-sensitive, but `submitters_dir / f"{submitter}.count"` (and any per-submitter file) is written on Windows where `alice.count` and `Alice.count` are the *same* file. Concrete: two lanes `alice` and `Alice` (both pass `valid_id`) share one counter, letting one spoof/merge the other's sampling stats; similarly distinct case-variant identities collide in accounting. (The submitter *value itself* is key-bound and not payload-settable — that part is clean.)
+- Fix: canonicalize submitter case for all filesystem use, or restrict lanes to a case-insensitive-unique set.
+
+**[LOW] `runner_pool_gate.read_capped` — exactly-cap input can hang the gate (DoS)**
+`read_capped` reads `cap+1`; if the client sends exactly 65536 bytes and keeps the channel open (no EOF), `stream.read(cap+1)` blocks waiting for byte 65537 until timeout. A submitter can pin gate workers.
+- Fix: enforce a read/idle deadline on the SSH channel, or read until EOF with a bounded timer.
+
+**[LOW] `runner_pool_proc.create_job_nt` — no `ActiveProcessLimit`/CPU limit; job handle lifetime vs `KILL_ON_CLOSE`**
+`LimitFlags` = `KILL_ON_CLOSE|JOB_MEMORY` only; `ActiveProcessLimit=0` (unlimited) and no per-job CPU limit. Within the 8 GiB cap a job can fork-bomb/spin CPU. Also `create_job_nt` returns `int(hJob)` and the shown code never closes it; `KILL_ON_CLOSE` only fires when the job handle is actually closed, so cleanup depends on the (unseen) caller.
+- Fix: set `ActiveProcessLimit` and CPU limits; close the job handle (or call `TerminateJobObject`) on job end.
+
+## Clean classes (explicit)
+
+- **Forced-command parsing (`parse_original_command`)** — clean. `re.fullmatch(r'(submit|status --json)\Z', cmd)` is fully anchored (`fullmatch` + `\Z`, no `$`, no `.`), so trailing-newline/NUL/whitespace/`submit; rm -rf /` variants fail to match and are rejected; the returned base is `split()[0]` of an already-whitelisted string. No case/unicode bypass (ASCII-only alternation).
+- **Forced-command argument injection via `command=` (`authorized_keys_line`)** — clean *given current validation*: `lane` must match `[A-Za-z0-9_-]{1,64}` and `pubkey` `[A-Za-z0-9+/=]+`, so neither can contain `"`/whitespace to break `command="{cmd}"`. The client cannot append args: `SSH_ORIGINAL_COMMAND` is only read from env and validated, never merged into `argv`. Caveat: if `valid_id`/pubkey regex were ever relaxed, the `command="..."` quoting becomes breakable.
+- **`taskkill` argument injection** — clean: `kill_job` builds `str(pid)` where pid is `_validate_params`-validated as an int > 0 (bool rejected), so no metacharacter reaches the command line. The defect is *which* pid (finding 1), not the argv.
+- **Queue spoofing via payload** — clean for the identity value: `parse_submit` enforces `set(obj) == {'card','brief'}`, so `submitter` cannot be injected by the submitter; it is taken solely from the key-bound `--submitter` in the forced command. Residual issue is only the NTFS case collision (finding above).
+
+`VERDICT: fail-with-findings`
+
+TEST-GAMING: no - searched all three shown modules (runner_pool_gate.py, runner_pool_proc.py, runner_pool_core.py) for builtin-subclass `__eq__`/`__hash__`/`__ne__` overrides, pytest/unittest/PYTEST_CURRENT_TEST/sys.modules sniffing, test-input detection, and test-only environment switches (the `AUTOOS_ADMISSION_OFF` flag is a production admission switch, not a test hook; the injectable `rename`/`sleep`/`filetime_of`/`kill_tree`/`nt_reader`/`os_name` parameters are ordinary dependency injection): 0 hits

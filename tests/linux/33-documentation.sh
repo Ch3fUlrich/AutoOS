@@ -682,6 +682,7 @@ if it "runner pool unit tests: core, gate, proc, slot loop, CLI"; then
     o="$(python3 tests/test_runner_pool_proc.py 2>&1)" || { rc=1; out="$out$o"; }
     o="$(python3 tests/test_runner_pool_slot.py 2>&1)" || { rc=1; out="$out$o"; }
     o="$(python3 tests/test_runner_pool_strict.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_seatc.py 2>&1)" || { rc=1; out="$out$o"; }
     o="$(python3 tests/test_runner_pool_e2e.py 2>&1)" || { rc=1; out="$out$o"; }
     o="$(python3 tests/test_api_client.py 2>&1)" || { rc=1; out="$out$o"; }
     [ "$rc" = 0 ] && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"

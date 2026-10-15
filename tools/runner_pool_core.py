@@ -37,11 +37,11 @@ def dead_slot(pid_alive, filetime_matches, heartbeat_age_s, T=120):
 def strip_env(env):
     """
     Return a shallow copy of *env* without the key
-    'AUTOOS_ADMISSION_OFF'. Original dict is unchanged.
+    'AUTOOS_ADMISSION_OFF' in any letter case (the NT environment is
+    case-insensitive). Original dict is unchanged.
     """
-    result = env.copy()
-    result.pop('AUTOOS_ADMISSION_OFF', None)
-    return result
+    return {k: v for k, v in env.items()
+            if not (isinstance(k, str) and k.upper() == 'AUTOOS_ADMISSION_OFF')}
 
 def may_claim(free_mb, floor_mb):
     """

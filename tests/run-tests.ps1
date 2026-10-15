@@ -5047,6 +5047,8 @@ Test-Case 'runner pool unit tests: core, gate, proc, slot loop, CLI' {
         Assert-Equal $rc 0 "test_runner_pool_slot.py failed: $out"
         $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_strict.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-Equal $rc 0 "test_runner_pool_strict.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_seatc.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_seatc.py failed: $out"
         $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_e2e.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-Equal $rc 0 "test_runner_pool_e2e.py failed: $out"
         $out = & $py.Source (Join-Path $Root 'tests\test_api_client.py') 2>&1 | Out-String; $rc = $LASTEXITCODE

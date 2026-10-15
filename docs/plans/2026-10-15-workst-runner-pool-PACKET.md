@@ -35,3 +35,15 @@ Seat B (llama 70B, shallow): 1,2 message-wording nits; 3 gate_env None check (lo
 ## Not done / follow-up (workst-L1-autoos, see HANDOFF)
 host:workstation dispatch, nt Job Object wiring, live scoped spawn + Scheduled Tasks + authorized_keys evidence + >3-parallel measurement (all CUT here by fixes-L1, D-1297).
 Questions: api model allowlist is a constant in tools/api_client.py (registry schema additionalProperties=false); argv brief limited <30000 chars by job_argv.
+
+## Gen4b: seat B replaced (fixes-L1 ruling: Llama seat did not count; seat A counts)
+Seat C: mimo/mimo-v2.6-pro (xiaomi, non-writer, non-Claude), tool-less, review-call.py from lane 39def3f5c (stream), gate + proc + core, sharper attacker brief.
+run 20261015-203247-runnerpool-seatc-b8dc69, corr 8e6dba08-6582-4775-bf60-36c8193b667e, review.txt sha256 0741d7d1438935bacbe2b0752d9cfa347608a5fb59d0989432a6992757777f47, prompt sha256 b8d1607d43ddfc5042fafa101b30981d3a84b4f4f921b8c1f419cd09705aafb8, VERDICT fail-with-findings, TEST-GAMING no. Raw: docs/plans/evidence/2026-10-15-runnerpool-seatC-mimo-pro-*.
+Triage (8 findings, 3 fixed fail-first in tests/test_runner_pool_seatc.py, wired):
+- FIXED card.paths unconfined (..\, absolute, drive, UNC, reserved NT names, trailing dot/space; paths must be list) -> gate._check_path.
+- FIXED strip_env case-sensitive (NT env case-insensitive) -> drops AUTOOS_ADMISSION_OFF in any case.
+- FIXED read_capped hang on a stalled channel (<cap bytes, no EOF) -> 30 s thread-timeout, GateError('read timeout').
+- DEFERRED Windows-only (HANDOFF follow-up item 5): kill by pid (TOCTOU/redirect via run.private; kill via job object + ACL), bInheritHandles/NUL stdin, ActiveProcessLimit, NTFS case collision of submitter counters, env allow-list.
+- ACCEPTED brief newline path-guard bypass: brief is argv text, never a path (job_argv); guard only catches a single-line path mistake.
+- Seat noted classes clean: forced-command parsing, authorized_keys quoting, taskkill arg injection, submitter spoofing via payload.
+Seats now: A qwen (admission, counts per fixes-L1) + C mimo-pro (gate+proc). B llama superseded.
