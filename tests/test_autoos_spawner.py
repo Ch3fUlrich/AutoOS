@@ -533,7 +533,7 @@ class RoutingBoundaryTests(unittest.TestCase):
 class ClientMatrixTests(unittest.TestCase):
     def test_every_client_declares_the_matrix_fields(self):
         names = set(clients.CLIENTS)
-        self.assertEqual(names, {"opencode", "claude", "qwen", "gemini", "codex", "agy", "qoder"})
+        self.assertEqual(names, {"opencode", "claude", "qwen", "gemini", "codex", "agy", "qoder", "api"})
         for c in clients.CLIENTS.values():
             self.assertIsInstance(c.headless, bool, c.name)
             self.assertIsInstance(c.gateway, bool, c.name)
@@ -543,7 +543,7 @@ class ClientMatrixTests(unittest.TestCase):
 
     def test_gateway_clients_are_exactly_the_omniroute_run_targets(self):
         gw = {n for n, c in clients.CLIENTS.items() if c.gateway}
-        self.assertEqual(gw, {"opencode", "qwen", "gemini", "codex"})
+        self.assertEqual(gw, {"opencode", "qwen", "gemini", "codex", "api"})
 
     def test_auth_names_env_vars_or_logins_never_values(self):
         for c in clients.CLIENTS.values():
@@ -18170,11 +18170,17 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
                 # says so), so the drift guard reads build_plan's product instead.
                 argv = self.agent.build_plan(
                     self.args(client="opencode", model=sentinel), cfg)["cmd"]
+                expect = sentinel
             else:
+                # api's model is a closed allowlist (tools/api_client.py), so the
+                # sentinel is refused there; read back an allowed id instead.
+                expect = sentinel
+                if name == "api":
+                    expect = __import__("api_client").API_MODELS[0]
                 argv = clients_mod.build_command(clients_mod.CLIENTS[name], "x", None,
-                                                 "edit", model=sentinel)
+                                                 "edit", model=expect)
             for flag in flags:
-                self.assertEqual([sentinel],
+                self.assertEqual([expect],
                                  self.agent._argv_flag_values(argv, flag),
                                  "%s: MODEL_INPUT says %s carries the model, the "
                                  "builder disagrees: %r" % (name, flag, argv))
