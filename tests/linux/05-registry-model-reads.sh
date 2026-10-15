@@ -207,6 +207,27 @@ PY
     assert_eq "$out" "ABSENT"
 fi
 
+if it "setup_openhands_config reports a failing tier-profile sync as a failure (not swallowed)"; then
+    # install.sh finds the repo from its own path, so run it from a tmp tree of
+    # symlinks whose sync tool exits 3. The embedded writer must not swallow it.
+    tmp="$(mktemp -d)"; mkdir -p "$tmp/r/lib/linux" "$tmp/r/tools" "$tmp/home"
+    for f in "$ROOT"/*; do case "$f" in */lib|*/tools) ;; *) ln -s "$f" "$tmp/r/";; esac; done
+    for f in "$ROOT"/lib/*; do [[ "$f" == */linux ]] || ln -s "$f" "$tmp/r/lib/"; done
+    for f in "$ROOT"/lib/linux/*; do ln -s "$f" "$tmp/r/lib/linux/"; done
+    for f in "$ROOT"/tools/*; do ln -s "$f" "$tmp/r/tools/"; done
+    rm "$tmp/r/tools/sync-openhands-profiles.py"; printf 'import sys\nsys.exit(3)\n' > "$tmp/r/tools/sync-openhands-profiles.py"
+    out="$(
+        source "$tmp/r/lib/linux/install.sh"
+        SYS_HOME="$tmp/home"; AUTOOS_DRY_RUN=0; AUTOOS_EXTRA_FAILURES=()
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        curl() { return 6; }
+        OLLAMA_BASE_URL="http://ollama:11434" AUTOOS_OMNIROUTE_KEY="test-omni-key" setup_openhands_config >/dev/null 2>&1
+        echo "${AUTOOS_EXTRA_FAILURES[*]:-none}"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$out" "openhands"
+fi
+
 if it "setup_openhands_config writes litellm fallback tiers with a litellm key only"; then
     tmp="$(mktemp -d)"
     out="$(
