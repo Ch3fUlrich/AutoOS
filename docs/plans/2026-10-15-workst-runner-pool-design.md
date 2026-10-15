@@ -1,6 +1,6 @@
-# AO-WORKST-RUNNER-POOL - design note v3 (fixes-L2-runnerpool, D-1317)
+# AO-WORKST-RUNNER-POOL - design note v4 (fixes-L2-runnerpool, D-1317)
 
-Status: v3 = v2 + Haiku seat 2 findings 1-12 (all accepted by judge). For the final non-Claude pass (R-orch-13). No code before it passes.
+Status: v4 = v3 (Haiku F1-F12) + muse seat 1 deltas (a)-(f). For the final non-Claude pass (R-orch-13). No code before it passes.
 
 ## Problem
 One workstation runner session queues beyond ~3 parallel L2 jobs, and workst-L1 reviews every job.
@@ -53,6 +53,16 @@ primitives (msvcrt lock, `_proc_starttime` = GetProcessTimes creation FILETIME).
   `BREAKAWAY_OK`. `run.private` (pid, creation FILETIME, run id, mode). `kill <id>` reads ONLY it, re-checks
   the FILETIME, `taskkill /T /F`; test asserts the tree is empty.
 
+- **Seat-1 deltas (v4).**
+  (a) `AUTOOS_ADMISSION_OFF` is stripped from the env of the slot, the job and the SSH gate and never
+  forwarded; the pool ignores it. (b) Toolless and tool-using counters are read under the SAME claim lock,
+  and memory is re-read inside that lock immediately before exec. (c) Requeue-once is a durable
+  `requeued` marker in the job file's slot record; a slot is dead only if pid gone AND creation FILETIME
+  mismatch AND heartbeat > T; a `breaker-open` slot never claims. (d) Mechanical every-done check also
+  covers leak check + rc / failure-class / ready consistency; an empty diff or tests-skipped forces deep
+  review; an unsampled job never auto-promotes an R2+ result. (f) Gate rejects any arg starting with `-`;
+  job id must match `^[A-Za-z0-9_-]{1,64}$`; card size cap (8 KB); brief size cap.
+
 ## B. Admission per kind (`tools/autoos-agent.py`, registry)
 - Registry `host_admission.kinds.toolless = {max_live_workers: 4, mem_available_floor_mb: 3072}`;
   top-level pair unchanged (shipped 6 / 4608; code defaults 6 / 6144).
@@ -65,6 +75,9 @@ primitives (msvcrt lock, `_proc_starttime` = GetProcessTimes creation FILETIME).
 - **Count (F3).** `host_admission_claim` writes `kind` into the reservation placeholder AND the worker
   record; a record without `kind` counts as tool-using. Toolless launch: toolless-live < 4, total live < 6,
   memory >= 3072. Tool-using launch: all live < 6, memory >= 4608 (unchanged).
+- **`api` client (e).** build_command passes ONLY `--model` (allowlist from the registry, no passthrough
+  args), `--prompt-file` and `--out-dir` confined to pool dirs (realpath check, no symlinks/`..`). `write
+  false` means no clone / workspace write: its only output is `--out-dir` text + evidence.json.
 - Gate change = R-orch-16: 2 non-Claude seats, different families. Verify: test_registry_render.py +
   renderer `--checks` (R-orch-18).
 
@@ -72,7 +85,7 @@ primitives (msvcrt lock, `_proc_starttime` = GetProcessTimes creation FILETIME).
 pool: claim race (1 job, 2 slots), PermissionError retry, requeue-once, rc13 requeue without count,
 status schema + stale heartbeat, kill refuses FILETIME mismatch and ignores a poisoned job json, job
 account cannot write spool (nt only), gate rejects every non-`submit`/`status --json` string and a path in
-the brief, unmocked Popen slot run + one live scoped spawn (Windows cases skipped off nt).
+the brief, ADMISSION_OFF stripped on slot/gate, lock covers both counters, requeued marker survives restart, `-x`/bad-id/oversize card rejected, api-client path/model confinement, unmocked Popen slot run + one live scoped spawn (Windows cases skipped off nt).
 admission: 5th toolless refused, tool-using floor unchanged between 3072 and 4608 free, kind not
 spoofable, unregistered client = tool-using, malformed/zero `kinds` -> top-level pair, nt unreadable memory
 refuses, placeholder carries kind.
