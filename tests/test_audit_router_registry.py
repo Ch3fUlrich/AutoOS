@@ -112,7 +112,7 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
 
 # A registry fixture with two combo routes: one served to opencode only,
 # one served to openhands too. Only the openhands one needs an
-# `omniroute-<name>` tier profile (Q1fix: the four pinned opencode+zed-only
+# tier profile named <name> (PREFIX-STRIP, no omniroute- prefix) (Q1fix: the four pinned opencode+zed-only
 # routes were wrongly reported as drift).
 OPENHANDS_FIXTURE = {
     "routes": {
@@ -145,7 +145,7 @@ class OpenHandsTierProfileTests(unittest.TestCase):
         audit = _load_module()
         drift = audit.tier_profile_drift(
             ["route-opencode-only", "route-openhands"], set(), OPENHANDS_FIXTURE)
-        self.assertEqual(drift, ["tier-profiles.json lacks 'omniroute-route-openhands'"])
+        self.assertEqual(drift, ["tier-profiles.json lacks 'route-openhands'"])
 
 
 if __name__ == "__main__":
