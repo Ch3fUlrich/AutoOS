@@ -164,23 +164,60 @@ def trust(worktree: Path, repo: Path, *, mcpjson: list[str], force: bool = False
         return False, f"no config at {path}"
     data = load(path)
     projects = data.setdefault("projects", {})
-    key = str(worktree)
-    entry = projects.get(key)
-    already = bool(entry) and all(entry.get(k) == v for k, v in TRUST_FLAGS.items())
-    enabled = list((entry or {}).get("enabledMcpjsonServers") or [])
-    missing_mcp = [m for m in mcpjson if m not in enabled]
-    if already and not missing_mcp and not force:
-        return False, f"already trusted: {key}"
+    key1 = str(worktree)
+    key2 = str(worktree).replace("\\", "/")
+    keys_to_write = {key1, key2}
+    
+    # Compute the union of all keys' current enabledMcpjsonServers for the return message
+    all_enabled_old = set()
+    for k in keys_to_write:
+        entry_k = projects.get(k, {})
+        all_enabled_old |= set(entry_k.get("enabledMcpjsonServers", []))
+    
+    # F1: missing_mcp: a server is missing if any key in keys_to_write lacks it.
+    missing_mcp = []
+    for m in mcpjson:
+        for k in keys_to_write:
+            entry_k = projects.get(k, {})
+            if m not in entry_k.get("enabledMcpjsonServers", []):
+                missing_mcp.append(m)
+                break   # break inner loop, move to next m
+    
+    # F1: already_trusted: every key must have trust flags and every mcpjson server.
+    already_trusted = True
+    for k in keys_to_write:
+        entry_k = projects.get(k)
+        if not entry_k:
+            already_trusted = False
+            break
+        # Check trust flags
+        if not all(entry_k.get(trust_flag_key) == trust_flag_value for trust_flag_key, trust_flag_value in TRUST_FLAGS.items()):
+            already_trusted = False
+            break
+        # Check that the key has every mcpjson server
+        current_servers = entry_k.get("enabledMcpjsonServers", [])
+        if not all(m in current_servers for m in mcpjson):
+            already_trusted = False
+            break
+    
+    if already_trusted and not missing_mcp and not force:
+        return False, f"already trusted: {key1}"
     if check:
-        return False, f"WOULD trust: {key}" + (f" (+mcpjson {missing_mcp})" if missing_mcp else "")
-    merged = template(data, repo)
-    merged.update(entry or {})
-    merged.update(TRUST_FLAGS)
-    if mcpjson:
-        merged["enabledMcpjsonServers"] = sorted(set(enabled) | set(mcpjson))
-    projects[key] = merged
+        return False, f"WOULD trust: {key1}" + (f" (+mcpjson {missing_mcp})" if missing_mcp else "")
+    
+    for k in keys_to_write:
+        merged = template(data, repo)
+        merged.update(projects.get(k, {}))
+        merged.update(TRUST_FLAGS)
+        # F2: only set enabledMcpjsonServers if mcpjson is non-empty (to match old behavior)
+        if mcpjson:
+            current = projects.get(k, {}).get("enabledMcpjsonServers", [])
+            merged["enabledMcpjsonServers"] = sorted(set(current) | set(mcpjson))
+        projects[k] = merged
     save(path, data)
-    return True, f"trusted: {key}" + (f" (mcpjson {sorted(set(enabled) | set(mcpjson))})" if mcpjson else "")
+    
+    all_enabled_after = all_enabled_old | set(mcpjson)
+    return True, f"trusted: {key1}" + (f" (mcpjson {sorted(all_enabled_after)})" if mcpjson else "")
 
 
 def copy_local_settings(worktree: Path, repo: Path, *, mcpjson: list[str],
