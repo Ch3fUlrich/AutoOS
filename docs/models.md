@@ -69,7 +69,7 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `l2-worker-paid` | mid | 131,072 | (none) |
 | `l3-driver` | cheap | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` → ovhcloud `Qwen3.5-397B-A17B` |
 | `l3-driver-1m` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` |
-| `l3-driver-256k` | cheap | 256k | xiaomi_mimo `mimo-v2.6-flash` → openrouter `nvidia/nemotron-3-super-120b-a12b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
+| `l3-driver-256k` | cheap | 256k | xiaomi_mimo `mimo-v2.6-flash` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `poolside/laguna-s-2.1:free` |
 | `l3-driver-clean` | cheap | 128k | xiaomi_mimo `mimo-v2.6-pro` → deepseek `deepseek-flash` |
 | `l3-driver-free-only` | free | 128k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` → cohere `command-a-03-2025` → openrouter `poolside/laguna-s-2.1:free` → cohere `command-a-plus-05-2026` → openrouter `nvidia/nemotron-3-ultra-550b-a55b:free` → bazaarlink `deepseek/deepseek-v4-flash-0731free:free` → openrouter `cohere/north-mini-code:free` |
 | `l3-driver-paid` | cheap | 131,072 | (none) |

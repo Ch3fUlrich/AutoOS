@@ -95,9 +95,9 @@
     }
   },
   "host_admission": {
-    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape.",
+    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape. D-1349 2026-10-15: floor lowered to 1 GB MemAvailable on coding.vm.",
     "max_live_workers": 6,
-    "mem_available_floor_mb": 4608
+    "mem_available_floor_mb": 1024
   },
   "models": {
     "MiniMax-M3": {
@@ -5362,7 +5362,6 @@
       "strategy": "priority",
       "legs": [
         "xiaomi_mimo/mimo-v2.6-flash",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/poolside/laguna-s-2.1:free"
       ],

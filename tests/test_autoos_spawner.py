@@ -596,9 +596,22 @@ class InProcessEquivalenceTests(unittest.TestCase):
         text = re.sub(r"\d{8}-\d{6}", "DATETIME", text)
         return text
 
+    @unittest.skipIf(os.name == "nt", "sh stubs; tests/run-tests.sh runs these on Linux")
     def test_in_process_matches_subprocess(self):
+        # `list` live-probes any installed signin-probe CLI (agy: 15 s timeout), so
+        # the two runs can disagree on a loaded host (measured: yes vs broken);
+        # CI has no such CLI. Shadow just those binaries with an exit-0 stub: the
+        # probe is then deterministic and the rest of PATH is untouched.
+        stubs = tempfile.mkdtemp(prefix="signin-stub-")
+        self.addCleanup(shutil.rmtree, stubs, True)
+        for c in clients.CLIENTS.values():
+            if c.signin_probe:
+                stub = os.path.join(stubs, c.binary)
+                Path(stub).write_text("#!/bin/sh\nexit 0\n")
+                os.chmod(stub, 0o755)
         for argv, extra in self.CASES:
             env = clean_env(**extra)
+            env["PATH"] = stubs + os.pathsep + env.get("PATH", "")
             fast = run_agent(*argv, env=env)
             with mock.patch.dict(os.environ, {"AUTOOS_SPAWNER_ISOLATED": "1"}):
                 slow = run_agent(*argv, env=env)
@@ -25916,10 +25929,10 @@ class HostAdmissionTests(unittest.TestCase):
     def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}
         self.assertEqual(shipped.get("max_live_workers"), 6)
-        self.assertEqual(shipped.get("mem_available_floor_mb"), 4608)
+        self.assertEqual(shipped.get("mem_available_floor_mb"), 1024)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
-        self.assertEqual(self.agent.host_admission_config(None), (6, 4608))
+        self.assertEqual(self.agent.host_admission_config(None), (6, 1024))
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
@@ -26029,7 +26042,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(started, [], "the client never started")
         self.assertIn("queue or run on workstation", err)
         self.assertIn("cap 6", err)
-        self.assertIn("floor 4608 MB", err)
+        self.assertIn("floor 1024 MB", err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
     def test_cmd_run_refuses_on_memory_alone_for_admission(self):

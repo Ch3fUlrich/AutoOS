@@ -192,10 +192,6 @@ model_list:
   # AUTOOS-MANAGED-START l3-driver-256k
   - model_name: l3-driver-256k
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver-256k
-    litellm_params:
       model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free
       api_key: os.environ/BAZAARLINK_API_KEY
   - model_name: l3-driver-256k
