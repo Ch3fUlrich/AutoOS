@@ -211,6 +211,17 @@ class TestSlot(unittest.TestCase):
         done = self._done('j1')
         self.assertIn('risk', self._reasons(done))
 
+    def test_default_risk_is_fail_safe_not_r0(self):
+        # Deps() with no risk_of must not call every job R0: an unknown job is R2.
+        deps = pool.Deps(spawn=lambda *a: 0)
+        self.assertEqual(deps.risk_of({'id': 'j', 'card': {'client': 'codex'}}), 'R2')
+        self.assertEqual(deps.risk_of({}), 'R2')
+        self.assertEqual(deps.risk_of({'card': None}), 'R2')
+
+    def test_tool_less_api_job_has_no_diff_so_is_r0(self):
+        self.assertEqual(pool.default_risk_of({'card': {'client': 'api'}}), 'R0')
+        self.assertEqual(pool.default_risk_of({'card': {'client': 'API'}}), 'R2')
+
     def test_two_jobs_oldest_first(self):
         self._q('a')
         self._q('b')

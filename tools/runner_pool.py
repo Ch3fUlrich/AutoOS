@@ -207,9 +207,23 @@ import subprocess
 import sys
 import time
 
+def default_risk_of(job):
+    """Fail-safe risk class for a pool job: R0 only when the job cannot have a diff.
+
+    The `api` client is tool-less (prompt file in, review.txt out), so there is no
+    worktree to classify. Every other or unreadable job is R2 and gets deep
+    sampling -- an unclassified job is never reported as R0.
+    """
+    try:
+        if job['card']['client'] == 'api':
+            return 'R0'
+    except (KeyError, TypeError):
+        pass
+    return 'R2'
+
 class Deps:
     def __init__(self, *, spawn, admission_refusal=lambda: None, mem_mb=lambda: 99999,
-                 floor_mb=6144, breaker_open=lambda: False, risk_of=lambda job: 'R0',
+                 floor_mb=6144, breaker_open=lambda: False, risk_of=default_risk_of,
                  diff_info=lambda job: (False, False), sample_every=4,
                  now=time.time, pid=os.getpid(), filetime=0,
                  repo_root=Path(__file__).resolve().parent.parent, python=sys.executable,
