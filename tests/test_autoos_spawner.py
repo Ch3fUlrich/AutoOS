@@ -597,8 +597,15 @@ class InProcessEquivalenceTests(unittest.TestCase):
         return text
 
     def test_in_process_matches_subprocess(self):
+        # `list` live-probes any installed signin-probe CLI (agy: 15 s timeout), so
+        # the two runs can disagree on a loaded host (measured: yes vs broken);
+        # CI has no such CLI. Take them off PATH - this test compares the paths.
+        probed = [c.binary for c in clients.CLIENTS.values() if c.signin_probe]
         for argv, extra in self.CASES:
             env = clean_env(**extra)
+            env["PATH"] = os.pathsep.join(
+                d for d in env.get("PATH", "").split(os.pathsep)
+                if not any(os.path.exists(os.path.join(d, b)) for b in probed))
             fast = run_agent(*argv, env=env)
             with mock.patch.dict(os.environ, {"AUTOOS_SPAWNER_ISOLATED": "1"}):
                 slow = run_agent(*argv, env=env)
