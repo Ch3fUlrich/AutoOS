@@ -20,3 +20,11 @@ Brief: /home/s/code/routing-worktrees/fixes-L1/docs/plan/briefs/fixes-L2-runnerp
 
 ## Tool-less writer recipe (D-1317, works)
 $JOBTMP = /home/s/.claude/jobs/406179e9/tmp (may be gone): rc.sh NAME MODEL MAXTOK runs `autoos_gateway_key.py exec --no-notice /home/s/code/AutoOS/configuration/api-keys.yml -- review-call.py --model M --prompt-file p/NAME.md --out-dir p/NAME-out`; ext.py extracts `=== FILE: path ===` blocks. Models: `deepseek-v4.1-flash` (best, ~1-2 min), `ovh/gpt-oss-120b` (fast, sloppy tests), `qoder/glm-5.2` (timed out on 8k). NEVER bzl/deepseek/deepseek-v4-flash-0731free:free (hangs; fixes-L1 confirmed). Tests first, run failing, then impl; weak-test lesson: demand exact signatures + mutation-check (e.g. sed out strip_env's pop).
+
+## Follow-up item for workst-L1-autoos (CUT from this lane by fixes-L1, D-1297 freeze; gen4 2026-10-15)
+Not built, unexecutable off Windows:
+1. Spawner `host: workstation` card dispatch: submit over the ssh forced command (tools/runner_pool_gate.py) + read pool `done/` for `ps`/`result`.
+2. nt Job Object path: proc.create_job_nt/spawn_in_job exist (ctypes argtypes fixed, UNEXECUTED); popen_spawn is plain Popen on all OS. Wire it, then run on Windows.
+3. Live scoped spawn (R-orch-19), Scheduled Tasks AutoOS-Pool-<n> with unit_breaker wrap, pool-slot/pool-job accounts, authorized_keys line + evidence Windows OpenSSH honours command=, >3-parallel measurement.
+4. Real risk recompute from git diff base...HEAD is moot for tool-less jobs; Deps.risk_of now defaults fail-safe R2 (R0 only for client api, 57937b11b).
+Gen4 done: spawner reds fixed 7f0347db8; D-1349 floor 1024 MB edbcfe449; seats: see packet.
