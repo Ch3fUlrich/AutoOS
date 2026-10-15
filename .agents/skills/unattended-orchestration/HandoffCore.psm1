@@ -899,6 +899,43 @@ function Test-HandoffDoneQuiet {
     return (($NowEpoch - $LastCommitEpoch) -ge ($QuietMinutes * 60))
 }
 
+function Resolve-HandoffDoneNotePath {
+    <#  Where is a session's DONE note on disk?
+
+        Measured 2026-10-15 (gen, runner 4314a00): doneNote = "{{planDir}}\DONE-{{session}}.md"
+        with an absolute planDir expanded to "C:\fleet\gen\genw1\DONE-A3A4.md", and the
+        runner's `Join-Path $wt $doneNote` turned it into "<wt>\C:\fleet\...". The note
+        was never found: nine "stopped without its DONE note", eight resumes. A fully
+        qualified note is used as-is; a bare root-level name ("/session-A-DONE.md", what
+        the default template gives with an empty planDir) stays relative to $Base.  #>
+    param([string]$Base, [string]$DoneNote)
+
+    # If $DoneNote is empty or whitespace, return empty string.
+    if ([string]::IsNullOrWhiteSpace($DoneNote)) {
+        return ""
+    }
+
+    # Check if $DoneNote is an absolute path and not a bare root-level file name.
+    $isAbs = [System.IO.Path]::IsPathFullyQualified($DoneNote)
+    if ($isAbs) {
+        # Check for bare root-level: starts with '/' or '\' and no further '/' or '\' after the first char.
+        $firstChar = $DoneNote.Substring(0,1)
+        if ($firstChar -in @('/', '\')) {
+            # Check the rest of the string for any slash or backslash.
+            $rest = $DoneNote.Substring(1)
+            if ($rest -notmatch '[/\\]') {
+                # It's a bare root-level file name -> treat as relative to base.
+                return Join-Path $Base $DoneNote
+            }
+        }
+        # Otherwise, it's an absolute path that is not bare root-level -> return as is.
+        return $DoneNote
+    }
+
+    # If not absolute, join with base.
+    return Join-Path $Base $DoneNote
+}
+
 function Test-HandoffStalled {
     <#  Is this child HUNG, as opposed to finished or quietly working?
 
@@ -1524,7 +1561,7 @@ Build-HandoffGuardCommand, Read-HandoffConfig, Build-HandoffSubagentPolicy, Buil
 Get-HandoffSessionVars, Build-HandoffBrief, Export-HandoffBriefs,
 Get-HandoffLinkType, Resolve-HandoffRepoRoot, Build-HandoffLaunchArgs, Resolve-HandoffSessionLauncher,
 New-HandoffConfigScaffold,
-Get-HandoffDependencyState, Build-HandoffTraps, Test-HandoffDoneQuiet,
+Get-HandoffDependencyState, Build-HandoffTraps, Test-HandoffDoneQuiet, Resolve-HandoffDoneNotePath,
 Test-HandoffStalled, Test-HandoffStallBudgetExceeded,
 Test-HandoffResourceConflict, Get-HandoffRefusalCount, Build-HandoffMachineBudget, Build-HandoffControllerBrief,
 Get-HandoffText, Test-HandoffMergedElsewhere, Build-HandoffResumePrompt, Get-HandoffWorktreeAssets,
