@@ -684,7 +684,7 @@ function Run-Session([string]$s, [bool]$isFollowUpRun) {
     # inside the session loop. The first version stopped the lane here regardless,
     # so an operator who had fixed a red branch by hand and relaunched the lane got
     # "stopped by the operator" instead of a guard run (measured 2026-09-05).
-    $doneEarly = [bool]($vars["doneNote"] -and (Test-Path (Join-Path $wt $vars["doneNote"])))
+    $doneEarly = [bool]($vars["doneNote"] -and (Test-Path (Resolve-HandoffDoneNotePath $wt $vars["doneNote"])))
     if ((Test-Path (Join-Path $queueDir "stop-$key")) -and -not $doneEarly) {
         Log "$key stopped by the operator's stop marker before starting"
         Update-State $key @{ status = "stopped-by-operator" }; return $false
@@ -760,7 +760,7 @@ function Run-Session([string]$s, [bool]$isFollowUpRun) {
         return $green
     }
 
-    $doneNote = Join-Path $wt $vars["doneNote"]
+    $doneNote = Resolve-HandoffDoneNotePath $wt $vars["doneNote"]
     $sessionId = $null
     if (-not $Fresh -and $state.ContainsKey($key) -and $state[$key]["session_id"]) { $sessionId = $state[$key]["session_id"] }
     $continues = 0; $retries = 0
@@ -1166,7 +1166,7 @@ if ($Status) {
             $note = $null
             if ($rel) {
                 foreach ($base in @($e["worktree"], $vars["worktree"], $repo)) {
-                    if ($base -and (Test-Path (Join-Path $base $rel))) { $note = Join-Path $base $rel; break }
+                    if ($base) { $cand = Resolve-HandoffDoneNotePath $base $rel; if (Test-Path $cand) { $note = $cand; break } }
                 }
             }
             if ($env:HANDOFF_DEBUG) { Write-Host "status: $k note=$note (rel=$rel)" }
