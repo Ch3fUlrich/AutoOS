@@ -75,3 +75,12 @@ Source: `apply.sh --drift` 2026-10-15, set difference per combo (order-only diff
 Missing live (7): `l2-worker-1m`, `l3-driver-1m`, `l3-driver-256k`, `mimo-v2.6-flash`, `mimo-v2.6-pro` -> keep, safe apply creates them; `gemini-3.8-flash`, `vertex-gemini-3.8-flash` -> keep, blocked on vertex (group D).
 Live-only (7): `deepseek-v4.1-flash`, `spark-1.3-contributor`, `groq-qwen3.8-27b`, `opus-5-5`, `ovh-gpt-oss-120b` -> drop (registry "omitted", no servable leg; apply prunes);
 `l1-orchestrator-paid` -> drop (same family as the retired `*-paid` ids; add to `retired`); `ha-assist` -> not AutoOS's: add an `unmanaged` list the drift check ignores and apply never touches.
+
+## Update 2026-10-15 (gen-3, after fixes-L1 gen-11 rulings)
+
+- `--overwrite-live` is a boolean flag (not `<ref>`); the exit-4 guard runs before any mutating step.
+- D-1349: deepseek-flash stays a leg of the six `*-clean` routes (registry `CLEAN_LEG_EXEMPTIONS`, cites D-1349 + D-1201); deny-deepseek-pro stands. `deepseek-direct-flash` (opencode.jsonc hand entry) is judged via route `deepseek-v4.1-flash`, never exempt.
+- Order: live wins, MiMo leads every non-clean chain that carries it (D-1351). combo-contract (b) has a named exemption: a subscription HEAD leg only (`tier_order_findings`).
+- Not folded: groq (pruned live, D-1344; GROQRETIRED pin), nemotron-ultra into l1/l2 chains (cache gate (f)). Vertex is out of every managed chain (forbidden fleet-wide, absent live); only the pinned `gemini-3.8-flash` / `vertex-gemini-3.8-flash` routes keep it.
+- `l3-driver-256k` is not live: dropped north-mini-code and reordered (MiMo, nemotron-super, bzl, laguna) so (g) diversity passes.
+- LiteLLM: the six clean twins get groups holding only the deepseek leg; no new LiteLLM provider.
