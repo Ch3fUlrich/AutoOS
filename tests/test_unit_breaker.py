@@ -204,5 +204,125 @@ class TestCli(Base):
         self.assertEqual(log.read_text().strip(), "--user disable --now c.service")
 
 
+class TestNtBranch(Base):
+    """Windows branch tests (run on Linux by forcing AUTOOS_OS_NAME=nt)."""
+    def setUp(self):
+        super().setUp()
+        self.env["AUTOOS_OS_NAME"] = "nt"
+
+    def wrap(self, unit, cmd, threshold=5, **kw):
+        return self.run_breaker(["--unit", unit, "--threshold", str(threshold), "--"] + cmd, **kw)
+
+    # --- state directory on nt ---
+    def test_state_dir_uses_localappdata_when_xdg_unset(self):
+        env = {"AUTOOS_OS_NAME": "nt", "LOCALAPPDATA": str(self.root / "localappdata")}
+        d = ub.state_dir(env)
+        self.assertEqual(d, Path(self.root / "localappdata") / "autoos" / "breaker")
+
+    def test_state_dir_falls_back_to_appdata_local_when_localappdata_unset(self):
+        env = {"AUTOOS_OS_NAME": "nt"}
+        d = ub.state_dir(env)
+        self.assertEqual(d, Path.home() / "AppData" / "Local" / "autoos" / "breaker")
+
+    def test_state_dir_prefers_xdg_when_set(self):
+        env = {"AUTOOS_OS_NAME": "nt", "XDG_STATE_HOME": str(self.root / "xdg")}
+        d = ub.state_dir(env)
+        self.assertEqual(d, Path(self.root / "xdg") / "autoos" / "breaker")
+
+    # --- trip() on nt uses schtasks, never systemctl ---
+    def test_trip_on_nt_runs_schtasks_end_then_change_disable(self):
+        for _ in range(4):
+            self.wrap("w.service", failing(3, "boom"))
+        self.assertEqual(self.calls, [])  # not yet
+        self.assertEqual(self.wrap("w.service", failing(3, "boom")), 3)
+        self.assertEqual(self.calls, [
+            ["schtasks", "/End", "/TN", "w"],
+            ["schtasks", "/Change", "/TN", "w", "/DISABLE"],
+        ])
+
+    def test_trip_on_nt_never_calls_systemctl(self):
+        for _ in range(5):
+            self.wrap("w.service", failing(3, "boom"))
+        for argv in self.calls:
+            self.assertNotIn("systemctl", argv)
+
+    def test_task_name_strips_trailing_service(self):
+        # unit is "w.service" -> task name "w"
+        self.wrap("w.service", failing(3, "boom"))
+        self.assertEqual(self.calls, [])  # not yet tripped (threshold 5)
+
+    def test_trip_on_nt_still_writes_marker_and_one_alert_when_schtasks_fails(self):
+        def failing_runner(argv):
+            self.calls.append(list(argv))
+            raise FileNotFoundError("schtasks")
+        for _ in range(4):
+            self.wrap("w.service", failing(3, "boom"), runner=failing_runner)
+        self.assertEqual(self.calls, [])  # not yet
+        rc = self.wrap("w.service", failing(3, "boom"), runner=failing_runner)
+        self.assertNotEqual(rc, 0)
+        self.assertTrue((self.state / "autoos" / "breaker" / "w.service.tripped").exists())
+        self.assertEqual(len(self.alerts()), 1)
+        # it tried the two schtasks commands
+        self.assertEqual(self.calls, [
+            ["schtasks", "/End", "/TN", "w"],
+            ["schtasks", "/Change", "/TN", "w", "/DISABLE"],
+        ])
+
+    # --- failure class table ---
+    def test_class_startup(self):
+        for rc in (2, 3):
+            self.assertEqual(ub.failure_class(rc, "anything"), "startup")
+
+    def test_class_io(self):
+        for line in ("OSError: [Errno 2] No such file",
+                     "WinError 5 Access is denied",
+                     "PermissionError: [Errno 13] Permission denied"):
+            self.assertEqual(ub.failure_class(1, line), "io")
+
+    def test_class_memory(self):
+        self.assertEqual(ub.failure_class(1, "MemoryError"), "memory")
+        self.assertEqual(ub.failure_class(1, "mem floor unreadable"), "memory")
+
+    def test_class_crash(self):
+        self.assertEqual(ub.failure_class(1, "Traceback (most recent call last):"), "crash")
+        self.assertEqual(ub.failure_class(1, "Unhandled exception:"), "crash")
+        self.assertEqual(ub.failure_class(-11, ""), "crash")   # rc < 0
+        self.assertEqual(ub.failure_class(139, ""), "crash")   # rc >= 128 and not 130/143
+
+    def test_class_other(self):
+        self.assertEqual(ub.failure_class(1, "some random error"), "other")
+
+    def test_stop_codes_neutral(self):
+        # 130/143 are stop codes, not failures -> class is "stop" (or None) and not counted
+        for rc in (130, 143):
+            cls = ub.failure_class(rc, "whatever")
+            self.assertNotIn(cls, ("startup", "io", "memory", "crash", "other"))
+
+    # --- 5 consecutive same-class failures trip, no time window ---
+    def test_five_same_class_failures_trip(self):
+        for i in range(4):
+            self.assertEqual(self.wrap("w.service", failing(1, "random err %d" % i)), 1)
+        self.assertEqual(self.calls, [])  # not yet
+        self.assertEqual(self.wrap("w.service", failing(1, "another err")), 1)
+        self.assertEqual(self.calls, [
+            ["schtasks", "/End", "/TN", "w"],
+            ["schtasks", "/Change", "/TN", "w", "/DISABLE"],
+        ])
+
+    def test_success_resets_on_nt(self):
+        for _ in range(4):
+            self.wrap("w.service", failing(1, "same class"))
+        self.wrap("w.service", [PY, "-c", "pass"])  # success resets
+        self.wrap("w.service", failing(1, "same class"))
+        self.assertEqual(self.calls, [])  # no trip after reset
+
+    def test_different_class_resets_on_nt(self):
+        for _ in range(4):
+            self.wrap("w.service", failing(2, "startup failure"))  # class startup
+        self.wrap("w.service", failing(1, "random"))  # different class -> reset
+        self.wrap("w.service", failing(1, "random"))
+        self.assertEqual(self.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,17 +6,28 @@ RestartSec=20). Wrap the command:
 
     unit_breaker.py --unit oc-l0-watch.service [--threshold 5] -- <cmd...>
 
-It runs <cmd>, passes its exit code through, and keeps a failure signature per unit: the exit code plus the sha1
-of the last non-empty stderr line (digits -> N, so a pid or a timestamp does not make two failures differ).
-After THRESHOLD identical consecutive failures it runs `systemctl --user disable --now <unit>`, appends ONE
-alert line to $AUTOOS_ALERT_INBOX (stderr when unset) and refuses to run <cmd> until reset. A success resets the
-counter. A stop by signal (exit 130/143) is neither a failure nor a success. On a host without systemctl a
-`<unit>.tripped` marker is written beside the state and the wrapper exits non-zero.
+It runs <cmd>, passes its exit code through, and keeps a failure signature per unit: the failure class.
+After THRESHOLD identical consecutive failures (same class) it runs `schtasks /End /TN <task>` then
+`schtasks /Change /TN <task> /DISABLE` on Windows (task name = the --unit value with a trailing '.service'
+removed) or `systemctl --user disable --now <unit>` on Linux, appends ONE alert line to $AUTOOS_ALERT_INBOX
+(stderr when unset) and refuses to run <cmd> until reset. A success resets the counter. A stop by signal
+(exit 130/143) is neither a failure nor a success. On a host without the appropriate service manager
+(systemctl on Linux, schtasks on Windows) a `<unit>.tripped` marker is written beside the state and the
+wrapper exits non-zero.
+
+Failure classes:
+  startup: rc 2 or 3
+  io: stderr last line mentions OSError/WinError/PermissionError
+  memory: MemoryError or 'floor unreadable'
+  crash: traceback / unhandled exception text or rc <0 / rc>=128 other than 130,143
+  other: anything else
+
+State: $XDG_STATE_HOME/autoos/breaker/<unit>.json (default ~/.local/state on Linux,
+       %LOCALAPPDATA%\autoos\breaker on Windows when XDG_STATE_HOME is unset, fallback to ~/AppData/Local).
+       Override OS with AUTOOS_OS_NAME environment variable.
 
     unit_breaker.py status          one line per unit: <unit> state=ok|failing|tripped count=<n> sig=<short>
     unit_breaker.py reset <unit>    clear a trip (state and marker)
-
-State: $XDG_STATE_HOME/autoos/breaker/<unit>.json (default ~/.local/state), written atomically.
 """
 import datetime
 import hashlib
@@ -35,7 +46,11 @@ ALERT_TAIL_CHARS = 200
 
 
 def state_dir(env):
-    base = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
+    os_name = env.get("AUTOOS_OS_NAME", os.name)
+    if os_name == "nt":
+        base = env.get("XDG_STATE_HOME") or env.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), "AppData", "Local")
+    else:
+        base = env.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
     return Path(base) / "autoos" / "breaker"
 
 
@@ -43,6 +58,23 @@ def normalise(line):
     """Digits -> N, also hex ids, uuids and 0x addresses, so a varying crash line still counts as one failure."""
     line = re.sub(r"0x[0-9a-fA-F]+|\b[0-9a-fA-F]{8,}\b", "H", line.strip())
     return re.sub(r"\d+", "N", line)
+
+
+def failure_class(code, last_line):
+    if code in (130, 143):
+        return None  # neutral
+    line_norm = normalise(last_line)
+    if code in (2, 3):
+        return "startup"
+    if any(err in line_norm for err in ("OSError", "WinError", "PermissionError")):
+        return "io"
+    if "MemoryError" in line_norm or "floor unreadable" in line_norm:
+        return "memory"
+    if code < 0 or (code >= 128 and code not in (130, 143)):
+        return "crash"
+    if "Traceback" in line_norm or "Unhandled exception:" in line_norm:
+        return "crash"
+    return "other"
 
 
 def signature(code, last_line):
@@ -135,9 +167,27 @@ def trip(unit, data, env, runner, directory):
     _write(directory / (unit + ".json"), data)
     old = signal.signal(signal.SIGTERM, signal.SIG_IGN)  # survive the stop long enough to finish
     try:
-        disabled = runner(["systemctl", "--user", "disable", "--now", unit]) == 0
-    except (OSError, subprocess.SubprocessError):
-        disabled = False
+        os_name = env.get("AUTOOS_OS_NAME", os.name)
+        if os_name == "nt":
+            # Remove the trailing '.service' if present
+            task_name = unit
+            if task_name.endswith(".service"):
+                task_name = task_name[:-len(".service")]
+            # Run schtasks /End /TN <task_name>
+            try:
+                runner(["schtasks", "/End", "/TN", task_name])
+            except (OSError, subprocess.SubprocessError):
+                pass
+            # Run schtasks /Change /TN <task_name> /DISABLE
+            try:
+                disabled = runner(["schtasks", "/Change", "/TN", task_name, "/DISABLE"]) == 0
+            except (OSError, subprocess.SubprocessError):
+                disabled = False
+        else:
+            try:
+                disabled = runner(["systemctl", "--user", "disable", "--now", unit]) == 0
+            except (OSError, subprocess.SubprocessError):
+                disabled = False
     finally:
         signal.signal(signal.SIGTERM, old)
     if not disabled:
@@ -157,7 +207,11 @@ def wrap(unit, threshold, cmd, env, runner):
     if code == 0:
         _write(path, {"count": 0, "updated": _utc()})
         return 0
-    sig = signature(code, last)
+    os_name = env.get("AUTOOS_OS_NAME", os.name)
+    if os_name == "nt":
+        sig = failure_class(code, last)
+    else:
+        sig = signature(code, last)
     count = data.get("count", 0) + 1 if data.get("sig") == sig else 1
     data = {"sig": sig, "count": count, "last": last[:ALERT_TAIL_CHARS], "updated": _utc()}
     if count >= threshold:

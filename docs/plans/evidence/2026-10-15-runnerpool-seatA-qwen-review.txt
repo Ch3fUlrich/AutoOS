@@ -1,0 +1,17 @@
+- **Severity:** High  
+  **Location:** `tools/autoos-agent.py`, `host_admission_config` and `host_admission_kind_config`  
+  **Scenario:** An attacker with write access to `catalog/ai-registry.json` can set `host_admission.max_live_workers` or `host_admission.kinds.toolless.max_live_workers` to an arbitrarily high integer (e.g., 9999). The validation logic only checks `isinstance(value, int) and value >= 1`.  
+  **Suggested Fix:** Enforce a hard-coded upper bound in Python (e.g., `min(config_value, HARD_MAX_LIMIT)`) rather than trusting the registry value blindly.
+
+- **Severity:** High  
+  **Location:** `catalog/ai-registry.json` (Diff 2)  
+  **Scenario:** The memory floor `mem_available_floor_mb` is lowered to 1024 MB for both top-level and `toolless` kinds. On a ~4 GB host running 4 `toolless` workers, the reserved memory (4 * 1024 MB = 4096 MB) leaves no room for the OS, guaranteeing OOM kills.  
+  **Suggested Fix:** Revert `mem_available_floor_mb` to a safe value (e.g., 2048 MB) or reduce `max_live_workers` to ensure `workers * floor < total_ram - os_overhead`.
+
+- **Severity:** Medium  
+  **Location:** `tools/autoos-agent.py`, `_nt_mem_available_mb` and `host_admission_refusal`  
+  **Scenario:** On Windows (`os.name == "nt"`), if `GlobalMemoryStatusEx` fails (returns 0 or raises), `_nt_mem_available_mb` returns `None`. `host_admission_refusal` treats `None` as a failure condition when a floor is configured, refusing all admissions indefinitely until the API call succeeds.  
+  **Suggested Fix:** Cache the last known good memory value or implement a retry/backoff mechanism before failing closed to prevent transient API failures from DoSing the pool.
+
+VERDICT: fail-with-findings
+TEST-GAMING: yes - "    if os.environ.get(ADMISSION_OFF_ENV) == "1":"

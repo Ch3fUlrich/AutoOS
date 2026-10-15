@@ -5024,6 +5024,39 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'runner pool unit tests: core, gate, proc, slot loop, CLI' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_cli.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_cli.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core_b.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core_b.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core_c.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core_c.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_gate.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_gate.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_proc.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_proc.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_slot.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_slot.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_strict.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_strict.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_seatc.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_seatc.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_e2e.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_e2e.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_api_client.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_api_client.py failed: $out"
+    }
+    finally { $ErrorActionPreference = $prev }
+}
+
 Test-Case 'autoos_redact span: PEM block masking keeps the report and its VERDICT (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
