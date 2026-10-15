@@ -63,7 +63,10 @@ for path in ("lib/linux/install.sh", "lib/windows/AutoOS.Install.psm1"):
     calls = set()
     for call in re.findall(r"_profile_for\(([^)]*)\)", src):
         calls.update(re.findall(r"['\"]([^'\"]+)['\"]", call))
-    missing = {m["id"] for m in models if m["id"] not in calls}
+    # PREFIX-STRIP 2026-10-14: the direct openrouter-* profiles are retired
+    # (registry OPENHANDS_RETIRED_IDS); the gateway tiers replace them.
+    missing = {m["id"] for m in models
+               if m["id"] not in calls and m["id"] not in registry.OPENHANDS_RETIRED_IDS}
     if missing:
         print(f"{path}: unprojected models: {sorted(missing)}"); sys.exit(1)
 PY

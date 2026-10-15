@@ -206,7 +206,7 @@ class WriteTests(SandboxCase):
         self.assertEqual(oc["providers"]["litellm"]["models"]["l3-driver"]["limit"]["context"], 65536)
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
-        self.assertEqual(by_id["omniroute-l2-worker-clean"]["max_output_tokens"], 40000)
+        self.assertEqual(by_id["l2-worker-clean"]["max_output_tokens"], 40000)
         self.assertEqual(by_id["litellm-l3-driver"]["max_input_tokens"], 65536)
         toml = self.box.text("openhands_toml")
         section = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
@@ -581,7 +581,7 @@ class RegistrySourcedTests(unittest.TestCase):
 
         spec = json.loads(self.box.text("tier_profiles"))
         by_id = {t["id"]: t for t in spec["tiers"]}
-        self.assertEqual(by_id["omniroute-l3-driver"]["max_input_tokens"], 65536)
+        self.assertEqual(by_id["l3-driver"]["max_input_tokens"], 65536)
 
         toml = self.box.text("openhands_toml")
         section = toml.split("[llm.l3-driver]", 1)[1].split("\n[", 1)[0]
