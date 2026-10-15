@@ -1410,11 +1410,13 @@ m = oc["providers"]["omniroute"]["models"]
 ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
 expected = {x["id"]: x["context"] for x in ide
             if "opencode" in ((x.get("surfaces") or {}).get("omniroute") or [])}
+# A mimo route sends its provider leg as modelID (IDE_PROVIDER_MODEL_IDS), every other one its own id.
+wire = {x["id"]: x.get("modelID", x["id"]) for x in ide}
 combos = json.load(io.open("configuration/omniroute/combos.json", encoding="utf-8"))
 problems = []
 for name in sorted(expected):
     ctx = expected[name]
-    if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
+    if name not in m or m[name]["modelID"] != wire[name] or m[name]["limit"]["context"] != ctx:
         problems.append(name)
 if not expected:
     problems.append("ide-models-empty")
