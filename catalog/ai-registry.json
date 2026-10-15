@@ -67,7 +67,7 @@
       "supports_effort": true
     },
     "qoder": {
-      "$comment": "Own-account auth (qodercli login) but tools/autoos_clients.py defines no signin_probe for it (only agy has one) - a real gap, not fixed by this migration. skills_dir unmeasured - see clients.qwen's comment.",
+      "$comment": "Own-account auth (qodercli login); signin_check is the command tools/autoos_clients.py probes with (measured 2026-10-11, qodercli 1.1.63, empty HOME: `qodercli --list-models` exits 1 in 2.6 s naming the login, while `qodercli status` exits 0 even signed out and prints account details when in - so status is not a probe). skills_dir unmeasured - see clients.qwen's comment.",
       "binary": "qodercli",
       "capabilities": {
         "$comment": "QOFIX 2026-09-27 (L0, operator-approved): headless shell + write work with --permission-mode bypass_permissions (measured: file written + ls run in a scratch repo, Qwen3.8-Flash, 25 s). The earlier false/false came from the spawner passing the non-existent mode accept_edits. The spawner forces an --isolate sandbox for every non-read qoder run; qodercli has no path fence of its own, so the containment prompt and the post-run leak check (tracked + untracked parent changes, refs) are the controls - writes outside the parent checkout (e.g. $HOME) are not detected.",
@@ -76,7 +76,7 @@
       },
       "gateway_mode": "none",
       "id": "qoder",
-      "signin_check": null,
+      "signin_check": "qodercli --list-models",
       "skills_dir": null,
       "supports_effort": false
     },
@@ -95,7 +95,7 @@
     }
   },
   "host_admission": {
-    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' \u2014 queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape.",
+    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape.",
     "max_live_workers": 6,
     "mem_available_floor_mb": 4608
   },
@@ -290,7 +290,7 @@
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "command-a-plus-05-2026": {
-      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the probe-d657 leg cohere/command-a-plus-05-2026, which both gateways answered (ack 200, one get_weather tool call ok, 882/780 ms; cache cell false on both -> prompt_cache 'false'), but which the probe lane skipped because no models row existed for it. context_advertised 131072 / output_max 8192 / context_usable 65536 are the conservative SIBLING DEFAULT taken from models.command-a-03-2025, not a measurement of this id: spec combo-v2 \u00a72 claims 'cohere command-a-plus (436k, trial)' from the single-source AA table, and \u00a77 records why an unflagged figure from that table is not adopted, so the row promises only what a sibling of the same provider's tier already promises. Re-probe GET /v1/models context_length to raise it. Price 0.0 follows command-a-03-2025's 'vendor price not sourced' note - a trial key, not a published free tier, and do not use it for cost math.",
+      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the probe-d657 leg cohere/command-a-plus-05-2026, which both gateways answered (ack 200, one get_weather tool call ok, 882/780 ms; cache cell false on both -> prompt_cache 'false'), but which the probe lane skipped because no models row existed for it. context_advertised 131072 / output_max 8192 / context_usable 65536 are the conservative SIBLING DEFAULT taken from models.command-a-03-2025, not a measurement of this id: spec combo-v2 §2 claims 'cohere command-a-plus (436k, trial)' from the single-source AA table, and §7 records why an unflagged figure from that table is not adopted, so the row promises only what a sibling of the same provider's tier already promises. Re-probe GET /v1/models context_length to raise it. Price 0.0 follows command-a-03-2025's 'vendor price not sourced' note - a trial key, not a published free tier, and do not use it for cost math.",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -350,7 +350,7 @@
       "price_cache_read": 3e-08,
       "price_in": 3e-07,
       "price_out": 1.2e-06,
-      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) \u2014 reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 3e-08 (T1-CREDIT-FIX-10 M4, D-253: cache-read = 10 % of price_in). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number \u2014 not an invented price.",
+      "price_source": "SB-C2 2026-09-28: numbers are the ones this row has carried since DSAMEND (2026-09-28T10:0xZ) — reused from models.deepseek-v4-flash (the retired llm-models.json row, same per-token price: price_in 3e-07, price_out 1.2e-06, price_cache_read 3e-08 (T1-CREDIT-FIX-10 M4, D-253: cache-read = 10 % of price_in). They are the exact prices the DSGUARD spend guard bills this leg with (tools/autoos_usage.py prices_from_registry over the $25 cap at providers.deepseek.monthly_cap_usd, operator 2026-09-28; .agents/skills/unattended-orchestration/deepseek_call.py check_cap), so the gate, the ledger and this row read one number — not an invented price.",
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -655,7 +655,7 @@
       "tool_calls": "unproven"
     },
     "longcat-2.5-preview-free": {
-      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/longcat-2.5-preview-free resolves to a family. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), tool_calls stays 'unproven', and effort_ladder is empty because no ladder was probed. trains_on_prompts is unset, so it inherits providers.zen's false \u2014 and the leg is still never private-safe, because a free tier is not (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule the sibling contributor leg already carries ('OpenCode's free tier can only be used from within OpenCode', combos.json's own comment), not a probe of this model.",
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/longcat-2.5-preview-free resolves to a family. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), tool_calls stays 'unproven', and effort_ladder is empty because no ladder was probed. trains_on_prompts is unset, so it inherits providers.zen's false — and the leg is still never private-safe, because a free tier is not (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule the sibling contributor leg already carries ('OpenCode's free tier can only be used from within OpenCode', combos.json's own comment), not a probe of this model.",
       "client_bound": "opencode",
       "context_advertised": 200000,
       "context_usable": {
@@ -696,8 +696,38 @@
       "tool_calls": "unproven",
       "trains_on_prompts": true
     },
+    "mimo-v2.6-flash": {
+      "$comment": "AO-MIMO-V26 (gateway smoke 2026-10-12; tests/fixtures/mimo-models.json): the L3-class MiMo Token Plan leg. Measured through the gateway: text 200, one tool call 200 (tool_calls proven), image input 200 with image_tokens 9 and an audio input (input_audio wav) 200 with audio_tokens 7 — so capabilities.image_in and audio_in are \"proven\" and the gateway's own custom-model row agrees on the image half (vision true, input_modalities [text, image]). prompt_cache \"true\": 1856 cached_tokens of 1917 on the second identical call (this leg rides l3-driver, where the l2 cache gate of tools/combo-contract.py rule (f) does not reach, so the measurement is recorded, not required). context_advertised/output_max 1048576/131072 are the gateway's reported context_length/max_output_tokens; context_usable stays at the 50% default until a probe measures it. reasoning true from the gateway's capability cell and reasoning_tokens in the usage block; effort_ladder empty because no effort parameter has been answered for this id. audio_out/video_in unproven: the chat path rejects the plan's mimo-v2.5-tts* ids (/v1/audio/speech answers upstream 400) and video input was never tested. Replaces the retired mimo-v2.5 chat id (retires 2026-10-21); the id is a gateway custom model, declared in configuration/omniroute/custom-models.json.",
+      "capabilities": {
+        "audio_in": "proven",
+        "audio_out": "unproven",
+        "image_in": "proven",
+        "text": "proven",
+        "video_in": "unproven"
+      },
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [],
+      "family": "xiaomi",
+      "id": "mimo-v2.6-flash",
+      "output_max": 131072,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "price_source": "Xiaomi MiMo Token Plan: a flat subscription with vendor-side credit metering, no per-token API price is metered (the seat-metered providers.cc shape) — 0.0 here means 'not metered', not 'free' (gateway smoke 2026-10-12)",
+      "prompt_cache": "true",
+      "prompt_cache_source": "gateway smoke 2026-10-12",
+      "reasoning": true,
+      "tool_calls": "proven",
+      "price_cache_read": 2.8e-09,
+      "prompt_cache_by_provider": {
+        "xiaomi_mimo": "documented"
+      }
+    },
     "mimo-v2.6-flash-free": {
-      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) \u2014 and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
       "client_bound": "opencode",
       "context_advertised": 200000,
       "context_usable": {
@@ -712,6 +742,36 @@
       "price_out": 0.0,
       "reasoning": false,
       "tool_calls": "unproven"
+    },
+    "mimo-v2.6-pro": {
+      "$comment": "AO-MIMO-V26 (gateway smoke 2026-10-12; tests/fixtures/mimo-models.json): the L2-class MiMo Token Plan leg. Measured through the gateway: text 200, one tool call 200 (tool_calls proven), image input 200 with image_tokens 9 and an audio input (input_audio wav) 200 with audio_tokens 7 — so capabilities.image_in and audio_in are both \"proven\", where the id it replaces (mimo-v2.5-pro) 404s on image input; the gateway's own custom-model row agrees (vision true, input_modalities [text, image]). prompt_cache \"true\": 1792 cached_tokens of 1917 on the second identical call, which is what an l2-* combo's cache gate (tools/combo-contract.py rule (f)) needs from this leg. context_advertised/output_max 1048576/131072 are the gateway's reported context_length/max_output_tokens; context_usable stays at the 50% default until a probe measures it. reasoning true from the gateway's capability cell and reasoning_tokens in the usage block; effort_ladder empty because no effort parameter has been answered for this id. audio_out/video_in unproven: the chat path rejects the plan's mimo-v2.5-tts* ids (/v1/audio/speech answers upstream 400) and video input was never tested. Replaces the retired mimo-v2.5-pro chat id (retires 2026-10-21); the id is a gateway custom model, declared in configuration/omniroute/custom-models.json.",
+      "capabilities": {
+        "audio_in": "proven",
+        "audio_out": "unproven",
+        "image_in": "proven",
+        "text": "proven",
+        "video_in": "unproven"
+      },
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [],
+      "family": "xiaomi",
+      "id": "mimo-v2.6-pro",
+      "output_max": 131072,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "price_source": "Xiaomi MiMo Token Plan: a flat subscription with vendor-side credit metering, no per-token API price is metered (the seat-metered providers.cc shape) — 0.0 here means 'not metered', not 'free' (gateway smoke 2026-10-12)",
+      "prompt_cache": "true",
+      "prompt_cache_source": "gateway smoke 2026-10-12",
+      "reasoning": true,
+      "tool_calls": "proven",
+      "price_cache_read": 3.6e-09,
+      "prompt_cache_by_provider": {
+        "xiaomi_mimo": "documented"
+      }
     },
     "minimax-m2.7": {
       "$comment": "cheaperinference resale leg inside l3-driver (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
@@ -848,7 +908,7 @@
       "tool_calls": "unproven"
     },
     "nemotron-3-ultra-free": {
-      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/nemotron-3-ultra-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Numbers reused from models.'openrouter-nemotron-ultra' \u2014 the same vendor model line (nvidia/nemotron-3-ultra), different provider path \u2014 not measured on this leg, so the ladder keeps that row's conservative three rungs and tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) \u2014 and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
+      "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/nemotron-3-ultra-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Numbers reused from models.'openrouter-nemotron-ultra' — the same vendor model line (nvidia/nemotron-3-ultra), different provider path — not measured on this leg, so the ladder keeps that row's conservative three rungs and tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
       "client_bound": "opencode",
       "context_advertised": 1000000,
       "context_usable": {
@@ -1526,7 +1586,7 @@
     },
     "qwen3-235b-a22b-instruct-2507": {
       "id": "qwen3-235b-a22b-instruct-2507",
-      "display_name": "scw/Qwen3 235B A22B (1M free tok \ud83c\udd93)",
+      "display_name": "scw/Qwen3 235B A22B (1M free tok 🆓)",
       "family": "qwen",
       "context_advertised": 128000,
       "context_usable": {
@@ -1543,7 +1603,7 @@
     },
     "mistral-small-3.2-24b-instruct-2506": {
       "id": "mistral-small-3.2-24b-instruct-2506",
-      "display_name": "scw/Mistral Small 3.2 (\ud83c\udd93 EU)",
+      "display_name": "scw/Mistral Small 3.2 (🆓 EU)",
       "family": "mistral",
       "context_advertised": 128000,
       "context_usable": {
@@ -1609,7 +1669,7 @@
       "price_in": 7.08e-07,
       "price_out": 4.248e-06,
       "price_source": "OVH AI Endpoints catalogue https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/ 2026-10-04 (0.6 EUR in / 3.6 EUR out per 1M tokens as shown; converted at 1.18 USD/EUR, the factor implied by the Qwen3.8-27B row; the USD price table was not readable: UNVERIFIED in USD)",
-      "$comment": "Added for OC pilot 2026-10-04: cited from OVH AI Endpoints catalogue https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/ 2026-10-04: '0.6\u20ac /Mtoken(input)' and '3.6\u20ac /Mtoken(output)'. Converted at 1.18 USD/EUR, the factor implied by the Qwen3.8-27B row ($0.708 in / $4.248 out per 1M tokens => 7.08e-07 in / 4.248e-06 out per-token); USD cross-check against the OVH price table is pending. context_advertised 128000 / context_usable 64000 / output_max 32768 mirror the existing OVH Qwen rows. reasoning true and effort_ladder [] follow the Qwen family pattern. tool_calls unproven pending live gateway probe. trains_on_prompts inherits providers.ovhcloud (null = unverified)."
+      "$comment": "Added for OC pilot 2026-10-04: cited from OVH AI Endpoints catalogue https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog/ 2026-10-04: '0.6€ /Mtoken(input)' and '3.6€ /Mtoken(output)'. Converted at 1.18 USD/EUR, the factor implied by the Qwen3.8-27B row ($0.708 in / $4.248 out per 1M tokens => 7.08e-07 in / 4.248e-06 out per-token); USD cross-check against the OVH price table is pending. context_advertised 128000 / context_usable 64000 / output_max 32768 mirror the existing OVH Qwen rows. reasoning true and effort_ladder [] follow the Qwen family pattern. tool_calls unproven pending live gateway probe. trains_on_prompts inherits providers.ovhcloud (null = unverified)."
     },
     "Qwen3.8-27B": {
       "id": "Qwen3.8-27B",
@@ -1626,7 +1686,7 @@
       "price_in": 4.7e-07,
       "price_out": 3.19e-06,
       "price_source": "OVH pricing page https://www.ovhcloud.com/en/public-cloud/prices/#ai-endpoints 2026-09-30 ($0.47 in / $3.19 out per 1M tokens, per-token)",
-      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000). 2026-10-04 catalogue re-confirmed: '0.4\u20ac /Mtoken(input)' and '2.7\u20ac /Mtoken(output)' ($0.47 in / $3.19 out per 1M at 1.18 USD/EUR).",
+      "$comment": "OVH lane 2026-09-30 (combos lane probe through the gateway at http://127.0.0.1:20128/v1/chat/completions - ack chat 200 'Hello', single tool call 200 finish=tool_calls get_weather, round trip 200 mentions 18; OVH catalogue page reports 262K context, Function calling + Vision + Reasoning, 0.4 EUR/M in 2.7 EUR/M out = $0.47/M in $3.19/M out): the gateway serves this leg as 'ovh/Qwen3.8-27B', which is why providers.ovhcloud.model_prefix is 'ovh'. context_advertised 262000 is from the OVH catalogue page (gateway GET /v1/models was not read, auth required). output_max 32768 is the registry's conservative unknown. price_in/price_out are from OVH's public pricing page (per 1M tokens, converted to per-token). trains_on_prompts is unset and inherits providers.ovhcloud (null = unverified), which tools/registry.py's private_safe() fails closed on, so this leg reaches no -clean route. Classified as Visual LLM on OVH but used as a text chat leg in combos. B2-OVH 2026-10-01: context_advertised 262000->128000 per live gateway Combo context limit 128000 (source=combo-min) and live ovh/Qwen3.8-27B 128000; OVH catalogue 262K over-declared. Usable stays 64000 (50% of 128000). 2026-10-04 catalogue re-confirmed: '0.4€ /Mtoken(input)' and '2.7€ /Mtoken(output)' ($0.47 in / $3.19 out per 1M at 1.18 USD/EUR).",
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
@@ -1669,7 +1729,7 @@
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "nvidia/nemotron-3-ultra-550b-a55b:free": {
-      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the leg probe-d657-central.tsv + probe-d657-workstation.tsv both answered (ack 200, one get_weather tool call ok, 4054/6313 ms; cache cell false on both gateways -> prompt_cache 'false'), which the probe lane could not write because no models row existed for it. context_advertised 1000000 / context_usable 500000 / output_max 32768 / effort_ladder / reasoning are REUSED from models.openrouter-nemotron-ultra - the same vendor model line whose own direct.model is this exact OpenRouter id - so they are sourced, not measured on this leg (D20: an unsourced number is never presented as a measurement). tier 'free' is a MODEL-level override of providers.openrouter.tier (paid), the same shape as the nemotron-3-super :free row, so the $0 :free id may sit in a *-free-only route. spec combo-v2 \u00a72 flags 'OR nemotron-3-ultra :free [T: NVIDIA logs]': no data-policy source was read for that claim, so private_safe keeps reading providers.openrouter.trains_on_prompts (false) and this leg is treated as non-training until the claim is sourced.",
+      "$comment": "AO-DENYLEGS D2 2026-10-08 (operator D-657): the row for the leg probe-d657-central.tsv + probe-d657-workstation.tsv both answered (ack 200, one get_weather tool call ok, 4054/6313 ms; cache cell false on both gateways -> prompt_cache 'false'), which the probe lane could not write because no models row existed for it. context_advertised 1000000 / context_usable 500000 / output_max 32768 / effort_ladder / reasoning are REUSED from models.openrouter-nemotron-ultra - the same vendor model line whose own direct.model is this exact OpenRouter id - so they are sourced, not measured on this leg (D20: an unsourced number is never presented as a measurement). tier 'free' is a MODEL-level override of providers.openrouter.tier (paid), the same shape as the nemotron-3-super :free row, so the $0 :free id may sit in a *-free-only route. spec combo-v2 §2 flags 'OR nemotron-3-ultra :free [T: NVIDIA logs]': no data-policy source was read for that claim, so private_safe keeps reading providers.openrouter.trains_on_prompts (false) and this leg is treated as non-training until the claim is sourced.",
       "context_advertised": 1000000,
       "context_usable": {
         "source": "default",
@@ -1816,50 +1876,6 @@
       "tool_calls": "proven",
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
-    },
-    "mimo-v2.6-flash": {
-      "$comment": "Xiaomi MiMo v2.6 Flash native model on OmniRoute connection 'xiaomi-mimo' (model id 'mimo/mimo-v2.6-flash'). Sourced specification: 1,000,000 token context window, 64k output max, supports reasoning and function calling.",
-      "context_advertised": 1048576,
-      "context_usable": {
-        "source": "default",
-        "tokens": 524288
-      },
-      "effort_ladder": [],
-      "family": "xiaomi",
-      "id": "mimo-v2.6-flash",
-      "output_max": 65536,
-      "price_in": 1.4e-07,
-      "price_out": 2.8e-07,
-      "price_cache_read": 2.8e-09,
-      "price_source": "Xiaomi MiMo Open Platform pricing: $0.14 in / $0.28 out per 1M tokens, cache hit $0.0028/1M.",
-      "prompt_cache_by_provider": {
-        "xiaomi_mimo": "documented"
-      },
-      "prompt_cache_source": "Xiaomi MiMo Open Platform documentation: context caching supported at $0.0028/1M tokens.",
-      "reasoning": true,
-      "tool_calls": "documented"
-    },
-    "mimo-v2.6-pro": {
-      "$comment": "Xiaomi MiMo v2.6 Pro flagship model on OmniRoute connection 'xiaomi-mimo' (model id 'mimo/mimo-v2.6-pro'). Sourced specification: 1,000,000 token context window, 64k output max, supports reasoning and function calling.",
-      "context_advertised": 1048576,
-      "context_usable": {
-        "source": "default",
-        "tokens": 524288
-      },
-      "effort_ladder": [],
-      "family": "xiaomi",
-      "id": "mimo-v2.6-pro",
-      "output_max": 65536,
-      "price_in": 4.35e-07,
-      "price_out": 8.7e-07,
-      "price_cache_read": 3.6e-09,
-      "price_source": "Xiaomi MiMo Open Platform pricing: $0.435 in / $0.87 out per 1M tokens, cache hit $0.0036/1M.",
-      "prompt_cache_by_provider": {
-        "xiaomi_mimo": "documented"
-      },
-      "prompt_cache_source": "Xiaomi MiMo Open Platform documentation: context caching supported at $0.0036/1M tokens.",
-      "reasoning": true,
-      "tool_calls": "documented"
     },
     "mimo-v2.5-asr": {
       "$comment": "Xiaomi MiMo v2.5 ASR speech recognition model on OmniRoute connection 'xiaomi-mimo' (model id 'mimo/mimo-v2.5-asr'). 1M context window for long-form audio.",
@@ -2194,7 +2210,7 @@
     },
     "risk_audit_percent": {
       "$comment": [
-        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): how much of the NORMAL-risk work gets the Sonnet final on top of its two cheap cross-family reviews. tools/autoos_risk.py audit() decides it as int(sha[:12], 16) % 100 < percent \u2014 deterministic in the commit itself, so re-running the classifier after an unlucky draw cannot shop for a friendlier bucket.",
+        "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): how much of the NORMAL-risk work gets the Sonnet final on top of its two cheap cross-family reviews. tools/autoos_risk.py audit() decides it as int(sha[:12], 16) % 100 < percent — deterministic in the commit itself, so re-running the classifier after an unlucky draw cannot shop for a friendlier bucket.",
         "Why a sample instead of a rule: the final is the expensive eye. Paying it on 100% of normal work is the cost this routing scheme exists to avoid; paying it on 0% would make the audit meaningless. The value stays clock-free and machine-free (rule 5), so the draw is a property of the commit."
       ],
       "source": "operator Q-013 2026-09-28",
@@ -2445,7 +2461,7 @@
     "review_counts": {
       "$comment": [
         "RISKTIER-a (operator Q-013 / D-060, 2026-09-28): what each risk class costs in review eyes. cross_family is how many reviewers tools/autoos_resolver.py _select_reviewers must pick from a family other than the author's; final is whether the Claude-client Sonnet close (spec 5.7 D2, the resolver's own _CLOSER) runs on top of them.",
-        "The class itself is no longer the writer's call: tools/autoos_risk.py reads it off the diff against policy.risk_rules, so these numbers are what a high-risk diff pays, not what it volunteers. Normal work gets two cheap cross-family reviews plus the sampled final (policy.risk_audit_percent); high work pays the SAME two cross-family reviews and adds the final on top. RISKTIER-a declared high as 1 + final, which reviewed a dangerous change with fewer eyes than a routine one \u2014 the operator's Q-013 line in common.md is 'two diverse cheap cross-family reviews, and for high the same two plus the Sonnet final' (RISKTIER-a2, D-060)."
+        "The class itself is no longer the writer's call: tools/autoos_risk.py reads it off the diff against policy.risk_rules, so these numbers are what a high-risk diff pays, not what it volunteers. Normal work gets two cheap cross-family reviews plus the sampled final (policy.risk_audit_percent); high work pays the SAME two cross-family reviews and adds the final on top. RISKTIER-a declared high as 1 + final, which reviewed a dangerous change with fewer eyes than a routine one — the operator's Q-013 line in common.md is 'two diverse cheap cross-family reviews, and for high the same two plus the Sonnet final' (RISKTIER-a2, D-060)."
       ],
       "high": {
         "cross_family": 2,
@@ -2760,7 +2776,7 @@
         "id": "allow-bazaarlink-ds-v4-flash-0731-free",
         "match": "*deepseek-v4-flash-0731free*",
         "allow": true,
-        "reason": "AO-DENYLEGS D2 (operator D-657, spec combo-v2 \u00a77b/\u00a78): this one DeepSeek spelling re-opens above deny-deepseek because it is the only $0 free DeepSeek copy the D-657 probe measured with a cache hit (prompt_cache true), and L0-L2 chains may now hold cached legs only. It is NOT the native paid DeepSeek API (deepseek/deepseek-flash stays denied) and NOT V4 Pro (deny-deepseek-pro is still first in this list, so no allow here can re-open the pro model). price_in/price_out 0 with no vendor price on file: bazaarlink's own balance, not autoos_usage's paid_spend, shows the real spend (see models.deepseek/deepseek-v4-flash-0731free:free.$comment).",
+        "reason": "AO-DENYLEGS D2 (operator D-657, spec combo-v2 §7b/§8): this one DeepSeek spelling re-opens above deny-deepseek because it is the only $0 free DeepSeek copy the D-657 probe measured with a cache hit (prompt_cache true), and L0-L2 chains may now hold cached legs only. It is NOT the native paid DeepSeek API (deepseek/deepseek-flash stays denied) and NOT V4 Pro (deny-deepseek-pro is still first in this list, so no allow here can re-open the pro model). price_in/price_out 0 with no vendor price on file: bazaarlink's own balance, not autoos_usage's paid_spend, shows the real spend (see models.deepseek/deepseek-v4-flash-0731free:free.$comment).",
         "source": "configuration/omniroute/probes/probe-d657-central.tsv + probe-d657-workstation.tsv 2026-10-08 (ack 200 + one get_weather tool call ok, cache cell true on 3 of the 4 rows); ordered by AO-DENYLEGS D2 2026-10-08 under operator D-657"
       },
       {
@@ -3034,7 +3050,7 @@
         ],
         "caveats": [
           "quote not re-verified (page rendered as a nav index); see each row's own accessed date",
-          "AI Studio unpaid tier contrast (not this provider): https://ai.google.dev/gemini-api/terms \u2014 \"When you use Unpaid Services, including, for example, Google AI Studio and the unpaid quota on Gemini API, Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products and services and machine learning technologies\"",
+          "AI Studio unpaid tier contrast (not this provider): https://ai.google.dev/gemini-api/terms — \"When you use Unpaid Services, including, for example, Google AI Studio and the unpaid quota on Gemini API, Google uses the content you submit to the Services and any generated responses to provide, improve, and develop Google products and services and machine learning technologies\"",
           "flagged prompts logged up to 90 days (opt-out form available)",
           "in-memory and implicit prompt cache 24 h by default: disable at project level",
           "never use Grounding with Google Search for private work",
@@ -3503,7 +3519,7 @@
       "monthly_cap_usd": 10,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-28 Morph USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'morph' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'morph', 2 answered a tool-call trial end to end. Statuses measured: 200 x4, 400 x2. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): morph/morph-dsv4flash, morph/morph-glm52-744b."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'morph' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'morph', 2 answered a tool-call trial end to end. Statuses measured: 200 x4, 400 x2. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. Registered legs (gateway spelling): morph/morph-dsv4flash, morph/morph-glm52-744b."
     },
     "bazaarlink": {
       "id": "bazaarlink",
@@ -3519,7 +3535,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": true,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bazaarlink' is registered and active, its catalog exposes 87 canonical model id(s) under prefix 'bzl', 1 answered a tool-call trial end to end. Statuses measured: 200 x1, 400 x5. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): bzl/deepseek/deepseek-v4-flash-0731free:free. GWDIAG 2026-10-02 (D-323 item 4): billing/credit note - the free key is credit-metered: non-free ids answer 402 'Insufficient credits. Please top up to continue.'. Workstation history: 2026-09-30 14:08Z CredentialHealth 'Invalid API key'; 2026-09-30 20:40Z 'All 1 connection(s) credits exhausted - please reconnect' (402, then emergency fallback). OmniRoute then holds the connection in a terminal credits_exhausted/expired state that reads as disabled until it is re-keyed/re-tested; no AutoOS code writes a connection's active flag and OmniRoute's auto-disable setting is off. Keep bazaarlink legs on auto:free; validationModelId makes the connection test probe the free model."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bazaarlink' is registered and active, its catalog exposes 87 canonical model id(s) under prefix 'bzl', 1 answered a tool-call trial end to end. Statuses measured: 200 x1, 400 x5. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. Registered legs (gateway spelling): bzl/deepseek/deepseek-v4-flash-0731free:free. GWDIAG 2026-10-02 (D-323 item 4): billing/credit note - the free key is credit-metered: non-free ids answer 402 'Insufficient credits. Please top up to continue.'. Workstation history: 2026-09-30 14:08Z CredentialHealth 'Invalid API key'; 2026-09-30 20:40Z 'All 1 connection(s) credits exhausted - please reconnect' (402, then emergency fallback). OmniRoute then holds the connection in a terminal credits_exhausted/expired state that reads as disabled until it is re-keyed/re-tested; no AutoOS code writes a connection's active flag and OmniRoute's auto-disable setting is off. Keep bazaarlink legs on auto:free; validationModelId makes the connection test probe the free model."
     },
     "navyai": {
       "id": "navyai",
@@ -3533,7 +3549,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'navy' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'navy', 0 answered a tool-call trial end to end. Statuses measured: 6 tried, 400 x5, 403 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'navy' is registered and active, its catalog exposes 7 canonical model id(s) under prefix 'navy', 0 answered a tool-call trial end to end. Statuses measured: 6 tried, 400 x5, 403 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
     },
     "arcee": {
       "id": "arcee",
@@ -3547,7 +3563,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'arcee-ai' is registered and active, its catalog exposes 0 canonical model id(s) under prefix 'arcee', 0 answered a tool-call trial end to end. Statuses measured: nothing probed - the connection exposes no model id at all, so there was nothing to try. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'arcee-ai' is registered and active, its catalog exposes 0 canonical model id(s) under prefix 'arcee', 0 answered a tool-call trial end to end. Statuses measured: nothing probed - the connection exposes no model id at all, so there was nothing to try. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
     },
     "bluesminds": {
       "id": "bluesminds",
@@ -3561,7 +3577,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bluesminds' is registered and active, its catalog exposes 49 canonical model id(s) under prefix 'bm', 0 answered a tool-call trial end to end. Statuses measured: 400 x4, 410 x1, ERR x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'bluesminds' is registered and active, its catalog exposes 49 canonical model id(s) under prefix 'bm', 0 answered a tool-call trial end to end. Statuses measured: 400 x4, 410 x1, ERR x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. Q7 (2026-10-08, operator; decision D-654): no free models (Q7, D-654) - the connection exposes nothing servable at zero cost, so this provider stays available:false and lists no leg in any combo."
     },
     "agentrouter": {
       "id": "agentrouter",
@@ -3575,7 +3591,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'agentrouter' is registered and active, its catalog exposes 13 canonical model id(s) under prefix 'agentrouter', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'agentrouter' is registered and active, its catalog exposes 13 canonical model id(s) under prefix 'agentrouter', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "novita_ai": {
       "id": "novita_ai",
@@ -3589,7 +3605,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'novita' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'novita', 0 answered a tool-call trial end to end. Statuses measured: 3 tried, 403 x3 - the three-consecutive-auth-failure stop fired before the shortlist ran out. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'novita' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'novita', 0 answered a tool-call trial end to end. Statuses measured: 3 tried, 403 x3 - the three-consecutive-auth-failure stop fired before the shortlist ran out. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "scaleway": {
       "id": "scaleway",
@@ -3603,7 +3619,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "SCWREMOVAL 2026-10-06 (operator: scaleway is not used anymore): provider gated (available:false); legs removed from every band (l2-worker, l2-worker-free-only, l3-driver, l3-driver-free-only, l2-researcher); reviewer leg moved to groq/qwen/qwen3.8-27b (same qwen family). Rows kept for pricing history. Previous: FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'scaleway' is registered and active, its catalog exposes 6 canonical model id(s) under prefix 'scw', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 400 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): scw/gpt-oss-120b, scw/mistral-small-3.2-24b-instruct-2506, scw/qwen3-235b-a22b-instruct-2507. Reuses the already-registered models row(s) 'gpt-oss-120b' instead of writing a second row for the same model id."
+      "$comment": "SCWREMOVAL 2026-10-06 (operator: scaleway is not used anymore): provider gated (available:false); legs removed from every band (l2-worker, l2-worker-free-only, l3-driver, l3-driver-free-only, l2-researcher); reviewer leg moved to groq/qwen/qwen3.8-27b (same qwen family). Rows kept for pricing history. Previous: FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'scaleway' is registered and active, its catalog exposes 6 canonical model id(s) under prefix 'scw', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 400 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. Registered legs (gateway spelling): scw/gpt-oss-120b, scw/mistral-small-3.2-24b-instruct-2506, scw/qwen3-235b-a22b-instruct-2507. Reuses the already-registered models row(s) 'gpt-oss-120b' instead of writing a second row for the same model id."
     },
     "nebius": {
       "id": "nebius",
@@ -3617,7 +3633,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "D-287 operator: debt-capable billing (incurred debt), excluded from free/trial tiers - providers.nebius is therefore available: false while the provider row and its three model rows stay registered (pricing history). FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'nebius' is registered and active, its catalog exposes 27 canonical model id(s) under prefix 'nebius', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 404 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. Registered legs (gateway spelling): nebius/zai-org/GLM-5.1, nebius/zai-org/GLM-5.2, nebius/zai-org/GLM-5.3-Flash."
+      "$comment": "D-287 operator: debt-capable billing (incurred debt), excluded from free/trial tiers - providers.nebius is therefore available: false while the provider row and its three model rows stay registered (pricing history). FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'nebius' is registered and active, its catalog exposes 27 canonical model id(s) under prefix 'nebius', 3 answered a tool-call trial end to end. Statuses measured: 200 x3, 404 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. Registered legs (gateway spelling): nebius/zai-org/GLM-5.1, nebius/zai-org/GLM-5.2, nebius/zai-org/GLM-5.3-Flash."
     },
     "together_ai": {
       "id": "together_ai",
@@ -3634,7 +3650,7 @@
       "monthly_cap_usd": 5,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-28 Together AI USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'together' is registered and active, its catalog exposes 277 canonical model id(s) under prefix 'together', 0 answered a tool-call trial end to end. Statuses measured: 403 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'together' is registered and active, its catalog exposes 277 canonical model id(s) under prefix 'together', 0 answered a tool-call trial end to end. Statuses measured: 403 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "ovhcloud": {
       "id": "ovhcloud",
@@ -3651,7 +3667,7 @@
       "monthly_cap_usd": 200,
       "monthly_warn_fraction": 0.8,
       "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
-      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%). OVH-GATE 2026-10-08 (AO-DENYLEGS D2, operator D-657 'only legs that acked ok'): available false - probe-d657-central.tsv and probe-d657-workstation.tsv answer HTTP 404 'no Route matched' for all six ovhcloud/ and ovh/ spellings of Qwen3.8-27B, gpt-oss-120b and Qwen3-Coder-30B-A3B-Instruct, so no render may carry an OVH leg and the three ovh-* single combos fall to `omitted`. spec combo-v2 \u00a71 records the same break ('OVH served 1,253 calls OK this week -> recent break, autoos-L1 checking'); a re-probe 200 restores this flag. OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief): the flag is restored. `gpt-oss-120b`, `Qwen3.8-27B` and `Qwen3.5-397B-A17B` answer 200 again while `Qwen3-Coder-30B-A3B-Instruct` stays withdrawn upstream, so OVH rides L3 chains only (spec \u00a72: no documented caching, so an L0\u2013L2 chain on it is the cost leak rule (f) prices) and the two legs that must NOT ride are gated per-leg by the routes that declare them \u2014 the retired coder id, and ovhcloud/gpt-oss-120b whose shared model row is still unpriced (rule (h) fails an unpriced credit leg closed; no OVH price table is machine-readable: the catalogue and prices pages were fetched 2026-10-08 and return no per-token row for it). Provenance: the re-probe's own artifact is committed at `configuration/omniroute/probes/probe-d657-ovh-20261009.tsv` (2026-10-09) \u2014 `ovh/Qwen3.8-27B`, `ovh/Qwen3.5-397B-A17B` and `ovh/gpt-oss-120b` each record gateway `central`, tool ok, `served` = the requested id, no error (ack_ms 578 / 649 / 800); its `ack` column reads `empty` \u2014 not the `ok`/`fail` vocabulary the 10-04 TSVs use \u2014 so what the file records is a tool call and a served model, and it records no non-empty plain-completion ack. That file is the central gateway only: the workstation gateway is unreachable from the host that ran it, so it carries no workstation rows and no workstation verdict is claimed here. Stated plainly: the 2026-10-08 HTTP 200 verdict arrived by judge brief D-716 (autoos-L1-main) and is now backed by that committed TSV, and every leg that now rides a chain carries its own price row from the OVH pricing page. The older committed `configuration/omniroute/probes/probe-d657-{central,workstation}.tsv` (10-04) rows for ovh/Qwen3.8-27B (HTTP 404) and the absent Qwen3.5-397B row predate this re-probe and are stale \u2014 do not read a 200 or a tool-call verdict into them.",
+      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%). OVH-GATE 2026-10-08 (AO-DENYLEGS D2, operator D-657 'only legs that acked ok'): available false - probe-d657-central.tsv and probe-d657-workstation.tsv answer HTTP 404 'no Route matched' for all six ovhcloud/ and ovh/ spellings of Qwen3.8-27B, gpt-oss-120b and Qwen3-Coder-30B-A3B-Instruct, so no render may carry an OVH leg and the three ovh-* single combos fall to `omitted`. spec combo-v2 §1 records the same break ('OVH served 1,253 calls OK this week -> recent break, autoos-L1 checking'); a re-probe 200 restores this flag. OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief): the flag is restored. `gpt-oss-120b`, `Qwen3.8-27B` and `Qwen3.5-397B-A17B` answer 200 again while `Qwen3-Coder-30B-A3B-Instruct` stays withdrawn upstream, so OVH rides L3 chains only (spec §2: no documented caching, so an L0–L2 chain on it is the cost leak rule (f) prices) and the two legs that must NOT ride are gated per-leg by the routes that declare them — the retired coder id, and ovhcloud/gpt-oss-120b whose shared model row is still unpriced (rule (h) fails an unpriced credit leg closed; no OVH price table is machine-readable: the catalogue and prices pages were fetched 2026-10-08 and return no per-token row for it). Provenance: the re-probe's own artifact is committed at `configuration/omniroute/probes/probe-d657-ovh-20261009.tsv` (2026-10-09) — `ovh/Qwen3.8-27B`, `ovh/Qwen3.5-397B-A17B` and `ovh/gpt-oss-120b` each record gateway `central`, tool ok, `served` = the requested id, no error (ack_ms 578 / 649 / 800); its `ack` column reads `empty` — not the `ok`/`fail` vocabulary the 10-04 TSVs use — so what the file records is a tool call and a served model, and it records no non-empty plain-completion ack. That file is the central gateway only: the workstation gateway is unreachable from the host that ran it, so it carries no workstation rows and no workstation verdict is claimed here. Stated plainly: the 2026-10-08 HTTP 200 verdict arrived by judge brief D-716 (autoos-L1-main) and is now backed by that committed TSV, and every leg that now rides a chain carries its own price row from the OVH pricing page. The older committed `configuration/omniroute/probes/probe-d657-{central,workstation}.tsv` (10-04) rows for ovh/Qwen3.8-27B (HTTP 404) and the absent Qwen3.5-397B row predate this re-probe and are stale — do not read a 200 or a tool-call verdict into them.",
       "privacy": {
         "trains_on_prompts": false,
         "evidence": [
@@ -3691,7 +3707,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'api-airforce' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'af', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'api-airforce' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'af', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "llm7": {
       "id": "llm7",
@@ -3705,7 +3721,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'llm7' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'llm7', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'llm7' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'llm7', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "nscale": {
       "id": "nscale",
@@ -3719,7 +3735,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'nscale' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'nscale', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'nscale' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'nscale', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "siliconflow": {
       "id": "siliconflow",
@@ -3733,7 +3749,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'siliconflow' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'siliconflow', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'siliconflow' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'siliconflow', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "sealion": {
       "id": "sealion",
@@ -3747,7 +3763,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'sealion' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'sealion', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'sealion' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'sealion', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "routeway": {
       "id": "routeway",
@@ -3761,7 +3777,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'routeway' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'routeway', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'routeway' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'routeway', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "requesty": {
       "id": "requesty",
@@ -3775,7 +3791,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'requesty' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'requesty', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'requesty' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'requesty', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "aion_labs": {
       "id": "aion_labs",
@@ -3789,7 +3805,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'aion' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'aion', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'aion' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'aion', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "agnes": {
       "id": "agnes",
@@ -3803,7 +3819,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'agnes' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'agnes', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'agnes' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'agnes', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "pollinations": {
       "id": "pollinations",
@@ -3817,7 +3833,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'pollinations' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'pol', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'pollinations' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'pol', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "g4f": {
       "id": "g4f",
@@ -3831,7 +3847,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'g4f-pollinations' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'g4f', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'g4f-pollinations' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'g4f', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "kilo_gateway": {
       "id": "kilo_gateway",
@@ -3845,7 +3861,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'kilo-gateway' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'kg', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'kilo-gateway' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'kg', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "ainative": {
       "id": "ainative",
@@ -3859,7 +3875,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": true,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ainative' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ainative', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. AINATIVE 2026-10-05 (operator): available:false LIFTED - the 2026-09-28 probe predated the connection's current catalog (live /v1/models now exposes 116 ainative/* rows). The FREEKEYS2 ledger separately proved llama-4-maverick's tool calls x2. The trial carries $9.79 until 2026-11-02; the operator ordered it burned for development. Only legs a route references become servable; trains_on_prompts stays unverified, so no -clean route may reference this provider."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'ainative' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'ainative', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. AINATIVE 2026-10-05 (operator): available:false LIFTED - the 2026-09-28 probe predated the connection's current catalog (live /v1/models now exposes 116 ainative/* rows). The FREEKEYS2 ledger separately proved llama-4-maverick's tool calls x2. The trial carries $9.79 until 2026-11-02; the operator ordered it burned for development. Only legs a route references become servable; trains_on_prompts stays unverified, so no -clean route may reference this provider."
     },
     "felo": {
       "id": "felo",
@@ -3873,7 +3889,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'felo-web' is registered and active, its catalog exposes 5 canonical model id(s) under prefix 'felo', 0 answered a tool-call trial end to end. Statuses measured: 400 'thread creation failed' x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'felo-web' is registered and active, its catalog exposes 5 canonical model id(s) under prefix 'felo', 0 answered a tool-call trial end to end. Statuses measured: 400 'thread creation failed' x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "uncloseai": {
       "id": "uncloseai",
@@ -3887,7 +3903,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'uncloseai' is registered and active, its catalog exposes 3 canonical model id(s) under prefix 'unc', 0 answered a tool-call trial end to end. Statuses measured: 502 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'uncloseai' is registered and active, its catalog exposes 3 canonical model id(s) under prefix 'unc', 0 answered a tool-call trial end to end. Statuses measured: 502 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "opencode_gateway": {
       "id": "opencode_gateway",
@@ -3901,7 +3917,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": true,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. GLM55 2026-10-05 (operator): glm-5.3-flash is served through this connection; the live catalog's canonical spelling is oc/* (opencode/* is the alias row), so model_prefix 'oc' makes gateway_ref() emit oc/glm-5.3-flash. The ZCode provider stays a local-process spawn (not installed on the gateway host): the operator's 'ZCode glm-5.3-flash' grant lands through this OpenCode connection centrally; the workstation holds the ZCode connection. GLM55 2026-10-05 (operator): available:false LIFTED - the FREEKEYS-1 400s measured 2026-09-28 predate the connection's current catalog (live /v1/models now exposes 129 oc/* rows incl. oc/glm-5.3-flash, thinking + tool_calling). Only legs a route references become servable; glm-5.3-flash is the first and its tool_calls stay 'unproven' until a live seat quotes one."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. GLM55 2026-10-05 (operator): glm-5.3-flash is served through this connection; the live catalog's canonical spelling is oc/* (opencode/* is the alias row), so model_prefix 'oc' makes gateway_ref() emit oc/glm-5.3-flash. The ZCode provider stays a local-process spawn (not installed on the gateway host): the operator's 'ZCode glm-5.3-flash' grant lands through this OpenCode connection centrally; the workstation holds the ZCode connection. GLM55 2026-10-05 (operator): available:false LIFTED - the FREEKEYS-1 400s measured 2026-09-28 predate the connection's current catalog (live /v1/models now exposes 129 oc/* rows incl. oc/glm-5.3-flash, thinking + tool_calling). Only legs a route references become servable; glm-5.3-flash is the first and its tool_calls stay 'unproven' until a live seat quotes one."
     },
     "ai_horde": {
       "id": "ai_horde",
@@ -3915,7 +3931,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'aihorde' is registered and active, its catalog exposes 165 canonical model id(s) under prefix 'horde', 0 answered a tool-call trial end to end. Statuses measured: 400 'image-generation model' x3 (all horde/* ids are image-generation, not chat). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'aihorde' is registered and active, its catalog exposes 165 canonical model id(s) under prefix 'horde', 0 answered a tool-call trial end to end. Statuses measured: 400 'image-generation model' x3 (all horde/* ids are image-generation, not chat). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "z_ai": {
       "id": "z_ai",
@@ -3929,7 +3945,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'zai' is registered and active, its catalog exposes 0 canonical model id(s) under prefix 'zai', 0 answered a tool-call trial end to end. Statuses measured: nothing probed - the connection exposes no model id at all, so there was nothing to try. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'zai' is registered and active, its catalog exposes 0 canonical model id(s) under prefix 'zai', 0 answered a tool-call trial end to end. Statuses measured: nothing probed - the connection exposes no model id at all, so there was nothing to try. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "qoder_ai": {
       "id": "qoder_ai",
@@ -3943,7 +3959,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'qoder' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'qoder', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: this provider is reached through its OmniRoute connection, not a LiteLLM-managed block, so tools/mirror-litellm-env.py keeps no .env line for it. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'qoder' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'qoder', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
     "zcode": {
       "id": "zcode",
@@ -3960,17 +3976,17 @@
       "$comment": "local-process provider: spawn zcode ENOENT, app not installed on the gateway host (OS-72). GWDIAG 2026-10-02 (D-323 item 2): zcode://app-server/stdio is a LOCAL process the gateway spawns (ZCode CLI/app-server under ~/.zcode/server or $ZCODE_BIN; auth lives in that host's ZCode profile). Call-logs on both gateways show 502 'spawn zcode ENOENT' in 11-66 ms (both gateways' call-logs); the dashboard /models validation answers 'Invalid outbound URL protocol zcode://' by design (http/https only); the executor is buffered (whole turn, up to 120 s, before any SSE byte) so it cannot serve streaming legs. No legs. Revisit only if ZCode is installed on the gateway host."
     },
     "xiaomi_mimo": {
-      "$comment": "Xiaomi MiMo provider registered in OmniRoute connection 'xiaomi-mimo' (dashboard http://127.0.0.1:20128/dashboard/providers/xiaomi-mimo). Models: mimo-v2.6-flash, mimo-v2.6-pro (both 1M context), mimo-v2.5-asr, mimo-v2.6-tts.",
-      "api_base": null,
       "id": "xiaomi_mimo",
+      "omniroute_id": "xiaomi-mimo",
       "litellm_env": null,
       "litellm_prefix": null,
-      "model_prefix": "mimo",
-      "omniroute_id": "xiaomi-mimo",
+      "api_base": "https://token-plan-ams.xiaomimimo.com/v1",
       "provider_data": null,
-      "tier": "paid",
-      "trains_on_prompts": false,
-      "available": true
+      "tier": "subscription",
+      "trains_on_prompts": null,
+      "available": true,
+      "$comment": "AO-MIMO-WIRING (2026-10-12, smoke measured through the OmniRoute gateway; tests/fixtures/mimo-models.json is the GATEWAY's view of this connection, not the vendor's own /v1/models — the MiMo key lives only in the gateway DB): Xiaomi MiMo Token Plan, an OpenAI-compatible subscription endpoint. AO-MIMO-V26 (2026-10-12) rows the plan, each cell a live call answered that day: mimo-v2.6-pro (text 200, one tool call 200, image input 200 with image_tokens 9, audio input 200 with audio_tokens 7, prompt cache 1792 cached_tokens of 1917 on the second identical call) and mimo-v2.6-flash (the same cells, cache 1856 of 1917) are the two legs; mimo-v2.5-pro and mimo-v2.5 still answer today but retire 2026-10-21, so they carry no model row and no leg (tests/test_mimo_catalog.py's RETIRED table is the alarm); mimo-v2.5-tts* are listed and never answered a chat call (400 'not in live catalog') while /v1/audio/speech answers upstream 400 'Param Incorrect', so audio_out stays unproven and there is no tts row, and video_in was never tested for any id. WHY CUSTOM MODELS: mimo-v2.6-pro and mimo-v2.6-flash are gateway CUSTOM models, declared in configuration/omniroute/custom-models.json and applied by configuration/omniroute/apply-custom-models.sh — the OmniRoute image ships a static model list that knows only mimo-v2.5-pro and mimo-v2.5, so without those declarations the gateway would register no id the plan actually serves today. The registry therefore follows the gateway's authoritative live catalog (GET /v1/models for the ids, GET /api/v1/providers/xiaomi-mimo/models for the capability cells), not the image's shipped list: a leg the gateway does not register answers 400 whatever the vendor page says, and a leg the gateway refuses to serve is not a fallback. trains_on_prompts is null = UNVERIFIED (the terms were never read); tools/registry.py's private_safe() fails closed on null, so no MiMo leg reaches any *-clean route, and it is deliberately not guessed to false. tier is `subscription` and price_in/price_out are 0.0 because the plan is not metered per token — the same shape the seat-metered providers.cc/cxa/devin rows use — with the fact named in each row's price_source, so a dollar estimate over these legs reads $0 and is not a price. ToS (Token Plan): the plan allows CODING TOOLS ONLY (OpenCode, Claude Code, OpenClaw, ...) and bans 'clearly non-coding scenarios (automated scripts, custom app backends)', so these legs ride the coding combos routes.l2-worker and routes.l3-driver and appear in no research/chat/TTS route; the operator accepted the ToS risk (D-1179). litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself.",
+      "model_prefix": "mimo"
     }
   },
   "routes": {
@@ -4089,7 +4105,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "deepseek-v4.1-flash \u2014 paid cheapest-first",
+          "display_name": "deepseek-v4.1-flash — paid cheapest-first",
           "output": 393216,
           "openhands_profile": {
             "max_input_tokens": 1048576,
@@ -4154,7 +4170,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "Gemini 3.8 Flash \u00b7 1M (free\u2192credit)",
+          "display_name": "Gemini 3.8 Flash · 1M (free→credit)",
           "output": 65536,
           "openhands_profile": {
             "max_input_tokens": 1048576,
@@ -4355,7 +4371,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "Spark 1.3 \u00b7 1M (Meta paid)",
+          "display_name": "Spark 1.3 · 1M (Meta paid)",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -4377,7 +4393,7 @@
       "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/meta/muse-spark-1.3-contributor'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the paid meta-api muse leg is gated per spec SS8 ('muse only via free ids'), and the free contributor id is client_bound to opencode (403 through the gateway, probe D-657 confirms), so nothing renders and the combo falls to `omitted`."
     },
     "l1-orchestrator": {
-      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN \u00a718) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven; providers.groq tier free; 128k) added to the free band after the scaleway legs so this route keeps TWO distinct proven providers once nebius is removed (L1-beta); the leg answered a live gateway ack+tool-call probe (200, get_weather, max_tokens 512) at 05:58:58Z. Chosen over huggingface/zai-org/GLM-5.2 (401 'no active credentials' on this host) and openrouter/*:free (provider tier paid, which fails test_on_t1_it_follows_the_free_band - only a provider-tier-free leg may precede the paid contributor). The matching combos.json combo carries the same leg with its nebius legs already dropped (NEBREMOVAL). TORDER 2026-10-01 (D-TORDER-1 option b, threshold >=600k per operator update 3): t1 keeps only >=1M legs (all 1048576, renders 1M); free gemini head + free_ai 1M second free, vertex credit, meta paid, deepseek paid LAST. Sub-1M scaleway/nebius/groq legs removed to t2/t3. TORDER-OR 2026-10-01: deleted orphaned unavailable_legs (openrouter/meta TASK1-removed + morph/deepinfra/zen tails not in 1M band); t1 has no unavailable (all 5 legs servable). CLAUDE55 2026-10-05 (operator): antigravity/claude-sonnet-5-5-medium joins the free band after the gemini head (subscription $0 marginal, 1M window >= the 600k t1 floor, caching). D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): re-chained to the legs the D-657 probe measured as prompt-cached - bazaarlink/deepseek/deepseek-v4-flash-0731free:free ($0 free grant, 1M, cache true) then vertex/gemini-3.8-flash (Vertex credit, 1M, caching documented by the vendor), free before credit as rule (b) orders it. Legs that left this route and why: gemini/gemini-3.8-flash (401, no AI Studio quota), antigravity/claude-sonnet-5-5-medium (429, and agy is never a head - spec SS8), free_ai/google/gemini-3.8-flash (429/503 and spec SS2 drops free-ai), meta_api/muse-spark-1.3-contributor and deepseek/deepseek-flash (spec SS8 removes the paid muse and paid deepseek legs from every chain). The t1 promise stays 1M because both serving legs advertise 1M, so no clamp narrows it, and both windows clear the 600k t1 floor. Two distinct providers, so a 429 on the free grant falls through to Vertex and not onto a second leg of the same rate-limit domain.  D657-EFFORT (lane AO-DENYLEGS D2, 2026-10-08): the free head leg 'deepseek/deepseek-v4-flash-0731free:free' documents effort_ladder [] - no rung is on file for it. DSAMEND (docs/models.md) measured the accepted set none/minimal/low/medium/high/xhigh/ultra/max against api.deepseek.com directly, not against this bazaarlink mirror, so the rung is dropped rather than inherited - the same call models.md records ('a rung the model declares no variant for is dropped rather than invented') and the same outcome DSBACK's head-swap had on deepseek-v4.1-flash. surfaces.*.effort_default is therefore removed from this route: left in place, render_ide() forwarded it as reasoning_effort unconditionally once the head ladder went empty (tools/registry.py effort rule), which would have sent an unproven wire parameter to the mirror; the low/medium/high variants and the hand 'omniroute/l1-orchestrator#high' pin go with it (opencode answers 'Variant unavailable' for an undeclared rung). The mirror still reasons by default (DSAMEND: a DeepSeek call with no reasoning_effort returns reasoning_tokens). Restore by probing rungs on this host, then filling models.'deepseek/deepseek-v4-flash-0731free:free'.effort_ladder.",
+      "$comment": "free fallback so t1 stays servable while OpenRouter/DeepSeek credit is out (L0 2026-09-27T16:00:38Z every tier keeps a free leg); gemini-3.8-flash context 1M per Google AI Studio model card - verify against the registry model entry; meta_api/muse-spark-1.3-contributor as first leg (MUSEAPI 2026-09-27: Meta Model API direct, contributor tier, paid, trains). FREEKEYS-2 (D-141 item 3) reorders the same legs by what they cost: the free band first (gemini, then the probe-passed free grants scaleway Qwen3-235B / nebius GLM-5.3-Flash / scaleway Mistral Small 3.2), the paid contributor legs after it, and the two `credit` grants last - gated, because they are unpriced (see unavailable_legs). The head is now a free leg on purpose: a 429 falls through the combo to the next DIFFERENT provider, so a combo that leads with the paid leg spends operator money before it spends a grant. Reset-aware cooldowns (PLAN §18) are untouched. The free band is TWO providers only (scaleway, nebius) and its third proven leg is necessarily a second scaleway model: the third probe-passed free grant (bazaarlink deepseek-v4-flash-0731) is V4 weights, and the operator's DeepSeek rule keeps it out of every combo, so a third distinct free provider needs a new probe-passed model, not a re-ordered one. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. T1SECOND 2026-10-01: groq/qwen/qwen3.8-27b (FREEKEYS-1 tool_calls-proven; providers.groq tier free; 128k) added to the free band after the scaleway legs so this route keeps TWO distinct proven providers once nebius is removed (L1-beta); the leg answered a live gateway ack+tool-call probe (200, get_weather, max_tokens 512) at 05:58:58Z. Chosen over huggingface/zai-org/GLM-5.2 (401 'no active credentials' on this host) and openrouter/*:free (provider tier paid, which fails test_on_t1_it_follows_the_free_band - only a provider-tier-free leg may precede the paid contributor). The matching combos.json combo carries the same leg with its nebius legs already dropped (NEBREMOVAL). TORDER 2026-10-01 (D-TORDER-1 option b, threshold >=600k per operator update 3): t1 keeps only >=1M legs (all 1048576, renders 1M); free gemini head + free_ai 1M second free, vertex credit, meta paid, deepseek paid LAST. Sub-1M scaleway/nebius/groq legs removed to t2/t3. TORDER-OR 2026-10-01: deleted orphaned unavailable_legs (openrouter/meta TASK1-removed + morph/deepinfra/zen tails not in 1M band); t1 has no unavailable (all 5 legs servable). CLAUDE55 2026-10-05 (operator): antigravity/claude-sonnet-5-5-medium joins the free band after the gemini head (subscription $0 marginal, 1M window >= the 600k t1 floor, caching). D657-CHAIN 2026-10-08 (AO-DENYLEGS D2, operator D-657): re-chained to the legs the D-657 probe measured as prompt-cached - bazaarlink/deepseek/deepseek-v4-flash-0731free:free ($0 free grant, 1M, cache true) then vertex/gemini-3.8-flash (Vertex credit, 1M, caching documented by the vendor), free before credit as rule (b) orders it. Legs that left this route and why: gemini/gemini-3.8-flash (401, no AI Studio quota), antigravity/claude-sonnet-5-5-medium (429, and agy is never a head - spec SS8), free_ai/google/gemini-3.8-flash (429/503 and spec SS2 drops free-ai), meta_api/muse-spark-1.3-contributor and deepseek/deepseek-flash (spec SS8 removes the paid muse and paid deepseek legs from every chain). The t1 promise stays 1M because both serving legs advertise 1M, so no clamp narrows it, and both windows clear the 600k t1 floor. Two distinct providers, so a 429 on the free grant falls through to Vertex and not onto a second leg of the same rate-limit domain.  D657-EFFORT (lane AO-DENYLEGS D2, 2026-10-08): the free head leg 'deepseek/deepseek-v4-flash-0731free:free' documents effort_ladder [] - no rung is on file for it. DSAMEND (docs/models.md) measured the accepted set none/minimal/low/medium/high/xhigh/ultra/max against api.deepseek.com directly, not against this bazaarlink mirror, so the rung is dropped rather than inherited - the same call models.md records ('a rung the model declares no variant for is dropped rather than invented') and the same outcome DSBACK's head-swap had on deepseek-v4.1-flash. surfaces.*.effort_default is therefore removed from this route: left in place, render_ide() forwarded it as reasoning_effort unconditionally once the head ladder went empty (tools/registry.py effort rule), which would have sent an unproven wire parameter to the mirror; the low/medium/high variants and the hand 'omniroute/l1-orchestrator#high' pin go with it (opencode answers 'Variant unavailable' for an undeclared rung). The mirror still reasons by default (DSAMEND: a DeepSeek call with no reasoning_effort returns reasoning_tokens). Restore by probing rungs on this host, then filling models.'deepseek/deepseek-v4-flash-0731free:free'.effort_ladder.",
       "class": "cheap",
       "id": "l1-orchestrator",
       "legs": [
@@ -4393,7 +4409,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "L1 \u00b7 l1-orchestrator \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator · 1M",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 1000000,
@@ -4411,7 +4427,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "L1 \u00b7 l1-orchestrator \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator · 1M",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -4438,7 +4454,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "L1 \u00b7 l1-orchestrator-clean \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator-clean · 1M",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -4471,7 +4487,7 @@
             "openhands"
           ],
           "context": 1000000,
-          "display_name": "L1 \u00b7 l1-orchestrator-free-only \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator-free-only · 1M",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 1000000,
@@ -4489,7 +4505,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "L1 \u00b7 l1-orchestrator-free-only \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator-free-only · 1M",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 1000000,
@@ -4512,7 +4528,7 @@
             "zed"
           ],
           "context": 1000000,
-          "display_name": "L1 \u00b7 l1-orchestrator-paid \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator-paid · 1M",
           "output": 32768
         },
         "omniroute": {
@@ -4522,7 +4538,7 @@
           ],
           "context": 1000000,
           "context_declared": "1M",
-          "display_name": "L1 \u00b7 l1-orchestrator-paid \u00b7 1M",
+          "display_name": "L1 · l1-orchestrator-paid · 1M",
           "output": 32768
         }
       }
@@ -4544,7 +4560,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "L2 \u00b7 l2-orchestrator \u00b7 1M",
+          "display_name": "L2 · l2-orchestrator · 1M",
           "openhands_profile": {
             "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
@@ -4554,10 +4570,10 @@
           "$comment": "CTX1M 2026-10-05 (operator): the 128k declaration was a stale clamp - every serving leg advertises 1M (agy claude-sonnet-5-5-medium, vertex flash, deepseek-flash per its registry row), and orchestrator layers L0/L1/L2 need long contexts, so the route declares 1M. PRIVACY 2026-10-05 (operator): the L2-CLEAN sensitive-capable classification is narrowed - privacy sensitive means only what is risky to share (credentials and the like); nearly all projects are not privacy sensitive, so the antigravity claude head is allowed here again. A privacy=sensitive CARD is still filtered per-leg at routing time (private_safe), so credential-adjacent work never reaches the trains-on-prompts leg. CACHEORCH still holds: all three legs are prompt-caching providers; OVH stays out of orchestrator tiers. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the three legs above are the pre-D-657 chain, kept as the decision log. The chain today is two legs - the bazaarlink free 1M head and the vertex flash credit tail - because probe-d657 429s the antigravity claude head on both gateways (and agy is never a head per the D-657 rules) while spec SS8 bans the paid deepseek tail. CACHEORCH holds unchanged: both legs are prompt-caching (bazaarlink's cache measured true, vertex's documented), and the 1M declaration still matches every serving leg."
         }
       },
-      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). CACHEORCH 2026-10-05 (operator): orchestrator tiers (L0-L2) serve long sessions, so only prompt-caching providers may serve them; OVH does not cache and is moved to implementation work only - its two legs are removed here. Claude 4-6 generation retired upstream: agy/claude-sonnet-5-5-medium heads the combo (subscription $0 marginal, caching). L2-CLEAN reconciliation: antigravity/claude-sonnet-5-5-medium was considered as the head but is EXCLUDED - this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01) and antigravity trains_on_prompts is true. The two remaining legs are the caching \u2229 trains-nothing intersection (vertex trial credit; deepseek's cited no-training terms, D-393). CTX1M/PRIVACY 2026-10-05 (operator): legs restored to [antigravity/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] with declared context 1M (see the surfaces.omniroute $comment). D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): spec SS7b's gateway L2 head is Vertex gemini-3.8-flash, but rule (b) orders free before credit, so the chain is bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash - the two legs the D-657 probe measured as cached (true / documented). This is the L2 chain that reaches the 1M class (brief item 3: spawner L2 >= 600k): both legs advertise 1M, so nothing clamps the promise down. antigravity/claude-sonnet-5-5-medium (429, and never a head) and the paid deepseek tail (SS8) left the route."
+      "$comment": " TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). CACHEORCH 2026-10-05 (operator): orchestrator tiers (L0-L2) serve long sessions, so only prompt-caching providers may serve them; OVH does not cache and is moved to implementation work only - its two legs are removed here. Claude 4-6 generation retired upstream: agy/claude-sonnet-5-5-medium heads the combo (subscription $0 marginal, caching). L2-CLEAN reconciliation: antigravity/claude-sonnet-5-5-medium was considered as the head but is EXCLUDED - this route is privacy=sensitive-capable (L2-CLEAN 2026-10-01) and antigravity trains_on_prompts is true. The two remaining legs are the caching ∩ trains-nothing intersection (vertex trial credit; deepseek's cited no-training terms, D-393). CTX1M/PRIVACY 2026-10-05 (operator): legs restored to [antigravity/claude-sonnet-5-5-medium, vertex/gemini-3.8-flash, deepseek/deepseek-flash] with declared context 1M (see the surfaces.omniroute $comment). D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): spec SS7b's gateway L2 head is Vertex gemini-3.8-flash, but rule (b) orders free before credit, so the chain is bazaarlink ds-v4-flash :free then vertex/gemini-3.8-flash - the two legs the D-657 probe measured as cached (true / documented). This is the L2 chain that reaches the 1M class (brief item 3: spawner L2 >= 600k): both legs advertise 1M, so nothing clamps the promise down. antigravity/claude-sonnet-5-5-medium (429, and never a head) and the paid deepseek tail (SS8) left the route."
     },
     "l2-worker": {
-      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so l2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' \u2014 that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg l2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the D-657 cache gate is the whole story for an l2-* combo - every leg of it must be prompt-cached, and the probe measured three cached legs total, so the 24-leg band is now bazaarlink ds-v4-flash :free -> openrouter nemotron-3-super :free -> vertex gemini, one provider each, free before credit. Every leg that left answered the D-657 probe with a failure (gemini 401, agy 429, ainative 429, free-ai 429/503 and tool-call fail, ovh 404 x6 spellings, morph 429/401, opencode-zen/oc 403, OR qwen3.8-27b:free 404, inkling 403) or is banned by spec SS8 (paid deepseek, paid muse) or by (i) (qoder, no Qoder PAT in the gateway); uncached legs that do serve (groq, cohere, OR laguna/north-mini/nemotron-ultra) moved to the l3 band, where the gate does not reach.",
+      "$comment": "free_ai/qwen7b trails the route as a last-resort leg so l2-worker answers while the legs ahead of it are down: source note 'stopgap routing-00 smoke 2026-09-28T04:5xZ (T2FREE)' — that run got 503 ALL_TARGETS_SKIPPED with gemini/gemini-3.8-flash in a 429 cooldown, antigravity/gemini-3.7-flash-high out of quota for ~83 h more and meta-api/muse-spark-1.3-contributor not registered on the gateway, while free-ai/qwen7b answered 200. FREEKEYS-2 (D-141 item 3) ordered the band free -> credit -> paid and put the probe-passed free grants (scaleway Qwen3-235B, scaleway Mistral Small 3.2, nebius GLM-5.2) behind the two Gemini legs and ahead of every paid one; this stopgap keeps its documented last place among the legs that can answer today, so it is still reached only when everything ahead of it failed - only the two gated credit grants trail it, and they render nothing until priced. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. It is the same leg l2-worker-free-only already ends with; free tier and trains-on-prompts, so it never enters a -clean route. Drop it from the last position (or gate it) once the legs ahead of it are measured answering again. FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed (8088 gemini cooling-down lines / 7187 429s on 2026-09-30) and a probe-passed free band (huggingface GLM-5.2/Qwen3.8-27B, groq qwen3.8-27b + gpt-oss-120b/20b, openrouter :free nemotron/laguna/north-mini/qwen, per L1-backlog/ws-free-probe-20260930) was interleaved ahead of the ovhcloud credit band; the three groq legs were re-opened by allow-groq-* above deny-groq on a single-tool-call probe only (free-probe's multi-turn caveat stands). openrouter/deepseek/deepseek-v4.1-flash now carries a route-level gate (the DSMAX provider-level guard moved as providers.openrouter.available became true for its :free ids). TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/openai/gpt-oss-120b', 'openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. B2-AGY 2026-10-01: antigravity/* deleted from band (dead head/latency sink; provider available:false, revisit 2026-10-15). GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the D-657 cache gate is the whole story for an l2-* combo - every leg of it must be prompt-cached, and the probe measured three cached legs total, so the 24-leg band is now bazaarlink ds-v4-flash :free -> openrouter nemotron-3-super :free -> vertex gemini, one provider each, free before credit. Every leg that left answered the D-657 probe with a failure (gemini 401, agy 429, ainative 429, free-ai 429/503 and tool-call fail, ovh 404 x6 spellings, morph 429/401, opencode-zen/oc 403, OR qwen3.8-27b:free 404, inkling 403) or is banned by spec SS8 (paid deepseek, paid muse) or by (i) (qoder, no Qoder PAT in the gateway); uncached legs that do serve (groq, cohere, OR laguna/north-mini/nemotron-ultra) moved to the l3 band, where the gate does not reach. MIMO 2026-10-12 (AO-MIMO-WIRING), re-legged by AO-MIMO-V26 the same day: xiaomi-mimo/mimo-v2.6-pro joins the chain, and it joins LAST - behind the vertex credit tail. AO-MIMO-WIRING brief:1 asked for 'after the free legs, before vertex', and rule (b) refuses that placement for this leg: TIER_ORDER (tools/combo-contract.py) ranks `subscription` with `paid`, and tools/autoos_resolver.py holds a non-free tier back as a last resort while a free/trial/credit leg is healthy, so a subscription leg ahead of a credit leg contradicts both the gate and the resolver. The tail is the position the shipped spend model admits; the delta is reported rather than the gate weakened. Rule (g) holds (vertex -> xiaomi-mimo is a new rate-limit domain) and the cache gate (f) holds because prompt_cache here is a measurement, not a claim: the gateway smoke answered cached_tokens 1792 of 1917. AO-MIMO-V26 (2026-10-12): the leg names the gateway custom id mimo-v2.6-pro, declared in configuration/omniroute/custom-models.json and applied by configuration/omniroute/apply-custom-models.sh. The interim v2.5 chat ids retire 2026-10-21 and carry neither a model row nor a leg here; the swap kept the tail position and the rule (b) reading, so it is a name change, not a re-order. D-1181 (operator 2026-10-12): providers.vertex_ai is available:false (the grant is at its limit), so the declared vertex leg renders nothing and this subscription leg closes the combo that is left.",
       "class": "mid",
       "id": "l2-worker",
       "legs": [
@@ -4574,7 +4590,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "L2 \u00b7 l2-worker \u00b7 128k",
+          "display_name": "L2 · l2-worker · 128k",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4592,7 +4608,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "L2 \u00b7 l2-worker \u00b7 128k",
+          "display_name": "L2 · l2-worker · 128k",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 131072,
@@ -4603,7 +4619,7 @@
       }
     },
     "l2-worker-clean": {
-      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest left the last position \u2014 measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log, so a request that reached it was a dead end, not a fallback. The route keeps three legs and its native deepseek/deepseek-flash head, so it still serves; the openrouter and opencode-zen legs behind the head stay as they were (provider-level and per-leg gates). MISTRALFIX2 (operator 2026-09-28T11:5xZ): the freed slot was offered mistral/mistral-code-latest - measured 3/3 200 through the gateway (evidence work/L1-routing/MISTRALREPL.probe.jsonl) - and refused by spec 3.1 rule 3, because that model's free pool trains on prompts (models.'mistral-code-latest'.trains_on_prompts) and this twin is where a privacy=sensitive card lands. mistral/codestral-latest answers too and is registered as the tested alternative (models.'codestral-latest'), not as a leg. So the twin keeps MISTRALFIX's three legs and exactly one live leg, its native deepseek/deepseek-flash head - it still serves, which is what the route-liveness invariant requires (tests/test_registry.py MistralReplaceTests pins both facts). TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): cached AND non-training, which is openrouter nemotron-3-super :free (providers.openrouter.trains_on_prompts false) then vertex gemini (false) - the bazaarlink free leg stays out (its provider records no trains_on_prompts answer, so private_safe says no) and the two ovh legs left with providers.ovhcloud.available false (404 on both gateways) after the deepseek paid tail went with spec SS8. D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs).",
+      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest left the last position — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log, so a request that reached it was a dead end, not a fallback. The route keeps three legs and its native deepseek/deepseek-flash head, so it still serves; the openrouter and opencode-zen legs behind the head stay as they were (provider-level and per-leg gates). MISTRALFIX2 (operator 2026-09-28T11:5xZ): the freed slot was offered mistral/mistral-code-latest - measured 3/3 200 through the gateway (evidence work/L1-routing/MISTRALREPL.probe.jsonl) - and refused by spec 3.1 rule 3, because that model's free pool trains on prompts (models.'mistral-code-latest'.trains_on_prompts) and this twin is where a privacy=sensitive card lands. mistral/codestral-latest answers too and is registered as the tested alternative (models.'codestral-latest'), not as a leg. So the twin keeps MISTRALFIX's three legs and exactly one live leg, its native deepseek/deepseek-flash head - it still serves, which is what the route-liveness invariant requires (tests/test_registry.py MistralReplaceTests pins both facts). TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): removed paid openrouter legs ['openrouter/deepseek/deepseek-v4.1-flash'] (were already unavailable/gated, combos clean); no :free replacement (already have :free band or paid-only route); orphaned unavailable entries deleted. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): cached AND non-training, which is openrouter nemotron-3-super :free (providers.openrouter.trains_on_prompts false) then vertex gemini (false) - the bazaarlink free leg stays out (its provider records no trains_on_prompts answer, so private_safe says no) and the two ovh legs left with providers.ovhcloud.available false (404 on both gateways) after the deepseek paid tail went with spec SS8. D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs).",
       "class": "mid",
       "id": "l2-worker-clean",
       "legs": [
@@ -4619,7 +4635,7 @@
           ],
           "context": 128000,
           "context_declared": "128k",
-          "display_name": "L2 \u00b7 l2-worker-clean \u00b7 128k",
+          "display_name": "L2 · l2-worker-clean · 128k",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 128000,
@@ -4647,7 +4663,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "L2 \u00b7 l2-worker-free-only \u00b7 128k",
+          "display_name": "L2 · l2-worker-free-only · 128k",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4665,7 +4681,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "L2 \u00b7 l2-worker-free-only \u00b7 128k",
+          "display_name": "L2 · l2-worker-free-only · 128k",
           "output": 32768,
           "openhands_profile": {
             "max_input_tokens": 131072,
@@ -4688,13 +4704,13 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "L2 \u00b7 l2-worker-paid \u00b7 128k",
+          "display_name": "L2 · l2-worker-paid · 128k",
           "output": 32768
         }
       }
     },
     "l3-driver": {
-      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out \u2014 measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule \u2014 free -> credited-cheap -> paid on EVERY agentic combo \u2014 by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn \u2014 mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): re-chained to the probe-passed implementation band, one provider per step so a 429 falls through to a different rate-limit domain (rule (g)): bazaarlink ds-v4-flash :free, OR nemotron-3-super :free, groq qwen3.8-27b, OR laguna-s-2.1 :free, cohere command-a-03-2025, OR nemotron-3-ultra :free, groq gpt-oss-120b, OR north-mini-code :free, cohere command-a-plus-05-2026, and vertex gemini last as the only credit leg. The ovh legs left with the provider's 404s, the paid deepseek/muse tails with spec SS8, gemini (401), ainative (429), free-ai (429 + tool-call fail), morph (429/401) and the client-bound opencode-zen legs with the probe; mistral/mistral-code-latest acked but is a paid-tier leg with no price row on file, so rule (h) fails it closed - it comes back the moment a vendor price is sourced. Same chain as routes.l3-implementer, which is the spec SS2 name for it, except for the OVH credit leg: this route carries the larger-context Qwen3.5-397B-A17B and the implementer the tool-call-proven Qwen3.8-27B. OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief): providers.ovhcloud is available again (the 404s cleared on a re-probe 200 the same day), so an OVH leg rides again - as an L3 leg ONLY (no l0-/l1-/l2- chain: OVH documents no prompt caching, so rule (f) would fail it there and the spec keeps the cache-lever layers clean), in the trial position of the credit band (immediately ahead of the vertex credit tail, after every free leg, so rule (b)'s trial->free->credit->paid walk holds), and never consecutive with another ovhcloud leg (rule (g): one rate-limit domain per step, and only one credit leg per step means one OVH leg per chain here - the second priced OVH id rides routes.l3-implementer instead). The retired Qwen3-Coder-30B id stays out of every chain, gated in its own single-provider route. OVH-REPROBE-CAVEAT 2026-10-08: models.'Qwen3.5-397B-A17B' carries tool_calls \"unproven\" in the tracked data \u2014 the re-probe confirmed an ack 200 and a priced row, not a tool call \u2014 so on an agentic card the resolver falls through this leg, the way FREEKEYS-1b describes for the unproven gpt-oss row: it serves non-agentic work and waits for a probe before it carries a tool loop. The proven id (Qwen3.8-27B, 3/3) rides routes.l3-implementer instead, because rule (g) allows only one OVH leg per chain. Stated plainly for the next reader: tool_calls is unproven for Qwen3.5-397B-A17B, so this route's ovhcloud/Qwen3.5-397B-A17B leg is a non-tool/trial leg only - it never carries an agentic tool loop on an agentic card.",
+      "$comment": "MISTRALFIX (2026-09-28): the L11 leg, mistral/mistral-small-latest, is out — measured 429 at 0 requests/minute on this plan (providers.mistral.limits) and 51/51 failures in the gateway's own 7-day log. L1 was mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) and stays the first PAID leg; with the dead leg gone L12 and L13 move up one. FREEKEYS-2 (D-141 item 3) put the new FREEKEYS-1 free grants (scaleway Mistral Small 3.2, nebius GLM-5.2, scaleway Qwen3-235B) behind that measured head and ahead of every other paid leg. FREEKEYS-2c (L1-routing DECISION 2026-09-29, rev-freekeys2 finding 1) completes the operator rule — free -> credited-cheap -> paid on EVERY agentic combo — by moving that free band AHEAD of mistral/mistral-code-latest, so this route is headed by a grant too: a 429 on the head falls through the combo to the next DIFFERENT provider, and a combo that leads with the paid leg spends the operator's money before it spends a grant. MISTRALFIX's measurement is not withdrawn — mistral/mistral-code-latest (200, 125 rpm, 625k tpm measured) is still the paid fallback and still the first PAID leg, now L4 rather than L1, reached when the three free legs ahead of it are down. The two credit legs trail the route gated, unpriced until a price lands. FREEKEYS-2b (L1-routing DECISION, operator 'DeepSeek only V4.1 Flash'): the free bazaarlink deepseek-v4-flash-0731 leg is V4 weights, so it is in no combo; the row stays registered and the blanket `deny-deepseek` governs it. TORDER-T2T3 2026-10-01: trial->free->credits->paid, deepseek LAST, no free after paid; gemini head restored; nebius removed; scaleway/antigravity kept but not heads; credits ovh x3 + vertex (NEW to t2/t3 full); paid meta then deepseek LAST; free_ai/qwen7b moved into free band. B2-HF 2026-10-01: huggingface/* legs deleted from band (401/absent live); singles hf-glm/hf-qwen keep declared legs for omitted+prune. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): re-chained to the probe-passed implementation band, one provider per step so a 429 falls through to a different rate-limit domain (rule (g)): bazaarlink ds-v4-flash :free, OR nemotron-3-super :free, groq qwen3.8-27b, OR laguna-s-2.1 :free, cohere command-a-03-2025, OR nemotron-3-ultra :free, groq gpt-oss-120b, OR north-mini-code :free, cohere command-a-plus-05-2026, and vertex gemini last as the only credit leg. The ovh legs left with the provider's 404s, the paid deepseek/muse tails with spec SS8, gemini (401), ainative (429), free-ai (429 + tool-call fail), morph (429/401) and the client-bound opencode-zen legs with the probe; mistral/mistral-code-latest acked but is a paid-tier leg with no price row on file, so rule (h) fails it closed - it comes back the moment a vendor price is sourced. Same chain as routes.l3-implementer, which is the spec SS2 name for it, except for the OVH credit leg: this route carries the larger-context Qwen3.5-397B-A17B and the implementer the tool-call-proven Qwen3.8-27B. OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief): providers.ovhcloud is available again (the 404s cleared on a re-probe 200 the same day), so an OVH leg rides again - as an L3 leg ONLY (no l0-/l1-/l2- chain: OVH documents no prompt caching, so rule (f) would fail it there and the spec keeps the cache-lever layers clean), in the trial position of the credit band (immediately ahead of the vertex credit tail, after every free leg, so rule (b)'s trial->free->credit->paid walk holds), and never consecutive with another ovhcloud leg (rule (g): one rate-limit domain per step, and only one credit leg per step means one OVH leg per chain here - the second priced OVH id rides routes.l3-implementer instead). The retired Qwen3-Coder-30B id stays out of every chain, gated in its own single-provider route. OVH-REPROBE-CAVEAT 2026-10-08: models.'Qwen3.5-397B-A17B' carries tool_calls \"unproven\" in the tracked data — the re-probe confirmed an ack 200 and a priced row, not a tool call — so on an agentic card the resolver falls through this leg, the way FREEKEYS-1b describes for the unproven gpt-oss row: it serves non-agentic work and waits for a probe before it carries a tool loop. The proven id (Qwen3.8-27B, 3/3) rides routes.l3-implementer instead, because rule (g) allows only one OVH leg per chain. Stated plainly for the next reader: tool_calls is unproven for Qwen3.5-397B-A17B, so this route's ovhcloud/Qwen3.5-397B-A17B leg is a non-tool/trial leg only - it never carries an agentic tool loop on an agentic card. MIMO 2026-10-12 (AO-MIMO-WIRING), re-legged by AO-MIMO-V26 the same day: xiaomi-mimo/mimo-v2.6-flash closes this chain, behind both credit legs. AO-MIMO-WIRING brief:1 asked for it ahead of the ovhcloud leg; rule (b) ranks `subscription` with `paid` and tools/autoos_resolver.py holds a non-free tier back as a last resort while a free/trial/credit leg is healthy, so the credit legs keep their place and the subscription leg takes the tail - reported as a delta, gate left intact. The OVH trial position and the vertex tail pair are unchanged: the OVH leg still sits immediately ahead of vertex, and the leg behind vertex is new. Both MiMo v2.6 ids are tool_calls proven from the gateway smoke, so unlike the OVH leg this one does carry an agentic loop. AO-MIMO-V26 (2026-10-12): the leg names the gateway custom id mimo-v2.6-flash, declared in configuration/omniroute/custom-models.json and applied by configuration/omniroute/apply-custom-models.sh; the interim v2.5 chat ids retire 2026-10-21 and carry neither a model row nor a leg here, and the tail position is unchanged. D-1181 (operator 2026-10-12): providers.vertex_ai is available:false, so the declared vertex credit leg renders nothing - the ovhcloud credit leg and this subscription tail are what the combo still serves.",
       "class": "cheap",
       "id": "l3-driver",
       "legs": [
@@ -4717,7 +4733,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "L3 \u00b7 l3-driver \u00b7 128k",
+          "display_name": "L3 · l3-driver · 128k",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4735,7 +4751,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-driver \u00b7 128k",
+          "display_name": "L3 · l3-driver · 128k",
           "output": 16384,
           "openhands_profile": {
             "max_input_tokens": 131072,
@@ -4746,7 +4762,7 @@
       }
     },
     "l3-driver-clean": {
-      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest is out of the middle \u2014 measured 429 at 0 requests/minute on this plan (providers.mistral.limits), 51/51 gateway failures. The twin does NOT go unavailable: it keeps a live head leg (deepseek/deepseek-flash, back on after the DSBACK top-up), so it still has one leg that is neither denied, gated nor plan-dead. The rule this leaves in place is the invariant in tests/test_registry.py \u2014 a route that serves traffic must keep at least one live leg, and a -clean twin with none is marked unavailable instead of being routed into a dead leg. MISTRALFIX2 (operator 2026-09-28T11:5xZ): the same replacement was considered for the freed middle slot and refused for the same reason - mistral/mistral-code-latest measures 3/3 200 through the gateway but its free pool trains on prompts (models.'mistral-code-latest'), so spec 3.1 rule 3 rejects it in a route a privacy=sensitive card lands on; mistral/codestral-latest answers as well and is registered as the tested alternative (models.'codestral-latest'), not as a leg. The twin keeps MISTRALFIX's two legs and one live leg, its native deepseek/deepseek-flash head. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the non-training implementation band - the same chain as l3-driver without the bazaarlink free leg (providers.bazaarlink.trains_on_prompts unset = not private-safe). The ovh legs left with providers.ovhcloud.available false and the paid deepseek tail with spec SS8, both of which were this route's whole declared band before. D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs).",
+      "$comment": "MISTRALFIX (2026-09-28): mistral/mistral-small-latest is out of the middle — measured 429 at 0 requests/minute on this plan (providers.mistral.limits), 51/51 gateway failures. The twin does NOT go unavailable: it keeps a live head leg (deepseek/deepseek-flash, back on after the DSBACK top-up), so it still has one leg that is neither denied, gated nor plan-dead. The rule this leaves in place is the invariant in tests/test_registry.py — a route that serves traffic must keep at least one live leg, and a -clean twin with none is marked unavailable instead of being routed into a dead leg. MISTRALFIX2 (operator 2026-09-28T11:5xZ): the same replacement was considered for the freed middle slot and refused for the same reason - mistral/mistral-code-latest measures 3/3 200 through the gateway but its free pool trains on prompts (models.'mistral-code-latest'), so spec 3.1 rule 3 rejects it in a route a privacy=sensitive card lands on; mistral/codestral-latest answers as well and is registered as the tested alternative (models.'codestral-latest'), not as a leg. The twin keeps MISTRALFIX's two legs and one live leg, its native deepseek/deepseek-flash head. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the non-training implementation band - the same chain as l3-driver without the bazaarlink free leg (providers.bazaarlink.trains_on_prompts unset = not private-safe). The ovh legs left with providers.ovhcloud.available false and the paid deepseek tail with spec SS8, both of which were this route's whole declared band before. D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs).",
       "class": "cheap",
       "id": "l3-driver-clean",
       "legs": [
@@ -4762,7 +4778,7 @@
           ],
           "context": 128000,
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-driver-clean \u00b7 128k",
+          "display_name": "L3 · l3-driver-clean · 128k",
           "output": 16384,
           "openhands_profile": {
             "max_input_tokens": 128000,
@@ -4795,7 +4811,7 @@
             "openhands"
           ],
           "context": 131072,
-          "display_name": "L3 \u00b7 l3-driver-free-only \u00b7 128k",
+          "display_name": "L3 · l3-driver-free-only · 128k",
           "openhands_profile": {
             "gateway": "litellm",
             "max_input_tokens": 131072,
@@ -4813,7 +4829,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-driver-free-only \u00b7 128k",
+          "display_name": "L3 · l3-driver-free-only · 128k",
           "output": 16384,
           "openhands_profile": {
             "max_input_tokens": 131072,
@@ -4836,7 +4852,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "L3 \u00b7 l3-driver-paid \u00b7 128k",
+          "display_name": "L3 · l3-driver-paid · 128k",
           "output": 16384
         }
       }
@@ -4858,7 +4874,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "t4-rag \u00b7 128k (cohere trial)",
+          "display_name": "t4-rag · 128k (cohere trial)",
           "output": 4096
         },
         "omniroute": {
@@ -4869,7 +4885,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "t4-rag \u00b7 128k (cohere trial)",
+          "display_name": "t4-rag · 128k (cohere trial)",
           "output": 4096,
           "openhands_profile": {
             "max_input_tokens": 131072,
@@ -4916,7 +4932,7 @@
             "zed"
           ],
           "context": 131072,
-          "display_name": "L2 \u00b7 l2-researcher \u00b7 128k",
+          "display_name": "L2 · l2-researcher · 128k",
           "output": 8192
         },
         "omniroute": {
@@ -4926,7 +4942,7 @@
           ],
           "context": 131072,
           "context_declared": "128k",
-          "display_name": "L2 \u00b7 l2-researcher \u00b7 128k",
+          "display_name": "L2 · l2-researcher · 128k",
           "output": 8192
         }
       }
@@ -4953,7 +4969,7 @@
       },
       "unavailable_legs": {
         "ovhcloud/gpt-oss-120b": {
-          "$comment": "OVH-REPROBE 2026-10-08: the leg answers 200 again, but it is gated because it is UNPRICED, not because it is dead. ovhcloud/gpt-oss-120b resolves to the shared models.gpt-oss-120b row (cerebras/sambanova's free spelling), whose price_in/price_out are 0.0 with no price_source \u2014 providers.ovhcloud is tier credit, so combo-contract rule (h) fails the closed: a credit leg with no price row bills $0 while it drains the $200 grant invisibly (\u00a77b delta b). The per-leg mechanism exists now (models.<id>.provider_prices.<provider>, LANE-PRICE-GAP/T1-CREDIT-FIX-6), it only needs a cited OVH number \u2014 none is readable: the OVH catalogue and prices pages were fetched 2026-10-08 and carry no per-token row for gpt-oss-120b. Gap filed in logs/briefs/denylegs-gaps.md. Re-open by filing provider_prices.ovhcloud with price_source + price_as_of.",
+          "$comment": "OVH-REPROBE 2026-10-08: the leg answers 200 again, but it is gated because it is UNPRICED, not because it is dead. ovhcloud/gpt-oss-120b resolves to the shared models.gpt-oss-120b row (cerebras/sambanova's free spelling), whose price_in/price_out are 0.0 with no price_source — providers.ovhcloud is tier credit, so combo-contract rule (h) fails the closed: a credit leg with no price row bills $0 while it drains the $200 grant invisibly (§7b delta b). The per-leg mechanism exists now (models.<id>.provider_prices.<provider>, LANE-PRICE-GAP/T1-CREDIT-FIX-6), it only needs a cited OVH number — none is readable: the OVH catalogue and prices pages were fetched 2026-10-08 and carry no per-token row for gpt-oss-120b. Gap filed in logs/briefs/denylegs-gaps.md. Re-open by filing provider_prices.ovhcloud with price_source + price_as_of.",
           "available": false
         }
       }
@@ -4995,7 +5011,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "Opus 5.5 \u00b7 1M (Antigravity)",
+          "display_name": "Opus 5.5 · 1M (Antigravity)",
           "openhands_profile": {
             "max_input_tokens": 1048576,
             "max_output_tokens": 32768,
@@ -5034,7 +5050,7 @@
             "zed"
           ],
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-implementer \u00b7 128k",
+          "display_name": "L3 · l3-implementer · 128k",
           "context": 131072,
           "output": 8192
         }
@@ -5055,7 +5071,7 @@
             "zed"
           ],
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-implementer-clean \u00b7 128k",
+          "display_name": "L3 · l3-implementer-clean · 128k",
           "context": 128000,
           "output": 8192
         }
@@ -5078,7 +5094,7 @@
             "zed"
           ],
           "context_declared": "1M",
-          "display_name": "L3 \u00b7 l3-researcher \u00b7 1M",
+          "display_name": "L3 · l3-researcher · 1M",
           "context": 1000000,
           "output": 32768
         }
@@ -5099,7 +5115,7 @@
             "zed"
           ],
           "context_declared": "1M",
-          "display_name": "L3 \u00b7 l3-researcher-clean \u00b7 1M",
+          "display_name": "L3 · l3-researcher-clean · 1M",
           "context": 1000000,
           "output": 32768
         }
@@ -5121,7 +5137,7 @@
             "zed"
           ],
           "context_declared": "128k",
-          "display_name": "L3 \u00b7 l3-review-diff \u00b7 128k",
+          "display_name": "L3 · l3-review-diff · 128k",
           "context": 131072,
           "output": 16384
         }
@@ -5143,7 +5159,7 @@
             "zed"
           ],
           "context_declared": "1M",
-          "display_name": "L3 \u00b7 l3-review-tests \u00b7 1M",
+          "display_name": "L3 · l3-review-tests · 1M",
           "context": 1048576,
           "output": 16384
         }
@@ -5165,7 +5181,7 @@
             "zed"
           ],
           "context_declared": "1M",
-          "display_name": "L3 \u00b7 l3-review-codebase \u00b7 1M",
+          "display_name": "L3 · l3-review-codebase · 1M",
           "context": 1048576,
           "output": 16384
         }
@@ -5184,12 +5200,12 @@
             "zed"
           ],
           "context_declared": "1M",
-          "display_name": "L3 \u00b7 l3-review-transcript \u00b7 1M",
+          "display_name": "L3 · l3-review-transcript · 1M",
           "context": 1000000,
           "output": 16384
         }
       },
-      "$comment": " D657-GAP 2026-10-08 (AO-DENYLEGS D2): spec SS3 requires II >= 44 for the transcript lens and names four candidates - qoder qwen3.8-max, qoder kimi-k3, muse-spark contributor xhigh, vertex claude-sonnet-5. SS7b moves every qoder/* leg out of the gateway (no Qoder PAT in OmniRoute: the spawner's own client only); the muse contributor is an openrouter leg that does not end :free, so rule (b-or) cannot serve it and its free oc/opencode-zen spellings answer 403 in the D-657 probe; vertex claude answers 501. No gateway leg meets the bar, so this route is deliberately legless (legs [], like the *-paid routes: it renders no combo and is not orphaned) rather than filled with a sub-44 leg. The carrier is the qoder CLI leg SS7b (b) names, outside OmniRoute \u2014 and since AO-DENYLEGS open item 2 (2026-10-08) it is named in data, not prose: policy.reviewers carries a client=qoder / model=Qwen3.8-Max / family=qwen / paid:true row with no `leg`, which is what reviewer_for walks for a transcript-lens review. A gateway leg that meets II >= 44 re-chains this route; until then it stays legs: [] and renders no combo."
+      "$comment": " D657-GAP 2026-10-08 (AO-DENYLEGS D2): spec SS3 requires II >= 44 for the transcript lens and names four candidates - qoder qwen3.8-max, qoder kimi-k3, muse-spark contributor xhigh, vertex claude-sonnet-5. SS7b moves every qoder/* leg out of the gateway (no Qoder PAT in OmniRoute: the spawner's own client only); the muse contributor is an openrouter leg that does not end :free, so rule (b-or) cannot serve it and its free oc/opencode-zen spellings answer 403 in the D-657 probe; vertex claude answers 501. No gateway leg meets the bar, so this route is deliberately legless (legs [], like the *-paid routes: it renders no combo and is not orphaned) rather than filled with a sub-44 leg. The carrier is the qoder CLI leg SS7b (b) names, outside OmniRoute — and since AO-DENYLEGS open item 2 (2026-10-08) it is named in data, not prose: policy.reviewers carries a client=qoder / model=Qwen3.8-Max / family=qwen / paid:true row with no `leg`, which is what reviewer_for walks for a transcript-lens review. A gateway leg that meets II >= 44 re-chains this route; until then it stays legs: [] and renders no combo."
     },
     "l2-orchestrator-clean": {
       "id": "l2-orchestrator-clean",
@@ -5206,7 +5222,7 @@
           ],
           "context": 1048576,
           "context_declared": "1M",
-          "display_name": "L2 \u00b7 l2-orchestrator-clean \u00b7 1M",
+          "display_name": "L2 · l2-orchestrator-clean · 1M",
           "output": 32768,
           "$comment": " D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): declared 1M because its one served leg advertises 1M (models.'gemini-3.8-flash'.context_advertised) - no smaller leg clamps the promise, so this is the clean twin that keeps the L2 >=600k band (brief item 3)."
         }

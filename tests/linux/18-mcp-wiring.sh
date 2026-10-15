@@ -174,6 +174,14 @@ if it "omnigraph bridge benchmark: unit tests pass offline (fake server + fake b
     fi
 fi
 
+if it "omnigraph live doctor: unit tests pass offline (fake 0.13 server)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_check_omnigraph.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
 if it "omnigraph bridge benchmark: the sh wrapper drives a fake-server run to exit 0"; then
     if ! has_cmd python3; then
         skip "python3 not found"

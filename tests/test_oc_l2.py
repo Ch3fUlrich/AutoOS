@@ -1261,6 +1261,78 @@ class ResumeTest(unittest.TestCase):
             "next.")
         oc_l2.cmd_stop(result["lane"])
 
+    # (2c'') AO-RECOVER-L2-LOOP: a child that died non-zero wakes with what
+    # recovery plans for it — plan only, never a spawn and never a record.
+    def _kill_record(self, run_id, lane):
+        """The runner-private kill record for one child run, in the store the
+        spawner's own reader looks in (<state>/kill/<run_id>.json)."""
+        root = self.agents.parent / "kill"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ("%s.json" % run_id)).write_text(
+            json.dumps({"run_id": run_id, "lane": lane}), encoding="utf-8")
+
+    def _failed_child(self, rc=1):
+        """A started lane whose newest child ended rc!=0, with a job.json fit to
+        continue (a task), as `spawn` writes it."""
+        result, _ = self._start()
+        self.srv.items = []
+        kid = self._spawn_child(run_id="20261009-120000-dead-a1b2c3", rc=rc)
+        (kid / "job.json").write_text(json.dumps({
+            "run_id": kid.name, "parent_lane": result["lane"],
+            "task": "Implement the widget and run the suite.",
+            "request": {"cwd": str(self.proj)}, "cwd": str(self.proj),
+            "started": time.time(),
+        }), encoding="utf-8")
+        return result, kid.name
+
+    def test_a_failed_child_stall_wakes_with_the_recovery_action(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, result["lane"])
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertEqual(info["recovery"]["action"], "rerun", info)
+        self.assertEqual(info["recovery"]["state"], "died", info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertEqual(out["recovery"], {"action": "rerun", "attempts": 0,
+                                          "state": "died"}, out)
+        text = self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"]
+        self.assertIn("recovery: rerun", text)
+        self.assertIn("attempts 0", text)
+
+    def test_a_clean_exit_names_no_recovery(self):
+        result, run_id = self._failed_child(rc=0)
+        self._kill_record(run_id, result["lane"])
+        info = oc_l2.stalled(result["lane"])
+        self.assertTrue(info["stalled"], info)
+        self.assertIsNone(info["recovery"], info)
+
+    def test_another_lanes_record_adds_nothing_to_the_wake(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, "l2-other-lane-p9")
+        info = oc_l2.stalled(result["lane"])
+        self.assertIsNone(info["recovery"], info)
+        before = len(self._prompts_to(FAKE_SESSION_ID))
+        out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertNotIn("recovery", out)
+        self.assertEqual(
+            self._prompts_to(FAKE_SESSION_ID)[before]["body"]["text"],
+            "Wake: child 20261009-120000-dead-a1b2c3 exited rc=1; read "
+            "20261009-120000-dead-a1b2c3 result via autoos-agent result and "
+            "continue the phase plan. Reply with one short line of what you do "
+            "next.")
+
+    def test_a_recovery_fault_never_blocks_a_wake(self):
+        result, run_id = self._failed_child()
+        self._kill_record(run_id, result["lane"])
+        with mock.patch.object(oc_l2.autoos_recovery, "plan",
+                               side_effect=RuntimeError("boom")):
+            out = oc_l2.cmd_resume(result["lane"])
+        self.assertTrue(out["resumed"], out)
+        self.assertNotIn("recovery", out)
+
     def test_an_errored_turn_wakes_with_its_exact_next_action(self):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
@@ -2046,6 +2118,54 @@ class McpToolTest(unittest.TestCase):
                 out = fn(*args)
                 self.assertIs(out["refused"], True, fn.__name__)
                 self.assertIn("L3", out["detail"], fn.__name__)
+
+
+class ForeignRepoFooterTests(unittest.TestCase):
+    """AO-L2-SEAT-INTEGRITY P4: the fixed footer may not hard-require a skill
+    that only exists in THIS repo's `.agents/skills`. Measured: an L2 launched in
+    a scratch/foreign repo errored `Unable to load skill
+    unattended-orchestration` and the lane never worked. The load is
+    best-effort now and the rules an L2 needs travel with the footer, as ONE
+    inline line."""
+
+    INBOX = "/srv/run/inbox/L1.md"
+
+    def setUp(self):
+        self.text = oc_l2.first_prompt_text(BRIEF, "l2-proj-x-p1", self.INBOX)
+
+    def test_the_skill_load_is_conditional_and_never_fatal(self):
+        self.assertIn("if it is available", self.text)
+        self.assertIn("do NOT stop or error", self.text)
+        self.assertIn("`%s`" % oc_l2.SKILL, self.text)
+        self.assertNotIn("Load the `%s` skill first." % oc_l2.SKILL, self.text)
+
+    def test_the_inline_rules_line_is_one_line_and_travels_once(self):
+        line = oc_l2.INLINE_RULES_LINE
+        self.assertNotIn("\n", line, "the inline rules must stay one line")
+        self.assertLessEqual(len(line), 600, "the footer grew past its budget")
+        self.assertEqual(self.text.count(line), 1, self.text)
+
+    def test_the_inline_line_carries_the_rules_an_l2_needs(self):
+        table = (("R-coord-14", "never fix or research"),
+                 ("R-coord-09", "autoos-agent"),
+                 ("R-orch-01", "one line per fact"),
+                 ("R-orch-22", "GOAL / DONE / NEXT / BLOCKED"),
+                 ("R-coord-08", "heartbeat"))
+        for rule, claim in table:
+            self.assertIn(rule, oc_l2.INLINE_RULES_LINE, rule)
+            self.assertIn(claim, oc_l2.INLINE_RULES_LINE, claim)
+
+    def test_the_rest_of_the_footer_survives_in_order(self):
+        self.assertTrue(self.text.startswith(BRIEF.rstrip()), self.text[:80])
+        parts = ["You are the L2 orchestrator of this phase (l2-proj-x-p1)",
+                 oc_l2.INLINE_RULES_LINE,
+                 oc_l2.ROLE_LINES[1],
+                 "Report upward with the `l2_report` tool",
+                 oc_l2.CHILD_WAIT_LINE,
+                 oc_l1_serve.HINT_LINE]
+        where = [self.text.index(p) for p in parts]
+        self.assertEqual(where, sorted(where), self.text)
+        self.assertIn(self.INBOX, self.text)
 
 
 if __name__ == "__main__":

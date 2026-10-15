@@ -87,6 +87,12 @@ session's fill, `token-rate` orchestrator tokens per merged change (RESTART spec
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the full
 list of code-enforced rules.
 
+Every `ready` call names both guard files (AO-READY-CALLERS): the gate only *requires*
+them when the diff reaches R2, so a command line copied without them is refused at a
+gate the lane had already cleared.
+
+`python3 tools/autoos-agent.py ready <RECORD> --branch <B> --sha <SHA> --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>`
+
 `tools/prepush.py` holds its own gate order and the `AUTOOS_PREPUSH_OVERRIDE="<reason>"` escape
 (orchestrators only — it is logged, and an overridden sha is never green); its docstring is the
 source of truth, not this line. `git push --no-verify` steps past any hook, which is exactly why

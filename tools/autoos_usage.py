@@ -50,7 +50,7 @@ tag - build to this, not to a guess):
 
 Grouping: lane is the part of the row's sessionTag before the FIRST '/' - the
 session tag and the D-063 `<tag>/<run-id>` value therefore group into the same
-lane - "(untagged)" when empty; run is the part after the LAST '/' when it is a
+lane - when empty (or OmniRoute's `conv_<uuid>` fallback) "key:<api key name>", "(untagged)" only if the key has no name; run is the part after the LAST '/' when it is a
 canonical run id, "(no run id)" otherwise; combo is comboName, "(none)" when
 empty; provider/model "(unknown)" when empty. Rows
 with a timestamp older than --since are dropped; rows without a parseable
@@ -162,6 +162,23 @@ def is_run_id(value) -> bool:
     to be recognisable, and a stamp with an impossible date is still one run)."""
     match = RUN_ID_SHAPE.match(value or "")
     return bool(match) and len(match.group(2)) <= RUN_ID_SLUG_CAP
+
+
+KEY_LANE_PREFIX = "key:"
+# OmniRoute's own fallback conversation id when the client sent no x-omniroute-session-id.
+FALLBACK_TAG = re.compile(r"^conv_[0-9a-f]{8}-[0-9a-f-]{27}$", re.I)
+
+
+def lane_of_row(row) -> str:
+    """The lane of a call-log row. An empty tag (or OmniRoute's `conv_<uuid>` fallback) is attributed to
+    `key:<api key NAME>` (P1.2: 70-84 % of rows carry no tag); "(untagged)" only when the key has no name.
+    Only the NAME is read; the key value never reaches this tool."""
+    tag = row.get("sessionTag") if isinstance(row, dict) else None
+    tag = str(tag).strip() if tag else ""
+    if tag and not FALLBACK_TAG.match(tag) and lane_of(tag) != UNTAGGED_LANE:
+        return lane_of(tag)
+    name = row.get("apiKeyName") if isinstance(row, dict) else None
+    return KEY_LANE_PREFIX + str(name).strip() if name and str(name).strip() else UNTAGGED_LANE
 
 
 def lane_of(session_id) -> str:
@@ -2241,7 +2258,7 @@ def _group_key(dim, row):
     if dim == "combo":
         return row.get("comboName") or "(none)"
     if dim == "lane":
-        return lane_of(row.get("sessionTag"))
+        return lane_of_row(row)
     if dim == "run":
         return run_of(row.get("sessionTag"))
     return row.get("model") or "(unknown)"

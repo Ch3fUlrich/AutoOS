@@ -202,7 +202,8 @@ def post(url: str, key: str, model: str, prompt: str, timeout: float,
     body = json.dumps({"model": model, "temperature": 0.1, "max_tokens": max_tokens,
                        "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST", headers={
-        "Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        "Authorization": "Bearer " + key, "Content-Type": "application/json",
+        "x-omniroute-session-id": "deepseek-call"})  # P1.2: spend attribution, not a secret
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode("utf-8"))
 

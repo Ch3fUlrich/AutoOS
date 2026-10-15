@@ -5,16 +5,24 @@ Every boundary of the bucket table is pinned here, plus every effort row, the
 ladder clamp and the max_tokens floors. The module is pure: it imports from any
 cwd once `tools/` is on sys.path, which is the first thing this file does.
 """
+import contextlib
 import importlib.util
+import io
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 
+import autoos_clients as clients  # noqa: E402  (the client adapters: signin probe)
+import autoos_redact as redact  # noqa: E402  (the one canonical text mask)
 import autoos_resolver as r  # noqa: E402
 import autoos_usage as usage  # noqa: E402  (the spend guard's one reader of the cap trio)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
@@ -5738,6 +5746,154 @@ class CreditFailOpenTests(unittest.TestCase):
                         removed["r-trial"])
 
 
+@unittest.skipIf(os.name == "nt",
+                 "the fake qodercli is a POSIX shell script with chmod +x")
+class QoderSigninProbeTests(unittest.TestCase):
+    """AO-QODER-ROUTE part 1: qoder gets a sign-in probe, and a probe's success
+    output is never kept.
+
+    Measured 2026-10-11 on qodercli 1.1.63 with an empty HOME and an empty
+    XDG_CONFIG_HOME (fresh mktemp dirs, so the operator's real login was never
+    asked): `qodercli status` exits 0 in 1.8 s signed OUT ("Account: Not logged
+    in"), so it cannot be the probe - signin_state would read it as signed in -
+    while `qodercli --list-models` exits 1 in 2.6 s with "Not logged in. Run
+    `qodercli login` to authenticate.", which fails fast and names the login
+    that `signed_out()` looks for. Signed in, `--list-models` prints only model
+    names; `status` prints account details, the second reason for the choice.
+    """
+
+    EMAIL = "ada@example.com"
+    URL = "https://img.example.com/ada.png"
+
+    def stub(self, body):
+        """A fake `qodercli` in its own bin dir, plus the env that finds it."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        path = os.path.join(d, "qodercli")
+        with open(path, "w") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+        return d + os.pathsep + "/usr/bin" + os.pathsep + "/bin"
+
+    def probe(self, body):
+        return clients.signin_state(clients.CLIENTS["qoder"],
+                                    {"PATH": self.stub(body)})
+
+    # --- the declared probe ------------------------------------------------
+
+    def test_qoder_declares_the_measured_list_models_probe(self):
+        self.assertEqual(clients.CLIENTS["qoder"].binary, "qodercli")
+        self.assertEqual(clients.CLIENTS["qoder"].signin_probe,
+                         ("--list-models",))
+
+    def test_the_registry_signin_check_matches_the_adapter_probe(self):
+        # catalog/ai-registry.json's `signin_check` command string is written
+        # from the adapter, never typed independently: one reading of the
+        # probe, no drift between the two files.
+        registry = json.loads((ROOT / "catalog" / "ai-registry.json")
+                              .read_text(encoding="utf-8"))
+        checked = []
+        for name, entry in registry["clients"].items():
+            check = entry.get("signin_check")
+            if check is None or str(check).startswith("env:"):
+                continue
+            checked.append(name)
+            self.assertEqual(
+                clients.CLIENTS[name].binary + " "
+                + " ".join(clients.CLIENTS[name].signin_probe), check,
+                "clients.%s.signin_check drifted from signin_probe" % name)
+        self.assertIn("qoder", checked)
+
+    # --- what each probe outcome means ------------------------------------
+
+    def test_a_signed_in_qoder_is_usable_and_keeps_no_output(self):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            result = self.probe('#!/bin/sh\nprintf "Account: %s Avatar: %s\\n"\n'
+                                'exit 0\n' % (self.EMAIL, self.URL))
+        self.assertEqual(result, (True, ""),
+                         "rc 0 is signed in, with no reason text at all")
+        combined = stdout.getvalue() + stderr.getvalue()
+        self.assertNotIn(self.EMAIL, combined)
+        self.assertNotIn(self.URL, combined)
+
+    def test_a_signed_out_qoder_reports_its_own_reason(self):
+        ok, reason = self.probe('#!/bin/sh\nprintf "Please log in first\\n" 1>&2\n'
+                                'exit 1\n')
+        self.assertIs(ok, False)
+        self.assertIn("Please log in", reason)
+        self.assertTrue(clients.signed_out(reason))
+
+    def test_a_probe_that_never_answers_is_a_failure_not_a_hang(self):
+        with mock.patch.object(clients, "SIGNIN_TIMEOUT", 1):
+            ok, reason = self.probe("#!/bin/sh\nsleep 5\n")
+        self.assertIs(ok, False)
+        self.assertIn("did not answer within 1 s", reason)
+
+    def test_a_missing_qodercli_is_never_probed(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        self.assertEqual(clients.signin_state(clients.CLIENTS["qoder"],
+                                              {"PATH": d}), (None, ""))
+
+    def test_a_failed_probe_scrubs_an_email_and_a_url_from_its_reason(self):
+        # The reason goes to the spawner's log, and AGENTS.md rule 1 keeps an
+        # account identity out of a log line. Only the failure text survives,
+        # with the address and the link masked and the whole line capped.
+        # The wording is the measured one: `signed_out()` matches "login"/
+        # "authenticat", not a bare "logged in", so a probe whose only cue were
+        # "Not logged in" would be labelled "broken" rather than "signed-out".
+        ok, reason = self.probe('#!/bin/sh\nprintf "Not logged in (%s): see %s.'
+                                ' Run qodercli login to authenticate.\\n" 1>&2\n'
+                                'exit 1\n' % (self.EMAIL, self.URL))
+        self.assertIs(ok, False)
+        self.assertNotIn(self.EMAIL, reason)
+        self.assertNotIn(self.URL, reason)
+        self.assertIn(redact.TEXT_MASK, reason)
+        self.assertLessEqual(len(reason), 240)
+        self.assertTrue(clients.signed_out(reason), reason)
+
+    def test_the_probe_mask_is_the_reactors_one_mask(self):
+        # tools/autoos_clients.py does not import the redactor (the adapters
+        # stay stdlib-only, so a lone copy of the file still imports), which
+        # makes the shared marker a string that must be kept equal here.
+        self.assertEqual(clients.SIGNIN_MASK, redact.TEXT_MASK)
+
+    def test_a_long_failure_line_is_capped(self):
+        ok, reason = self.probe('#!/bin/sh\nprintf "not logged in '
+                                + "y" * 400 + '\\n"\nexit 1\n')
+        self.assertIs(ok, False)
+        self.assertLessEqual(len(reason), 240)
+
+    # --- the resolver half ------------------------------------------------
+
+    ROUTE_REGISTRY = {
+        "providers": {"clean": {"id": "clean", "tier": "paid",
+                                "trains_on_prompts": False}},
+        "models": {"big": {"id": "big", "tool_calls": "proven",
+                           "context_usable": {"tokens": 100000,
+                                              "source": "default"}}},
+        "routes": {"r-qoder": {"id": "r-qoder", "legs": ["clean/big"]}},
+    }
+
+    def qoder_state(self, signed_in):
+        return {"qoder": {"installed": True, "signed_in": signed_in,
+                          "reason": "" if signed_in else "Not logged in"}}
+
+    def run_qoder_filters(self, signed_in):
+        return r.filter_routes({"kind": "review", "privacy": "public"},
+                               {"need_tokens": 1000}, self.qoder_state(signed_in),
+                               self.ROUTE_REGISTRY, {}, client="qoder")
+
+    def test_a_signed_out_qoder_removes_routes_run_on_it(self):
+        survivors, removed = self.run_qoder_filters(False)
+        self.assertNotIn("r-qoder", survivors)
+        self.assertEqual(removed["r-qoder"], ["client: qoder not signed in"])
+
+    def test_a_signed_in_qoder_keeps_routes_run_on_it(self):
+        survivors, removed = self.run_qoder_filters(True)
+        self.assertIn("r-qoder", survivors)
+        self.assertNotIn("r-qoder", removed)
 
 
 if __name__ == "__main__":

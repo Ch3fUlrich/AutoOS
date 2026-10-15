@@ -7,8 +7,12 @@
 #      alone has nothing to attach to)
 #   2. refreshes the gateway's model catalog for what it just registered
 #      (omniroute models <provider>), so one run is enough on a fresh machine
-#   3. (re)creates the tier combos from configuration/omniroute/combos.json
-#   4. prunes the combos listed there as "retired" from the store (only those)
+#   3. declares the custom (manual) models of configuration/omniroute/
+#      custom-models.json through apply-custom-models.sh, before the catalog is
+#      read for combo validation — a provider whose model list the gateway image
+#      bakes has no live discovery, so its new ids exist only once declared
+#   4. (re)creates the tier combos from configuration/omniroute/combos.json
+#   5. prunes the combos listed there as "retired" from the store (only those)
 #
 # B2-VERTEX 2026-10-01: vertex authenticates from the GCP service-account JSON
 # file configuration/vertex-credentials-<gcp-project>-<keyid>.json (the real
@@ -1136,6 +1140,38 @@ else
             echo "  ! $provider_id could not be enumerated - its legs may be dropped below"
         fi
     done
+fi
+
+# ─── Declared custom (manual) models ───────────────────────────────────────
+# A provider whose model list is baked into the gateway image has no live
+# discovery: OmniRoute 3.8.50 ships xiaomi-mimo with mimo-v2.5-pro and mimo-v2.5
+# only, and the synced catalog is authoritative, so mimo-v2.6-* answered 400
+# "not available in the active live catalog". custom-models.json is the
+# operator's declared override, registered as a manual model by
+# apply-custom-models.sh (idempotent — an id the gateway holds is reported, not
+# rewritten). This must run BEFORE the /v1/models read below: a combo leg that
+# names a custom id the store does not hold yet would be dropped as "catalog
+# does not know" and only appear on the second run.
+# The manage key is NOT handed over with an assignment prefix here: an env
+# var set on a child reaches its whole process tree, and this child starts
+# curl, which takes the key from a private 0600 config file instead — a prefix
+# would put it in curl's environment, where apply.sh deliberately never puts it
+# (see omni() above and the stand-in curl in tests/linux/34-ai-services.sh that
+# reports any tool which could see OMNIROUTE_API_KEY). apply-custom-models.sh
+# resolves the key by the one rule apply.sh uses: an OMNIROUTE_API_KEY already
+# exported (the child inherits it), else the ai-stack manage.key file.
+# --drift never reaches this line: its block above compares the live store and
+# exits, so a read-only run still reads nothing but the combo list.
+echo "Custom models:"
+_custom_args=()
+if [[ $DRY -eq 1 ]]; then
+    _custom_args=(--dry-run)
+else
+    _custom_args=(--go "$GO_REF" --go-sha "$GO_SHA")
+    [[ $GO_OFFLINE -eq 1 ]] && _custom_args+=(--go-offline)
+fi
+if ! bash "$HERE/apply-custom-models.sh" "${_custom_args[@]}"; then
+    echo "  ! custom models not applied - combo legs that name a declared custom id may be dropped below"
 fi
 
 # TORDER 2026-10-01: combo-contract gate (fail-closed, also under --dry-run).

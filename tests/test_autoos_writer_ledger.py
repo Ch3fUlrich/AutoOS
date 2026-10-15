@@ -23,6 +23,31 @@ import autoos_writer_ledger as ledger  # noqa: E402
 
 NOW = datetime.datetime(2026, 10, 9, 12, 0, tzinfo=datetime.timezone.utc)
 MODEL = "vertex/gemini-3.8-flash"
+# P6e: a rejection is attributed to a FAMILY read out of the registry, so this file pins that
+# registry like it pins the clock — the committed catalog moves when an operator edits a reviewer.
+FAMILY_REGISTRY = {"providers": {"vertex": {}, "openrouter": {}},
+                   "models": {"gemini-3.8-flash": {"family": "google"},
+                              "gemini-3.8-flash-lite": {"family": "google"},
+                              "nemotron-3-super": {"family": "nvidia"},
+                              "nvidia/nemotron-3-super-120b-a12b:free": {"family": "nvidia"}},
+                   "policy": {"reviewers": [{"model": "t3", "family": "deepseek"},
+                                             {"model": "gemini-3.8-flash", "family": "google"},
+                                             {"model": "qwen3.8-flash", "family": "qwen"}]}}
+REAL_FAMILY_REGISTRY = None
+
+
+def setUpModule():
+    """P6e-c: pin the registry only while THIS file's tests run. pytest imports every test
+    module at collection, so an import-time assignment here replaced the real registry reader
+    for the whole session and reddened other files' ledger tests."""
+    global REAL_FAMILY_REGISTRY
+    REAL_FAMILY_REGISTRY = ledger._family_registry
+    ledger._family_registry = lambda: FAMILY_REGISTRY
+
+
+def tearDownModule():
+    if REAL_FAMILY_REGISTRY is not None:
+        ledger._family_registry = REAL_FAMILY_REGISTRY
 
 
 def path():
@@ -167,13 +192,14 @@ class LedgerTests(unittest.TestCase):
         self.assertGreaterEqual(skipped, 1)
         self.assertEqual({r["run_id"] for r in rows}, {"r1", "r2", "r3", "r4"})
         mixed = path()
-        write_rows(mixed, [entry(run_id="r1", ts=ago(1)),
-                           entry(run_id="r2", ts=ago(2))])
+        families = dict(writer_family="google", reviewer_family="deepseek")
+        write_rows(mixed, [dict(entry(run_id="r1", ts=ago(1)), **families),
+                           dict(entry(run_id="r2", ts=ago(2)), **families)])
 
         with open(mixed, "a", encoding="utf-8") as fh:
             fh.write('{"run_id": "torn-r3-fragment\n')
 
-        write_rows(mixed, [entry(run_id="r4", ts=ago(4))])
+        write_rows(mixed, [dict(entry(run_id="r4", ts=ago(4)), **families)])
         rows, skipped = ledger.load(mixed)
         self.assertEqual(len(rows), 3)
         self.assertGreaterEqual(skipped, 1)
@@ -906,6 +932,136 @@ class LedgerTests(unittest.TestCase):
                 self.assertIsNotNone(
                     re.search(r"\n\n\ndef %s\b" % re.escape(name), "\n\n" + text),
                     "expected two blank lines before def %s" % name)
+
+
+class RefKeyTests(unittest.TestCase):
+    """AO-LEDGER-WRITE (P6): a seat row names the evidence it came from. `ref` is
+    optional and hex-shaped, old rows without it keep loading, and the ledger's
+    home is overridable so a test never touches the real logs/writer-ledger.jsonl."""
+
+    def setUp(self):
+        self._real_now = ledger._now
+        ledger._now = lambda: NOW
+
+    def tearDown(self):
+        ledger._now = self._real_now
+
+    def test_ref_round_trips_and_is_shape_checked(self):
+        self.assertEqual(ledger.record(entry(ref="a" * 64), path=path())["ref"], "a" * 64)
+
+        for bad in ("f" * 6, "g" * 64, "A" * 64, "a" * 65, "has space", 7):
+            with self.subTest(bad=str(bad)[:12]):
+                self.assertRaises(ValueError, ledger.record, entry(ref=bad), path())
+
+    def test_rows_without_ref_still_load_and_rollup(self):
+        target = path()
+        ledger.record(entry(), path=target)
+        ledger.record(entry(run_id="r2", ref="b" * 8), path=target)
+        self.assertEqual([r.get("ref") for r in ledger.load(target)[0]], [None, "b" * 8])
+        self.assertEqual(ledger.rollup(path=target)["gemini-3.8-flash"]["code"]["rejected"], 2)
+
+    def test_default_path_honours_the_env(self):
+        old = os.environ.get("AUTOOS_LEDGER_PATH")
+        os.environ["AUTOOS_LEDGER_PATH"] = os.path.join(path(), "led.jsonl")
+
+        try:
+            self.assertEqual(ledger.default_path(), os.environ["AUTOOS_LEDGER_PATH"])
+        finally:
+            if old is None:
+                del os.environ["AUTOOS_LEDGER_PATH"]
+            else:
+                os.environ["AUTOOS_LEDGER_PATH"] = old
+
+
+class RejectFamilyTests(unittest.TestCase):
+    """P6e (judge): the seat-pair rule belongs to a 'rejected' row, not only to a counted seat —
+    both families COMPUTED from the registry as the row is WRITTEN, re-read by demoted()/rollup()."""
+
+    def setUp(self):
+        self._real_now = ledger._now
+        ledger._now = lambda: NOW
+
+    def tearDown(self):
+        ledger._now = self._real_now
+
+    def test_a_cross_family_reject_is_written_with_both_families(self):
+        got = ledger.record(entry(), path=path())
+        self.assertEqual((got["writer_family"], got["reviewer_family"]), ("google", "deepseek"))
+
+    def test_a_reject_that_cannot_name_two_families_lands_no_row(self):
+        for bad in ({"reviewer": "gemini-3.8-flash"},
+                    {"reviewer": "gemini-3.8-flash", "reviewer_family": "nvidia"},
+                    {"reviewer": "t9"}, {"reviewer": " "}, {"writer_model_served": "nope-3"}):
+            target = path()
+
+            with self.assertRaises(ValueError) as ctx:
+                ledger.record(entry(**bad), path=target)
+
+            self.assertIn("another family", str(ctx.exception), bad)
+            self.assertFalse(os.path.exists(target), bad)
+
+    def test_the_registry_answers_never_the_caller(self):
+        got = ledger.record(entry(writer_family="deepseek", reviewer_family="google"), path=path())
+        self.assertEqual((got["writer_family"], got["reviewer_family"]), ("google", "deepseek"))
+
+    def test_family_shape_is_validated(self):
+        for bad in ("Google", "x" * 41, "has space", "a/b", 7):
+            with self.subTest(bad=str(bad)[:12]):
+                with self.assertRaises(ValueError):
+                    ledger.validate(dict(entry(), writer_family=bad))
+
+    def test_accepted_rows_need_no_family_and_store_one_when_known(self):
+        good = entry(run_id="a1", verdict="accepted", reviewer="t9")
+        del good["failure_class"]
+        got = ledger.record(good, path=path())
+        self.assertEqual((got.get("writer_family"), got.get("reviewer_family")),
+                         ("google", None), "an unresolvable reviewer is not invented")
+        self.assertEqual(ledger.record(entry(run_id="a2", verdict="accepted"),
+                                       path=path())["reviewer_family"], "deepseek")
+
+    def test_demoted_counts_only_cross_family_rejects(self):
+        target = path()
+        write_rows(target, [entry(run_id="old1", ts=ago(1)),   # a pre-P6e family-less row
+                            entry(run_id="old2", ts=ago(2)),
+                            dict(entry(run_id="same1", ts=ago(3)), writer_family="google",
+                                 reviewer_family="google"),
+                            dict(entry(run_id="half1", ts=ago(4)), reviewer_family="deepseek")])
+        self.assertFalse(ledger.demoted(MODEL, "code", now=NOW, path=target),
+                         "family-less and same-family rejects count nothing")
+        self.assertEqual(ledger.rollup(target, NOW), {},
+                         "a rejection that counts nothing is not a verdict count")
+        ledger.record(entry(run_id="x1", ts=ago(5)), path=target)
+        self.assertFalse(ledger.demoted(MODEL, "code", now=NOW, path=target), "under threshold 2")
+        ledger.record(entry(run_id="x2", ts=ago(6)), path=target)
+        self.assertTrue(ledger.demoted(MODEL, "code", now=NOW, path=target))
+        self.assertEqual(ledger.rollup(target, NOW)["gemini-3.8-flash"]["code"]["rejected"], 2,
+                         "rollup() counts what demoted() counts")
+        ledger.probe_pass(MODEL, "code", path=target)
+        self.assertFalse(ledger.demoted(MODEL, "code", now=NOW, path=target))
+
+    def test_a_hand_written_row_with_two_families_counts_and_says_why(self):
+        # The read side trusts the stored families because ONLY the write side computes them; the
+        # file's integrity is the filesystem's, as the module docstring states.
+        target = path()
+        write_rows(target, [dict(entry(run_id="f%d" % i, ts=ago(i)), writer_family="google",
+                                 reviewer_family="nvidia") for i in (1, 2)])
+        self.assertTrue(ledger.demoted(MODEL, "code", now=NOW, path=target))
+        self.assertIn("filesystem", ledger.__doc__)
+
+    def test_the_default_registry_is_the_committed_catalog(self):
+        ledger._family_registry = REAL_FAMILY_REGISTRY
+        self.addCleanup(setattr, ledger, "_family_registry", lambda: FAMILY_REGISTRY)
+        self.assertEqual(ledger._family_of("qwen3.8-flash"), "qwen")
+        self.assertEqual(ledger._family_of("gemini/gemini-3.8-flash"), "google")
+        self.assertIsNone(ledger._family_of("t3"))
+
+    def test_no_producer_path_passes_a_ledger_path_to_writer_allowed(self):
+        """(P6e 4) Nothing may block a spawn on a demotion yet: `writer_allowed` keeps its
+        `ledger_path=None` default with no caller until ROUTE-WRITER-OPS starts the clock."""
+        for rel in ("tools/autoos-agent.py", "tools/autoos_routing.py",
+                    "tools/autoos_resolver.py", "tools/autoos_agent_mcp.py"):
+            with self.subTest(rel=rel):
+                self.assertNotIn("writer_allowed(", (ROOT / rel).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

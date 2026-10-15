@@ -97,6 +97,9 @@ from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
 # The spawner resolves the run-state root with this helper; a lane's children are
 # looked for under the SAME root, never under a path this module invented (F4).
 import autoos_clients  # noqa: E402
+# AO-RECOVER-L2-LOOP: the stall loop asks recovery what it plans for a child
+# that died — plan only; this module never calls `record` or `spawn` from here.
+import autoos_recovery  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = REPO_ROOT / "catalog" / "ai-registry.json"
@@ -158,8 +161,22 @@ _WAKE_COOLDOWN_S = 10 * 60.0
 _SAFE_TEXT_MAX = 200
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
+# AO-L2-SEAT-INTEGRITY (P4): the skill only exists in this repo's `.agents/skills`
+# (or the user's skills dir), so a phase lane launched in a scratch/foreign repo
+# errored `Unable to load skill unattended-orchestration` and never worked. The
+# load is best-effort now and the few rules an L2 acts on travel with the footer
+# as ONE line — no private content, and who may spawn what is unchanged.
+INLINE_RULES_LINE = (
+    "R-coord-14: you orchestrate, so follow this contract - never fix or research "
+    "yourself, and spawn L3 workers sized to the complexity; R-coord-09: an L3's "
+    "spawn, routing and status go through the `autoos-agent` MCP only; "
+    "R-orch-01/R-orch-22: report terse, one line per fact, evidence by pointer, "
+    "and end every wave with a visible `GOAL / DONE / NEXT / BLOCKED` text block; "
+    "R-coord-08: keep the heartbeat and read the L1 inbox before every launch.")
 ROLE_LINES = (
-    "You are the L2 orchestrator of this phase (%s). Load the `%s` skill first.",
+    "You are the L2 orchestrator of this phase (%s). Load the `%s` skill if it is "
+    "available (try the Skill tool once); if it is not present in this repo, do "
+    "NOT stop or error - follow the inline rule pointer instead: %s",
     "You NEVER edit code and you never run a write against the repository: "
     "every file-mutating and spawn permission of this session (`edit`, `write`, "
     "`patch`, `task`) is denied and the shell guard runs in `l2` role, which "
@@ -358,7 +375,7 @@ def first_prompt_text(brief_text, name, l1_inbox):
     """The brief verbatim plus the fixed footer; the hint line is the L1
     launcher's own (one home for how MCP is reached under opencode)."""
     role = "\n".join([
-        ROLE_LINES[0] % (name, SKILL),
+        ROLE_LINES[0] % (name, SKILL, INLINE_RULES_LINE),
         ROLE_LINES[1],
         ROLE_LINES[2] % str(l1_inbox),
     ])
@@ -845,6 +862,7 @@ def stalled(name):
         return dict(base, stalled=False, reason="ok")
     if _already_woken(_read_heartbeat(lane), verdict, newest):
         return dict(base, stalled=False, reason="already-woken")
+    verdict["lane"] = name          # AO-RECOVER-L2-LOOP: a plan is per-lane
     verdict["next_action"] = _next_action(verdict)
     return dict(base, stalled=True, **verdict)
 
@@ -876,6 +894,37 @@ def _poll_activity(lane, out):
         out["activity_error"] = type(e).__name__
 
 
+def _recovery(info):
+    """AO-RECOVER-L2-LOOP: what recovery plans for the child that just exited —
+    {action, attempts, state} — or None, cached on the verdict so one stall costs
+    one plan. It speaks for THIS lane only: the id comes back from the spawner's
+    runner-private record, never job.json, and another lane's record says nothing
+    here — one lane may not spend another's attempts. A child that exited 0 has
+    nothing to recover. Any fault is None: a wake is never blocked on recovery.
+    """
+    if "recovery" not in info:
+        info["recovery"] = None
+        rc, lane = info.get("rc"), info.get("lane")
+        if (info.get("reason") == "child-exited" and type(rc) is int
+                and rc != 0 and lane and info.get("run_id")):
+            try:
+                if autoos_recovery.record_lane(info["run_id"]) == lane:
+                    plan = autoos_recovery.plan(info["run_id"])
+                    info["recovery"] = {"action": plan.get("action"),
+                                        "attempts": plan.get("attempts"),
+                                        "state": plan.get("state")}
+            except Exception:                   # noqa: BLE001 - fail open: no hint
+                info["recovery"] = None
+    return info["recovery"]
+
+
+def _recovery_phrase(rec):
+    """The wake's own words for a plan: the action and the attempt count. Both
+    come out of another process's record, so both go through `_safe_text`."""
+    return "recovery: %s (attempts %s)" % (_safe_text(rec["action"]),
+                                          _safe_text(rec.get("attempts")))
+
+
 def _next_action(verdict):
     """What the stall says to do next, in one clause.
 
@@ -884,8 +933,12 @@ def _next_action(verdict):
     the wake prompt, `resume`'s answer and `status`'s detail all carry the one
     wording."""
     if verdict.get("reason") == "child-exited":
-        return ("read %s result via autoos-agent result and continue the phase "
-                "plan" % verdict.get("run_id"))
+        action = ("read %s result via autoos-agent result and continue the phase "
+                  "plan" % verdict.get("run_id"))
+        rec = _recovery(verdict)
+        if rec is not None:
+            action = "%s; %s" % (action, _recovery_phrase(rec))
+        return action
     return ("re-read the last tool error, retry the failed step once, then "
             "continue the phase plan")
 
@@ -898,6 +951,9 @@ def _wake_text(info):
     would otherwise end the wake line and start an instruction of its own."""
     nxt = _safe_text(info.get("next_action") or "the next phase step")
     if info.get("reason") == "child-exited":
+        rec = _recovery(info)
+        if rec is not None and "recovery:" not in nxt:
+            nxt = "%s; %s" % (nxt, _recovery_phrase(rec))
         return ("Wake: child %s exited rc=%s; %s. Reply with "
                 "one short line of what you do next."
                 % (_safe_text(info.get("run_id")), _safe_text(info.get("rc")), nxt))
@@ -1035,7 +1091,7 @@ def cmd_resume(name):
                "http_status": status,
                "detail": "the wake prompt returned HTTP %s - a healthy lane is "
                          "left alone, not restarted" % status}
-        for key in ("run_id", "rc", "next_action"):
+        for key in ("run_id", "rc", "next_action", "recovery"):
             if info.get(key) is not None:
                 out[key] = info[key]
         return out
@@ -1043,7 +1099,7 @@ def cmd_resume(name):
     out = {"lane": name, "resumed": True, "restarted": False,
            "reason": info.get("reason"),
            "detail": "woke session %s (%s)" % (state["session_id"], info["reason"])}
-    for key in ("run_id", "rc", "next_action"):
+    for key in ("run_id", "rc", "next_action", "recovery"):
         if info.get(key) is not None:
             out[key] = info[key]
     return out

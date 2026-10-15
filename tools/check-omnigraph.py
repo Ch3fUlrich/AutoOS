@@ -22,6 +22,8 @@ Checks:
     * GET  <base>/healthz                      server is up
     * GET  <base>/graphs/<graph>/schema        token accepted, graph exists
     * POST <base>/graphs/<graph>/query         the graph has a Project hub
+    Every request but /healthz carries `omnigraph-http-api: 0.13` — 0.13.0
+    answers 400 api_contract_mismatch without it.
 
 Usage:
     python3 tools/check-omnigraph.py [--offline] [--json] [--root DIR]
@@ -54,6 +56,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN_REF = "${OMNIGRAPH_TOKEN}"
 DEFAULT_BASE = "http://localhost:8080"
+CONTRACT_VERSION = "0.13"
+CONTRACT_HEADER = "omnigraph-http-api"
 
 
 class Unusable(Exception):
@@ -161,6 +165,7 @@ def read_env_file(path: Path) -> dict[str, str]:
 def _request(url: str, token: str | None, body: dict | None = None, timeout: int = 10):
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method="POST" if data else "GET")
+    req.add_header(CONTRACT_HEADER, CONTRACT_VERSION)
     if data:
         req.add_header("Content-Type", "application/json")
     if token:
@@ -172,6 +177,22 @@ def _request(url: str, token: str | None, body: dict | None = None, timeout: int
         return exc.code, exc.read().decode("utf-8", "replace")
     except (urllib.error.URLError, OSError) as exc:
         return 0, str(getattr(exc, "reason", exc))
+
+
+def _contract_mismatch(code: int, body: str) -> bool:
+    """A 0.13 server rejects every other HTTP contract with exactly this answer."""
+    if code != 400:
+        return False
+    try:
+        return json.loads(body).get("code") == "api_contract_mismatch"
+    except ValueError:
+        return False
+
+
+def _contract_problem() -> str:
+    return (f"http contract mismatch: the server answers api_contract_mismatch to"
+            f" '{CONTRACT_HEADER}: {CONTRACT_VERSION}', so it speaks a different HTTP"
+            f" contract than this tool (expects {CONTRACT_VERSION})")
 
 
 def check_live(base: str, graph: str, token: str | None, token_source: str) -> tuple[list[str], list[str]]:
@@ -195,6 +216,9 @@ def check_live(base: str, graph: str, token: str | None, token_source: str) -> t
         return problems, facts
 
     code, body = _request(f"{base}/graphs/{graph}/schema", token)
+    if _contract_mismatch(code, body):
+        problems.append(_contract_problem())
+        return problems, facts
     if code == 401:
         problems.append("schema read: 401, the token was rejected (stale or wrong server)")
         return problems, facts
@@ -208,6 +232,9 @@ def check_live(base: str, graph: str, token: str | None, token_source: str) -> t
 
     query = "query whoami() { match { $p: Project } return { $p.slug } }"
     code, body = _request(f"{base}/graphs/{graph}/query", token, {"query": query})
+    if _contract_mismatch(code, body):
+        problems.append(_contract_problem())
+        return problems, facts
     if code != 200:
         problems.append(f"Project read: {code or 'unreachable'} {body[:120]}".rstrip())
         return problems, facts
@@ -215,7 +242,10 @@ def check_live(base: str, graph: str, token: str | None, token_source: str) -> t
         rows = json.loads(body).get("rows") or []
     except ValueError:
         rows = []
-    slugs = sorted(str(r.get("p.slug")) for r in rows if isinstance(r, dict))
+    # 0.13 omits a NULL column from the row object: a missing key is not a slug.
+    slugs = sorted(
+        row["p.slug"] for row in rows
+        if isinstance(row, dict) and isinstance(row.get("p.slug"), str) and row["p.slug"])
     if not slugs:
         problems.append(f"graph {graph!r} has no Project hub node (empty, or the wrong graph)")
     else:

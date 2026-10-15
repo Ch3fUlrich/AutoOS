@@ -323,6 +323,11 @@ Test-Case 'registry: no generated file drifts' {
         # AO-DENYLEGS D1 (2026-10-08): the (f)-(i) gate's own unit tests.
         $out = & python3 (Join-Path $Root 'tests\test_combo_contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
         Assert-True ($rc -eq 0) "combo-contract unit tests failed: $out"
+        # AO-MIMO-CUSTOM-APPLY (2026-10-12): the declared custom models the apply
+        # paths must declare. Checks apply.ps1's block as text and runs the shell
+        # applier against a fake loopback gateway it owns — never the live one.
+        $out = & python3 (Join-Path $Root 'tests\test_custom_models_apply.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "custom-models apply tests failed: $out"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
         try {
             $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
@@ -5119,14 +5124,33 @@ Test-Case 'autoos_writer_ledger: verdict ledger, demotion, probe, rollup (unit t
     Assert-Equal $rc 0 "writer-ledger unit tests failed: $out"
 }
 
-Test-Case 'autoos_ready_guards: brief FILES scope, diff fence, report checks, preflight (unit tests)' {
+Test-Case 'autoos_ready_guards + autoos_verdict: FILES scope, diff fence, verdict grammar (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_ready_guards.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_ready_guards.py') 2>&1 | Out-String; $rc = $LASTEXITCODE; if ($rc -eq 0) { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_verdict.py') 2>&1 | Out-String; $rc = $LASTEXITCODE } }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "ready-guards unit tests failed: $out"
+}
+
+Test-Case 'autoos_recovery: run classify, stall clock, attempt budget, continue task, plan (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_recovery.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "recovery unit tests failed: $out"
+}
+
+Test-Case 'ready callers: tracked invocations name --brief and --report (lint)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_callers.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "ready-caller lint failed: $out"
 }
 
 Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
@@ -11334,7 +11358,8 @@ $gateRouting = Join-Path $Root 'tests/fixtures/go-gate/routing'
 $gateWorkers = Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'
 $gateEnvKeys = @(
     'PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE',
-    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG'
+    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG',
+    'OMNIGRAPH_IMAGE'
 ) + $GateStubUrlVars
 function Push-GateEnv {
     # [Environment] rather than $env: because a $null read under Set-StrictMode
@@ -11591,11 +11616,20 @@ Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unc
 # instead of the host's.
 Describe-Group 'compact-graphs D-825 GO gate'
 $gateCompact = Join-Path $Root 'infra/mcp-servers/scripts/compact-graphs.ps1'
+# D-1038 P4c4: compact-graphs.ps1 defaults to the pinned v0.13.0 reference and its image
+# guard fails closed on >= 0.13 — before the GO gate and before any docker call, and
+# -DryRun included. These cases test the GO gate, so they must get past that guard: they
+# name a 0.8 image, the same shared-variable fix APC_IMG08 makes in
+# tests/linux/40-omnigraph-images.sh. One variable, so no case can drift back onto the
+# failing default.
+$gateCompactImage = 'modernrelay/omnigraph-server:v0.8.1'
 
 function Invoke-ChildCompact {
     # D-852: compaction is a docker-first tool — it inspects, stops and restarts the
     # live omnigraph-server — so the stand-in directory is the only thing this case
     # family can honestly run against. The record comes back as 'Calls'.
+    # An empty -Extra OMNIGRAPH_IMAGE clears the 0.8 image and so runs against the
+    # failing default — that is how the guard case below reaches the abort.
     param([string[]]$ScriptArgs, [hashtable]$Extra = @{})
     $prevEap = $ErrorActionPreference
     $saved = Push-GateEnv
@@ -11607,6 +11641,7 @@ function Invoke-ChildCompact {
         $values = Get-GateStubEnv -Stub $stub -Extra @{
             'AUTOOS_ROUTING_DIR' = $gateRouting
             'AUTOOS_WORKERS_DIR' = $gateWorkers
+            'OMNIGRAPH_IMAGE'    = $gateCompactImage
         }
         foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
         Set-GateStubEnv -Values $values
@@ -11693,6 +11728,22 @@ Test-Case 'compact-graphs.ps1 D-825: a valid -Go + -GoSha clears the gate and ec
     Assert-True (Test-GateStubRecord $r.Calls 'docker') `
         "the cleared run reached no stand-in docker: [$(($r.Calls) -replace "`r", ' / ')]"
     Assert-True ($r.Out -match 'omnigraph-server not found') "the stand-in did not stop the run: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-1038: no OMNIGRAPH_IMAGE aborts on the 0.13 default before the gate' {
+    # The guard every case above now has to satisfy, asserted at suite level: with no
+    # image named, the run fails closed on the 0.13 default — and it does so ahead of
+    # the GO gate and ahead of -DryRun, so neither reaches a docker call.
+    $r = Invoke-ChildCompact @() -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'ABORT: image ') "no image abort: $($r.Out)"
+    Assert-True ($r.Out -match 'AO-APPLY-CLUSTER-013') "the abort lost the port item: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "the run reached the GO gate: $($r.Out)"
+    Assert-GateUntouched $r
+    $d = Invoke-ChildCompact @('-DryRun') -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $d.Code 2
+    Assert-True ($d.Out -match 'ABORT: image ') "a dry run skipped the guard: $($d.Out)"
+    Assert-GateUntouched $d
 }
 
 # ─── D-852: the shadow itself is a tested property ────────────────────────────

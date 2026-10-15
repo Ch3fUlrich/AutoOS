@@ -50,17 +50,25 @@ def _patcher():
 
 
 PATCHER = _patcher()
-# The three shipped states of one expression site, taken from the patcher's own
-# table so this fixture cannot drift from what the patcher writes.
+# The shipped states of one expression site, taken from the patcher's own table so
+# this fixture cannot drift from what the patcher writes.
 EXPR_SITE = [s for s in PATCHER.SITES if s["chunk"] == ALL_CHUNKS[0]][0]
-PRISTINE_EXPR = EXPR_SITE["forms"][1][0]
-V1_EXPR = EXPR_SITE["forms"][0][0]
-V2_EXPR = EXPR_SITE["new"]
+
+
+def _form(site, state):
+    return next(old for old, _new, label in site["forms"] if label == state)
+
+
+PRISTINE_EXPR = _form(EXPR_SITE, "pristine")
+V1_EXPR = _form(EXPR_SITE, "v1")
+V2_EXPR = _form(EXPR_SITE, "v2")
+V3_EXPR = EXPR_SITE["new"]
 
 
 def extra_chunk_text(state="pristine"):
     """A chunk file that carries one call site and nothing the tables name."""
-    form = {"pristine": PRISTINE_EXPR, "v1": V1_EXPR, "v2": V2_EXPR}[state]
+    form = {"pristine": PRISTINE_EXPR, "v1": V1_EXPR,
+            "v2": V2_EXPR, "v3": V3_EXPR}[state]
     return ("// hermetic 13th-site fixture: a call site in a chunk the tables do not name\n"
             "const u={mergeConsecutiveSameRoleContents:(c)=>(Array.isArray(c)?c:[])};\n"
             "function h(t,n){let f={contents:(n&&n.contents)||[]};return f._x=1,%s}\n"
@@ -122,6 +130,7 @@ class GatePasses(unittest.TestCase):
             self.assertIn("total=12", proc.stdout)
             self.assertIn("patched=12", proc.stdout)
             self.assertIn("refill=12", proc.stdout)
+            self.assertIn("split=12", proc.stdout)
 
     def test_the_counts_are_printed_even_when_it_passes(self):
         """The build log has to say what it measured, not only that it was happy."""
@@ -157,6 +166,28 @@ class GateFailsUnpatchedSite(unittest.TestCase):
             self.assertNotEqual(0, proc.returncode)
             self.assertIn("total=13", proc.stdout)
             self.assertIn("v1", proc.stdout)
+
+    def test_a_13th_site_left_on_the_v2_guard_fails_the_build(self):
+        """A v2 guard is the split's absence, so the gate must refuse it (D-908)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            patched_tree(tree, extra={EXTRA_CHUNK: extra_chunk_text("v2")})
+            proc = run_gate(tree)
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("total=13", proc.stdout)
+            self.assertIn("patched=12", proc.stdout)
+            self.assertIn("split=12", proc.stdout)
+
+    def test_a_13th_site_on_the_v3_guard_passes_the_build(self):
+        """The gate accepts a fully-v3 13-site tree: the count is not fixed at 12."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            patched_tree(tree, extra={EXTRA_CHUNK: extra_chunk_text("v3")})
+            proc = run_gate(tree)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn("total=13", proc.stdout)
+            self.assertIn("patched=13", proc.stdout)
+            self.assertIn("split=13", proc.stdout)
 
     def test_a_renamed_chunk_is_still_counted(self):
         """Renaming is invisible to a count over the directory, not to a list of names."""
@@ -347,11 +378,13 @@ class Hermetic(unittest.TestCase):
         """The README's ordering claim is proved against the tables, not asserted.
 
         The chunk sites match on the full head+tail string, so the pristine form is
-        NOT a substring of the v1 form; only the .ts site's anchor is, which is why
-        the v1 form has to be tried first there.
+        NOT a substring of the v1 form (nor of the v2 form); only the .ts site's
+        anchor is, which is why the upgrade forms have to be tried first there.
         """
         for site in PATCHER.SITES:
-            self.assertNotIn(site["forms"][1][0], site["forms"][0][0], site["label"])
+            pristine = _form(site, "pristine")
+            self.assertNotIn(pristine, _form(site, "v1"), site["label"])
+            self.assertNotIn(pristine, _form(site, "v2"), site["label"])
         ts_find = "result.contents = mergeConsecutiveSameRoleContents(result.contents ?? []);"
         self.assertIn(ts_find, ts_find + "\n\n  if (result.contents.length > 1) {")
 

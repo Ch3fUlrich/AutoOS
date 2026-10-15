@@ -38,9 +38,17 @@ runs. A Decision that cites a routing-d-NNN in its own text emits no
 Decision->Decision ``Implements`` edge - no such schema edge exists.
 
 Usage: tools/sync_memory_graph.py > out.ndjson   (then load with omnigraph `load` mode=merge)
-       tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs)
+       tools/sync_memory_graph.py --mark          (after a verified load: remember the emitted slugs;
+                                                   with an attempt marker, mark only the records its
+                                                   "keys" list named)
        tools/sync_memory_graph.py --load          (POST new records to $OMNIGRAPH_BASE_URL/graphs/autoos/load, then --mark)
+       tools/sync_memory_graph.py --clear-pending (after an ambiguous --load that did NOT land: drop the attempt marker)
        tools/sync_memory_graph.py --known-slugs FILE --load
+
+``--load`` writes an attempt marker ``.state/graph-load-pending`` before the POST and
+clears it only on a confirmed load or a 4xx (D-1038 P2g); a marker left behind means the
+answer was lost or ambiguous while the batch may have landed, so the next ``--load``
+refuses until a human runs ``--mark`` (it landed) or ``--clear-pending`` (it did not).
 
 ``--load`` refuses (non-zero, nothing marked) when the batch carries an
 edge-only Implements/Supersedes record and no ``--known-slugs`` was given: an
@@ -61,9 +69,15 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 
 GRAPH_ID = "autoos"
 PROJECT_SLUG = "autoos"
+
+# D-1038 A3: Omnigraph 0.13.0 answers 400 api_contract_mismatch to any request
+# that does not declare the contract it speaks.
+CONTRACT_HEADER = "omnigraph-http-api"
+CONTRACT_VERSION = "0.13"
 
 # Kept small and meaningful: top-level dirs/modules that matter, not one node per file.
 COMPONENTS = [
@@ -244,6 +258,43 @@ def ledger_path(root):
     return os.path.join(repo_root(root), ".state", "graph-loaded.txt")
 
 
+def pending_path(root):
+    """D-1038 P2g: the ``--load`` attempt marker, beside the ledger (machine state)."""
+    return os.path.join(os.path.dirname(ledger_path(root)), "graph-load-pending")
+
+
+def write_pending(root, keys, lines):
+    """Record the attempt before POSTing: {"ts", "lines", "keys"}."""
+    path = pending_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = json.dumps({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                          "lines": lines, "keys": list(keys)})
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(payload + "\n")
+    os.replace(tmp, path)
+
+
+def read_pending(root):
+    """Marker contents, ``{}`` when present but unreadable, ``None`` when absent."""
+    path = pending_path(root)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clear_pending(root):
+    try:
+        os.remove(pending_path(root))
+    except FileNotFoundError:
+        pass
+
+
 def loaded(root):
     try:
         with open(ledger_path(root), encoding="utf-8") as f:
@@ -403,10 +454,24 @@ def load_confirmed(res, sent, edge_only=0):
     the prior permissive behavior for a batch with no edge-only record; an
     edge-only record has no @key and would silently duplicate, so an
     unconfirmed edge batch must not be marked. Otherwise every reported table
-    must be error-free and must report rows when records were sent."""
-    tables = (res or {}).get("tables", [])
+    must be error-free and must report rows when records were sent.
+
+    D-1038 A3 adds the 0.13.0 shape: flat ``total_entities`` is the evidence and
+    must equal what was sent (fewer is a partial load, more is not this batch);
+    a non-empty flat ``error`` means the whole load failed, there is no
+    per-table list. A dict with neither ``tables`` nor ``total_entities`` is an
+    unknown shape and reads as unconfirmed - the permissive node-only path would
+    mark edges that never landed as loaded, and they are gone for good."""
+    if not isinstance(res, dict):
+        return False
+    if res.get("error"):
+        return False
+    total = res.get("total_entities")
+    if isinstance(total, int) and not isinstance(total, bool):
+        return total == sent
+    tables = res.get("tables") or []
     if not tables:
-        return edge_only == 0
+        return "tables" in res and edge_only == 0
     for t in tables:
         if t.get("error"):
             return False
@@ -419,13 +484,34 @@ def load_confirmed(res, sent, edge_only=0):
     return True
 
 
+def load_summary(res):
+    """Counts to log for a load response: the per-table map of the 0.8.1 shape,
+    the per-type map (``{name: entities_loaded}`` over nodes + edges) of the
+    0.13.0 shape. Tolerates any shape - this only feeds a log line."""
+    if not isinstance(res, dict):
+        return {}
+    tables = res.get("tables") or []
+    if isinstance(tables, list) and tables:
+        return {t.get("table_key"): t.get("rows_loaded")
+                for t in tables if isinstance(t, dict)}
+    counts = {}
+    for group in ("nodes", "edges"):
+        rows = res.get(group) or []
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    counts[row.get("name")] = row.get("entities_loaded")
+    return counts
+
+
 def post_load(base_url, token, lines):
     body = json.dumps({"branch": "main", "mode": "merge",
                        "data": "\n".join(lines) + "\n"}).encode()
     url = base_url.rstrip("/") + f"/graphs/{GRAPH_ID}/load"
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Authorization": "Bearer " + token,
-                                          "content-type": "application/json"})
+                                          "content-type": "application/json",
+                                          CONTRACT_HEADER: CONTRACT_VERSION})
     return json.load(urllib.request.urlopen(req, timeout=120))
 
 
@@ -476,9 +562,23 @@ def main(argv=None, root=None, env=None):
     env = os.environ if env is None else env
     root = repo_root(root)
     known, argv = _take_known_slugs(list(argv))
+    if "--clear-pending" in argv:
+        clear_pending(root)
+        print("cleared pending marker", file=sys.stderr)
+        return 0
     new = emit(root, ledger_path(root), known)
     edge_only = sum(1 for _, node, _ in new if node is None)
     if "--load" in argv:
+        pending = read_pending(root)
+        if pending is not None:
+            print(f"ERROR: a previous --load attempt "
+                  f"({pending.get('ts', '?')}, {pending.get('lines', '?')} lines) "
+                  "did not finish cleanly; it may have landed. Do NOT re-run "
+                  "blindly: edges would be duplicated. Check commits_list head "
+                  "and snapshot edge counts against the values before that load, "
+                  "then run --mark (it landed) or --clear-pending (it did not).",
+                  file=sys.stderr)
+            return 1
         if not new:
             print("nothing new", file=sys.stderr)
             return 0
@@ -491,21 +591,39 @@ def main(argv=None, root=None, env=None):
             return 1
         lines = [json.dumps(n, ensure_ascii=False) for _, n, _ in new if n is not None] + \
                 [json.dumps(e) for _, _, es in new for e in es]
+        base_url = env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080")
+        token = env.get("OMNIGRAPH_TOKEN")
+        if not token:
+            # Refused before the marker: a request that was never sent can
+            # never have landed, so the next --load must not refuse on it.
+            print("ERROR: OMNIGRAPH_TOKEN is not set; nothing sent.",
+                  file=sys.stderr)
+            return 1
+        write_pending(root, [k for k, _, _ in new], len(lines))
         try:
-            res = post_load(env.get("OMNIGRAPH_BASE_URL", "http://localhost:8080"),
-                            env["OMNIGRAPH_TOKEN"], lines)
+            res = post_load(base_url, token, lines)
         except urllib.error.HTTPError as exc:
-            print(f"ERROR: the omnigraph server rejected the load "
-                  f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
-                  "retry.", file=sys.stderr)
+            if 400 <= exc.code < 500:
+                # A 4xx rejected the whole load, so nothing landed and a retry is safe.
+                print(f"ERROR: the omnigraph server rejected the load "
+                      f"(HTTP {exc.code} {exc.reason}); ledger NOT marked - fix and "
+                      "retry.", file=sys.stderr)
+                clear_pending(root)
+            else:
+                print(f"ERROR: the omnigraph server rejected the load "
+                      f"(HTTP {exc.code} {exc.reason}); ledger NOT marked. The load "
+                      "may have landed - the attempt marker was kept, so the next "
+                      "--load refuses until you run --mark (it landed) or "
+                      "--clear-pending (it did not).", file=sys.stderr)
             return 1
         except urllib.error.URLError as exc:
             print(f"ERROR: could not reach the omnigraph server "
-                  f"({exc.reason}); ledger NOT marked - fix and retry.",
+                  f"({exc.reason}); ledger NOT marked. The load may have landed - "
+                  "the attempt marker was kept, so the next --load refuses until "
+                  "you run --mark (it landed) or --clear-pending (it did not).",
                   file=sys.stderr)
             return 1
-        print("loaded:", {t["table_key"]: t["rows_loaded"]
-                           for t in res.get("tables", [])}, file=sys.stderr)
+        print("loaded:", load_summary(res), file=sys.stderr)
         if not load_confirmed(res, len(lines), edge_only):
             print("ERROR: load NOT confirmed by server response "
                   f"({res!r}); refusing to mark {len(new)} records as loaded. "
@@ -513,9 +631,30 @@ def main(argv=None, root=None, env=None):
                   file=sys.stderr)
             return 1
         argv = list(argv) + ["--mark"]
+        # Clear before the internal --mark: it must mark the WHOLE batch it
+        # just confirmed, not intersect with the marker this same run wrote.
+        clear_pending(root)
     if "--mark" in argv:
-        mark(root, ledger_path(root), new)
-        print(f"marked {len(new)} records as loaded", file=sys.stderr)
+        pending = read_pending(root)
+        if pending is None:
+            mark(root, ledger_path(root), new)
+            print(f"marked {len(new)} records as loaded", file=sys.stderr)
+            return 0
+        keys = pending.get("keys")
+        if not isinstance(keys, list):
+            # {} from read_pending (unreadable) or a dict without "keys": the
+            # marker cannot say which records it covered, so nothing may be
+            # hidden as loaded on its behalf.
+            print("ERROR: attempt marker unreadable; cannot tell which records "
+                  "it covered. Check the graph, then run --clear-pending and "
+                  "re-run --mark.", file=sys.stderr)
+            return 1
+        wanted = set(keys)
+        batch = [rec for rec in new if rec[0] in wanted]
+        mark(root, ledger_path(root), batch)
+        clear_pending(root)
+        print(f"marked {len(batch)} records as loaded (from the attempt marker)",
+              file=sys.stderr)
         return 0
     for _, node, _ in new:
         if node is not None:

@@ -9,6 +9,8 @@ agy and qoder cannot use the gateway: they run on their own account login.
 
 Permission levels map onto each CLI's own modes:
     read  - role=review: plan / read-only, no edits
+    seat  - an --isolate read run: the same reviewer, in a private clone it is
+            allowed to write its report into (see `seat_level`)
     edit  - the default (--auto): file edits approved, shell asks (and so
             fails headless) unless the CLI's sandbox allows it
     ask   - --no-auto: the CLI's default prompting
@@ -32,7 +34,15 @@ from dataclasses import dataclass, field
 
 DEFAULT_MAX_DEPTH = 2  # = opencode.jsonc experimental.subagent_depth
 PROBE_STALE_DAYS = 7   # ADR 0006 Q1
-SIGNIN_TIMEOUT = 15    # seconds; `agy models` answers in < 1 s either way
+SIGNIN_TIMEOUT = 15    # seconds; `agy models` answers in < 1 s, `qodercli
+                       # --list-models` in 2.6 s, signed in or out (1.1.63)
+SIGNIN_REASON_CAP = 240  # chars; a probe's failure line is one human line
+# The marker for an account identity in a probe's failure line: the same text as
+# tools/autoos_redact.py's TEXT_MASK, pinned by a test, not imported - the
+# adapters stay stdlib-only so a lone copy of this file still imports.
+SIGNIN_MASK = "[autoos:redacted]"
+_LEAK_URL_RE = re.compile(r"(?i)\b(?:https?|ftp)://\S+")
+_LEAK_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+(?:\.[A-Za-z]{2,})?\b")
 
 
 @dataclass(frozen=True)
@@ -54,7 +64,12 @@ CLIENTS = {c.name: c for c in (
            "tier agents from opencode.jsonc; --isolate adds the outside-path fence"),
     Client("claude", "claude", True, False, True, "claude login (subscription)",
            "-p headless; --joinable = --bg --remote-control session",
-           modes={"read": ["--permission-mode", "plan"], "edit": ["--permission-mode", "acceptEdits"]}),
+           modes={"read": ["--permission-mode", "plan"],
+                  # AO-L2-SEAT-INTEGRITY P3b (measured, run 20261009-165450-mem-tools-
+                  # sonnet-68764c): a review SEAT in a private clone ran `plan` and could
+                  # not write its own REVIEW-FINDINGS.txt. `acceptEdits` writes in there.
+                  "seat": ["--permission-mode", "acceptEdits"],
+                  "edit": ["--permission-mode", "acceptEdits"]}),
     Client("qwen", "qwen", True, True, True, "AUTOOS_OMNIROUTE_KEY (omniroute run)",
            modes={"read": ["--approval-mode", "plan"], "edit": ["--approval-mode", "auto-edit"]}),
     Client("gemini", "gemini", True, True, False, "AUTOOS_OMNIROUTE_KEY (omniroute run)",
@@ -67,6 +82,12 @@ CLIENTS = {c.name: c for c in (
            signin_probe=("models",)),
     Client("qoder", "qodercli", True, False, True, "qodercli login (own account)",
            "own auth, not the gateway; promo - privacy=public only", promo=True,
+           # AO-QODER-ROUTE part 1 (measured 2026-10-11, qodercli 1.1.63, empty
+           # HOME so no real login was asked): `qodercli status` exits 0 even
+           # SIGNED OUT and prints the account's name, e-mail and avatar URL
+           # when in, so it is no probe; `--list-models` exits 1 in 2.6 s naming
+           # the login, and signed in prints only model names.
+           signin_probe=("--list-models",),
            # qodercli 1.1.63 modes are bypass_permissions|dont_ask|auto only; the
            # former "accept_edits" does not exist and refused every write (62 runs,
            # 2026-09-27). bypass_permissions is safe only because the spawner
@@ -382,6 +403,23 @@ def gemini_custom_headers(headers: dict | None) -> str:
     return ",".join("%s:%s" % (name, value) for name, value in (headers or {}).items())
 
 
+def seat_level(client: Client, level: str, isolate: bool = False,
+               read_only: bool = False) -> str:
+    """The mode level for one run: "seat" when `level` is a read run that may write.
+
+    A read run is a reviewer, and a reviewer that runs --isolate works in a private
+    clone: the sandbox confines its writes and the post-run leak check proves the parent
+    checkout stayed clean, so `plan` — a mode that cannot write its report at all — only
+    blocks the seat's deliverable. Two read runs keep `plan`: one NOT isolated, which
+    would otherwise edit the caller's checkout, and one marked --read-only, whose success
+    IS an unchanged sandbox. The seat is declared, never assumed: only a client row with
+    a "seat" mode gets one, so every other CLI's argv is unchanged by construction.
+    """
+    if level == "read" and isolate and not read_only and "seat" in client.modes:
+        return "seat"
+    return level
+
+
 def build_command(client: Client, task: str, combo: str | None, level: str,
                   model: str | None = None, joinable: str | None = None,
                   headers: dict | None = None, deny_spawn: bool = False,
@@ -492,6 +530,11 @@ def signin_state(client: Client, env: dict | None = None) -> tuple:
     in; only the CLI can. Measured 2026-09-25: signed out, `agy models` exits 1
     in 0.6 s with "Please sign in ...", while a headless `agy -p` prints an
     OAuth URL, waits 60 s for a code and only then fails.
+
+    The success path keeps no text, which is what stops a probe repeating what
+    the CLI printed about the account it just authenticated as (`qodercli status`
+    names the user, their e-mail, an avatar URL). The failure path keeps the
+    CLI's last line, minus any address or link, capped.
     """
     env = os.environ if env is None else env
     if not client.signin_probe:
@@ -505,15 +548,23 @@ def signin_state(client: Client, env: dict | None = None) -> tuple:
         r = subprocess.run(argv, capture_output=True, text=True, env=dict(env),
                            stdin=subprocess.DEVNULL, timeout=SIGNIN_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, "`%s %s` did not answer within %d s" % (
-            client.binary, " ".join(client.signin_probe), SIGNIN_TIMEOUT)
+        return _signin_fail("`%s %s` did not answer within %d s" % (
+            client.binary, " ".join(client.signin_probe), SIGNIN_TIMEOUT))
     except OSError as exc:
-        return False, str(exc)
+        return _signin_fail(str(exc))
     if r.returncode == 0:
         return True, ""
     lines = [ln.strip() for ln in (r.stdout + "\n" + r.stderr).splitlines() if ln.strip()]
-    return False, (lines[-1] if lines else "`%s %s` exited %d" % (
-        client.binary, " ".join(client.signin_probe), r.returncode))[:240]
+    return _signin_fail(lines[-1] if lines else "`%s %s` exited %d" % (
+        client.binary, " ".join(client.signin_probe), r.returncode))
+
+
+def _signin_fail(text: str) -> tuple:
+    """(False, one human line) - scrubbed, so an account identity stays out of
+    the spawner's log (AGENTS.md rule 1)."""
+    text = _LEAK_URL_RE.sub(SIGNIN_MASK, text)
+    text = _LEAK_EMAIL_RE.sub(SIGNIN_MASK, text)
+    return False, text[:SIGNIN_REASON_CAP]
 
 
 def signed_out(reason: str) -> bool:

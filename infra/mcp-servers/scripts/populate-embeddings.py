@@ -68,7 +68,7 @@ def main():
     ap.add_argument("--graph", default="memory")
     ap.add_argument("--server", default="http://omnigraph-server:8080",
                     help="server URL as seen from inside the CLI container")
-    ap.add_argument("--image", default="modernrelay/omnigraph-server:v0.8.1")
+    ap.add_argument("--image", default="modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1")
     ap.add_argument("--network", default="mcp-server_mcp-net")
     ap.add_argument("--env-shared", default=".env.shared")
     ap.add_argument("--out", default=None, help="embedded NDJSON output path (default: temp)")

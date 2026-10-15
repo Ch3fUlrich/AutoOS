@@ -29,6 +29,36 @@
 #   * Every docker invocation's exit code is checked. The old version discarded stderr and
 #     `|| true`-d over failures, so a fully failed sync still reported success.
 #
+# RESTORE after a kill between purge and load (D-1038 P2f2, known gap):
+#   The pull purges LOCAL and only then refills it. A kill in that window leaves the
+#   local graph at 0 nodes / 0 edges, and nothing restores it automatically. The next
+#   run refuses — which is the safe outcome — and says so:
+#     [graph] local is dirty or empty — refusing to sync this graph. Backup: <file>
+#   <file> is $BACKUP_DIR/local-<graph>-<UTC ts>.jsonl, but it is NOT the file to
+#   restore from: step 0 exports local before it writes anything, and after a kill that
+#   local graph is already EMPTY — so the refusing run's own message names a NEW 0-byte
+#   export. Restoring from it loads nothing and the operator believes the graph came
+#   back. The file to restore from is the newest NON-EMPTY backup — the pre-kill one:
+#     find "$BACKUP_DIR" -name 'local-<graph>-*.jsonl' -size +0 | sort | tail -1
+#   Restore ONLY into the EMPTY local graph — edges have no @key, so merge-loading into
+#   a non-empty graph APPENDS a duplicate of every edge. OMNIGRAPH_IMAGE, DOCKER_NET and
+#   BACKUP_DIR are normally unset in your shell: the script defaults them internally
+#   (image = the IMAGE default near the top of this script, DOCKER_NET default `host`,
+#   BACKUP_DIR default `<script dir>/backups`), so substitute those values below before
+#   pasting — an unset one expands to empty and `docker run --network ""` is not what
+#   you meant. Using LOCAL_TOKEN and LOCAL_URL_CONTAINER (which you do set), <graph>
+#   from the refusing run's own message, and <backup> from the selector above:
+#     docker run --rm -i --network "$DOCKER_NET" \
+#       -e OMNIGRAPH_BEARER_TOKEN="$LOCAL_TOKEN" -e LOCAL_URL_CONTAINER="$LOCAL_URL_CONTAINER" \
+#       --entrypoint sh "$OMNIGRAPH_IMAGE" \
+#       -c 'cat > /tmp/d.jsonl; omnigraph load --server "$LOCAL_URL_CONTAINER" --graph <graph> --data /tmp/d.jsonl --mode merge --yes --json' \
+#       < "$BACKUP_DIR/local-<graph>-<ts>.jsonl"   # = <backup>, the NON-EMPTY one above
+#   The second -e is load-bearing: the -c string is single-quoted, so it is the
+#   CONTAINER's sh that expands $LOCAL_URL_CONTAINER, and a name it was never given
+#   resolves to empty — `--server` with no URL.
+#   Then run the sync again; it will carry the restored state on to central.
+#   Automatic restore on a partial pull is a known follow-up, NOT implemented.
+#
 # Config via env (or a .env next to this script):
 #   CENTRAL_URL, CENTRAL_TOKEN, LOCAL_TOKEN                      (required)
 #   LOCAL_URL(=http://127.0.0.1:8080)        local API as seen from THIS HOST
@@ -58,10 +88,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 : "${LOCAL_URL:=http://127.0.0.1:8080}"; : "${LOCAL_TOKEN:?set LOCAL_TOKEN}"
 LOCAL_URL_CONTAINER="${LOCAL_URL_CONTAINER:-$LOCAL_URL}"
 DEVICE="${DEVICE:-$(hostname)}"
-IMAGE="${OMNIGRAPH_IMAGE:-modernrelay/omnigraph-server:v0.8.1}"
+IMAGE="${OMNIGRAPH_IMAGE:-modernrelay/omnigraph-server:v0.13.0@sha256:f664cab63d746d7f1fb66d51bf2869363b481f094366853c4e7741b5e96645c1}"
 DOCKER_NET="${DOCKER_NET:-host}"
 BACKUP_DIR="${BACKUP_DIR:-$here/backups}"
 BRANCH="device/${DEVICE}"
+CONTRACT_HEADER='omnigraph-http-api: 0.13'
 JQ="$here/omnigraph_jsonl.py"; PULL="$here/pull_graph.py"; PY="${PYTHON:-python3}"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 mkdir -p "$BACKUP_DIR"
@@ -81,7 +112,7 @@ og_load() {  # og_load <token> <url> <graph> <mode> <file>
     < "$5"
 }
 api() {  # api <token> <url> <graph> <verb: export|…>  -> stdout
-  curl -fsS -m 300 -X POST "${2%/}/graphs/$3/$4" \
+  curl -fsS -m 300 -X POST "${2%/}/graphs/$3/$4" -H "$CONTRACT_HEADER" \
     -H "Authorization: Bearer $1" -H 'content-type: application/json' -d '{}'
 }
 
@@ -92,7 +123,7 @@ if [ -n "${GRAPHS:-}" ]; then
 elif [ -n "${GRAPH:-}" ] && [ "${GRAPH}" != "memory" ]; then
   GRAPH_LIST=("$GRAPH")                       # legacy single-graph
 else
-  read -r -a GRAPH_LIST <<< "$(curl -fsS -m 60 "${CENTRAL_URL%/}/graphs" \
+  read -r -a GRAPH_LIST <<< "$(curl -fsS -m 60 "${CENTRAL_URL%/}/graphs" -H "$CONTRACT_HEADER" \
     -H "Authorization: Bearer $CENTRAL_TOKEN" \
     | grep -o '"graph_id":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ')"
 fi
@@ -179,9 +210,12 @@ sync_graph() {
 
 rc=0
 for g in "${GRAPH_LIST[@]}"; do
-  if ! sync_graph "$g"; then
-    rc=$?
-    log "[$g] sync returned $rc — continuing with remaining graphs"
+  # `if ! sync_graph; then rc=$?` would read the status of the NEGATION — always 0 —
+  # so a failing graph would exit 0 and the timer would never fire. Capture it here.
+  sync_graph "$g"; grc=$?
+  if [ "$grc" -ne 0 ]; then
+    rc=$grc
+    log "[$g] sync returned $grc — continuing with remaining graphs"
   fi
 done
 [ -n "${DRY_RUN:-}" ] && log "DRY_RUN complete — no writes made."

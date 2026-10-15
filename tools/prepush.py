@@ -55,7 +55,7 @@ checkout could certify its own push. That log stays — one line per push, the
 it. A gate that runs inside a worker's sandbox — ``AUTOOS_AGENT_RUN_ID`` set, the
 mark the spawner puts in every worker it starts — runs the checks and prints its
 verdict but writes no green record: the worker cannot certify its own push, so
-only an orchestrator's run records green and ``autoos-agent.py ready`` asks for
+only an orchestrator's run records green and ``autoos-agent.py ready`` asks for <!-- ready-no-guards -->
 that record as its fifth gate. Under the same mark the reader is guarded too: a
 state root that was never given defaults to ``<checkout>/logs``, and a store that
 resolves inside the sandbox it certifies is refused rather than believed. An
@@ -148,6 +148,20 @@ SH_SUMMARY = re.compile(r"passed\s+(\d+)\s+failed\s+(\d+)\s+skipped\s+(\d+)")
 #: pytest's own summary — ``5 passed``, ``1 passed, 2 warnings in 0.4s``. What
 #: ``parse_passed`` reads off a run, alongside the bash suite's tally.
 PYTEST_PASSED = re.compile(r"(\d+) passed")
+#: Every environment variable that pins *which repository* git reads, whatever
+#: the cwd says: the list git itself prints with ``git rev-parse --local-env-vars``
+#: (git exports these to hooks), plus two more that pin a repo just as hard.
+#: A pre-push gate whose children inherit them hands those children the pushing
+#: repository instead of their own (AO-PREPUSH-HOOK-GITENV, measured 2026-10-11:
+#: a fixture's ``git config`` flipped ``core.bare`` in the main ``.git/config``,
+#: fixture commits moved the pushing worktree's HEAD, stray refs appeared).
+GIT_LOCATION_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_QUARANTINE_PATH", "GIT_NAMESPACE",
+)
 
 #: The gate's answers. ``REFUSED`` is a verdict the lane can act on — fix the tree,
 #: merge the base, run the check. ``COULD_NOT_RUN`` is the absence of a verdict: no
@@ -209,9 +223,29 @@ def python_executable() -> str:
     return sys.executable or "python3"
 
 
+def scrub_git_location_env(env) -> dict:
+    """Remove every repository-location pin from ``env``, in place.
+
+    A hook runs with git's own view of which repository is in play exported
+    into its environment; a child that inherits it resolves git commands
+    against *that* repo no matter what cwd it was given. The gate's fixtures
+    work in tmp dirs and must see only their own cwd (AO-PREPUSH-HOOK-GITENV).
+    Returns ``env`` so callers can chain; nothing else in the dict is touched —
+    in particular ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM`` stay, and
+    ``ci_env`` re-pins the identity keys after scrubbing.
+    """
+    for name in GIT_LOCATION_VARS:
+        env.pop(name, None)
+    return env
+
+
 def ci_env(extra=None) -> dict:
-    """This host's env with the git identity CI does not have (rule d)."""
+    """This host's env with the git identity CI does not have (rule d), and
+    with git's repo-location pins removed (AO-PREPUSH-HOOK-GITENV — belt and
+    braces: ``main`` already scrubbed ``os.environ`` for the children it
+    launches without an explicit env, every child built here is scrubbed too)."""
     env = dict(os.environ)
+    scrub_git_location_env(env)
     for key in [k for k in env if k.startswith(GIT_IDENTITY_PREFIXES)]:
         del env[key]
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -687,6 +721,12 @@ def main(argv=None) -> int:
                          "gate record binding exactly this sha and its tree, with "
                          "every result ok (D-110, D-154)")
     args = ap.parse_args(argv)
+    # Scrub git's repo-location pins from this process's own environment before
+    # anything reads a repo: ``_git`` passes no env, so its children inherit
+    # whatever is in ``os.environ`` here. Run from the pre-push hook, that
+    # environment is git's view of the pushing repo, and a test fixture working
+    # in a tmp dir would otherwise edit that repo (AO-PREPUSH-HOOK-GITENV).
+    scrub_git_location_env(os.environ)
     try:
         repo = repo_root(args.repo)
         if args.check_ready:

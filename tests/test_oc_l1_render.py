@@ -115,7 +115,12 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(list(cfg["provider"]), ["omniroute"])
         prov = cfg["provider"]["omniroute"]
         self.assertEqual(prov["npm"], "@ai-sdk/openai-compatible")
-        self.assertEqual(prov["options"], {"baseURL": "{env:AUTOOS_OMNIROUTE_URL}/v1", "apiKey": "{env:AUTOOS_OMNIROUTE_KEY}"})
+        opts = dict(prov["options"])
+        # P1.2: spend attribution header, a plain tag (never a key value).
+        hdrs = opts.pop("headers")
+        self.assertEqual(list(hdrs), ["x-omniroute-session-id"])
+        self.assertRegex(hdrs["x-omniroute-session-id"], r"^oc-l1-[A-Za-z0-9._-]+$")
+        self.assertEqual(opts, {"baseURL": "{env:AUTOOS_OMNIROUTE_URL}/v1", "apiKey": "{env:AUTOOS_OMNIROUTE_KEY}"})
 
     def test_model_pin_and_models_keyed_by_gateway_id(self):
         cfg, _ = render(self.tmp)

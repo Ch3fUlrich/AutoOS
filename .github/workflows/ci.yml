@@ -240,9 +240,15 @@ jobs:
           # main unseen while its docs/ copy was caught; the one pre-existing
           # tools/ match (a /home/... example in tools/hostexec/policy.py) is now
           # a placeholder.
+          # `.agents/` and `deploy/` join the scope as of 2026-10-10: router skills
+          # and the host-unit / hook templates will be published in those two trees, so
+          # they are exactly the content this repository says about a real machine and
+          # must be scrubbed like the rest. Neither tree is exempted by
+          # scan-exclude.txt — only three fixtures that set a throwaway git identity
+          # are, each excluded by its exact file.
           python3 scripts/public-scrub/scan.py \
             --patterns scripts/public-scrub/patterns.txt \
-            infra/ scripts/ docs/ catalog/ tools/ README.md AGENTS.md
+            infra/ scripts/ docs/ catalog/ tools/ .agents/ deploy/ README.md AGENTS.md
 
       # The gate is only as good as patterns.txt: these fixtures fail when a shape
       # stops matching, or when a documentation value starts matching one.

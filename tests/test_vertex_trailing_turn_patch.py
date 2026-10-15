@@ -46,6 +46,16 @@ V1_EXPR = ('{v}.contents.length>1&&"model"==={v}.contents[{v}.contents.length-1]
 V1_STMT = ('if({v}.contents.length>1&&"model"==={v}.contents[{v}.contents.length-1].role)'
            '{v}.contents.pop();')
 
+# The guard omniroute 3.8.50-autoos4 shipped (v2): pop every trailing model turn,
+# refill an emptied contents with one synthetic "Continue." user turn. Frozen here
+# as literal shipped bytes too, so the v2 -> v3 upgrade is proved against what is
+# really on a patched machine, not against the patcher's own table.
+V2_BODY = ('for(;{v}.contents.length&&"model"==={v}.contents[{v}.contents.length-1].role;)'
+           '{v}.contents.pop();'
+           '{v}.contents.length||{v}.contents.push({role:"user",parts:[{text:"Continue."}]})')
+V2_EXPR = '(()=>{' + V2_BODY + '})()'
+V2_STMT = V2_BODY + ';'
+
 
 def _family(expr_var, stmt_var, decl):
     """The two merge call sites of one chunk, in the two shipped states."""
@@ -73,10 +83,13 @@ def _family(expr_var, stmt_var, decl):
     v1 = (pristine
           .replace(e_head + e_tail, e_head + V1_EXPR.format(v=expr_var) + "," + e_tail)
           .replace(s_head + s_tail, s_head + V1_STMT.format(v=stmt_var) + s_tail))
+    v2 = (pristine
+          .replace(e_head + e_tail, e_head + V2_EXPR.replace("{v}", expr_var) + "," + e_tail)
+          .replace(s_head + s_tail, s_head + V2_STMT.replace("{v}", stmt_var) + s_tail))
     return {
         "expr_var": expr_var,
         "stmt_var": stmt_var,
-        "text": {"pristine": pristine, "v1": v1},
+        "text": {"pristine": pristine, "v1": v1, "v2": v2},
     }
 
 
@@ -127,6 +140,37 @@ const shapes = {
   empty:           { contents: [] },
   lone_model_sys:  { contents: [{ role: "model", parts: [{ text: "prefill" }] }],
                      systemInstruction: { parts: [{ text: "be terse" }] } },
+  d908_single:     { contents: [
+      { role: "user", parts: [{ text: "do it" }] },
+      { role: "model", parts: [{ thoughtSignature: "sig", functionCall: { name: "x", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { name: "x", response: {} } },
+                              { text: "the notice" }] }] },
+  d908_parallel:   { contents: [
+      { role: "user", parts: [{ text: "do both" }] },
+      { role: "model", parts: [{ functionCall: { name: "a" } }] },
+      { role: "user", parts: [{ functionResponse: { name: "a" } },
+                              { functionResponse: { name: "b" } },
+                              { text: "notice" }] }] },
+  fr_only:         { contents: [
+      { role: "user", parts: [{ text: "go" }] },
+      { role: "model", parts: [{ functionCall: { name: "x" } }] },
+      { role: "user", parts: [{ functionResponse: { name: "x" } }] }] },
+  text_only:       { contents: [
+      { role: "user", parts: [{ functionResponse: { name: "x" } }] },
+      { role: "model", parts: [{ text: "ok" }] },
+      { role: "user", parts: [{ text: "just text" }] }] },
+  mixed_mid:       { contents: [
+      { role: "user", parts: [{ functionResponse: { name: "x" } }, { text: "mid" }] },
+      { role: "user", parts: [{ text: "later" }] },
+      { role: "model", parts: [{ text: "trailing" }] }] },
+  mixed_final_model: { contents: [
+      { role: "user", parts: [{ functionResponse: { name: "x" } }, { text: "mid" }] },
+      { role: "model", parts: [{ text: "trailing" }] }] },
+  d908_sys:        { contents: [
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "model", parts: [{ functionCall: { name: "x" } }] },
+      { role: "user", parts: [{ functionResponse: { name: "x" } }, { text: "notice" }] }],
+      systemInstruction: { parts: [{ text: "be terse" }] } },
 };
 for (const chunk of process.argv.slice(2)) {
   const { handlers } = require(`${dir}/${chunk}`);
@@ -147,6 +191,12 @@ for (const chunk of process.argv.slice(2)) {
         systemInstruction: result.systemInstruction || null,
       };
     }
+    const again = handler(null, { tools: [] },
+                         { contents: JSON.parse(JSON.stringify(out[key].d908_single.contents)) });
+    out[key].d908_single_twice = {
+      roles: (again.contents || []).map((c) => c.role),
+      contents: again.contents,
+    };
   }
 }
 process.stdout.write(JSON.stringify(out));
@@ -175,6 +225,28 @@ TS_V1_BLOCK = TS_FIND + "\n\n" + "\n".join([
     '    if (lastContent.role === "model") {',
     "      result.contents.pop();",
     "    }",
+    "  }",
+])
+# The .ts block autoos4 shipped (v2), byte for byte, as the v2 -> v3 upgrade
+# anchor. Frozen literal, never derived from the patcher's table.
+TS_V2_BLOCK = TS_FIND + "\n\n" + "\n".join([
+    "  // Pop every trailing model turn — Vertex AI rejects a request whose contents",
+    '  // end with a model turn ("Requests ending with a model turn are not supported."',
+    "  // 400). The v1 guard skipped a contents of ONE model turn, which is the body that",
+    "  // reproduces the 400, and popping can leave the array empty, which Vertex rejects",
+    "  // too: an emptied contents gets one synthetic user turn instead of a refused call,",
+    "  // because refusing is the failure this patch exists to remove. The popped model",
+    "  // text is dropped, not re-appended — the model continues from systemInstruction",
+    '  // and the history that is left. A body already ending on "user" is never touched.',
+    "  while (result.contents.length > 0) {",
+    "    const lastContent = result.contents[result.contents.length - 1];",
+    '    if (lastContent.role !== "model") {',
+    "      break;",
+    "    }",
+    "    result.contents.pop();",
+    "  }",
+    "  if (result.contents.length === 0) {",
+    '    result.contents.push({ role: "user", parts: [{ text: "Continue." }] });',
     "  }",
 ])
 # The vendor's own openai-to-gemini.ts carries a `result.contents.length > 1` that
@@ -222,6 +294,33 @@ class TreeStates(unittest.TestCase):
             self.assertEqual(f"Done: {SITE_COUNT} patched, 0 skipped, 0 errors", summary(proc))
             self.assertNotIn("SKIP", proc.stdout)
 
+    def test_v2_guard_tree_upgrades_every_site(self):
+        """The shipped autoos4 guard must be replaced too (v2 -> v3, D-908)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(Path(tmp), "v2")
+            proc = run_patcher(Path(tmp))
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertEqual(f"Done: {SITE_COUNT} patched, 0 skipped, 0 errors", summary(proc))
+            self.assertNotIn("SKIP", proc.stdout)
+
+    def test_v2_upgrade_installs_the_v3_split(self):
+        """The upgrade replaces the v2 bytes with v3, not just re-anchors them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(Path(tmp), "v2")
+            self.assertEqual(0, run_patcher(Path(tmp)).returncode)
+            for chunk in ALL_CHUNKS:
+                text = (Path(tmp) / chunk).read_text(encoding="utf-8")
+                self.assertIn('text:"Noted."', text, chunk)
+                self.assertIn('text:"Continue."', text, chunk)
+
+    def test_a_v3_tree_is_skipped(self):
+        """v3 present -> SKIP: the patcher's own output is its skip anchor."""
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(Path(tmp), "pristine")
+            self.assertEqual(0, run_patcher(Path(tmp)).returncode)
+            proc = run_patcher(Path(tmp))
+            self.assertEqual(f"Done: 0 patched, {SITE_COUNT} skipped, 0 errors", summary(proc))
+
     def test_upgraded_tree_skips_on_the_next_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_tree(Path(tmp), "v1")
@@ -248,7 +347,7 @@ class TreeStates(unittest.TestCase):
         outs = []
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for state in ("pristine", "v1"):
+            for state in ("pristine", "v1", "v2"):
                 tree = root / state
                 tree.mkdir()
                 write_tree(tree, state)
@@ -361,6 +460,92 @@ class Shapes(unittest.TestCase):
             self.assertEqual([CONTINUE_TURN], got["contents"], key)
             self.assertEqual({"parts": [{"text": "be terse"}]}, got["systemInstruction"], key)
 
+    def _raw_report(self, state):
+        """Evaluate a fixture tree in a shipped state WITHOUT running the patcher."""
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(Path(tmp), state)
+            return shapes_report(Path(tmp))
+
+    # --- D-908: the shape that ends on a user turn yet still 400s ------------------
+
+    def test_v2_guard_leaves_a_mixed_user_turn_untouched(self):
+        """The bug v3 exists to fix, pinned against the shipped v2 bytes.
+
+        Vertex 400s a body whose LAST turn is a user turn that mixes a
+        functionResponse with text (D-908); v2 never looks inside a turn, so the
+        mixed turn survives byte for byte.
+        """
+        report = self._raw_report("v2")
+        for key, shapes in report.items():
+            got = shapes["d908_single"]
+            self.assertEqual(["user", "model", "user"], got["roles"], key)
+            last = got["contents"][-1]
+            self.assertTrue(any("functionResponse" in p for p in last["parts"]), key)
+            self.assertTrue(any("text" in p for p in last["parts"]), key)
+            self.assertNotIn("Noted.", json.dumps(got["contents"]), key)
+
+    def test_v3_splits_a_mixed_final_user_turn(self):
+        for key, shapes in self.report.items():
+            got = shapes["d908_single"]
+            self.assertEqual(["user", "model", "user", "model", "user"], got["roles"], key)
+            self.assertEqual([{"text": "do it"}], got["contents"][0]["parts"], key)
+            self.assertEqual([{"thoughtSignature": "sig", "functionCall": {"name": "x", "args": {}}}],
+                             got["contents"][1]["parts"], key)
+            self.assertEqual([{"functionResponse": {"name": "x", "response": {}}}],
+                             got["contents"][2]["parts"], key)
+            self.assertEqual([{"text": "Noted."}], got["contents"][3]["parts"], key)
+            self.assertEqual([{"text": "the notice"}], got["contents"][4]["parts"], key)
+
+    def test_v3_splits_a_parallel_mixed_user_turn(self):
+        for key, shapes in self.report.items():
+            got = shapes["d908_parallel"]
+            self.assertEqual(["user", "model", "user", "model", "user"], got["roles"], key)
+            self.assertEqual([{"functionResponse": {"name": "a"}}, {"functionResponse": {"name": "b"}}],
+                             got["contents"][2]["parts"], key)
+            self.assertEqual([{"text": "Noted."}], got["contents"][3]["parts"], key)
+            self.assertEqual([{"text": "notice"}], got["contents"][4]["parts"], key)
+
+    def test_function_response_only_turn_is_untouched(self):
+        for key, shapes in self.report.items():
+            got = shapes["fr_only"]
+            self.assertEqual(["user", "model", "user"], got["roles"], key)
+            self.assertEqual([{"functionResponse": {"name": "x"}}], got["contents"][2]["parts"], key)
+            self.assertNotIn("Noted.", json.dumps(got["contents"]), key)
+
+    def test_text_only_turn_is_untouched(self):
+        for key, shapes in self.report.items():
+            got = shapes["text_only"]
+            self.assertEqual(["user", "model", "user"], got["roles"], key)
+            self.assertEqual([{"text": "just text"}], got["contents"][2]["parts"], key)
+            self.assertNotIn("Noted.", json.dumps(got["contents"]), key)
+
+    def test_v3_splits_a_mixed_mid_history_turn(self):
+        for key, shapes in self.report.items():
+            got = shapes["mixed_mid"]
+            self.assertEqual(["user", "model", "user", "user"], got["roles"], key)
+            self.assertEqual([{"text": "Noted."}], got["contents"][1]["parts"], key)
+            self.assertEqual("user", got["roles"][-1], key)
+
+    def test_a_trailing_model_behind_a_mixed_turn_is_still_popped(self):
+        for key, shapes in self.report.items():
+            got = shapes["mixed_final_model"]
+            self.assertEqual(["user", "model", "user"], got["roles"], key)
+            self.assertEqual("user", got["roles"][-1], key)
+            self.assertIn("Noted.", json.dumps(got["contents"]), key)
+
+    def test_the_v3_split_is_idempotent(self):
+        for key, shapes in self.report.items():
+            once = shapes["d908_single"]
+            twice = shapes["d908_single_twice"]
+            self.assertEqual(once["roles"], twice["roles"], key)
+            self.assertEqual(once["contents"], twice["contents"], key)
+
+    def test_system_instruction_survives_the_v3_split(self):
+        for key, shapes in self.report.items():
+            got = shapes["d908_sys"]
+            self.assertEqual({"parts": [{"text": "be terse"}]}, got["systemInstruction"], key)
+            self.assertEqual("user", got["roles"][-1], key)
+
     def test_no_shape_throws(self):
         for key, shapes in self.report.items():
             for shape, got in shapes.items():
@@ -371,6 +556,82 @@ class Shapes(unittest.TestCase):
             proc = subprocess.run(["node", "--check", str(Path(self._tmp.name) / chunk)],
                                   capture_output=True, text=True)
             self.assertEqual(0, proc.returncode, f"{chunk}: {proc.stderr[:500]}")
+
+
+# The v3 guard is a transform on an *array* at every compiled site (the merge
+# function's output), so the shapes below never reach it through a real call.
+# They are defence in depth (D-908): v3 dereferences a turn's `parts`, which v2
+# never did, so a raw malformed body must be no worse under v3 than under v2.
+# Evaluated against the patcher's own `_v3_inner` text, not a copy of it.
+RAW_JS_TEMPLATE = (
+    "const guard = (f) => { __GUARD__; return f; };\n"
+    "const shapes = __SHAPES__;\n"
+    "const out = {};\n"
+    "for (const [name, input] of Object.entries(shapes)) {\n"
+    "  try {\n"
+    "    out[name] = { contents: guard(JSON.parse(JSON.stringify(input))).contents };\n"
+    "  } catch (err) {\n"
+    "    out[name] = { threw: String((err && err.message) || err) };\n"
+    "  }\n"
+    "}\n"
+    "process.stdout.write(JSON.stringify(out));\n"
+)
+
+
+@unittest.skipUnless(NODE_AVAILABLE, "node not on PATH")
+class RawShapes(unittest.TestCase):
+    """The patcher's own v3 guard text run on raw, malformed contents (D-908)."""
+
+    BAD_SHAPES = {
+        "null_contents": {"contents": None},
+        "undefined_contents": {},
+        "list_with_null": {"contents": [None]},
+        "user_null_parts": {"contents": [{"role": "user", "parts": None}]},
+        "parts_undefined": {"contents": [{"role": "user"}]},
+        "missing_role": {"contents": [{"parts": [{"text": "x"}]}]},
+        # A functionResponse part inside a role:"model" turn is not a mixed
+        # *user* turn: it keeps v2 semantics and is popped only if it trails.
+        "model_function_response": {"contents": [
+            {"role": "user", "parts": [{"text": "go"}]},
+            {"role": "model", "parts": [{"functionResponse": {"name": "x"}}]}]},
+        "lone_model_function_response": {"contents": [
+            {"role": "model", "parts": [{"functionResponse": {"name": "x"}}]}]},
+    }
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        self.patcher = __import__("apply-vertex-patch")
+        text = (RAW_JS_TEMPLATE
+                .replace("__GUARD__", self.patcher._v3_inner("f"))
+                .replace("__SHAPES__", json.dumps(self.BAD_SHAPES)))
+        self._tmp = tempfile.TemporaryDirectory()
+        driver = Path(self._tmp.name) / "raw_driver.cjs"
+        driver.write_text(text, encoding="utf-8")
+        proc = subprocess.run(["node", str(driver)], capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise RuntimeError("raw guard harness failed: " + proc.stderr[:2000])
+        self.report = json.loads(proc.stdout)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_raw_bad_shape_never_throws(self):
+        for name, got in self.report.items():
+            self.assertNotIn("threw", got, name)
+
+    def test_a_raw_bad_shape_ends_on_a_user_turn_or_is_refilled(self):
+        for name, got in self.report.items():
+            contents = got.get("contents") or []
+            self.assertTrue(contents, name)
+            self.assertEqual("user", contents[-1].get("role"), name)
+
+    def test_function_response_in_a_model_turn_is_popped_not_split(self):
+        got = self.report["model_function_response"]["contents"]
+        self.assertEqual(["user"], [c["role"] for c in got])
+        self.assertEqual([{"text": "go"}], got[0]["parts"])
+        self.assertNotIn("Noted.", json.dumps(got))
+        self.assertEqual([CONTINUE_TURN],
+                         self.report["lone_model_function_response"]["contents"])
 
 
 class ScriptAgreement(unittest.TestCase):
@@ -391,12 +652,13 @@ class ScriptAgreement(unittest.TestCase):
             for form, _, _ in site["forms"]:
                 self.assertIn(form, ps1, f"{site['chunk']} form")
 
-    def test_the_reapply_script_carries_the_v2_ts_block(self):
-        """The .ts site is v2 too; the v1 text lives on only as an upgrade anchor."""
+    def test_the_reapply_script_carries_the_v3_ts_block(self):
+        """The .ts site is v3 too; v2 and v1 live on only as upgrade anchors."""
         ps1 = REAPPLY_PS1.read_text(encoding="utf-8-sig")
         self.assertIn("while (result.contents.length > 0) {", ps1)
         self.assertIn('text: "Continue."', ps1)
-        # Once, in the template the v1 -> v2 upgrade matches against.
+        self.assertIn('text: "Noted."', ps1)
+        # Once, in the template the v1 -> v3 upgrade matches against.
         self.assertEqual(1, ps1.count("Guard: never strip contents down to empty."))
 
     def test_the_v1_guard_is_only_ever_an_upgrade_anchor(self):
@@ -426,7 +688,7 @@ class ReapplyScript(unittest.TestCase):
                                           encoding="utf-8")
         ts_dir = pkg / "open-sse" / "translator" / "request"
         ts_dir.mkdir(parents=True)
-        head = TS_V1_BLOCK if state == "v1" else TS_FIND
+        head = {"v1": TS_V1_BLOCK, "v2": TS_V2_BLOCK}.get(state, TS_FIND)
         (ts_dir / "openai-to-gemini.ts").write_text(head + TS_VENDOR_TAIL, encoding="utf-8")
         return pkg
 
@@ -468,6 +730,25 @@ class ReapplyScript(unittest.TestCase):
                 self.assertIn('text:"Continue."',
                               (pkg / "dist" / ".build" / "next" / "server" / "chunks" /
                                chunk).read_text(encoding="utf-8"))
+
+    def test_v2_package_upgrades_all_sites(self):
+        """The shipped autoos4 package upgrades to v3, split and all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pkg = self._package(Path(tmp), "v2")
+            proc = self._run(pkg)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            self.assertIn(f"Done: {self.SITES} patched, 0 skipped, 0 errors", proc.stdout)
+            ts_text = (pkg / "open-sse" / "translator" / "request" /
+                       "openai-to-gemini.ts").read_text(encoding="utf-8")
+            self.assertNotIn(TS_V2_BLOCK, ts_text, "the v2 block is gone")
+            self.assertIn('text: "Noted."', ts_text)
+            self.assertIn('text: "Continue."', ts_text)
+            self.assertEqual(1, ts_text.count("Continue."), "one block, not two")
+            for chunk in ALL_CHUNKS:
+                text = (pkg / "dist" / ".build" / "next" / "server" / "chunks" /
+                        chunk).read_text(encoding="utf-8")
+                self.assertIn('text:"Noted."', text, chunk)
+                self.assertIn('text:"Continue."', text, chunk)
 
     def test_unknown_package_fails_loudly(self):
         with tempfile.TemporaryDirectory() as tmp:

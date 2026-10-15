@@ -394,6 +394,14 @@ def hook_text() -> str:
         "# (operator D-154). All logic is in tools/prepush.py; this shim only\n"
         "# finds it, runs it, and hands over to a hook that was here first.\n"
         "root=$(git rev-parse --show-toplevel) || exit 1\n"
+        "# git exports its repo-location pins to hooks (git rev-parse\n"
+        "# --local-env-vars). Drop them before any child runs, or a test fixture\n"
+        "# working in a tmp dir edits the pushing repo (AO-PREPUSH-HOOK-GITENV).\n"
+        "unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS\n"
+        "unset GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE\n"
+        "unset GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE\n"
+        "unset GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX\n"
+        "unset GIT_SHALLOW_FILE GIT_COMMON_DIR GIT_QUARANTINE_PATH GIT_NAMESPACE\n"
         'gate="$root/tools/prepush.py"\n'
         'if [ ! -f "$gate" ]; then\n'
         '    echo "pre-push gate: no $gate -- nothing was checked, refusing" >&2\n'

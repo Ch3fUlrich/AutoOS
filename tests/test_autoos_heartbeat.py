@@ -35,9 +35,11 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
 AGENT = TOOLS / "autoos-agent.py"
 sys.path.insert(0, str(TOOLS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import autoos_heartbeat as hb  # noqa: E402
 import autoos_agent_mcp as mcp_server  # noqa: E402
+import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
 
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
        "-c", "init.defaultBranch=main"]
@@ -56,6 +58,33 @@ def clean_env(**extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith("AUTOOS_AGENT_")}
     env.update(extra)
     return env
+
+
+# AO-ADMISSION-2-HERMETIC (2026-10-10): a spawn measures the machine it happens to
+# run on before it starts anything — the live worker count from the worker records,
+# MemAvailable from the kernel's memory file, and the day's spend report. On a busy
+# host every spawn test here refused for a reason none of them was about (measured
+# 4x in one day: "host admission: 0 live workers, cap 6; MemAvailable 4447 MB,
+# floor 4608 MB"), while CI, an idle machine, stayed green. Pin all three reads to
+# fixtures for the whole module through the seams tools/autoos-agent.py already
+# reads (AUTOOS_WORKERS_DIR / AUTOOS_MEMINFO_PATH / AUTOOS_DAILY_GATE_FILE —
+# tests/_host_state.py): an empty records dir is the live-worker stub (0), the fake
+# meminfo clears every floor the shipped registry names. The gate is NOT switched
+# off with AUTOOS_ADMISSION_OFF — the admission code still runs and still measures,
+# it measures a host this file describes. `clean_env` copies os.environ, so the
+# subprocess tests inherit the same pins.
+_HOST_PINS = None
+
+
+def setUpModule():
+    global _HOST_PINS
+    _HOST_PINS = host_state.install(None, gate="allow", workers=True,
+                                    meminfo="healthy")
+
+
+def tearDownModule():
+    if _HOST_PINS is not None:
+        host_state.uninstall(_HOST_PINS)
 
 
 class BranchPrefixTests(unittest.TestCase):

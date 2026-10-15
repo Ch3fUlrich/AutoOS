@@ -6,9 +6,25 @@ version: 1
 # per-user actors here — or better, in users.policy.yaml — to scope access.
 groups:
   operators: [default]
+  workstation: [workstation]
+  plangraph-kg-export: [plangraph-kg-export]
 
 rules:
   - id: operators-project-access
     allow:
       actors: { group: operators }
       actions: [read, export, change, schema_apply, branch_create, branch_delete, branch_merge, invoke_query]
+
+  # Read-only knowledge-graph export actor (plan tracker). Same bundle, NOT a separate
+  # one: cluster-mode serving refuses to boot when two bundles bind one graph.
+  - id: plangraph-kg-export-read-only
+    allow:
+      actors: { group: plangraph-kg-export }
+      actions: [read, export, invoke_query]
+
+  # Operator workstation actor (D-967): read + write on project graphs; no admin,
+  # no schema_apply, no branch_delete, no graph create/delete.
+  - id: workstation-project-read-write
+    allow:
+      actors: { group: workstation }
+      actions: [read, export, invoke_query, change, branch_create, branch_merge]

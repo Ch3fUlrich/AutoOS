@@ -1,0 +1,20 @@
+# Circuit-breaker drop-in (P1.2, D-1173). Place as <unit>.d/breaker.conf next to the unit, e.g.
+#   ~/.config/systemd/user/oc-l0-watch.service.d/breaker.conf
+# then `systemctl --user daemon-reload`. No substitution needed; this file is copied as is.
+#
+# Which units get it:
+#   - every agent starter that can restart: oc-l0-watch, oc-pilot-watch, herdr-server (already has an explicit
+#     limit; the drop-in aligns it), and the oneshot-with-timer starters fleet-revive, router-heartbeat;
+#   - the Restart=always units of the gateway side: oc-throttle-l0, oc-throttle-l1, plangraph-keeper,
+#     autoos-litellm (systemd's default 5 starts / 10 s can never trip at RestartSec >= 2.5 s).
+#
+# Watcher units (oc-l0-watch, oc-pilot-watch, fleet-revive, ctx-watchdog, router-heartbeat) additionally wrap
+# their ExecStart in tools/unit_breaker.py --unit <name>.service -- <old ExecStart>: after 5 identical
+# failures it disables the unit and writes one alert line. This drop-in is the systemd-side backstop: 5
+# starts in 600 s and the unit stays failed instead of restarting forever.
+[Unit]
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+RestartSec=20

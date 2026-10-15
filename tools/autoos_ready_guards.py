@@ -3,12 +3,24 @@ scope, the diff's file scope, the report's CHECK evidence, tool preflight, and t
 decision helper for whether the guards are required at all. Every input arrives as an
 argument (diff paths, injected `which`); HERMETIC (D-852): no command, nothing
 installed, no writes — the only disk touch is the default `shutil.which` a caller may
-inject away, and the `isdir` read on whatever that lookup returned."""
+inject away, and the `isdir` read on whatever that lookup returned.
+
+FILES cap (P10, AO-GUARD-LEGACY-BRIEF + FILES-cap rule): the canonical template's
+"<= 3 files" counts the entries a lane may EDIT, and a lane's `CHANGELOG.md` line is
+history rather than an edited source file, so the cap counts every FILES entry EXCEPT
+the one spelled exactly `CHANGELOG.md` (the repo-root name, case-exact, after this
+module's own `_files_item`/`exact_path` normalisation). A brief may therefore carry up
+to 4 entries when one of them is that changelog path; a 4th NON-exempt path —
+`docs/CHANGELOG.md`, `CHANGELOG.md.bak`, `changelog.md`, `README.md`, `deploy/README.md`
+— is refused. Lanes briefed after 2026-10-10 12:00Z must satisfy the guard; the one-time
+exception for F1a eac8dda6 is logged in ready-inbox and is NOT encoded here (no
+allowlist entry, no sha special-case)."""
 import os
 import re
 import shutil
 import unicodedata
 
+from autoos_blank import is_invisible_char as _is_invisible_char
 from autoos_writer_rule import R_LEVELS, required_r_level
 
 # Windows device stems, mirrored from tools/autoos_brief.py (private there).
@@ -31,20 +43,23 @@ _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
 # The characters a body may NEVER carry: every Unicode category Zs/Zl/Zp/Cc/Cf
-# (whitespace separators, line/paragraph breaks, controls and invisible format
-# characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000, U+200B,
-# the BOM, ...) except the four a real body legitimately carries: ' ', '\t',
-# '\n', '\r'. Each one is either a line break str.splitlines() would invent (so
-# a line such as 'foo\x0c```' used to reach the fence reader as a bare ``` closer
-# and the forged `CHECK 6: PASS` line under it counted), or an unspelled
-# whitespace/format character a path or CHECK line would silently eat (a
-# `files_line(['tools/a.py\xa0'])` once returned 'tools/a.py', a path the brief
-# did not spell). Matching the WHOLE set by category — see _invisible_char —
-# the text fails closed: refuse it outright (see _guard_text) and split on
-# '\n' only (see _lines). ' ' stays legal because it is the template's own
-# separator; '\t' stays legal inside a line because it can neither break a line
+# member (whitespace separators, line/paragraph breaks, controls and invisible
+# format characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000,
+# U+200B, the BOM, ...) PLUS the blank-LOOKING code points no category covers
+# (U+3164, U+2800, the Hangul fillers, the variation selectors), except the four a
+# real body legitimately carries: ' ', '\t', '\n', '\r'. Each one is either a line
+# break str.splitlines() would invent (so a line such as 'foo\x0c```' used to reach
+# the fence reader as a bare ``` closer and the forged `CHECK 6: PASS` line under it
+# counted), or an unspelled whitespace/format character a path or CHECK line would
+# silently eat (a `files_line(['tools/a.py\xa0'])` once returned 'tools/a.py', a
+# path the brief did not spell; a `CHECK 1: PASS \u3164` tail once read as a passed
+# required CHECK). ONE shared predicate decides all of it — `_invisible_char` calls
+# `tools/autoos_blank.is_invisible_char` (imported as `_is_invisible_char`), the
+# same object the recovery reader judges with, so a blank never passes this gate and
+# hides a footer there. The text fails closed: refuse it outright (see _guard_text)
+# and split on '\n' only (see _lines). ' ' stays legal because it is the template's
+# own separator; '\t' stays legal inside a line because it can neither break a line
 # nor indent a fence (' ' indent only, see _FENCE_RE).
-_INVISIBLE_CATS = frozenset(("Zs", "Zl", "Zp", "Cc", "Cf"))
 _ALLOWED_CHARS = frozenset(" \t\n\r")
 # A verdict needs a non-empty tail after it: a bare 'PASS' proves nothing.
 _VERDICT_RE = re.compile(r"^(PASS|FAIL|INPUT_REQUIRED)[ \t]+\S.*$")
@@ -55,6 +70,13 @@ MAX_TEXT_CHARS = 1 << 20          # 1 MiB of characters
 MAX_PATH_CHARS = 200
 MAX_COMPONENT_CHARS = 100
 MAX_PATH_COMPONENTS = 20
+# The FILES cap (P10): MAX_FILES is the canonical template's "<= 3 files", and
+# CHANGELOG_ENTRY is the ONE path the count skips. The comparison is against the
+# NORMALISED exact name, case-exact, so `changelog.md` and `docs/CHANGELOG.md` are
+# ordinary files and the total a brief can spell stays <= 4 (a duplicate CHANGELOG is
+# refused by the duplicate check, never counted twice).
+MAX_FILES = 3
+CHANGELOG_ENTRY = "CHANGELOG.md"
 # Documented install step, quoted for the operator; nothing runs it here.
 INSTALL_HELP = ("pipx install yamllint ansible-core ansible-lint pre-commit\n"
                 "gitleaks: the vendor release binary on PATH "
@@ -66,15 +88,17 @@ class GuardError(ValueError):
 
 
 def _invisible_char(text):
-    """The first character of `text` no brief or report may carry: any Unicode
-    category Zs/Zl/Zp/Cc/Cf character that is not ' ', '\\t', '\\n' or '\\r'.
-    Decided by `unicodedata.category`, never by a hand-listed codepoint set, so
-    an exotic separator (U+180E, a U+2000-U+200A en-dash-space, the BOM) is
-    refused as surely as '\\x0c'."""
+    """The first character of `text` no brief or report may carry: any character
+    `tools/autoos_blank.is_invisible_char` refuses — every Zs/Zl/Zp/Cc/Cf member and
+    every blank-LOOKING code point no category covers — that is not ' ', '\\t',
+    '\\n' or '\\r'. ONE predicate, imported and never restated here, because the
+    recovery reader has to refuse exactly the same characters: an exotic separator
+    (U+180E, a U+2000-U+200A en-dash-space, the BOM) is refused as surely as
+    '\\x0c', and so is a HANGUL FILLER or U+2800 wearing a blank."""
     for ch in text:
         if ch in _ALLOWED_CHARS:
             continue
-        if unicodedata.category(ch) in _INVISIBLE_CATS:
+        if _is_invisible_char(ch):
             return ch
     return None
 
@@ -238,8 +262,20 @@ def _files_item(item):
     return item.strip(" ")
 
 
-def brief_files(brief_text):
+def brief_files(brief_text, max_files=MAX_FILES):
     """Normalised paths the brief allows, from its ONE canonical FILES line.
+
+    The cap counts the entries the lane may EDIT: every entry EXCEPT the one spelled
+    exactly `CHANGELOG.md` (the repo-root name, case-exact, after `_files_item` plus
+    `exact_path` normalisation, so './CHANGELOG.md' is exempt and 'changelog.md',
+    'docs/CHANGELOG.md', 'CHANGELOG.md.bak' are ordinary files). Up to `max_files`
+    (default `MAX_FILES`) counted entries pass, which is at most one more item in
+    total, because the duplicate check lets only one CHANGELOG line through. `max_files`
+    is the ONE thing `ready --cap-exception` relaxes: every other rule in this function —
+    the count, the exemption, the duplicate check, the canonical single line — is decided
+    the same whatever the cap. Lanes briefed after 2026-10-10 12:00Z
+    must satisfy this; the one-time exception for F1a eac8dda6 is logged in
+    ready-inbox and is NOT encoded here (no allowlist entry, no sha special-case).
 
     The line must start at column 0 with `_CANON_PREFIX` in the canonical
     wording. A FILES-looking line that is indented, CR-terminated, quoted, or
@@ -280,8 +316,16 @@ def brief_files(brief_text):
     items = [_files_item(p) for p in raw.split(",")]
     out = [exact_path(p) for p in items]
     folded = [norm_path(p) for p in items]
-    if None in out or len(out) > 3 or len(folded) != len(set(folded)):
-        raise GuardError("FILES paths unusable (unparsable, duplicate, >3): %r" % raw[:120])
+    if None in out or len(folded) != len(set(folded)):
+        raise GuardError("FILES paths unusable (unparsable, duplicate): %r" % raw[:120])
+    counted = [p for p in out if p != CHANGELOG_ENTRY]
+    if len(counted) > max_files:
+        raise GuardError("FILES is >%d files not counting CHANGELOG.md: %d counted "
+                         "against the cap of %d. The exemption is the one repo-root "
+                         "path %r spelled case-exactly; docs/CHANGELOG.md, "
+                         "CHANGELOG.md.bak and changelog.md are ordinary files: %r"
+                         % (max_files, len(counted), max_files, CHANGELOG_ENTRY,
+                            raw[:120]))
     return out
 
 

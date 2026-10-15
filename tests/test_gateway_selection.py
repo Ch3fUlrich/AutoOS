@@ -7,9 +7,9 @@ and the compose network reaches it as `omniroute`
 (configuration/docker/ai-stack/compose.yml spells the in-network address
 "http://omniroute:20128"). The selection is now: an explicit
 `AUTOOS_OMNIROUTE_URL` (the same override tools/autoos_usage.py already reads)
-tried alone, else the docker DNS name with loopback as the fallback, and
-`gateway_up()` is the pre-check that walks those candidates and rebinds
-`GATEWAY` to the one that answers.
+tried alone; else docker DNS then loopback in a container, loopback only on a
+host (AO-SANDBOX-DNS: a search domain can answer the bare `omniroute`);
+`gateway_up()` rebinds `GATEWAY` to the candidate that answers.
 
 GWLOOPBACK-2 builds the spawned worker's side on top of that: `gateway_base_url()`
 spells the resolved address the way the repo's provider block spells it (its API
@@ -51,6 +51,12 @@ def load_agent(name="autoos_agent_gateway_tests"):
 agent = load_agent()
 
 
+def expected_const(mod):
+    """The address importing `mod` starts at here (docker DNS in a container,
+    loopback on a host), so the two import tests pass in either place."""
+    return mod.GATEWAY_DOCKER if mod.in_container() else mod.GATEWAY_FALLBACK
+
+
 class GatewayCandidateTests(unittest.TestCase):
     def test_an_override_is_the_only_candidate(self):
         """AUTOOS_OMNIROUTE_URL is the operator's answer: it is tried alone, so
@@ -61,24 +67,55 @@ class GatewayCandidateTests(unittest.TestCase):
             agent.gateway_candidates({"AUTOOS_OMNIROUTE_URL": "http://gw.override:20128/"}),
             ["http://gw.override:20128"])
 
-    def test_without_an_override_the_candidates_are_docker_dns_then_loopback(self):
-        self.assertEqual(agent.gateway_candidates({}),
+    def test_in_a_container_the_candidates_are_docker_dns_then_loopback(self):
+        """The compose-network case: the gateway is the sibling container, and
+        loopback stays the fall-through for when it is down."""
+        self.assertEqual(agent.gateway_candidates({}, lambda path: True),
                          [agent.GATEWAY_DOCKER, agent.GATEWAY_FALLBACK])
+
+    def test_on_a_host_the_candidates_are_loopback_only(self):
+        """AO-SANDBOX-DNS: the bare docker name is never a host candidate - on a
+        host its answer would hand a foreign host the gateway key."""
+        self.assertEqual(agent.gateway_candidates({}, lambda path: False),
+                         [agent.GATEWAY_FALLBACK])
 
     def test_without_an_override_the_environment_is_read_when_none_is_passed(self):
         with mock.patch.dict(os.environ, {"AUTOOS_OMNIROUTE_URL": "http://gw.env:20128"}):
             self.assertEqual(agent.gateway_candidates(), ["http://gw.env:20128"])
 
 
+class InContainerTests(unittest.TestCase):
+    """AO-SANDBOX-DNS: the two container markers decide the machine, nothing else."""
+
+    def test_either_marker_is_a_container_and_none_is_a_host(self):
+        for marker in ("/.dockerenv", "/run/.containerenv"):
+            with self.subTest(marker=marker):
+                self.assertTrue(agent.in_container(
+                    probe=lambda path, marker=marker: path == marker))
+        self.assertFalse(agent.in_container(probe=lambda path: False))
+
+    def test_the_probe_defaults_to_the_filesystem(self):
+        with mock.patch.object(agent.os.path, "exists", return_value=False) as exists:
+            self.assertFalse(agent.in_container())
+        self.assertEqual(exists.call_args_list,
+                         [mock.call("/.dockerenv"), mock.call("/run/.containerenv")])
+
+
 class GatewayConstTests(unittest.TestCase):
-    """The line-225 const: resolved, and resolved without I/O."""
+    """The line-225 const: resolved, and resolved with no gateway call."""
 
     def test_the_const_is_the_override_when_one_is_set(self):
         self.assertEqual(agent.resolve_gateway({"AUTOOS_OMNIROUTE_URL": "http://gw:1/"}),
                          "http://gw:1")
 
-    def test_the_const_is_the_docker_dns_name_without_one(self):
-        self.assertEqual(agent.resolve_gateway({}), agent.GATEWAY_DOCKER)
+    def test_in_a_container_the_const_starts_at_the_docker_dns_name(self):
+        self.assertEqual(agent.resolve_gateway({}, lambda path: True),
+                         agent.GATEWAY_DOCKER)
+
+    def test_on_a_host_the_const_starts_at_loopback(self):
+        """AO-SANDBOX-DNS: a host starts local, key included."""
+        self.assertEqual(agent.resolve_gateway({}, lambda path: False),
+                         agent.GATEWAY_FALLBACK)
 
     def test_the_names_of_the_three_addresses(self):
         """Pinned so a rename of the compose service or the env override is a
@@ -88,7 +125,7 @@ class GatewayConstTests(unittest.TestCase):
         self.assertEqual(agent.GATEWAY_FALLBACK, "http://127.0.0.1:20128")
 
     def test_importing_the_tool_never_touches_a_gateway(self):
-        """Import must stay I/O-free: the suite imports this module in
+        """Import must stay network-free: the suite imports this module in
         processes that must not contact a gateway, and a health GET per import
         would make every one of them depend on the host's stack."""
         env = {k: v for k, v in os.environ.items() if k != agent.GATEWAY_ENV_VAR}
@@ -96,7 +133,7 @@ class GatewayConstTests(unittest.TestCase):
             with mock.patch("urllib.request.urlopen",
                             side_effect=AssertionError("import contacted a gateway")):
                 mod = load_agent("autoos_agent_gateway_no_io")
-        self.assertEqual(mod.GATEWAY, mod.GATEWAY_DOCKER)
+        self.assertEqual(mod.GATEWAY, expected_const(mod))
 
     def test_a_fresh_interpreter_resolves_the_const_the_same_way(self):
         """The production entry point: a caller that just imports the tool and
@@ -114,7 +151,7 @@ class GatewayConstTests(unittest.TestCase):
             self.assertEqual(out.returncode, 0, out.stderr)
             return out.stdout.strip().splitlines()[-1]
 
-        self.assertEqual(const_with(dict(base)), agent.GATEWAY_DOCKER)
+        self.assertEqual(const_with(dict(base)), expected_const(agent))
         override = dict(base, AUTOOS_OMNIROUTE_URL="http://gw.override:20128/")
         self.assertEqual(const_with(override), "http://gw.override:20128")
 
@@ -181,13 +218,17 @@ class GatewayUpPreCheckTests(unittest.TestCase):
 
     def setUp(self):
         self._gateway = agent.GATEWAY
+        # The pre-check walks the candidate list, so state the machine: here a
+        # container, unless a test says host.
+        container = mock.patch.object(agent, "in_container", return_value=True)
+        container.start()
+        self.addCleanup(container.stop)
 
     def tearDown(self):
         agent.GATEWAY = self._gateway
 
     def test_a_healthy_docker_dns_answer_is_kept(self):
-        """The container case the fix exists for: docker DNS answers, loopback
-        is never reached."""
+        """The container case: docker DNS answers, loopback is never reached."""
         probed = []
         with mock.patch.object(agent, "gateway_answers",
                                lambda url, timeout=3:
@@ -196,16 +237,30 @@ class GatewayUpPreCheckTests(unittest.TestCase):
         self.assertEqual(probed, [agent.GATEWAY_DOCKER])
         self.assertEqual(agent.GATEWAY, agent.GATEWAY_DOCKER)
 
-    def test_a_host_where_loopback_answers_falls_back_from_docker_dns(self):
-        """The host case: `omniroute` does not resolve outside the compose
-        network, the second candidate answers, and GATEWAY is rebound to it so
-        every later consumer in this process talks to the address that works."""
+    def test_a_container_whose_docker_dns_is_down_falls_back_to_loopback(self):
+        """The container case: the sibling container answers nothing, the second
+        candidate does, and GATEWAY is rebound to it so every later consumer in
+        this process talks to the address that works."""
         probed = []
         with mock.patch.object(agent, "gateway_answers",
                                lambda url, timeout=3:
                                probed.append(url) or url == agent.GATEWAY_FALLBACK):
             self.assertTrue(agent.gateway_up())
         self.assertEqual(probed, [agent.GATEWAY_DOCKER, agent.GATEWAY_FALLBACK])
+        self.assertEqual(agent.GATEWAY, agent.GATEWAY_FALLBACK)
+
+    def test_on_a_host_the_docker_dns_name_is_never_probed(self):
+        """AO-SANDBOX-DNS: on a host `omniroute` is a search-domain question, not
+        this machine's gateway, so the pre-check must never ask it - GATEWAY
+        cannot rebind to it and the gateway key stays local."""
+        probed = []
+        with mock.patch.object(agent, "in_container", return_value=False):
+            with mock.patch.object(agent, "gateway_answers",
+                                   lambda url, timeout=3:
+                                   probed.append(url) or url == agent.GATEWAY_FALLBACK):
+                self.assertTrue(agent.gateway_up())
+        self.assertEqual(probed, [agent.GATEWAY_FALLBACK])
+        self.assertNotIn(agent.GATEWAY_DOCKER, probed)
         self.assertEqual(agent.GATEWAY, agent.GATEWAY_FALLBACK)
 
     def test_nothing_answering_is_false_and_the_guess_is_left_alone(self):

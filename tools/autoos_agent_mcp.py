@@ -97,6 +97,7 @@ TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
 AGENT = os.path.join(TOOLS_DIR, "autoos-agent.py")
 sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
+import autoos_recovery as recovery  # noqa: E402
 import autoos_report as report_parser  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
@@ -576,6 +577,19 @@ def read_kill_record(run_id: str):
     return agent.read_kill_record(run_id)
 
 
+def spawn_lane(env=None):
+    """AO-JOB-LANE-ID: this spawn's lane id — `AUTOOS_L2_LANE`, validated with
+    recovery's own key rule so what is recorded is what `plan` reads back. An
+    unset or unusable value is simply no lane: a spawn is never refused over a
+    label. The kill record's copy is the one recovery trusts (R-orch-17);
+    `parent_lane` stays as F1 wrote it, for `oc_l2`'s child attribution."""
+    raw = (os.environ if env is None else env).get(ENV_L2_LANE)
+    try:
+        return recovery.check_lane_key(raw)
+    except ValueError:
+        return None
+
+
 def _read_json(path: str):
     try:
         with io.open(path, encoding="utf-8") as fh:
@@ -790,6 +804,24 @@ def worktree_of(path: str) -> str:
     return os.path.realpath(top or path)
 
 
+_REVIEW_BASE_REV_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._^~/@{}+-]{0,63}$")
+
+
+def review_base_refusal(value) -> str | None:
+    """The error text for a `review_base` the CLI's own arg half would not take, or
+    None. AO-MCP-REVIEW-BASE: `resolve_review_base` answers None for a blank value
+    and for a leading '-' (it reads as an option), so an unusable value is refused
+    here, before a run dir exists, instead of reaching the argv as a flag. The shape
+    is one git rev token (a sha, or a ref like `HEAD~1`); whether it NAMES a commit
+    the seat can diff from stays the CLI's own resolution, rc 2 included. S5-FIX1: a
+    revision range (`..`, `...`) is not one rev token, so refuse it early and in text."""
+    text = value if isinstance(value, str) else ""
+    if text.strip() != text or ".." in text or not _REVIEW_BASE_REV_RE.fullmatch(text):
+        return ("review_base must be one git rev token (a sha, or a ref like "
+                "HEAD~1), got %r" % (value,))
+    return None
+
+
 def build_argv(req: dict, run_id: str | None = None,
                cwd: str | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
@@ -975,6 +1007,14 @@ def build_argv(req: dict, run_id: str | None = None,
         # family is read from that run's runner-private record by the CLI, so all
         # this path carries is the id.
         argv += ["--review-of", str(req["review_of"]).strip()]
+    if req.get("review_base") is not None:
+        # AO-MCP-REVIEW-BASE: needs isolation, forced anyway for a spawned tier
+        # and a review role; the CLI's rc 2 for a bad rev or no clone is the
+        # preflight's answer, and review_base rides into job.json's `request`.
+        refusal = review_base_refusal(req["review_base"])
+        if refusal is not None:
+            raise ValueError(refusal)
+        argv += ["--review-base", str(req["review_base"]).strip()]
     if run_id:
         argv += ["--run-id", run_id]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
@@ -1231,6 +1271,13 @@ def spawn(req: dict) -> dict:
            # child and wake it for someone else's process.
            "parent_lane": os.environ.get(ENV_L2_LANE) or None,
            "started": time.time()}
+    # AO-JOB-LANE-ID: the validated id goes in beside it, and only when it IS a
+    # lane — a run started outside a lane records nothing the worker can be
+    # graded on. The same value goes to the kill record below, which is the copy
+    # recovery reads; this one is a label on the worker's own file.
+    lane = spawn_lane()
+    if lane:
+        job["lane"] = lane
     _write_json(os.path.join(path, "job.json"), job)
     # SB-A4: the run's decided-at-spawn record, written before the child exists so
     # a run that dies instantly still has one, and written to the private store
@@ -1249,7 +1296,12 @@ def spawn(req: dict) -> dict:
         # the runner-private record, because the run's MODEFLIP verdict reads it.
         # job.json is the worker's own directory — an opt-out a worker could write
         # into the file it is graded from is not an opt-out, it is an escape.
-        "allow_mode_only": bool(req.get("allow_mode_only")) or None})
+        "allow_mode_only": bool(req.get("allow_mode_only")) or None,
+        # AO-JOB-LANE-ID: the same lane id, in the store the worker does not own,
+        # because that is the only copy `autoos_recovery` may believe (R-orch-17).
+        # None is not written at all: `write_kill_record` skips it, so a run
+        # outside a lane keeps a record that names no lane.
+        "lane": lane})
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats
@@ -1905,6 +1957,7 @@ def build_server(profile: str | None = None):
                not_family: list[str] | None = None,
                review_of: str | None = None,
                no_fallthrough: bool = False,
+               review_base: str | None = None,
                claude_reason: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
@@ -1977,6 +2030,11 @@ def build_server(profile: str | None = None):
         never a warning and an unfenced run.
         no_fallthrough: a stop on the pinned model ends the run with that rc; no
         re-plan onto another model. Off by default.
+        review_base: a git rev (sha or ref) whose `git diff base..HEAD` rides into the
+        isolated seat as REVIEW-DIFF.patch, stamped "sandbox base: <sha> HEAD <sha>".
+        Needs isolation, forced anyway for tier 2/3 and a review role; same semantics
+        as the CLI flag — a bad rev or a missing clone is a refusal (rc 2) as an
+        error dict, never a traceback.
         `model` is a pin for an own-account client too (FAMILYFENCE-b): a qoder or
         claude model name reaches that CLI's own --model and its family feeds the
         fence like a gateway leg's. The record's writer gains a `source`
@@ -1992,6 +2050,7 @@ def build_server(profile: str | None = None):
                       "allow_mode_only": allow_mode_only,
                       "not_family": not_family, "review_of": review_of,
                       "no_fallthrough": no_fallthrough,
+                      "review_base": review_base,
                       "claude_reason": claude_reason})
 
     @_register("status")

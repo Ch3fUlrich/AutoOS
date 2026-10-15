@@ -202,6 +202,27 @@ L2 alike.
   in the brief, and tell them the same token rules.
 - The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
 
+## 6a. Context cap: automatic recycle at 250k (P1.1)
+
+- A `PostToolUse` hook, `tools/hooks/context_guard.py`, reads the last assistant turn's usage (input + cache read + cache
+  creation) from the tail of the transcript and tells the session itself:
+  - at `AUTOOS_CTX_HANDOFF` (230000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
+    `python3 tools/hooks/context_guard.py ready <handoff-path>` (and `SendMessage RECYCLE-READY <path>` to your parent if
+    your brief says so);
+  - at `AUTOOS_CTX_HARD` (250000): `HARD-CAP` -- no new work, handoff now.
+  - It re-emits at most once per +10k of growth; any error is silent (exit 0). `context_guard.py status` lists the state
+    files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
+- Install, once per host, in `~/.claude/settings.json`:
+  `"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 <repo>/tools/hooks/context_guard.py"}]}]}`
+  On Windows write `py -3` (or `python`) in place of `python3` in that command; the `HANDOFF-NOW` line names `python3`, so
+  run the `ready` call with the interpreter your host has.
+- Safety net: the launcher exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` (the router's `bin/fleet-launch` does). Never put
+  it in a shared `settings.json`.
+- The watchdog on the router side stops and relaunches a session that is over the cap and wrote its `ready` marker.
+  A session without a launch spec, or with live children, only gets an alert.
+- Bridges on the workstation or prox run the same hook. On `HANDOFF-NOW` the bridge writes its handoff, then runs the host's
+  own self-restart task (the ebn-style scheduled restart) -- the hook never restarts anything itself.
+
 ## 7. Research grade: evidence over assertion
 
 - **A DONE note is a claim, not evidence** — verifying it yourself is R-coord-02.
@@ -225,3 +246,15 @@ L2 alike.
 - Write your own DONE note: chunks landed (commits), what remains, the decisions you took and why,
   and the ones left for the operator.
 - Persist durable decisions to Omnigraph (`structured-memory`). Clean up merged worktrees.
+
+## 9. Circuit breaker on every agent starter (P1.2)
+
+- A unit that starts agents must not restart forever (D-1173). Wrap its ExecStart in
+  `tools/unit_breaker.py --unit <name>.service -- <cmd>` and give it the drop-in
+  `lib/linux/systemd/user/breaker.conf.in` (`StartLimitBurst=5` in 600 s, `RestartSec=20`).
+- After 5 identical failures (exit code plus last stderr line) the unit is disabled and one
+  `BREAKER` line lands in `AUTOOS_ALERT_INBOX`. `unit_breaker.py status` lists units;
+  `unit_breaker.py reset <unit>` clears a trip after the cause is fixed.
+- Spend by lane: an empty gateway session tag shows as `key:<api key name>` in
+  `autoos_usage.py --by lane`; every client sends `x-omniroute-session-id`.
+  `tools/gateway_alerts.py` flags provider suspension signals (MiMo 401/403, "suspend").
