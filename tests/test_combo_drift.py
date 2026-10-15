@@ -467,3 +467,13 @@ def test_real_combos_json_clean_combos_have_no_forbidden_leg():
     with open(combos_path) as f:
         file_doc = json.load(f)
     assert clean_violations(file_doc) == []
+
+def test_cli_export_without_out_writes_the_snapshot_option_not_the_repo_file(tmp_path):
+    env, base_args, _ = make_cli(tmp_path, live_lines=["a\x1fs\x1fx\x1f0"], combos_models=[("a", "s", ["x"])])
+    repo_snap = REPO / "configuration" / "omniroute" / "combos.live.json"
+    before = repo_snap.read_bytes() if repo_snap.exists() else None
+    res = subprocess.run([sys.executable, str(REPO / "tools" / "combo_drift.py"), "export", *base_args], env=env, capture_output=True, text=True)
+    assert res.returncode == 0
+    assert json.loads((tmp_path / "snapshot.json").read_text(encoding="utf-8"))["count"] == 1
+    assert (repo_snap.read_bytes() if repo_snap.exists() else None) == before
+

@@ -361,7 +361,7 @@ def cmd_export(args: list[str]) -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     combos_path = Path(ns.combos) if ns.combos else _default_paths(repo_root)[0]
-    snapshot_path = Path(ns.out) if ns.out else _default_paths(repo_root)[1]
+    snapshot_path = Path(ns.out or ns.snapshot or _default_paths(repo_root)[1])
     gaps_path = Path(ns.known_gaps) if ns.known_gaps else _default_paths(repo_root)[2]
 
     live_text, unreadable = _read_live_text(ns.live_lines, repo_root)

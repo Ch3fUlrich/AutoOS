@@ -1,0 +1,13 @@
+{
+  "$comment": "Read by tools/combo_drift.py. gaps: file-side legs the live gateway cannot serve today (ignored by the drift check, printed as known-gap); every entry needs a reason. unmanaged: live combos this repo neither renders nor prunes.",
+  "gaps": [
+    {
+      "ref": "vertex/gemini-3.8-flash",
+      "reason": "the live gateway has no vertex connection or catalog entry (apply skips the unknown leg); repairing the vertex credential store is the operator's, not a registry change"
+    }
+  ],
+  "unmanaged": [
+    "ha-assist",
+    "l1-orchestrator-paid"
+  ]
+}

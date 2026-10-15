@@ -1,0 +1,11 @@
+# Template rendered by configuration/autostart/register-autostart.sh
+# Placeholder @REPO@ = repository path; installing is an operator step.
+# The breaker must not trip on persistent drift because --alert exits 0 on drift.
+[Unit]
+Description=AutoOS OmniRoute combo drift check (read-only)
+
+[Service]
+Type=oneshot
+WorkingDirectory=@REPO@
+ExecStart=/usr/bin/env python3 @REPO@/tools/unit_breaker.py --unit autoos-combo-drift.service -- /usr/bin/env python3 @REPO@/tools/autoos_gateway_key.py exec -- /usr/bin/env python3 @REPO@/tools/combo_drift.py check --alert
+Environment=AUTOOS_ALERT_INBOX=%h/.local/state/autoos/alerts.inbox
