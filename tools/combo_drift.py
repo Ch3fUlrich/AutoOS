@@ -173,16 +173,14 @@ def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
 
     clean_viols = clean_violations(file_doc)
 
-    if not snapshot_verify(snapshot_doc):
-        reasons.append("snapshot missing or does not verify")
-        reasons.extend(clean_viols)
-        return False, reasons
+    # An unusable snapshot proves nothing, but a live store that already equals the file has nothing to lose.
+    snap_ok = snapshot_verify(snapshot_doc)
 
     retired = set(file_doc.get("retired", []))
     ignored = retired | unmanaged
 
     # Build snapshot lookup
-    snap_combos = {c["name"]: c for c in snapshot_doc.get("combos", [])}
+    snap_combos = {c["name"]: c for c in snapshot_doc.get("combos", [])} if snap_ok else {}
     file_combos = {c["name"]: c for c in file_doc.get("combos", [])}
 
     for name, lcombo in live.items():
@@ -212,6 +210,8 @@ def guard(live: dict[str, dict[str, Any]], snapshot_doc: Any,
         if not (snap_match or file_match):
             reasons.append(f"unexported live change: {name}")
 
+    if reasons and not snap_ok:
+        reasons.insert(0, "snapshot missing or does not verify")
     reasons.extend(clean_viols)
     return len(reasons) == 0, reasons
 

@@ -162,9 +162,16 @@ def test_guard_unreadable():
     assert ok is False
     assert reasons == ["live store unreadable: store down"]
 
-def test_guard_tampered_snapshot():
+def test_guard_no_snapshot_passes_when_live_equals_file():
     m = load_module()
     live = {"c1": {"strategy": "s", "models": ["a"], "dropped": 0}}
+    ok, reasons = m.guard(live, None, {"retired": [], "omitted": [], "combos": [{"name": "c1", "strategy": "s", "models": ["a"]}]}, set())
+    assert ok is True and reasons == []
+    assert m.guard({}, None, {"retired": [], "omitted": [], "combos": []}, set()) == (True, [])
+
+def test_guard_tampered_snapshot():
+    m = load_module()
+    live = {"c1": {"strategy": "s", "models": ["z"], "dropped": 0}}
     snap = {"count": 1, "sha256": "bad", "combos": [{"name": "c1", "strategy": "s", "models": ["a"]}]}
     ok, reasons = m.guard(live, snap, {"retired": [], "omitted": [], "combos": [{"name": "c1", "strategy": "s", "models": ["a"]}]}, set())
     assert ok is False
