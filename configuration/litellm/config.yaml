@@ -200,15 +200,7 @@ model_list:
       api_key: os.environ/BAZAARLINK_API_KEY
   - model_name: l3-driver-256k
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver-256k
-    litellm_params:
       model: openrouter/poolside/laguna-s-2.1:free
-      api_key: os.environ/OPENROUTER_API_KEY
-  - model_name: l3-driver-256k
-    litellm_params:
-      model: openrouter/cohere/north-mini-code:free
       api_key: os.environ/OPENROUTER_API_KEY
     # litellm-skip: vertex/gemini-3.8-flash - providers.vertex authenticates without a LiteLLM api_key (litellm_auth)
   # AUTOOS-MANAGED-END l3-driver-256k
