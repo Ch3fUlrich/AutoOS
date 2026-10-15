@@ -3983,10 +3983,25 @@
       "api_base": "https://token-plan-ams.xiaomimimo.com/v1",
       "provider_data": null,
       "tier": "subscription",
-      "trains_on_prompts": null,
+      "trains_on_prompts": false,
       "available": true,
-      "$comment": "AO-MIMO-WIRING (2026-10-12, smoke measured through the OmniRoute gateway; tests/fixtures/mimo-models.json is the GATEWAY's view of this connection, not the vendor's own /v1/models — the MiMo key lives only in the gateway DB): Xiaomi MiMo Token Plan, an OpenAI-compatible subscription endpoint. AO-MIMO-V26 (2026-10-12) rows the plan, each cell a live call answered that day: mimo-v2.6-pro (text 200, one tool call 200, image input 200 with image_tokens 9, audio input 200 with audio_tokens 7, prompt cache 1792 cached_tokens of 1917 on the second identical call) and mimo-v2.6-flash (the same cells, cache 1856 of 1917) are the two legs; mimo-v2.5-pro and mimo-v2.5 still answer today but retire 2026-10-21, so they carry no model row and no leg (tests/test_mimo_catalog.py's RETIRED table is the alarm); mimo-v2.5-tts* are listed and never answered a chat call (400 'not in live catalog') while /v1/audio/speech answers upstream 400 'Param Incorrect', so audio_out stays unproven and there is no tts row, and video_in was never tested for any id. WHY CUSTOM MODELS: mimo-v2.6-pro and mimo-v2.6-flash are gateway CUSTOM models, declared in configuration/omniroute/custom-models.json and applied by configuration/omniroute/apply-custom-models.sh — the OmniRoute image ships a static model list that knows only mimo-v2.5-pro and mimo-v2.5, so without those declarations the gateway would register no id the plan actually serves today. The registry therefore follows the gateway's authoritative live catalog (GET /v1/models for the ids, GET /api/v1/providers/xiaomi-mimo/models for the capability cells), not the image's shipped list: a leg the gateway does not register answers 400 whatever the vendor page says, and a leg the gateway refuses to serve is not a fallback. trains_on_prompts is null = UNVERIFIED (the terms were never read); tools/registry.py's private_safe() fails closed on null, so no MiMo leg reaches any *-clean route, and it is deliberately not guessed to false. tier is `subscription` and price_in/price_out are 0.0 because the plan is not metered per token — the same shape the seat-metered providers.cc/cxa/devin rows use — with the fact named in each row's price_source, so a dollar estimate over these legs reads $0 and is not a price. ToS (Token Plan): the plan allows CODING TOOLS ONLY (OpenCode, Claude Code, OpenClaw, ...) and bans 'clearly non-coding scenarios (automated scripts, custom app backends)', so these legs ride the coding combos routes.l2-worker and routes.l3-driver and appear in no research/chat/TTS route; the operator accepted the ToS risk (D-1179). litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself.",
-      "model_prefix": "mimo"
+      "$comment": "AO-MIMO-WIRING (2026-10-12, smoke measured through the OmniRoute gateway; tests/fixtures/mimo-models.json is the GATEWAY's view of this connection, not the vendor's own /v1/models — the MiMo key lives only in the gateway DB): Xiaomi MiMo Token Plan, an OpenAI-compatible subscription endpoint. AO-MIMO-V26 (2026-10-12) rows the plan, each cell a live call answered that day: mimo-v2.6-pro (text 200, one tool call 200, image input 200 with image_tokens 9, audio input 200 with audio_tokens 7, prompt cache 1792 cached_tokens of 1917 on the second identical call) and mimo-v2.6-flash (the same cells, cache 1856 of 1917) are the two legs; mimo-v2.5-pro and mimo-v2.5 still answer today but retire 2026-10-21, so they carry no model row and no leg (tests/test_mimo_catalog.py's RETIRED table is the alarm); mimo-v2.5-tts* are listed and never answered a chat call (400 'not in live catalog') while /v1/audio/speech answers upstream 400 'Param Incorrect', so audio_out stays unproven and there is no tts row, and video_in was never tested for any id. WHY CUSTOM MODELS: mimo-v2.6-pro and mimo-v2.6-flash are gateway CUSTOM models, declared in configuration/omniroute/custom-models.json and applied by configuration/omniroute/apply-custom-models.sh — the OmniRoute image ships a static model list that knows only mimo-v2.5-pro and mimo-v2.5, so without those declarations the gateway would register no id the plan actually serves today. The registry therefore follows the gateway's authoritative live catalog (GET /v1/models for the ids, GET /api/v1/providers/xiaomi-mimo/models for the capability cells), not the image's shipped list: a leg the gateway does not register answers 400 whatever the vendor page says, and a leg the gateway refuses to serve is not a fallback. trains_on_prompts is null = UNVERIFIED (the terms were never read); tools/registry.py's private_safe() fails closed on null, so no MiMo leg reaches any *-clean route, and it is deliberately not guessed to false. tier is `subscription` and price_in/price_out are 0.0 because the plan is not metered per token — the same shape the seat-metered providers.cc/cxa/devin rows use — with the fact named in each row's price_source, so a dollar estimate over these legs reads $0 and is not a price. ToS (Token Plan): the plan allows CODING TOOLS ONLY (OpenCode, Claude Code, OpenClaw, ...) and bans 'clearly non-coding scenarios (automated scripts, custom app backends)', so these legs ride the coding combos routes.l2-worker and routes.l3-driver and appear in no research/chat/TTS route; the operator accepted the ToS risk (D-1179). litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. D-1348 2026-10-15: the operator accepted the cited MiMo platform privacy policy (see privacy.evidence, with its caveats), so trains_on_prompts is now false and the MiMo legs may sit in *-clean routes.",
+      "model_prefix": "mimo",
+      "privacy": {
+        "trains_on_prompts": false,
+        "evidence": [
+          {
+            "url": "https://privacy.mi.com/XiaomiMiMoPlatform/en_GB/",
+            "quote": "Without your prior consent, Xiaomi will not use the text content provided by you for model training or any other purposes.",
+            "accessed": "2026-10-15"
+          }
+        ],
+        "caveats": [
+          "the policy says 'text content', not API prompts explicitly",
+          "no zero-retention claim",
+          "the MiMo Desktop app policy differs (it trains)"
+        ]
+      }
     }
   },
   "routes": {
@@ -4397,6 +4412,8 @@
       "class": "cheap",
       "id": "l1-orchestrator",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "vertex/gemini-3.8-flash"
       ],
@@ -4441,7 +4458,7 @@
       "class": "cheap",
       "id": "l1-orchestrator-clean",
       "legs": [
-        "vertex/gemini-3.8-flash",
+        "xiaomi_mimo/mimo-v2.6-flash",
         "openrouter/meta/muse-spark-1.3-contributor"
       ],
       "strategy": "priority",
@@ -4476,6 +4493,7 @@
       "class": "free",
       "id": "l1-orchestrator-free-only",
       "legs": [
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
       ],
       "strategy": "priority",
@@ -4547,6 +4565,8 @@
       "class": "frontier",
       "id": "l2-orchestrator",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "vertex/gemini-3.8-flash"
       ],
@@ -4577,6 +4597,7 @@
       "class": "mid",
       "id": "l2-worker",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "vertex/gemini-3.8-flash"
@@ -4623,7 +4644,7 @@
       "class": "mid",
       "id": "l2-worker-clean",
       "legs": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi_mimo/mimo-v2.6-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4721,6 +4742,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
+        "groq/qwen/qwen3.8-27b",
+        "groq/openai/gpt-oss-120b",
         "ovhcloud/Qwen3.5-397B-A17B",
         "vertex/gemini-3.8-flash"
       ],
@@ -4766,7 +4789,7 @@
       "class": "cheap",
       "id": "l3-driver-clean",
       "legs": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi_mimo/mimo-v2.6-pro"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4800,7 +4823,9 @@
         "cohere/command-a-plus-05-2026",
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/cohere/north-mini-code:free"
+        "openrouter/cohere/north-mini-code:free",
+        "groq/qwen/qwen3.8-27b",
+        "groq/openai/gpt-oss-120b"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -4922,7 +4947,8 @@
       "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors l3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): an l2-* route is cache-gated like the worker band, so the read-only researcher tier is the two cached free legs (bazaarlink ds-v4-flash :free 1M, openrouter nemotron-3-super :free 256k) - wide context, $0, distinct providers. gemini/gemini-3.8-flash (401), opencode_gateway/glm-5.3-flash (402), ainative/llama-4-maverick (429) and free_ai/qwen7b (tool call failed on both gateways, and spec SS2 drops free-ai) all left.",
       "legs": [
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "xiaomi_mimo/mimo-v2.6-flash"
       ],
       "strategy": "priority",
       "surfaces": {
@@ -5040,6 +5066,8 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
+        "groq/qwen/qwen3.8-27b",
+        "groq/openai/gpt-oss-120b",
         "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash"
       ],
@@ -5062,7 +5090,7 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi_mimo/mimo-v2.6-pro"
       ],
       "surfaces": {
         "omniroute": {
@@ -5106,7 +5134,7 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi_mimo/mimo-v2.6-flash"
       ],
       "surfaces": {
         "omniroute": {
@@ -5128,7 +5156,8 @@
       "strategy": "priority",
       "legs": [
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
-        "openrouter/poolside/laguna-s-2.1:free"
+        "openrouter/poolside/laguna-s-2.1:free",
+        "groq/qwen/qwen3.8-27b"
       ],
       "surfaces": {
         "omniroute": {
@@ -5149,6 +5178,7 @@
       "class": "cheap",
       "strategy": "priority",
       "legs": [
+        "xiaomi_mimo/mimo-v2.6-flash",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "vertex/gemini-3.8-flash"
       ],
@@ -5212,7 +5242,7 @@
       "class": "frontier",
       "strategy": "priority",
       "legs": [
-        "vertex/gemini-3.8-flash"
+        "xiaomi_mimo/mimo-v2.6-flash"
       ],
       "surfaces": {
         "omniroute": {
