@@ -28696,5 +28696,27 @@ class ZenKeySpawnTests(unittest.TestCase):
         self.assertNotIn("drop --free", r.stderr)
 
 
+class DirectPassthroughSensitiveRefusalTests(unittest.TestCase):
+    """fixes-L1 gen-11 (D-1358 b): `deepseek-direct-flash` is an opencode.jsonc
+    hand entry for the native DeepSeek leg, not a combo. The sensitive-run guard
+    answered "not a registry route"; it must judge the leg it passes through (and
+    refuse it for the right reason: D-1349 exempts deepseek-flash in the six
+    *-clean twins only)."""
+
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = self.agent.load_registry(self.agent.REGISTRY_PATH)
+
+    def test_the_direct_entry_is_judged_on_its_leg_not_refused_as_unknown(self):
+        why = self.agent.sensitive_combo_refusal("deepseek-direct-flash", self.registry)
+        self.assertIsNotNone(why)
+        self.assertNotIn("not a registry route", why)
+        self.assertIn("not private-safe", why)
+
+    def test_an_unknown_id_is_still_refused_as_not_a_registry_route(self):
+        why = self.agent.sensitive_combo_refusal("no-such-combo", self.registry)
+        self.assertIn("not a registry route", why)
+
+
 if __name__ == "__main__":
     unittest.main()
