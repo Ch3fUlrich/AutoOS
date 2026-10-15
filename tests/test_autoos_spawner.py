@@ -25879,9 +25879,11 @@ class HostAdmissionTests(unittest.TestCase):
         for i in range(n):
             self.record("live%d" % (start + i), os.getpid())
 
-    def record(self, wid, pid):
+    def record(self, wid, pid, kind=None):
         rec = {"id": wid, "pid": pid, "started": self.agent.utc_now_iso(),
                "client": "opencode", "model": "m", "task_head": "do a thing"}
+        if kind is not None:
+            rec["kind"] = kind
         with io.open(os.path.join(self.workers, wid + ".json"), "w",
                      encoding="utf-8") as fh:
             json.dump(rec, fh)
@@ -26259,6 +26261,254 @@ class HostAdmissionTests(unittest.TestCase):
                                    "cwd": self.tmp}, None, base=src)
         self.assertNotIn("AUTOOS_ADMISSION_OFF", worker,
                          "a client worker never inherits the escape")
+
+    # --- D-1317 Admission-by-kind ----------------------------------------
+
+    def test_host_run_kind_toolless_only_when_explicit_bools(self):
+        # toolless iff registry client exists AND capabilities.shell is False
+        # AND capabilities.write is False (explicit booleans).
+        registry = {
+            "clients": {
+                "api": {"capabilities": {"shell": False, "write": False}},
+                "opencode": {"capabilities": {"shell": True, "write": True}},
+            }
+        }
+        self.assertEqual(self.agent.host_run_kind("api", registry), "toolless")
+        self.assertEqual(self.agent.host_run_kind("opencode", registry), "tool-using")
+
+    def test_host_run_kind_unregistered_client_is_tool_using(self):
+        registry = {"clients": {"opencode": {"capabilities": {"shell": True, "write": True}}}}
+        self.assertEqual(self.agent.host_run_kind("unknown-client", registry), "tool-using")
+
+    def test_host_run_kind_missing_capabilities_is_tool_using(self):
+        registry = {"clients": {"api": {}}}  # no capabilities key
+        self.assertEqual(self.agent.host_run_kind("api", registry), "tool-using")
+
+    def test_host_run_kind_shell_string_false_is_tool_using(self):
+        # Non-bool values do not count as explicit False
+        registry = {"clients": {"api": {"capabilities": {"shell": "false", "write": False}}}}
+        self.assertEqual(self.agent.host_run_kind("api", registry), "tool-using")
+
+    def test_host_run_kind_write_none_is_tool_using(self):
+        registry = {"clients": {"api": {"capabilities": {"shell": False, "write": None}}}}
+        self.assertEqual(self.agent.host_run_kind("api", registry), "tool-using")
+
+    def test_host_run_kind_card_cannot_override(self):
+        # The kind is derived from the resolved client in the plan, not from
+        # any card/flag/env. A card containing "toolless" cannot change it.
+        registry = {"clients": {"opencode": {"capabilities": {"shell": True, "write": True}}}}
+        # Even if a card somehow said "kind=toolless", the derivation ignores it
+        self.assertEqual(self.agent.host_run_kind("opencode", registry), "tool-using")
+
+    def test_host_admission_kind_config_toolless_reads_kinds_section(self):
+        # host_admission_kind_config reads host_admission.kinds.toolless
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        cap, floor = self.agent.host_admission_kind_config(registry, "toolless")
+        self.assertEqual((cap, floor), (4, 3072))
+
+    def test_host_admission_kind_config_missing_kinds_falls_back_to_top_level(self):
+        # Missing/malformed/non-int kinds.toolless falls back to TOP-LEVEL pair
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608}}
+        cap, floor = self.agent.host_admission_kind_config(registry, "toolless")
+        self.assertEqual((cap, floor), (6, 4608))
+
+    def test_host_admission_kind_config_malformed_kinds_falls_back_to_top_level(self):
+        # kinds present but malformed (not a dict) -> top-level
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608, "kinds": "not-a-dict"}}
+        cap, floor = self.agent.host_admission_kind_config(registry, "toolless")
+        self.assertEqual((cap, floor), (6, 4608))
+
+    def test_host_admission_kind_config_zero_cap_falls_back_to_top_level(self):
+        # cap < 1 is invalid -> top-level
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608,
+                                       "kinds": {"toolless": {"max_live_workers": 0, "mem_available_floor_mb": 3072}}}}
+        cap, floor = self.agent.host_admission_kind_config(registry, "toolless")
+        self.assertEqual((cap, floor), (6, 4608))
+
+    def test_host_admission_kind_config_zero_floor_falls_back_to_top_level(self):
+        # floor < 1 is invalid -> top-level
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608,
+                                       "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 0}}}}
+        cap, floor = self.agent.host_admission_kind_config(registry, "toolless")
+        self.assertEqual((cap, floor), (6, 4608))
+
+    def test_host_admission_config_top_level_invalid_falls_back_to_code_defaults(self):
+        # Top-level cap < 1 or floor < 1 falls back to code defaults (6, 6144)
+        registry = {"host_admission": {"max_live_workers": 0, "mem_available_floor_mb": 4608}}
+        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 0}}
+        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+        registry = {"host_admission": {"max_live_workers": -1, "mem_available_floor_mb": -1}}
+        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+
+    def test_5th_toolless_refused_when_4_live(self):
+        # Toolless cap is 4; 5th toolless run is refused
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        # Create 4 toolless live workers
+        for i in range(4):
+            self.record("toolless%d" % i, os.getpid(), kind="toolless")
+        # 5th toolless should be refused
+        r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                               meminfo=self.meminfo(8000), kind="toolless")
+        self.assertIsNotNone(r)
+        self.assertIn("toolless", r.lower())
+        self.assertIn("cap 4", r)
+        self.assertIn("queue or run on workstation", r)
+
+    def test_tool_using_floor_unchanged_between_3072_and_4608(self):
+        # Tool-using floor stays at 4608; toolless floor is 3072
+        # 4000 MB free: admits toolless (>=3072), refuses tool-using (<4608)
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        # No live workers
+        r_toolless = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                        meminfo=self.meminfo(4000), kind="toolless")
+        r_tool_using = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                          meminfo=self.meminfo(4000), kind="tool-using")
+        self.assertIsNone(r_toolless, "toolless with 4000 MB free should be admitted (floor 3072)")
+        self.assertIsNotNone(r_tool_using, "tool-using with 4000 MB free should be refused (floor 4608)")
+
+    def test_3500_free_admits_toolless_refuses_tool_using(self):
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        r_toolless = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                        meminfo=self.meminfo(3500), kind="toolless")
+        r_tool_using = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                          meminfo=self.meminfo(3500), kind="tool-using")
+        self.assertIsNone(r_toolless, "toolless with 3500 MB free should be admitted (floor 3072)")
+        self.assertIsNotNone(r_tool_using, "tool-using with 3500 MB free should be refused (floor 4608)")
+
+    def test_2500_free_refuses_both(self):
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        r_toolless = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                        meminfo=self.meminfo(2500), kind="toolless")
+        r_tool_using = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                          meminfo=self.meminfo(2500), kind="tool-using")
+        self.assertIsNotNone(r_toolless, "toolless with 2500 MB free should be refused (floor 3072)")
+        self.assertIsNotNone(r_tool_using, "tool-using with 2500 MB free should be refused (floor 4608)")
+
+    def test_total_cap_6_binds_toolless_too(self):
+        # Total cap 6 includes toolless runs: 4 toolless + 2 tool-using = 6, next refused
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        for i in range(4):
+            self.record("toolless%d" % i, os.getpid(), kind="toolless")
+        for i in range(2):
+            self.record("tool%d" % i, os.getpid(), kind="tool-using")
+        # Host is at total cap 6; next toolless refused
+        r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                               meminfo=self.meminfo(8000), kind="toolless")
+        self.assertIsNotNone(r)
+        self.assertIn("cap 6", r)
+
+    def test_placeholder_carries_kind(self):
+        # The reservation placeholder gets a kind field
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        refusal, token = self.agent.host_admission_claim(registry=registry, workers=self.workers,
+                                                          meminfo=self.meminfo(8000), kind="toolless")
+        self.assertIsNone(refusal)
+        self.assertIsNotNone(token)
+        # Read the placeholder file
+        with io.open(token, encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual(record.get("kind"), "toolless")
+
+    def test_worker_record_carries_kind(self):
+        # The worker record gets a kind field
+        plan = self.plan()
+        plan["client"] = "api"  # will be toolless if capabilities match
+        # Use a registry where api is toolless
+        registry = {
+            "clients": {"api": {"capabilities": {"shell": False, "write": False}}},
+            "host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608,
+                               "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}}
+        }
+        args = argparse.Namespace(task="do it", title=None)
+        wid, rec = self.agent._worker_record_start(plan, args, self.workers)
+        self.assertEqual(rec.get("kind"), "toolless")
+
+    def test_kindless_record_counts_as_tool_using(self):
+        # A record without kind (or any value except 'toolless') counts as tool-using
+        registry = {
+            "host_admission": {
+                "max_live_workers": 2,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 1, "mem_available_floor_mb": 3072}}
+            }
+        }
+        # One record WITHOUT kind (counts as tool-using), one WITH kind=toolless
+        self.record("tool1", os.getpid())  # no kind -> tool-using
+        self.record("toolless1", os.getpid(), kind="toolless")
+        # Total live = 2 (cap 2), so next tool-using refused on total cap
+        r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                               meminfo=self.meminfo(8000), kind="tool-using")
+        self.assertIsNotNone(r)
+        self.assertIn("cap 2", r)
+        # Total live = 2 (cap 2), so next toolless also refused on total cap first
+        r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                               meminfo=self.meminfo(8000), kind="toolless")
+        self.assertIsNotNone(r)
+        self.assertIn("cap 2", r)  # total cap binds first
+
+    def test_nt_unreadable_memory_refuses_when_floor_configured(self):
+        # On Windows (os.name == 'nt'), unreadable memory refuses when a floor
+        # is configured (fail closed). We inject a mock reader that returns None.
+        registry = {
+            "host_admission": {
+                "max_live_workers": 6,
+                "mem_available_floor_mb": 4608,
+                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
+            }
+        }
+        # Mock os.name in the agent module to simulate Windows
+        # Also mock _nt_mem_available_mb to return None (unreadable)
+        with mock.patch.object(self.agent.os, "name", "nt"), \
+             mock.patch.object(self.agent, "_nt_mem_available_mb", return_value=None):
+            # The test is to verify that when mem_available_mb returns None on nt
+            # with a floor configured, it REFUSES (fail closed)
+            r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
+                                                   meminfo="/dev/null", kind="tool-using")
+            self.assertIsNotNone(r, "unreadable memory on nt with floor should refuse")
+            self.assertIn("MemAvailable unknown", r)
 
 
 class P1ReviewBaseSeatTests(unittest.TestCase):

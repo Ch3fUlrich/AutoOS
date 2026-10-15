@@ -3892,7 +3892,7 @@ def live_free_reservations(directory: str, provider: str) -> int:
 
 def _reserve_free_slot(directory: str, provider: str, model: str,
                        suffix: str = FREE_RESERVATION_SUFFIX,
-                       prefix: str = "free"):
+                       prefix: str = "free", kind: str = "tool-using"):
     """Write this run's placeholder and return its path (None when it cannot be
     written — the run then proceeds unreserved, exactly as it used to).
 
@@ -3901,10 +3901,13 @@ def _reserve_free_slot(directory: str, provider: str, model: str,
     admitted spawner counts every other one's). The name never ends `.json`, so
     `ps` — which reads each `.json` in the directory as a worker — cannot list a
     placeholder.
+
+    The `kind` parameter ('toolless' or 'tool-using') is written into the
+    placeholder record for admission counting.
     """
     wid = "%s-%d-%s" % (prefix, os.getpid(), os.urandom(3).hex())
     record = {"id": wid, "pid": os.getpid(), "pid_start": _proc_starttime(os.getpid()),
-              "started": utc_now_iso()}
+              "started": utc_now_iso(), "kind": kind}
     if provider is not None:
         record["provider"] = provider
         record["model"] = model
@@ -13219,10 +13222,14 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
     # D-807: one resolution for the record, read off the model the plan launched.
     plan_family, plan_family_source, plan_family_reason = run_model_family(
         plan.get("launched_model") or plan.get("model"), client=plan.get("client"))
+    # Derive admission kind from the plan's client (fail closed)
+    registry = load_registry(REGISTRY_PATH) if plan.get("client") else {}
+    kind = host_run_kind(plan.get("client"), registry)
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
+        "kind": kind,
         # FAMILYFENCE-b: the row names the model the run was ASKED to use and where
         # that ask came from, so a default never reads as a pin. What actually
         # answered is not here — it lives in the runner-private record, which is
@@ -13394,6 +13401,7 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
                      "client": record.get("client") or "", "model": record.get("model") or "",
                      "model_source": record.get("model_source") or "",
                      "lane": record.get("session_tag") or "", "pid": record.get("pid"),
+                     "kind": record.get("kind") or "tool-using",
                      # FAMILYFENCE-b: WHO ANSWERED, from the runner-private kill
                      # store — never from job.json or the worker record, both of
                      # which live where the worker could write (R-orch-17). `model`
@@ -13449,6 +13457,9 @@ def host_admission_config(registry=None) -> tuple:
     a number, takes the documented default rather than no limit: an unparseable
     cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
     test-only escape, honoured by `host_admission_refusal`, not by the numbers.
+
+    If ANY top-level field is invalid (< 1 or not an int), BOTH fall back to
+    code defaults (6, 6144) - fail closed for the entire section.
     """
     if registry is None:
         try:
@@ -13457,22 +13468,144 @@ def host_admission_config(registry=None) -> tuple:
             registry = {}
     section = (registry or {}).get("host_admission")
     section = section if isinstance(section, dict) else {}
-    out = []
-    for field, default in (("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
-                           ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)):
-        value = section.get(field)
-        out.append(value if isinstance(value, int) and not isinstance(value, bool)
-                   else default)
-    return tuple(out)
+
+    # Validate both fields; if either is invalid, use code defaults for both
+    cap = section.get("max_live_workers")
+    floor = section.get("mem_available_floor_mb")
+
+    cap_valid = isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+    floor_valid = isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1
+
+    if cap_valid and floor_valid:
+        return cap, floor
+    else:
+        return ADMISSION_MAX_LIVE_DEFAULT, ADMISSION_MEM_FLOOR_MB_DEFAULT
+
+
+def host_admission_kind_config(registry, kind: str) -> tuple:
+    """(max_live_workers, mem_available_floor_mb) for a specific admission `kind`.
+
+    Reads `host_admission.kinds.<kind>`. A missing/malformed/non-int/bool entry,
+    or cap < 1 or floor < 1, falls back to the TOP-LEVEL pair (never to 3072,
+    never to a smaller default). The top-level fields are also validated:
+    cap < 1 or floor < 1 falls back to code defaults (6, 6144).
+    """
+    if kind != "toolless":
+        # Only 'toolless' kind is defined; any other kind uses top-level
+        return host_admission_config(registry)
+
+    if registry is None:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError):
+            registry = {}
+    section = (registry or {}).get("host_admission")
+    section = section if isinstance(section, dict) else {}
+
+    # Get top-level (already validated)
+    top_cap, top_floor = host_admission_config(registry)
+
+    kinds = section.get("kinds")
+    if not isinstance(kinds, dict):
+        return top_cap, top_floor
+
+    kind_cfg = kinds.get(kind)
+    if not isinstance(kind_cfg, dict):
+        return top_cap, top_floor
+
+    cap = kind_cfg.get("max_live_workers")
+    floor = kind_cfg.get("mem_available_floor_mb")
+
+    # Validate kind-specific values: must be int (not bool) and >= 1
+    if not (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1):
+        return top_cap, top_floor
+    if not (isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1):
+        return top_cap, top_floor
+
+    return cap, floor
+
+
+def host_run_kind(client_name: str, registry: dict | None) -> str:
+    """Derive the admission kind from the resolved client.
+
+    Returns 'toolless' ONLY when:
+      - registry.clients[client_name] exists, AND
+      - its capabilities dict has explicit boolean `shell is False`, AND
+      - its capabilities dict has explicit boolean `write is False`
+
+    Anything else (unregistered client, missing capabilities, non-bool values)
+    returns 'tool-using'. Fail closed: we do NOT use client_capabilities()
+    (which defaults missing to False); we require explicit False booleans.
+    """
+    if registry is None:
+        try:
+            registry = load_registry(REGISTRY_PATH)
+        except (OSError, ValueError):
+            registry = {}
+    clients = (registry or {}).get("clients")
+    if not isinstance(clients, dict):
+        return "tool-using"
+    client = clients.get(client_name)
+    if not isinstance(client, dict):
+        return "tool-using"
+    caps = client.get("capabilities")
+    if not isinstance(caps, dict):
+        return "tool-using"
+    shell = caps.get("shell")
+    write = caps.get("write")
+    if shell is False and write is False:
+        return "toolless"
+    return "tool-using"
+
+
+def _nt_mem_available_mb() -> int | None:
+    """MemAvailable on Windows via ctypes GlobalMemoryStatusEx (ullAvailPhys).
+
+    Returns MB or None if the call fails. Used when os.name == 'nt'.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", wintypes.DWORD),
+                ("dwMemoryLoad", wintypes.DWORD),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            # ullAvailPhys is in bytes; convert to MB
+            return int(stat.ullAvailPhys // (1024 * 1024))
+    except Exception:
+        pass
+    return None
 
 
 def mem_available_mb(path=None):
-    """MemAvailable from /proc/meminfo in MB, or None where it cannot be read.
+    """MemAvailable in MB, or None where it cannot be read.
 
-    The kernel writes it in kB. None is Windows, or a container mounted without
-    /proc: the live-worker half of the rule still binds there, and the memory
-    half stands down instead of refusing every run on a host it cannot measure.
+    On Linux: reads /proc/meminfo (kB -> MB).
+    On Windows (os.name == 'nt'): uses ctypes GlobalMemoryStatusEx (ullAvailPhys).
+    On other platforms: returns None.
+
+    The fail-open behavior is now platform-aware:
+      - Linux: unreadable -> fail open (memory half stands down), as before.
+      - Windows (nt): unreadable -> fail CLOSED (refuses when a floor is configured).
+      - Other platforms: fail open ONLY when AUTOOS_MEMINFO_PATH is unset AND
+        the OS is not linux/nt (documented exception).
     """
+    if os.name == "nt":
+        return _nt_mem_available_mb()
+
     path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
     try:
         with io.open(path, encoding="utf-8") as fh:
@@ -13522,7 +13655,37 @@ def live_admission_reservations(directory: str) -> int:
     return len(live)
 
 
-def host_admission_claim(registry=None, workers=None, meminfo=None):
+def live_worker_count_by_kind(directory: str, kind: str) -> int:
+    """Count live workers (records + reservations) of a specific `kind`.
+
+    A record or reservation WITHOUT a `kind` field (or any value except
+    'toolless') counts as 'tool-using'. Only records/reservations with
+    `kind == 'toolless'` are counted for the toolless kind.
+    """
+    if kind != "toolless":
+        # For tool-using, we count total - toolless
+        total = live_worker_count(directory)
+        toolless = live_worker_count_by_kind(directory, "toolless")
+        return total - toolless
+
+    # Count toolless records
+    live = sum(1 for row in visible_workers(directory)
+               if row.get("state") == "running" and row.get("kind") == "toolless")
+    # Count toolless reservations
+    live_res, _ = _reservation_rows(directory, None, ADMISSION_RESERVATION_SUFFIX)
+    toolless_res = 0
+    for path in live_res:
+        try:
+            with io.open(path, encoding="utf-8") as fh:
+                record = json.load(fh)
+            if record.get("kind") == "toolless":
+                toolless_res += 1
+        except (OSError, ValueError):
+            pass
+    return live + toolless_res
+
+
+def host_admission_claim(registry=None, workers=None, meminfo=None, kind: str = "tool-using"):
     """Ask the host for a worker, and take the slot when it says yes.
 
     Returns (refusal, claim-token). The two are one critical section: the same
@@ -13537,17 +13700,21 @@ def host_admission_claim(registry=None, workers=None, meminfo=None):
     it never refuses a run and never hangs one. The token is released by
     `free_reservation_release()` once this run's worker record exists — the
     record is the same fact, and `ps` reads it — or when the run is over.
+
+    `kind` is the admission kind ('toolless' or 'tool-using'). It determines
+    which cap and floor apply, and is written into the reservation placeholder
+    and the worker record.
     """
     directory = workers_dir() if workers is None else workers
     lock = free_slot_lock_take(directory)
     try:
         refusal = host_admission_refusal(registry=registry, workers=directory,
-                                         meminfo=meminfo)
+                                         meminfo=meminfo, kind=kind)
         if refusal is not None:
             return refusal, None
         return None, _reserve_free_slot(directory, None, None,
                                         suffix=ADMISSION_RESERVATION_SUFFIX,
-                                        prefix="host")
+                                        prefix="host", kind=kind)
     finally:
         free_slot_lock_give(lock)
 
@@ -13562,30 +13729,81 @@ def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str
             % (live, cap, free, floor, which))
 
 
-def host_admission_refusal(registry=None, workers=None, meminfo=None):
+def host_admission_refusal(registry=None, workers=None, meminfo=None, kind: str = "tool-using"):
     """Why this host cannot take another worker right now, or None to admit.
 
     Read-only, and it never waits (R-worker: queueing is the caller's job - the
     CLI's caller decides whether to sleep and retry, or to route the task to a
     different machine). `workers` and `meminfo` name the two sources for a
     caller that has them (a test); otherwise the host's own are read.
+
+    `kind` is the admission kind ('toolless' or 'tool-using'). Toolless launch
+    is admitted iff: toolless-live < kind cap AND total-live < top-level cap
+    AND memory >= kind floor. Tool-using launch: total-live < top-level cap
+    AND memory >= top-level floor (unchanged semantics, toolless runs count
+    in the total). Memory is read inside the lock.
     """
     if os.environ.get(ADMISSION_OFF_ENV) == "1":
         return None
-    cap, floor = host_admission_config(registry)
-    live = live_worker_count(workers)
+
+    # Top-level config (for total cap and tool-using floor)
+    top_cap, top_floor = host_admission_config(registry)
+
+    # Kind-specific config
+    kind_cap, kind_floor = host_admission_kind_config(registry, kind)
+
+    # Count live workers by kind
+    directory = workers_dir() if workers is None else workers
+    live_total = live_worker_count(directory)
+    live_toolless = live_worker_count_by_kind(directory, "toolless")
+
     free_mb = mem_available_mb(meminfo)
-    # HOSTADMISSION-FAILOPEN: `free_mb is None` means the host could not be
-    # measured (no /proc/meminfo: Windows, a container mounted without it, an
-    # unreadable path), and the memory half of the rule then stands down — it
-    # FAILS OPEN rather than refuse every run on a machine it cannot read. The
-    # live-worker half does not: `live >= cap` still binds, and it is the half
-    # that counts the slots claimed below it. A host that cannot say how much
-    # memory it has free can always say how many workers it is running.
-    if live >= cap:
-        return _admission_text(live, cap, free_mb, floor, "the live-worker cap")
-    if free_mb is not None and free_mb < floor:
-        return _admission_text(live, cap, free_mb, floor, "the memory floor")
+
+    # Fail-closed on unreadable memory:
+    # - On Linux: fail open (memory half stands down) - existing behavior
+    # - On Windows (nt): fail CLOSED when a floor is configured
+    # - Other platforms: fail open ONLY when AUTOOS_MEMINFO_PATH is unset
+    #   AND OS is not linux/nt (documented exception)
+    mem_unreadable = free_mb is None
+    if mem_unreadable:
+        # Check if we're on Windows or if floor is configured
+        if os.name == "nt":
+            # Windows: fail closed when any floor applies
+            applicable_floor = kind_floor if kind == "toolless" else top_floor
+            if applicable_floor > 0:
+                return _admission_text(
+                    live_total if kind == "tool-using" else live_toolless,
+                    kind_cap if kind == "toolless" else top_cap,
+                    free_mb, applicable_floor, "the memory floor (unreadable on Windows)")
+        elif not os.environ.get(ADMISSION_MEMINFO_ENV) and os.name not in ("posix", "nt"):
+            # Documented exception: fail open on non-Linux/non-nt when env unset
+            pass
+        else:
+            # Linux: fail open - memory half stands down
+            mem_unreadable = False  # treat as not a memory constraint
+
+    if kind == "toolless":
+        # Toolless admission: check total cap first (overarching limit), then kind cap, then kind floor
+        if live_total >= top_cap:
+            return _admission_text(live_total, top_cap, free_mb, top_floor,
+                                   "the total live-worker cap")
+        if live_toolless >= kind_cap:
+            return _admission_text(live_toolless, kind_cap, free_mb, kind_floor,
+                                   "the toolless live-worker cap")
+        # Memory floor check: only if we have a readable value (not None)
+        # and we're not in the Linux fail-open case
+        if free_mb is not None and free_mb < kind_floor:
+            return _admission_text(live_toolless, kind_cap, free_mb, kind_floor,
+                                   "the toolless memory floor")
+    else:
+        # Tool-using admission: check total cap and top-level floor
+        if live_total >= top_cap:
+            return _admission_text(live_total, top_cap, free_mb, top_floor,
+                                   "the live-worker cap")
+        if free_mb is not None and free_mb < top_floor:
+            return _admission_text(live_total, top_cap, free_mb, top_floor,
+                                   "the memory floor")
+
     return None
 
 
@@ -14265,7 +14483,9 @@ def cmd_run(args, cfg: dict) -> int:
     # model and then found the host full is refused with both slots released.
     # After this point exactly one path still exits before the record: the privacy
     # refusal below, and it releases the claim on its way out.
-    admission, host_claim = host_admission_claim(registry=registry)
+    # Derive admission kind from the plan's client (fail closed)
+    kind = host_run_kind(plan.get("client"), registry)
+    admission, host_claim = host_admission_claim(registry=registry, kind=kind)
     if admission is not None:
         return refuse(admission, EXIT_HOST_ADMISSION)
     parent_snap = None
