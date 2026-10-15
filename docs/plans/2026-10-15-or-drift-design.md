@@ -51,3 +51,20 @@ Seats: 2 non-Claude, different families (gate change, R-orch-16); design reviewe
 - Guard strictness: **refuse (exit 4) on unexported live change** vs warn-only.
 - Snapshot file name/location: **`configuration/omniroute/combos.live.json`**.
 - First convergence: **fold live-only mimo/nemotron legs into registry where wanted, then safe apply**; alt: apply git as-is (loses live legs).
+
+## Per-leg keep/drop list (for fixes-L1's judgment; every ref below is already a registry model, so "fold" = add it to that route's `legs`)
+
+Source: `apply.sh --drift` 2026-10-15, set difference per combo (order-only differences listed separately). Defaults are proposals.
+
+| Group | Combos | Live-only leg(s) | Default | Reason |
+|---|---|---|---|---|
+| A | l1-orchestrator(+clean), l2-orchestrator(+clean), l2-researcher, l2-worker(+clean), l3-review-tests | xiaomi-mimo/mimo-v2.6-flash | fold | model rows exist since AO-MIMO-S2, tier legs were hand-added live |
+| B | l1-orchestrator(+clean,+free-only), l2-orchestrator-clean, l2-worker-clean, l3-researcher-clean | nemotron-3-ultra / nemotron-3-super / bzl deepseek-v4-flash (free) | fold | free legs the registry knows, absent from these routes' legs |
+| C1 | l3-driver, l3-driver-free-only, l3-implementer, l3-review-diff | groq qwen3.8-27b, groq gpt-oss-120b | fold | free-quota legs hand-added live |
+| C2 | l3-driver-clean, l3-implementer-clean | 10-leg live pool (nemotron x2, groq x2, laguna-s-2.1, cohere x2, north-mini-code, ovh Qwen, bzl deepseek-v4-flash); the two differ only in ovh model | judge | looks like a hand-built clean pool; confirm "clean" policy admits each vendor before folding |
+| D | 14 combos carrying `vertex/gemini-3.8-flash` last (every combo in A/B/C2 above, plus l3-researcher, l3-review-codebase, l3-driver, l3-implementer) | file-only leg (live lacks it) | keep in registry | live has no vertex combos either (see missing); gateway-side vertex connection repair is L0's (apply.sh B2-VERTEX), not a registry change |
+| E | l2-worker-free-only | none, order only | drop live order | rendered order is the contract; live reorder is undocumented |
+
+Missing live (7): `l2-worker-1m`, `l3-driver-1m`, `l3-driver-256k`, `mimo-v2.6-flash`, `mimo-v2.6-pro` -> keep, safe apply creates them; `gemini-3.8-flash`, `vertex-gemini-3.8-flash` -> keep, blocked on vertex (group D).
+Live-only (7): `deepseek-v4.1-flash`, `spark-1.3-contributor`, `groq-qwen3.8-27b`, `opus-5-5`, `ovh-gpt-oss-120b` -> drop (registry "omitted", no servable leg; apply prunes);
+`l1-orchestrator-paid` -> drop (same family as the retired `*-paid` ids; add to `retired`); `ha-assist` -> not AutoOS's: add an `unmanaged` list the drift check ignores and apply never touches.
