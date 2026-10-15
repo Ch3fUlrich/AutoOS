@@ -2350,5 +2350,40 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
             self.assertEqual(self.sync.unmanaged_skip_notices(combos), [])
 
 
+class MimoModelIdNamesTheProviderLegTests(unittest.TestCase):
+    """The live gateway has no `mimo-v2.6-*` combo, so a bare modelID is
+    auto-resolved (sometimes to openrouter/xiaomi/... -> 402). Every omniroute
+    mimo picker entry sends the `mimo/` provider-prefixed leg; the picker KEY is
+    unchanged (fixes-L1, build-L1's 402 root cause, 2026-10-15)."""
+
+    def _combo_legs(self):
+        combos = registry.render_omniroute(json.loads(REGISTRY_PATH.read_text(encoding="utf-8")))
+        return {c["name"]: c["models"] for c in combos["combos"]
+                if c["name"].startswith("mimo-")}
+
+    def test_every_omniroute_mimo_entry_sends_the_provider_prefixed_leg(self):
+        oc = json.loads(_strip_jsonc((ROOT / "opencode.jsonc").read_text(encoding="utf-8")))
+        entries = {k: v for k, v in oc["providers"]["omniroute"]["models"].items()
+                   if k.startswith("mimo-")}
+        self.assertEqual(sorted(entries), ["mimo-v2.6-flash", "mimo-v2.6-pro"])
+        for key, entry in entries.items():
+            self.assertTrue(entry["modelID"].startswith("mimo/"), (key, entry["modelID"]))
+
+    def test_the_modelid_is_the_rendered_combos_single_leg(self):
+        legs = self._combo_legs()
+        self.assertEqual(sorted(legs), sorted(registry.IDE_PROVIDER_MODEL_IDS))
+        for route_id, model_id in registry.IDE_PROVIDER_MODEL_IDS.items():
+            self.assertEqual(legs[route_id], [model_id])
+
+    def test_ide_models_carry_the_modelid_and_other_entries_do_not(self):
+        by_id = {m["id"]: m for m in json.loads(
+            IDE_MODELS_PATH.read_text(encoding="utf-8"))["models"]}
+        for route_id, model_id in registry.IDE_PROVIDER_MODEL_IDS.items():
+            self.assertEqual(by_id[route_id]["modelID"], model_id)
+        others = [k for k, m in by_id.items()
+                  if "modelID" in m and k not in registry.IDE_PROVIDER_MODEL_IDS]
+        self.assertEqual(others, [])
+
+
 if __name__ == "__main__":
     unittest.main()

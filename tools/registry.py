@@ -1714,6 +1714,16 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # render drop the constant; not added here since spec 3.1 does not list one and
 # task A4c's brief is "keep today's value via the render" for exactly this kind
 # of gap (as A4b did for the litellm rpm lines).
+# Routes whose opencode model must name the gateway PROVIDER leg, not the combo id:
+# the live gateway has no `mimo-v2.6-*` combo, so a bare "mimo-v2.6-flash" is
+# auto-resolved (sometimes to openrouter/xiaomi/... -> 402). The picker key stays the
+# route id; only the modelID sent on the wire changes. Pinned to the rendered combo
+# by tests/test_registry_render.py (fixes-L1, build-L1 402 root cause 2026-10-15).
+IDE_PROVIDER_MODEL_IDS = {
+    "mimo-v2.6-flash": "mimo/mimo-v2.6-flash",
+    "mimo-v2.6-pro": "mimo/mimo-v2.6-pro",
+}
+
 IDE_MODEL_ORDER = (
     "l1-orchestrator", "l1-orchestrator-clean", "l1-orchestrator-paid",
     "l1-orchestrator-free-only",
@@ -1889,6 +1899,8 @@ def render_ide(registry: dict) -> dict:
             model["reasoning_effort"] = effort
         if head_ladder:
             model["effort_ladder"] = head_ladder
+        if route_id in IDE_PROVIDER_MODEL_IDS:
+            model["modelID"] = IDE_PROVIDER_MODEL_IDS[route_id]
         model["surfaces"] = {gw: list(gateways[gw].get("clients") or []) for gw in IDE_GATEWAYS if gw in gateways}
         models.append(model)
 
