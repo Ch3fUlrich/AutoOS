@@ -596,27 +596,6 @@ if [[ $LIVE_LINES -eq 1 ]]; then
     exit 0
 fi
 
-if [[ $DRY -eq 0 && $DRIFT -eq 0 && $LIVE_LINES -eq 0 ]]; then
-    if [[ $OVERWRITE_LIVE -eq 1 ]]; then
-        echo "guard: skipped (--overwrite-live)"
-    elif ! command -v omniroute >/dev/null || ! gateway_up; then
-        echo "guard: skipped (no reachable live store)"
-    else
-        if ! guard_read_live; then
-            echo "apply.sh: refused - live store unreadable ($GUARD_REASON); nothing was changed. Re-run with --overwrite-live to replace anyway." >&2
-            exit 4
-        fi
-        guard_rc=0
-        guard_out=$(printf '%s\n' "$GUARD_ROWS" | python3 "$ROOT/tools/combo_drift.py" guard --live-lines - ) || guard_rc=$?
-        if [[ $guard_rc -ne 0 ]]; then
-            echo "$guard_out" >&2
-            echo "apply.sh: refused (exit 4) - live holds changes git never saw, or a policy leg is forbidden in a -clean combo; nothing was changed. Export with: python3 tools/combo_drift.py export; or re-run with --overwrite-live (GO still required)." >&2
-            exit 4
-        fi
-        echo "guard: ok"
-    fi
-fi
-
 if ! gateway_up; then
     if [[ $DRY -eq 1 ]]; then
         echo "Gateway is down; dry run continues with the static plan (would start it with: omniroute --no-open --port 20128)."
@@ -651,6 +630,30 @@ if ! gateway_up; then
     fi
 fi
 if gateway_up; then echo "Gateway OK on $GATEWAY"; fi
+# The guard runs only AFTER the gateway is up: a stopped gateway used to skip it, then get
+# started below and be mutated unchecked (seat finding, 2026-10-15). Starting the gateway
+# changes no combo; a gateway that never comes up exits above, before any mutation.
+if [[ $DRY -eq 0 && $DRIFT -eq 0 && $LIVE_LINES -eq 0 ]]; then
+    if [[ $OVERWRITE_LIVE -eq 1 ]]; then
+        echo "guard: skipped (--overwrite-live)"
+    elif ! command -v omniroute >/dev/null || ! gateway_up; then  # dry runs never reach here; a real run has both
+        echo "guard: skipped (no reachable live store)"
+    else
+        if ! guard_read_live; then
+            echo "apply.sh: refused - live store unreadable ($GUARD_REASON); nothing was changed. Re-run with --overwrite-live to replace anyway." >&2
+            exit 4
+        fi
+        guard_rc=0
+        guard_out=$(printf '%s\n' "$GUARD_ROWS" | python3 "$ROOT/tools/combo_drift.py" guard --live-lines - ) || guard_rc=$?
+        if [[ $guard_rc -ne 0 ]]; then
+            echo "$guard_out" >&2
+            echo "apply.sh: refused (exit 4) - live holds changes git never saw, or a policy leg is forbidden in a -clean combo; nothing was changed. Export with: python3 tools/combo_drift.py export; or re-run with --overwrite-live (GO still required)." >&2
+            exit 4
+        fi
+        echo "guard: ok"
+    fi
+fi
+
 
 # ─── Register providers ─────────────────────────────────────────────────────
 # The manage key for the REST calls below: the same one omni() puts into the

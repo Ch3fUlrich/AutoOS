@@ -210,6 +210,17 @@ def test_dry_run_and_drift_no_refused(harness):
     assert "refused" not in res_drift.stderr
 
 
+def test_guard_runs_after_the_gateway_is_up():
+    """A stopped gateway used to skip the guard ('no reachable live store'), then apply
+    started it and mutated unchecked. The guard must come after the start block."""
+    text = (Path(__file__).resolve().parent.parent / "configuration" / "omniroute" / "apply.sh").read_text(encoding="utf-8")
+    guard = text.index('echo "guard: skipped (--overwrite-live)"')
+    started = text.index('Gateway did not start')
+    last_start = text.rindex('Gateway did not start')
+    assert guard > last_start, "the apply guard runs before the gateway start block"
+    assert started < guard
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main(["-q", __file__]))
