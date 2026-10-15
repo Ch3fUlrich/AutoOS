@@ -6,7 +6,7 @@ Brief: /home/s/code/routing-worktrees/fixes-L1/docs/plan/briefs/fixes-L2-runnerp
 - d6848f916 W2: tools/runner_pool{,_core,_gate,_proc}.py + 9 test files (core,core_b,core_c,gate,proc,slot,strict,cli,pool), wired in tests/linux/33-documentation.sh + tests/run-tests.ps1.
 - a80a6fb63 W1: admission-by-kind (taken from cancelled run 20261015-152819, working-tree diff; it never committed). -k Admission 40 ok, registry check + 5 renders ok. GATE change R-orch-16: needs 2 non-Claude seats (review points to look at: host_admission_config now falls back BOTH fields to code defaults if either invalid; dead branch `mem_unreadable=False`; host_admission_refusal nt fail-closed).
 
-## UNCOMMITTED in worktree (commit first thing)
+## Committed WIP 38cca458a (was uncommitted when written; worktree clean)
 - tools/api_client.py + tests/test_api_client.py (23 ok) = W4; tests/test_runner_pool_e2e.py (6 ok, unmocked Popen, mutation-checked); tools/autoos_clients.py (+Client("api"), MODEL_INPUT row, build_command api branch); wiring lines for e2e+api in 33-documentation.sh/run-tests.ps1.
 - FULL tests/test_autoos_spawner.py (372 s, run in background to a log, `python3 tests/test_autoos_spawner.py > $JOBTMP/x.log; wait for rc=`): 4 reds to fix before any push:
   1. ClientMatrixTests.test_every_client_declares_the_matrix_fields (l.536) expects 7 names -> add "api".
