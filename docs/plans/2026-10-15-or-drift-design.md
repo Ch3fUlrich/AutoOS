@@ -14,7 +14,7 @@ Basis: rethink-setup design R2 (implication 4). Lane `lane/ao-rt-p0-or-drift` of
 
 ## Measured drift (2026-10-15, `apply.sh --drift`, read-only, names only)
 
-31 file combos: 19 differ in legs/order, 7 missing live, 7 live-only extras (6 are "omitted" orphans, 2 unnamed in git: `ha-assist`, `l1-orchestrator-paid`).
+31 file combos: 19 differ in legs/order, 7 missing live, 5 in sync; plus 7 live-only extras (5 "omitted" orphans, 2 unknown to git: `ha-assist`, `l1-orchestrator-paid`).
 - differ: l1-orchestrator(+clean,+free-only), l2-orchestrator(+clean), l2-researcher, l2-worker(+clean,+free-only), l3-driver(+clean,+free-only),
   l3-implementer(+clean), l3-researcher(+clean), l3-review-{diff,tests,codebase}.
 - missing live: gemini-3.8-flash, l2-worker-1m, l3-driver-1m, l3-driver-256k, mimo-v2.6-flash, mimo-v2.6-pro, vertex-gemini-3.8-flash.
@@ -27,16 +27,23 @@ Never auto-write the registry from live (live holds skipped/experimental legs; r
    one line per difference (names + leg refs, no keys), writes `drift.json` (counts, names, sha256 of live export), exit 0 in sync / 1 drift / 3 unreadable.
 2. `tools/combo_drift.py export` writes the live store to `configuration/omniroute/combos.live.json` (committed snapshot: name, strategy, ordered refs).
    A reviewer diffs it against `combos.json` and folds wanted legs into the registry (normal render + tests). The snapshot is the audit trail of what live held.
-3. `apply.sh` guard (gate change): a mutating run first reads live; if live differs from the committed snapshot (= live changes git never saw) it
-   refuses, exit 4, naming the combos; `--overwrite-live <ref>` (same GO artefact as D-825) is the explicit way through. `--dry-run`/`--drift` unchanged.
-   Unreadable live store keeps today's behaviour but now says so before writing (no silent delete against an unseen store).
+3. `apply.sh` guard (gate change): a mutating run first reads live and passes only if every live combo equals the committed snapshot (live changes are in git's
+   audit trail) or equals the file (nothing to lose). Else it refuses, exit 4, naming the combos; `--overwrite-live <ref>` (same GO artefact as D-825) is the explicit
+   way through. The guard compares to the snapshot, not to `combos.json`: apply exists to move live to the file, so a file comparison would refuse every real run.
+   Unreadable live store, or any combo with a step the normaliser cannot read (dropped>0): refused too (exit 4) unless `--overwrite-live`; today's "replacing every
+   combo" fallback ends. `--dry-run`/`--drift` unchanged. After an approved apply the packet re-exports, so the snapshot tracks the new live state.
+   Export writes `combos.live.json` with `count` and `sha256` of the combo body; the guard recomputes both and refuses a snapshot that does not verify.
+   Known gaps: `configuration/omniroute/drift-known-gaps.json` lists `{ref, reason}` legs (today `vertex/gemini-3.8-flash`, live vertex connection is L0's)
+   that the check ignores on the file side, printed as `known gap`, so group D does not hold drift above 0 forever; an entry without a reason fails the check.
 4. Done state: registry fold + (approved) live apply, then drift = 0. Live apply is a quoted live-step packet to fixes-L1, never run by this lane.
 
 ## Daily check
 
 systemd user unit `autoos-combo-drift.service` (oneshot) + `.timer` (`OnCalendar=daily`, `Persistent=true`), ExecStart wrapped:
 `unit_breaker.py --unit autoos-combo-drift.service -- python3 tools/autoos_gateway_key.py exec -- python3 tools/combo_drift.py --alert`.
-Not cron. Alert: one line to `$AUTOOS_ALERT_INBOX` on rc 1 (count + first 5 names), on rc 3 (unreadable); silent on 0. Breaker disables the unit after 5 identical failures.
+Not cron. `--alert` mode: drift (rc 1) writes one line to `$AUTOOS_ALERT_INBOX` (count + first 5 names) EVERY day it persists and exits 0, so the breaker never
+disables the check over persistent drift (the alert is the signal); an unreadable store (rc 3) or a crash exits non-zero, alerts, and may trip the breaker (5 identical
+failures), which itself appends the breaker alert line. Silent on 0. Plain `combo_drift.py` (no flag) keeps exit 0/1/3 for scripts.
 Units live in `configuration/autostart/`; installing them on a host is a live step (packet), not done here.
 
 ## Tests (failing first) and verify
