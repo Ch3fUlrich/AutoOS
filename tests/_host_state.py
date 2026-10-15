@@ -44,7 +44,7 @@ STATE_HOME_ENV = "XDG_STATE_HOME"
 LOCALAPPDATA_ENV = "LOCALAPPDATA"
 
 # A host with this much free clears every floor the shipped registry names
-# (catalog/ai-registry.json `host_admission.mem_available_floor_mb` is 4608).
+# (catalog/ai-registry.json `host_admission.mem_available_floor_mb` is 1024).
 HEALTHY_MEMINFO_MB = 65536
 # The default budget of the gate document itself; the shipped refresh script
 # writes the real number. A test that wants a refusal names its own numbers.
