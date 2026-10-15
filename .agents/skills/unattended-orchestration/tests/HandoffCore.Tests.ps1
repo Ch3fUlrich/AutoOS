@@ -538,6 +538,75 @@ try {
         Assert-True (-not (Test-HandoffDoneQuiet $true 0 $now 20 $false)) "no commit at all -> not finished"
         Assert-True (Test-HandoffDoneQuiet $true ($now - 3600) $now 20 $false) "DONE note + clean + quiet an hour -> finished"
     }
+    # New tests for Resolve-HandoffDoneNotePath
+    It "relative note joins the base" {
+        $base = "C:\wt\a"
+        $rel = "DONE-A.md"
+        $expected = Join-Path $base $rel
+        $actual = Resolve-HandoffDoneNotePath $base $rel
+        Assert-Equal $actual $expected "relative note should be joined with base"
+    }
+
+    If ($IsWindows) {
+        It "absolute Windows note is kept" {
+            $base = "C:\wt\a"
+            $rel = "C:\fleet\gen\genw1\DONE-A3A4.md"
+            $expected = $rel
+            $actual = Resolve-HandoffDoneNotePath $base $rel
+            Assert-Equal $actual $expected "absolute Windows note should be returned as-is"
+            # Test with forward slashes
+            $rel2 = "C:/fleet/gen/genw1/DONE-A3A4.md"
+            $expected2 = $rel2
+            $actual2 = Resolve-HandoffDoneNotePath $base $rel2
+            Assert-Equal $actual2 $expected2 "absolute Windows note with forward slashes should be returned as-is"
+            # Test UNC
+            $rel3 = "\\srv\share\DONE.md"
+            $expected3 = $rel3
+            $actual3 = Resolve-HandoffDoneNotePath $base $rel3
+            Assert-Equal $actual3 $expected3 "UNC path should be returned as-is"
+        }
+    }
+
+    It "default template with an empty planDir stays relative" {
+        $base = "C:\wt\a"
+        # Test with leading forward slash
+        $rel1 = "/session-A-DONE.md"
+        $expected1 = Join-Path $base $rel1
+        $actual1 = Resolve-HandoffDoneNotePath $base $rel1
+        Assert-Equal $actual1 $expected1 "leading slash note should be treated as relative"
+        # Test with leading backslash
+        $rel2 = "\session-A-DONE.md"
+        $expected2 = Join-Path $base $rel2
+        $actual2 = Resolve-HandoffDoneNotePath $base $rel2
+        Assert-Equal $actual2 $expected2 "leading backslash note should be treated as relative"
+    }
+
+    If (-not $IsWindows) {
+        It "absolute Unix note is kept" {
+            $base = "C:\wt\a"   # base is ignored for absolute
+            $rel = "/home/s/plan/DONE.md"
+            $expected = $rel
+            $actual = Resolve-HandoffDoneNotePath $base $rel
+            Assert-Equal $actual $expected "absolute Unix note should be returned as-is"
+        }
+    }
+
+    It "empty note -> empty string" {
+        Assert-Equal (Resolve-HandoffDoneNotePath "C:\wt\a" "") "" "empty note should return empty string"
+        Assert-Equal (Resolve-HandoffDoneNotePath "C:\wt\a" "   ") "" "whitespace note should return empty string"
+    }
+
+    # T6: static guard on the runner script
+    It "runner script uses Resolve-HandoffDoneNotePath and not direct Join-Path for doneNote" {
+        $scriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) "run_handoff_sessions.ps1"
+        $src = Get-Content $scriptPath -Raw
+        # Should not contain the old patterns
+        Assert-True (-not ($src -match 'Join-Path \$wt \$vars\["doneNote"\]')) "should not contain Join-Path \$wt \$vars[\"doneNote\"]"
+        Assert-True (-not ($src -match 'Join-Path \$base \$rel')) "should not contain Join-Path \$base \$rel"
+        # Should contain at least three calls to Resolve-HandoffDoneNotePath
+        $hits = [regex]::Matches($src, 'Resolve-HandoffDoneNotePath')
+        Assert-True ($hits.Count -ge 3) "should have at least three calls to Resolve-HandoffDoneNotePath"
+    }
 
     Write-Host "`nStall watchdog (a hung child, not a finished one)"
     # Why these matter: quietMinutes only ever closes a session that ALREADY wrote
