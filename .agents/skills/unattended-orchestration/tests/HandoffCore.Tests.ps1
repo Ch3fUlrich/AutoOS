@@ -606,6 +606,9 @@ try {
         # Should contain at least three calls to Resolve-HandoffDoneNotePath
         $hits = [regex]::Matches($src, 'Resolve-HandoffDoneNotePath')
         Assert-True ($hits.Count -ge 3) "should have at least three calls to Resolve-HandoffDoneNotePath"
+        # Join-Path throws on an empty base (a session with no worktree yet); the status
+        # recount must skip that base, not fall into its catch before reaching the repo.
+        Assert-True ($src -match 'if \(\$base\) \{ \$cand = Resolve-HandoffDoneNotePath \$base \$rel') "the status loop must test `$base before resolving against it"
     }
 
     Write-Host "`nStall watchdog (a hung child, not a finished one)"
