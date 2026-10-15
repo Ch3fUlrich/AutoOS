@@ -1166,7 +1166,7 @@ if ($Status) {
             $note = $null
             if ($rel) {
                 foreach ($base in @($e["worktree"], $vars["worktree"], $repo)) {
-                    $cand = Resolve-HandoffDoneNotePath $base $rel; if ($base -and (Test-Path $cand)) { $note = $cand; break }
+                    if ($base) { $cand = Resolve-HandoffDoneNotePath $base $rel; if (Test-Path $cand) { $note = $cand; break } }
                 }
             }
             if ($env:HANDOFF_DEBUG) { Write-Host "status: $k note=$note (rel=$rel)" }
