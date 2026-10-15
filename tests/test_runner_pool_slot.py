@@ -257,4 +257,5 @@ class TestSlot(unittest.TestCase):
         finally:
             pool.job_argv = orig
 
-unittest.main()
+if __name__ == '__main__':
+    unittest.main()
