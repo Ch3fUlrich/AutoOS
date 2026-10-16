@@ -196,6 +196,10 @@ try {
         Assert-Equal 5 $c.stallWindow.maxStalls "stallWindow.maxStalls default"
         Assert-Equal 3 $c.stallWindow.hours "stallWindow.hours default"
     }
+    It "defaults the auto-deny grace to 5 min for a config that does not name it" {
+        $c = Read-HandoffConfig $goodPath
+        Assert-Equal 5 $c.autoDenyGraceMinutes "autoDenyGraceMinutes default"
+    }
     It "merges stallWindow key by key so a config naming one half keeps the other" {
         # A whole-object override would leave `hours` null, and the session loop
         # multiplies it by 3600: the window would silently become zero.
