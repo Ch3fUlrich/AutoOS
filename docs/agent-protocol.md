@@ -169,6 +169,22 @@ model names are not selectable. See `docs/models.md` for what serves now.
 | qoder writer (`--permission-mode bypass_permissions`, Qwen3.8-Flash, sandbox forced) | not measured | shell + write work headless (2026-09-27, scratch repo); ask-back not yet measured |
 | agy (default model) | not measured | Gemini quota 429 before the task ran |
 
+### Model access paths (D-1504)
+
+A brief or seat request that names a model gets that model over its own path and
+no other (operator rule D-1504, 2026-10-16). No substitution of model or route:
+when the path is down or rate-limited, back off or report `BLOCKED`.
+
+| model | the only path |
+|---|---|
+| `qwen3.8-flash` | qodercli ACP (display name `Qwen3.8-Flash`; other spellings silently fall back to another model) |
+| `gemini-3.8-flash` | antigravity (agy) ACP, or Google AI Studio; both rate-limited: back off or `BLOCKED`, never swap |
+| `muse-spark-1.3` | opencode ACP |
+| `mimo-v2.6-flash`, `mimo-v2.6-pro` | the mimo provider |
+
+The ask-back rows above that name gateway routes (`omniroute/...`) record what
+was measured then; they are not paths for these models.
+
 ### Stdout channel
 
 Workers that cannot use the ask-back helper print tagged messages to stdout:
