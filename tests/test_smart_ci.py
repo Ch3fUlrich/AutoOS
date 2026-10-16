@@ -16,6 +16,7 @@ Run directly:
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -243,9 +244,10 @@ class WorkflowShellTests(unittest.TestCase):
         self.bin = os.path.join(self.tmp.name, "bin")
         os.makedirs(self.bin)
         self.calls = os.path.join(self.tmp.name, "gh-calls")
-        gh = os.path.join(self.bin, "gh")
-        Path(gh).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls, ""]))
-        os.chmod(gh, 0o755)
+        # the gate posts the status with curl (the runner image has no gh)
+        curl = os.path.join(self.bin, "curl")
+        Path(curl).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls, ""]))
+        os.chmod(curl, 0o755)
 
     def gate(self, event, full, results, windows_enabled=""):
         """results: 'name=result ...' as the workflow builds it."""
@@ -254,7 +256,7 @@ class WorkflowShellTests(unittest.TestCase):
                    EVENT=event, FULL=full, REASON="r", RESULTS=results, WINDOWS_ENABLED=windows_enabled)
         p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env)
         calls = Path(self.calls).read_text() if os.path.exists(self.calls) else ""
-        state = [w.split("=", 1)[1] for w in calls.split() if w.startswith("state=")]
+        state = re.findall(r'"state":"([a-z]+)"', calls)
         return p.returncode, (state[-1] if state else None)
 
     OK = "smart=success linux=success ansible=success secrets=success scrub=success"

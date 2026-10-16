@@ -337,7 +337,14 @@ jobs:
         run: |
           echo "event=$EVENT full=$FULL results=$RESULTS reason=$REASON"
           ctx="Full suite (merge-ready)"
-          post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="$ctx" -f description="$2" >/dev/null || echo "::warning::could not set the $ctx status"; }
+          # curl, not gh: the self-hosted runner image has no gh, and a status that is
+          # never posted would leave the full-suite requirement unenforced.
+          post() {
+            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
+              -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null \
+              || echo "::warning::could not set the $ctx status"
+          }
           for pair in $RESULTS; do
             name="${pair%%=*}"; r="${pair#*=}"
             case "$r" in

@@ -86,7 +86,12 @@ jobs:
           FULL: ${{ needs.smart.outputs.full }}
           RESULTS: smart=${{ needs.smart.result }} tests=${{ needs.tests.result }} heavy=${{ needs.heavy.result }}
         run: |
-          post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="Full suite (merge-ready)" -f description="$2" >/dev/null || true; }
+          ctx="Full suite (merge-ready)"   # curl, not gh: runner images may lack gh
+          post() {
+            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
+              -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null || true
+          }
           for pair in $RESULTS; do
             name="${pair%%=*}"; r="${pair#*=}"
             case "$r" in
@@ -118,7 +123,9 @@ is posted to the PR head SHA while the run tested the merge ref, so a push to th
 base branch after the run does not invalidate it. In the gate, a skipped job in a
 full run is red, so a job that is deliberately off must be named there (AutoOS
 allows Windows to be skipped until the repository variable `CI_WINDOWS_ENABLED` is
-`true`). Pass `results` as `name=result` pairs so the gate can tell which job it was.
+`true`). Single-job repos gain little on source changes (the install step dominates);
+the saving is docs-only and test-only changes, and the skipped heavy jobs.
+Pass `results` as `name=result` pairs so the gate can tell which job it was.
 
 ## The map: `.github/smart-ci.json`
 
