@@ -340,7 +340,8 @@ jobs:
           # curl, not gh: the self-hosted runner image has no gh, and a status that is
           # never posted would leave the full-suite requirement unenforced.
           post() {
-            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            # the token goes in through stdin (-H @-), never into argv where ps could show it
+            printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS -X POST -H @- -H "Accept: application/vnd.github+json" \
               "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
               -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null \
               || echo "::warning::could not set the $ctx status"
@@ -360,6 +361,8 @@ jobs:
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
             post pending "selected-only run: add the merge-ready label for the full suite"
             echo "::notice::selected-only run passed; the full suite (label merge-ready or dispatch full=true) is still required before merge"
-          else
+          elif [ "$FULL" = true ]; then
             post success "full suite passed"
+          else
+            post failure "not a full run"; echo "::error::not a pull request and not a full run: refusing to report success"; exit 1
           fi

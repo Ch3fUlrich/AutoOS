@@ -88,7 +88,7 @@ jobs:
         run: |
           ctx="Full suite (merge-ready)"   # curl, not gh: runner images may lack gh
           post() {
-            curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS -X POST -H @- -H "Accept: application/vnd.github+json" \
               "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
               -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null || true
           }
@@ -101,7 +101,8 @@ jobs:
             esac
           done
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label"
-          else post success "full suite passed"; fi
+          elif [ "$FULL" = true ]; then post success "full suite passed"
+          else post failure "not a full run"; exit 1; fi
 ```
 
 AutoOS's own `.github/workflows/ci.yml` is the worked example (it also trims the
@@ -117,7 +118,8 @@ survives between runs, which self-hosted slots do not guarantee, so the committe
 map is the default. A repo may put `--testmon` inside its own `tests` job and keep
 the map for job selection.
 
-Caveats. A fork PR gets a read-only token, so it can never write the
+Caveats. The `Full suite (merge-ready)` status is a process guard, not a security
+boundary: anyone whose token can write commit statuses can set it. A fork PR gets a read-only token, so it can never write the
 `Full suite (merge-ready)` status (blocked, not unsafe: it stays unset). The status
 is posted to the PR head SHA while the run tested the merge ref, so a push to the
 base branch after the run does not invalidate it. In the gate, a skipped job in a

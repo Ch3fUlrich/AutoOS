@@ -143,8 +143,12 @@ def full_result(files, reason, job_names):
     }
 
 
-def select(files, cmap, force_full=False, force_reason="forced full run"):
-    """files: changed paths (posix, repo-relative). cmap: a validated map or None."""
+def select(files, cmap, force_full=False, force_reason="forced full run", exists=None):
+    """files: changed paths (posix, repo-relative). cmap: a validated map or None.
+
+    exists: optional callable(path) -> bool. A test that came from a `{path}` token (the
+    changed file itself) but is gone at HEAD (the PR deleted or renamed it) cannot be
+    run, so the run goes full rather than hand the runner a path that does not exist."""
     files = sorted({f.strip().replace("\\", "/") for f in files if f.strip()})
     job_names = list((cmap or {}).get("jobs", []))
     if force_full:
@@ -173,7 +177,10 @@ def select(files, cmap, force_full=False, force_reason="forced full run"):
                 for j in rule.get("jobs", []):
                     jobs[j] = True
                 for t in rule.get("tests", []):
-                    t = f if t == "{path}" else t
+                    if t == "{path}":
+                        t = f
+                        if exists is not None and not exists(f):
+                            return full_result(files, "selected test missing at HEAD: %s" % f, job_names)
                     if t not in tests:
                         tests.append(t)
         if not hit:
@@ -242,7 +249,7 @@ def main(argv=None) -> int:
                 files = git_changed(args.base, args.head)
             else:
                 raise ValueError("no --base and no --files")
-            result = select(files, cmap)
+            result = select(files, cmap, exists=os.path.exists)
             if cmap is None:
                 result["reason"] = "map unusable: %s" % err
         except (subprocess.CalledProcessError, OSError, ValueError) as exc:

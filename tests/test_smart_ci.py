@@ -78,6 +78,14 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(r["mode"], "selected")
         self.assertEqual(r["tests"], ["tests/test_api.py"])
 
+    def test_a_selected_test_file_missing_at_head_is_full(self):
+        r = run(["tests/test_gone.py"], exists=lambda p: False)
+        self.assertEqual(r["mode"], "full")
+        self.assertIn("missing at HEAD", r["reason"])
+        self.assertEqual(run(["tests/test_here.py"], exists=lambda p: True)["tests"], ["tests/test_here.py"])
+        # explicit (non-{path}) tests are the map author's names and are not probed
+        self.assertEqual(run(["src/api/a.py"], exists=lambda p: False)["mode"], "selected")
+
     def test_backslash_paths_are_normalised(self):
         self.assertEqual(run(["src\\api\\a.py"])["mode"], "selected")
 
@@ -285,6 +293,22 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertEqual(self.gate("pull_request", "true", "smart=success linux=skipped windows=skipped"), (1, "failure"))
         self.assertEqual(self.gate("pull_request", "true", "smart=success linux=success ansible=skipped windows=skipped"),
                          (1, "failure"))
+
+    def test_a_non_pr_run_that_is_not_full_never_reports_success(self):
+        self.assertEqual(self.gate("push", "", self.OK + " windows=skipped"), (1, "failure"))
+        self.assertEqual(self.gate("workflow_dispatch", "false", self.OK + " windows=skipped"), (1, "failure"))
+
+    def test_the_gate_results_cover_exactly_its_needs_list(self):
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        gate = text[text.index("  merge-gate:"):]
+        needs = re.search(r"needs: \[([^\]]*)\]", gate).group(1).replace(" ", "").split(",")
+        reported = re.findall(r"needs\.([A-Za-z0-9_-]+)\.result", re.search(r"RESULTS: .*", gate).group(0))
+        self.assertEqual(sorted(needs), sorted(reported))
+
+    def test_the_token_is_not_put_on_the_command_line(self):
+        gate = run_block("ci.yml", "merge-gate:")
+        self.assertIn("-H @-", gate)
+        self.assertNotIn("Bearer $GH_TOKEN\"", gate)
 
     def test_selector_that_cannot_run_falls_back_to_full(self):
         script = run_block("smart-ci.yml", "name: Select")
