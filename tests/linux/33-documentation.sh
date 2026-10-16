@@ -974,6 +974,11 @@ if it "context_guard hook: 230k handoff / 250k hard cap, ready marker, tail read
     out="$(python3 tests/test_context_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/hooks/fleet_report.py + fleet_inject.py: the Stop report filed into the parent's inbox and the PostToolUse/UserPromptSubmit injector that feeds it back - temp FLEET_* dirs only.
+if it "fleet hooks: Stop report + inbox injector (unit tests)"; then
+    out="$(python3 tests/test_fleet_hook.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # tools/unit_breaker.py + tools/gateway_alerts.py (P1.2): the circuit breaker around agent-starting units and the
 # provider-suspension check - fake systemctl, fixture sqlite, tmp state dirs, never the live ones.
 if it "unit_breaker: identical-failure trip, alert line, reset, status (unit tests)"; then
