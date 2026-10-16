@@ -1,0 +1,138 @@
+name: Smart CI selector
+
+# CI-SMART-SELECT (D-1475). Reusable workflow: decides which jobs and tests a
+# change needs and publishes the answer as outputs. The CALLER owns its jobs and
+# gates them on these outputs (docs/ci-smart-select.md has the adoption snippet
+# and the map format). Nothing here runs a test.
+#
+# FULL is the answer whenever the selection is not certain: any event that is
+# not a pull request, the `merge-ready` label, a dispatch with full=true,
+# workflow / dependency / CI files, a path no map rule names, a missing or
+# broken map, an unreadable diff.
+#
+# Callers gate a job with `needs.smart.outputs.full == 'true' ||
+# fromJSON(needs.smart.outputs.jobs).<job>`: the first term keeps the fallback
+# (selector could not even run, jobs is then {}) on the safe side.
+
+on:
+  workflow_call:
+    inputs:
+      map:
+        description: Path of the per-repo map in the caller checkout
+        type: string
+        default: .github/smart-ci.json
+      runs_on:
+        description: JSON for runs-on (pass toJSON of the caller's own expression, fork guard included)
+        type: string
+        default: '["self-hosted","fleet-ci"]'
+      full:
+        description: Force the full suite (a caller's workflow_dispatch input full=true)
+        type: boolean
+        default: false
+      selector_repo:
+        description: owner/AutoOS, where tools/smart-ci/selector.py is fetched from; empty = the caller checkout already has it
+        type: string
+        default: ''
+      selector_ref:
+        description: Ref of selector_repo
+        type: string
+        default: main
+      merge_label:
+        description: PR label that requests the full pre-merge run
+        type: string
+        default: merge-ready
+    outputs:
+      mode:
+        description: full | selected | none
+        value: ${{ jobs.select.outputs.mode }}
+      full:
+        description: 'true when mode is full'
+        value: ${{ jobs.select.outputs.full }}
+      reason:
+        description: Why this mode
+        value: ${{ jobs.select.outputs.reason }}
+      jobs:
+        description: 'JSON object {"<job>": bool}; read with fromJSON(needs.smart.outputs.jobs).<job>'
+        value: ${{ jobs.select.outputs.jobs }}
+      tests:
+        description: Selected tests, space separated (empty with mode full = run everything)
+        value: ${{ jobs.select.outputs.tests }}
+      tests_json:
+        description: Selected tests as a JSON array
+        value: ${{ jobs.select.outputs.tests_json }}
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Smart CI select
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    outputs:
+      mode: ${{ steps.pick.outputs.mode }}
+      full: ${{ steps.pick.outputs.full }}
+      reason: ${{ steps.pick.outputs.reason }}
+      jobs: ${{ steps.pick.outputs.jobs }}
+      tests: ${{ steps.pick.outputs.tests }}
+      tests_json: ${{ steps.pick.outputs.tests_json }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch the selector
+        if: ${{ inputs.selector_repo != '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.selector_repo }}
+          ref: ${{ inputs.selector_ref }}
+          path: .smart-ci-tool
+          sparse-checkout: tools/smart-ci
+
+      - name: Select
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          MERGE_LABEL: ${{ inputs.merge_label }}
+          FORCE_FULL: ${{ inputs.full }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          MAP: ${{ inputs.map }}
+          TOOL_REPO: ${{ inputs.selector_repo }}
+        shell: bash
+        run: |
+          tool=tools/smart-ci/selector.py
+          if [ -n "$TOOL_REPO" ]; then tool=.smart-ci-tool/tools/smart-ci/selector.py; fi
+          full_reason=""
+          if [ "$FORCE_FULL" = "true" ]; then
+            full_reason="full run requested (dispatch full=true)"
+          elif [ "$EVENT" != "pull_request" ]; then
+            full_reason="$EVENT event: full suite"
+          elif printf '%s' "$LABELS" | python3 -c 'import json,os,sys; sys.exit(0 if os.environ["MERGE_LABEL"] in json.load(sys.stdin) else 1)'; then
+            full_reason="label $MERGE_LABEL: full pre-merge run"
+          fi
+          args=(--map "$MAP" --github-output)
+          if [ -n "$full_reason" ]; then
+            args+=(--full --full-reason "$full_reason")
+          else
+            args+=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          fi
+          # The selector always exits 0 with an answer; if the interpreter or the
+          # script itself is missing, that is also "unknown" and therefore full.
+          if ! python3 "$tool" "${args[@]}" | tee "$RUNNER_TEMP/smart-ci.json"; then
+            echo "::warning::selector failed to run, falling back to the full suite"
+            {
+              echo "mode=full"
+              echo "full=true"
+              echo "reason=selector failed to run"
+              echo "jobs={}"
+              echo "tests="
+              echo "tests_json=[]"
+            } >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "### Smart CI"
+            echo
+            echo "mode: \`$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["mode"])' "$RUNNER_TEMP/smart-ci.json" 2>/dev/null || echo full)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
