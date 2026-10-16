@@ -315,7 +315,7 @@ jobs:
     name: CI merge gate
     if: always()
     needs: [smart, linux, ansible, secrets, public-scrub]
-    runs-on: ${{ ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }} }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
       statuses: write
