@@ -149,3 +149,5 @@ It is stdlib-only, prints the JSON answer, appends outputs to `$GITHUB_OUTPUT`
 with `--github-output`, and always exits 0: a failure to select becomes a full run.
 Its tests are `tests/test_smart_ci.py` (run by `tests/run-tests.sh` and
 `tests/run-tests.ps1`).
+
+The selector never skips a check it cannot place.
