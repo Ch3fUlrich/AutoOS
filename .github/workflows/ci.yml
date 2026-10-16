@@ -25,7 +25,7 @@ jobs:
   # .github/smart-ci.json, format docs/ci-smart-select.md). The FULL suite runs on
   # the merge-ready label, workflow_dispatch, every push to main, and whenever the
   # selection is unknown or a workflow / dependency / CI file changed. The
-  # "CI merge gate" job at the bottom is the required check for merge.
+  # "CI merge gate" job at the bottom plus the "Full suite (merge-ready)" status are the required checks.
   smart:
     name: Smart CI select
     uses: ./.github/workflows/smart-ci.yml
@@ -305,28 +305,43 @@ jobs:
       - name: Scanner rule tests
         run: python3 scripts/public-scrub/test_scan.py
 
-  # The required check for merge. It is green only when (a) nothing the selector
-  # picked failed and (b) on a pull request the run was the FULL suite - add the
-  # merge-ready label (or dispatch with full=true on the branch) to get it. A
-  # selected-only run is red here on purpose: it proves the fast loop, not merge.
+  # Merge gate. Red ONLY when a job failed or was cancelled. A selected-only PR run
+  # is green here (the fast loop worked) and instead leaves the commit status
+  # "Full suite (merge-ready)" PENDING, which blocks merge without a red cross; the
+  # merge-ready label (or a dispatch with full=true) runs the full suite and turns
+  # that status success. Make this status, plus "CI merge gate", the required checks.
+  # A fork PR has a read-only token: the status call is best effort there.
   merge-gate:
     name: CI merge gate
     if: always()
     needs: [smart, linux, ansible, secrets, public-scrub]
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    runs-on: ${{ ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }} }}
+    permissions:
+      contents: read
+      statuses: write
     steps:
-      - name: Selected jobs passed, and the run was full
+      - name: Selected jobs passed; report whether the run was full
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           EVENT: ${{ github.event_name }}
           FULL: ${{ needs.smart.outputs.full }}
           REASON: ${{ needs.smart.outputs.reason }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           echo "event=$EVENT full=$FULL results=$RESULTS reason=$REASON"
+          ctx="Full suite (merge-ready)"
+          post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="$ctx" -f description="$2" >/dev/null || echo "::warning::could not set the $ctx status"; }
           for r in $RESULTS; do
-            case "$r" in success|skipped) ;; *) echo "::error::a CI job ended $r"; exit 1 ;; esac
+            case "$r" in
+              success|skipped) ;;
+              *) post failure "a CI job ended $r"; echo "::error::a CI job ended $r"; exit 1 ;;
+            esac
           done
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
-            echo "::error::selected-only run. The full suite must pass before merge: add the merge-ready label (or run this workflow with full=true on the branch)."
-            exit 1
+            post pending "selected-only run: add the merge-ready label for the full suite"
+            echo "::notice::selected-only run passed; the full suite (label merge-ready or dispatch full=true) is still required before merge"
+          else
+            post success "full suite passed"
           fi

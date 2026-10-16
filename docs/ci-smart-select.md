@@ -15,9 +15,11 @@ answer. Nothing here runs a test; it only decides.
 | map missing or broken, diff unreadable, selector failed | the **full** suite |
 | docs-only (all paths in `ignore`) | nothing |
 
-There is no nightly run. The `CI merge gate` job is the required check for merge:
-on a PR it is green only when the run was the full suite and every job passed, so
-a selected-only run proves the fast loop but never allows a merge.
+There is no nightly run. Two checks are required for merge: the `CI merge gate` job
+(red only when a job failed or was cancelled) and the commit status
+`Full suite (merge-ready)`. A selected-only PR run leaves that status **pending**
+(yellow, not red) and blocks merge; the full run (label or dispatch) sets it
+success, a failing job sets it failure.
 
 ## Adopting it in a caller repo
 
@@ -68,21 +70,25 @@ jobs:
     if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).heavy }}
     ...
 
-  merge-gate:                  # make THIS the required check
+  merge-gate:                  # required check, together with the status it sets
     name: CI merge gate
     if: always()
     needs: [smart, tests, heavy]
     runs-on: <as before>
+    permissions: {contents: read, statuses: write}
     steps:
       - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           EVENT: ${{ github.event_name }}
           FULL: ${{ needs.smart.outputs.full }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          for r in $RESULTS; do case "$r" in success|skipped) ;; *) echo "a CI job ended $r"; exit 1 ;; esac; done
-          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
-            echo "selected-only run: add the merge-ready label for the full suite"; exit 1
-          fi
+          post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="Full suite (merge-ready)" -f description="$2" >/dev/null || true; }
+          for r in $RESULTS; do case "$r" in success|skipped) ;; *) post failure "a CI job ended $r"; exit 1 ;; esac; done
+          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label"
+          else post success "full suite passed"; fi
 ```
 
 AutoOS's own `.github/workflows/ci.yml` is the worked example (it also trims the
