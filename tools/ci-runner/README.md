@@ -88,6 +88,27 @@ decision 2026-10-16, D-1425:
   (the `ci-cargo-*` and `ci-sccache` caches live there) and never removes
   tagged images such as `workst-runner:*` or the pre-pulled job images.
 
+### Measured (2026-10-16, autoos:CI-SPEED-WORKST)
+
+Host: 32 logical CPUs, 128 GB RAM. Docker Desktop (WSL 2 backend) sees 32 CPUs
+and 62.8 GB (`.wslconfig` memory=64GB, swap=8GB, autoMemoryReclaim=dropCache).
+Slots: 16 fleet-ci containers in total, 4 of them plangraph (8 GB, `--cpus 8`
+each, so the 4 plangraph slots together can use exactly the whole machine).
+
+plangraph PR CI, the same commit run alone (single) and as 4 jobs at once
+(parallel), seconds, warm caches (third run, after the CPU cap):
+
+| job             | single | parallel | ratio |
+|-----------------|-------:|---------:|------:|
+| pytest          |    674 |      625 |  0.93 |
+| pytest-postgres |    487 |      422 |  0.87 |
+
+Second run, the short jobs: rust 23 -> 30 s (1.30), temporal-spike 59 -> 84 s
+(1.42), worker 145 -> 177 s (1.22). These are container start and image
+overhead on jobs under 3 minutes, not CPU contention; the long jobs, which set
+the PR wall time, stay under 1.0. More plangraph slots would oversubscribe the
+CPUs (4 x 8 = 32), so the pool stays at 4 plus the shared 12.
+
 ## Fork pull requests must never reach the workstation
 
 Two guards, both required:
