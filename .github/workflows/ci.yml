@@ -169,8 +169,12 @@ jobs:
 
   windows:
     name: Windows suite
-    # operator 2026-09-27: Windows CI paused until the Linux work is done.
-    if: false
+    # operator 2026-09-27: Windows CI paused until the Linux work is done. It stays
+    # off until the repository variable CI_WINDOWS_ENABLED is 'true' (needs a windows
+    # fleet-ci runner); the merge gate allows this one skip while it is off and
+    # requires success once it is on. Windows runs on full runs only.
+    needs: smart
+    if: ${{ vars.CI_WINDOWS_ENABLED == 'true' && needs.smart.outputs.full == 'true' }}
     # D-1349: no GitHub-hosted runners. Needs a windows fleet-ci runner before this job is un-gated; with if: false it is never queued.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","windows","fleet-ci"]') || 'windows-latest' }}
     steps:
@@ -314,7 +318,7 @@ jobs:
   merge-gate:
     name: CI merge gate
     if: always()
-    needs: [smart, linux, ansible, secrets, public-scrub]
+    needs: [smart, linux, ansible, secrets, public-scrub, windows]
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -328,16 +332,22 @@ jobs:
           EVENT: ${{ github.event_name }}
           FULL: ${{ needs.smart.outputs.full }}
           REASON: ${{ needs.smart.outputs.reason }}
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          WINDOWS_ENABLED: ${{ vars.CI_WINDOWS_ENABLED }}
+          RESULTS: smart=${{ needs.smart.result }} linux=${{ needs.linux.result }} ansible=${{ needs.ansible.result }} secrets=${{ needs.secrets.result }} scrub=${{ needs.public-scrub.result }} windows=${{ needs.windows.result }}
         run: |
           echo "event=$EVENT full=$FULL results=$RESULTS reason=$REASON"
           ctx="Full suite (merge-ready)"
           post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="$ctx" -f description="$2" >/dev/null || echo "::warning::could not set the $ctx status"; }
-          for r in $RESULTS; do
+          for pair in $RESULTS; do
+            name="${pair%%=*}"; r="${pair#*=}"
             case "$r" in
               success) ;;
-              skipped) if [ "$FULL" = true ]; then post failure "full run but a job was skipped"; echo "::error::full run but a job was skipped"; exit 1; fi ;;
-              *) post failure "a CI job ended $r"; echo "::error::a CI job ended $r"; exit 1 ;;
+              skipped)
+                # the one allowed skip in a full run: Windows while it is switched off
+                if [ "$FULL" = true ] && ! { [ "$name" = windows ] && [ "$WINDOWS_ENABLED" != true ]; }; then
+                  post failure "full run but $name was skipped"; echo "::error::full run but $name was skipped"; exit 1
+                fi ;;
+              *) post failure "$name ended $r"; echo "::error::$name ended $r"; exit 1 ;;
             esac
           done
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then

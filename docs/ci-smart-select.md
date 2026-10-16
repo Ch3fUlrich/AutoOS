@@ -63,6 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
+          # $SELECTED is split on spaces on purpose: map paths must not contain spaces
           if [ "$FULL" = true ] || [ -z "$SELECTED" ]; then pytest; else pytest $SELECTED; fi
 
   heavy:                       # a heavy job: runs only when its own paths changed
@@ -83,14 +84,15 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           EVENT: ${{ github.event_name }}
           FULL: ${{ needs.smart.outputs.full }}
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          RESULTS: smart=${{ needs.smart.result }} tests=${{ needs.tests.result }} heavy=${{ needs.heavy.result }}
         run: |
           post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="Full suite (merge-ready)" -f description="$2" >/dev/null || true; }
-          for r in $RESULTS; do
+          for pair in $RESULTS; do
+            name="${pair%%=*}"; r="${pair#*=}"
             case "$r" in
               success) ;;
-              skipped) if [ "$FULL" = true ]; then post failure "full run but a job was skipped"; exit 1; fi ;;
-              *) post failure "a CI job ended $r"; exit 1 ;;
+              skipped) if [ "$FULL" = true ]; then post failure "full run but $name was skipped"; exit 1; fi ;;
+              *) post failure "$name ended $r"; exit 1 ;;
             esac
           done
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label"
@@ -109,6 +111,14 @@ For python, pytest-testmon is an alternative to the path map: it needs a cache t
 survives between runs, which self-hosted slots do not guarantee, so the committed
 map is the default. A repo may put `--testmon` inside its own `tests` job and keep
 the map for job selection.
+
+Caveats. A fork PR gets a read-only token, so it can never write the
+`Full suite (merge-ready)` status (blocked, not unsafe: it stays unset). The status
+is posted to the PR head SHA while the run tested the merge ref, so a push to the
+base branch after the run does not invalidate it. In the gate, a skipped job in a
+full run is red, so a job that is deliberately off must be named there (AutoOS
+allows Windows to be skipped until the repository variable `CI_WINDOWS_ENABLED` is
+`true`). Pass `results` as `name=result` pairs so the gate can tell which job it was.
 
 ## The map: `.github/smart-ci.json`
 

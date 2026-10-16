@@ -247,30 +247,42 @@ class WorkflowShellTests(unittest.TestCase):
         Path(gh).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls, ""]))
         os.chmod(gh, 0o755)
 
-    def gate(self, event, full, results):
+    def gate(self, event, full, results, windows_enabled=""):
+        """results: 'name=result ...' as the workflow builds it."""
         script = run_block("ci.yml", "merge-gate:")
         env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], GH_TOKEN="x", REPO="o/r", SHA="abc",
-                   EVENT=event, FULL=full, REASON="r", RESULTS=results)
+                   EVENT=event, FULL=full, REASON="r", RESULTS=results, WINDOWS_ENABLED=windows_enabled)
         p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env)
         calls = Path(self.calls).read_text() if os.path.exists(self.calls) else ""
         state = [w.split("=", 1)[1] for w in calls.split() if w.startswith("state=")]
         return p.returncode, (state[-1] if state else None)
 
+    OK = "smart=success linux=success ansible=success secrets=success scrub=success"
+
     def test_selected_only_pr_run_is_green_with_a_pending_status(self):
-        self.assertEqual(self.gate("pull_request", "false", "success success skipped success"), (0, "pending"))
+        r = "smart=success linux=success ansible=skipped secrets=success scrub=success windows=skipped"
+        self.assertEqual(self.gate("pull_request", "false", r), (0, "pending"))
 
-    def test_full_pr_run_sets_success(self):
-        self.assertEqual(self.gate("pull_request", "true", "success success success"), (0, "success"))
+    def test_full_run_sets_success_while_windows_is_switched_off(self):
+        self.assertEqual(self.gate("pull_request", "true", self.OK + " windows=skipped"), (0, "success"))
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=skipped"), (0, "success"))
 
-    def test_push_run_sets_success(self):
-        self.assertEqual(self.gate("push", "true", "success success"), (0, "success"))
+    def test_full_run_requires_windows_once_it_is_enabled(self):
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=skipped", "true"), (1, "failure"))
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=failure", "true"), (1, "failure"))
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=success", "true"), (0, "success"))
+
+    def test_a_failed_windows_job_is_red_even_while_switched_off(self):
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=failure"), (1, "failure"))
 
     def test_a_failed_or_cancelled_job_is_red_with_a_failure_status(self):
-        self.assertEqual(self.gate("pull_request", "false", "success failure"), (1, "failure"))
-        self.assertEqual(self.gate("pull_request", "true", "success cancelled"), (1, "failure"))
+        self.assertEqual(self.gate("pull_request", "false", "smart=success linux=failure windows=skipped"), (1, "failure"))
+        self.assertEqual(self.gate("pull_request", "true", "smart=success linux=cancelled windows=skipped"), (1, "failure"))
 
-    def test_a_skipped_job_in_a_full_run_is_red(self):
-        self.assertEqual(self.gate("pull_request", "true", "success skipped success"), (1, "failure"))
+    def test_any_other_skipped_job_in_a_full_run_is_red(self):
+        self.assertEqual(self.gate("pull_request", "true", "smart=success linux=skipped windows=skipped"), (1, "failure"))
+        self.assertEqual(self.gate("pull_request", "true", "smart=success linux=success ansible=skipped windows=skipped"),
+                         (1, "failure"))
 
     def test_selector_that_cannot_run_falls_back_to_full(self):
         script = run_block("smart-ci.yml", "name: Select")
