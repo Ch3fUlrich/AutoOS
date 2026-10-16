@@ -24,6 +24,19 @@ class ShardMapTests(unittest.TestCase):
         self.assertEqual(sorted(parts), sorted(cs.parts_on_disk()))
         json.dumps(matrix)
 
+    def test_only_trims_the_matrix_to_the_selected_parts(self):
+        shards = [("a", ["13"]), ("b", ["33", "17"]), ("c", ["01"])]
+        m = cs.matrix_for(shards, "tests/linux/33-documentation.sh 13")
+        self.assertEqual(m, {"include": [{"shard": "a", "parts": "13"}, {"shard": "b", "parts": "33"}]})
+        self.assertEqual(cs.matrix_for(shards)["include"][1]["parts"], "33,17")
+        with self.assertRaises(ValueError):
+            cs.matrix_for(shards, "tools/x.py")
+
+    def test_only_naming_an_unknown_part_runs_everything(self):
+        shards = [("a", ["13"]), ("b", ["33"])]
+        self.assertEqual(cs.matrix_for(shards, "tests/linux/99-gone.sh"), cs.matrix_for(shards))
+        self.assertEqual(len(cs.matrix_for(shards, "13 99")["include"]), 2)
+
     def test_a_missing_part_is_named(self):
         found = cs.problems([("a", ["01"])], {"01", "02"})
         self.assertEqual(found, ["part 02 (tests/linux/02-*.sh) is in no shard"])
