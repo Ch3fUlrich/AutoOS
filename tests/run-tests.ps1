@@ -12070,14 +12070,12 @@ Test-Case 'ci-runner: ci.yml keeps fork PRs off the self-hosted runners' {
     $lines = @(Get-Content -LiteralPath (Join-Path $Root '.github\workflows\ci.yml'))
     $runsOn = @($lines | Where-Object { $_ -match '^\s*runs-on:' })
     Assert-True ($runsOn.Count -gt 0) 'no runs-on: lines in ci.yml'
-    $checked = 0
+    # Every job, the Windows one included: a self-hosted Windows fleet-ci runner would otherwise
+    # take fork PRs (22aa4730 moved it to [self-hosted, windows, fleet-ci] without the guard).
     foreach ($line in $runsOn) {
-        if ($line -match 'windows-latest') { continue }   # the Windows job is not self-hosted
-        $checked++
         Assert-True ($line -like '*github.event.pull_request.head.repo.full_name == github.repository*') "fork guard missing: $($line.Trim())"
-        Assert-True ($line -like "*'ubuntu-latest'*") "no ubuntu-latest fallback: $($line.Trim())"
+        Assert-True (($line -like "*'ubuntu-latest'*") -or ($line -like "*'windows-latest'*")) "no GitHub-hosted fallback: $($line.Trim())"
     }
-    Assert-True ($checked -gt 0) 'only the Windows runs-on line was seen'
 }
 
 Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
@@ -12100,6 +12098,88 @@ Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
         Assert-True ($text -notmatch $drive) "drive path in tools/ci-runner/$name"
         Assert-True ($text -notmatch $install) "install dir in tools/ci-runner/$name"
     }
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache mounts and sccache envs' {
+    $cbase = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $cmounts = @('ci-cargo-registry:/home/runner/.cargo/registry',
+                 'ci-cargo-git:/home/runner/.cargo/git',
+                 'ci-sccache:/home/runner/.cache/sccache')
+    $cenvs = @('RUSTC_WRAPPER=/usr/local/bin/sccache',
+               'SCCACHE_DIR=/home/runner/.cache/sccache',
+               'SCCACHE_CACHE_SIZE=30G')
+    $cwant = $cmounts + $cenvs
+    $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes
+    $cep = [array]::IndexOf([string[]]$cwith, '--entrypoint')
+    Assert-True ($cep -ge 0) '--entrypoint missing'
+    # each mount appears as the exact pair '-v','<volume>:<path>'
+    foreach ($cm in $cmounts) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-v' -and $cwith[$k + 1] -eq $cm) { $cpair = $true; break } }
+        Assert-True $cpair "mount pair '-v','$cm' missing with -CacheVolumes"
+    }
+    # each env appears as the exact pair '-e','<K>=<V>'
+    foreach ($ce in $cenvs) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-e' -and $cwith[$k + 1] -eq $ce) { $cpair = $true; break } }
+        Assert-True $cpair "env pair '-e','$ce' missing with -CacheVolumes"
+    }
+    # docker run options must all precede --entrypoint / the image
+    foreach ($cneedle in $cwant) {
+        $ci = [array]::IndexOf([string[]]$cwith, $cneedle)
+        Assert-True ($ci -ge 0) "$cneedle missing from the docker args"
+        Assert-True ($ci -lt $cep) "$cneedle must come before --entrypoint"
+    }
+    # without the switch none of them appear
+    $cwithout = Get-CiRunnerDockerArgs @cbase
+    foreach ($cneedle in $cwant) {
+        Assert-True (-not (@($cwithout) -contains $cneedle)) "$cneedle appears without -CacheVolumes"
+    }
+}
+
+Test-Case 'ci-runner: Get-CiCacheVolumes returns the three cache volume names in order' {
+    $cvols = @(Get-CiCacheVolumes)
+    Assert-Equal $cvols.Count 3
+    Assert-Equal $cvols[0] 'ci-cargo-registry'
+    Assert-Equal $cvols[1] 'ci-cargo-git'
+    Assert-Equal $cvols[2] 'ci-sccache'
+    # single source of truth: -CacheVolumes mounts exactly these volumes, in this order
+    $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes
+    $cgot = @()
+    for ($k = 0; $k -lt $cargs.Count - 1; $k++) { if ($cargs[$k] -eq '-v') { $cgot += ($cargs[$k + 1] -split ':')[0] } }
+    Assert-Equal $cgot.Count 3
+    for ($k = 0; $k -lt 3; $k++) { Assert-Equal $cgot[$k] $cvols[$k] }
+}
+
+Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empty when absent' {
+    $cpreCfg = [pscustomobject]@{ prepull = @('postgres:16', 'redis:7') }
+    $cpre = @(Get-CiPrepullImages -Config $cpreCfg)
+    Assert-Equal $cpre.Count 2
+    Assert-Equal $cpre[0] 'postgres:16'
+    Assert-Equal $cpre[1] 'redis:7'
+    $cpreNone = @(Get-CiPrepullImages -Config ([pscustomobject]@{ labels = 'x' }))
+    Assert-Equal $cpreNone.Count 0
+    $cex = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/slots.example.json') -Raw | ConvertFrom-Json
+    $cexPre = @(Get-CiPrepullImages -Config $cex)
+    Assert-True ($cexPre -contains 'postgres:16') 'slots.example.json has no postgres:16 in prepull'
+}
+
+Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0.18.0 and the cache dirs' {
+    $cdf = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/Dockerfile') -Raw
+    Assert-True ($cdf -match 'v1\.9\.1') 'Temporal CLI v1.9.1 not pinned'
+    Assert-True ($cdf -match 'temporal_cli_1\.9\.1_linux_amd64\.tar\.gz') 'temporal 1.9.1 tarball name missing'
+    Assert-True ($cdf -match '09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5') 'Temporal CLI sha256 missing'
+    Assert-True ($cdf -match '/usr/local/bin/temporal') 'temporal install path missing'
+    Assert-True ($cdf -match 'v0\.18\.0') 'sccache v0.18.0 not pinned'
+    Assert-True ($cdf -match 'sccache-v0\.18\.0-x86_64-unknown-linux-musl\.tar\.gz') 'sccache musl tarball name missing'
+    Assert-True ($cdf -match '/usr/local/bin/sccache') 'sccache install path missing'
+    $cshaChecks = ([regex]::Matches($cdf, 'sha256sum -c')).Count
+    Assert-True ($cshaChecks -ge 2) "sha256sum -c appears $cshaChecks time(s); expected at least 2"
+    Assert-True ($cdf -match '--default-toolchain stable') 'rustup stable default toolchain missing'
+    Assert-True ($cdf -match 'mkdir -p /home/runner/\.cargo/registry /home/runner/\.cargo/git /home/runner/\.cache/sccache') 'cache dir mkdir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/registry') 'cargo registry dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/git') 'cargo git dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cache/sccache') 'sccache cache dir missing'
 }
 
 # ─── Summary ────────────────────────────────────────────────────────────────
