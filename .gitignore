@@ -107,3 +107,9 @@ node_modules/
 /package-lock.json
 /tools/test-reason-fix.mjs
 /tools/start-isolated-gateway.ps1
+
+# CI runner workstation slots (D-1380): live config, logs, stop files, pids
+/tools/ci-runner/slots.json
+/tools/ci-runner/*.log
+/tools/ci-runner/stop-*
+/tools/ci-runner/pids.txt
