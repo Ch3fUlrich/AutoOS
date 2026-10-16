@@ -17,6 +17,18 @@ Log "supervisor start pid=$PID"
 # Docker Desktop must be up before any slot can start.
 for ($i = 0; $i -lt 60; $i++) { docker info --format '{{.ServerVersion}}' *> $null; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 10 }
 
+# Pre-pull the configured images (autoos:CI-SPEED-WORKST, D-1393) before the first slot
+# starts, so the first job does not pay for a cold pull. Never fatal here: a failed pull
+# is logged and the slot's own `docker run` pulls the image again when it needs it.
+try {
+    $cfg = Get-Content (Join-Path $dir "slots.json") -Raw | ConvertFrom-Json
+    foreach ($img in @(Get-CiPrepullImages -Config $cfg)) {
+        Log "prepull $img"
+        docker pull $img *> $null
+        if ($LASTEXITCODE -ne 0) { Log "prepull $img failed rc=$LASTEXITCODE (continuing)" }
+    }
+} catch { Log "prepull error: $($_.Exception.Message)" }
+
 $unhealthySince = @{}
 $offlineSince = @{}
 while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
@@ -69,6 +81,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 $a = @('-NoProfile', '-File', (Join-Path $dir 'runner-loop.ps1'), '-Repo', $r.repo, '-Name', $name, '-Memory', $r.memory, '-Labels', $cfg.labels)
                 if ($r.image) { $a += @('-Image', $r.image) }
                 if ($r.netns) { $a += '-NetNs' }
+                if ($r.cache) { $a += '-CacheVolumes' }
                 Remove-Item (Join-Path $dir "stop-$name") -ErrorAction SilentlyContinue
                 $p = Start-Process pwsh -ArgumentList $a -WindowStyle Hidden -PassThru
                 $unhealthySince.Remove($name)

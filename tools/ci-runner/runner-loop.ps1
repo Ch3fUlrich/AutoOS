@@ -9,9 +9,10 @@ param(
     [Parameter(Mandatory)][string]$Name,          # slot name, e.g. workst-plangraph-1
     [string]$Labels = "workst,workstation,fleet-ci", # added to the defaults self-hosted,Linux,X64
     [string]$Memory = "32g",
-    [string]$Image = "workst-runner:2.338.0-2",
+    [string]$Image = "workst-runner:2.338.0-3",
     [switch]$NoDockerSocket,                       # jobs cannot reach the host Docker
-    [switch]$NetNs                                 # caps for `sudo unshare --net` (AutoOS loopback-only suite)
+    [switch]$NetNs,                                # caps for `sudo unshare --net` (AutoOS loopback-only suite)
+    [switch]$CacheVolumes                          # mount the shared cargo/sccache cache volumes
 )
 $ErrorActionPreference = "Stop"
 $dir = $PSScriptRoot
@@ -25,7 +26,7 @@ while (-not (Test-Path $stop)) {
         $env:RUNNER_TOKEN = (gh api -X POST "repos/$Repo/actions/runners/registration-token" --jq .token)
         if (-not $env:RUNNER_TOKEN) { throw "no registration token" }
         $inst = "$Name-$(Get-Date -Format yyyyMMddHHmmss)"
-        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs
+        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs -CacheVolumes:$CacheVolumes
         Log "launch $inst"
         $env:MSYS_NO_PATHCONV = "1"
         & docker @dargs 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -notmatch 'token' } | Add-Content $log

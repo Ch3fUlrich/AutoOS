@@ -130,7 +130,7 @@ jobs:
     # operator 2026-09-27: Windows CI paused until the Linux work is done.
     if: false
     # D-1349: no GitHub-hosted runners. Needs a windows fleet-ci runner before this job is un-gated; with if: false it is never queued.
-    runs-on: [self-hosted, windows, fleet-ci]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","windows","fleet-ci"]') || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
 

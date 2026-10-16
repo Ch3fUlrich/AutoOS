@@ -1,11 +1,13 @@
 {
   "labels": "workst,workstation,fleet-ci",
+  "prepull": ["postgres:16"],
   "repos": [
     {
       "repo": "example-owner/example",
       "prefix": "workst-example",
       "slots": 2,
-      "memory": "8g"
+      "memory": "8g",
+      "cache": true
     },
     {
       "repo": "example-owner/other-project",
