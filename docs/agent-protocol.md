@@ -177,10 +177,15 @@ when the path is down or rate-limited, back off or report `BLOCKED`.
 
 | model | the only path |
 |---|---|
-| `qwen3.8-flash` | qodercli ACP (display name `Qwen3.8-Flash`; other spellings silently fall back to another model) |
+| `qwen3.8-flash` | qodercli ACP, called with `-m Qwen3.8-Flash` exactly (see warning below) |
 | `gemini-3.8-flash` | antigravity (agy) ACP, or Google AI Studio; both rate-limited: back off or `BLOCKED`, never swap |
 | `muse-spark-1.3` | opencode ACP |
 | `mimo-v2.6-flash`, `mimo-v2.6-pro` | the mimo provider |
+
+Warning, not an exception: qodercli does not refuse an unknown model name. Measured
+2026-10-16, `-m qwen-3.8-flash` was silently served by its "efficient" model, which is
+a substitution this rule forbids. Use the exact spelling above and treat a run whose
+served model is not Qwen3.8-Flash as void.
 
 The ask-back rows above that name gateway routes (`omniroute/...`) record what
 was measured then; they are not paths for these models.
