@@ -48,6 +48,7 @@ jobs:
     with:
       selector_repo: <owner>/AutoOS
       selector_ref: <ref>
+      # omitted = hosted (["ubuntu-latest"]); pass your guarded expression to use self-hosted
       runs_on: ${{ toJSON(<your existing runs-on expression, fork guard included>) }}
       full: ${{ github.event_name == 'workflow_dispatch' && inputs.full }}
 
@@ -117,6 +118,24 @@ For python, pytest-testmon is an alternative to the path map: it needs a cache t
 survives between runs, which self-hosted slots do not guarantee, so the committed
 map is the default. A repo may put `--testmon` inside its own `tests` job and keep
 the map for job selection.
+
+Branch protection: require `CI merge gate` and `Full suite (merge-ready)`, and also
+enable "Require branches to be up to date before merging". The success status is
+pinned to the PR head SHA while the run tested the merge of head and base at run
+time, so without the strict setting a push to the base afterwards leaves a stale
+green status.
+
+Fork PRs: the workflow runs the selector from the PR's own checkout when
+`selector_repo` is empty, and `runs_on` defaults to a hosted runner, so a fork never
+reaches your self-hosted runners unless the caller's own guarded expression says
+so. A fork PR cannot write the status. The maintainer path to the full-suite status
+is to push the fork branch to a same-repo branch (or dispatch the workflow with
+`full=true` on it) and let that run set it.
+
+Known limit of generated maps (for example one level of importers plus name
+matches): a test reaching a module only through a deeper call chain can be missed by
+a selected-only run. A selected-only run is never a substitute for the `merge-ready`
+full run; regenerate the map after structural changes.
 
 Caveats. The `Full suite (merge-ready)` status is a process guard, not a security
 boundary: anyone whose token can write commit statuses can set it. A fork PR gets a read-only token, so it can never write the

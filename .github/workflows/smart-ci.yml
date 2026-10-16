@@ -22,9 +22,9 @@ on:
         type: string
         default: .github/smart-ci.json
       runs_on:
-        description: JSON for runs-on (pass toJSON of the caller's own expression, fork guard included)
+        description: JSON for runs-on. Pass toJSON of the caller's own fork-guarded expression; the default is hosted so self-hosted is always opt-in
         type: string
-        default: '["self-hosted","fleet-ci"]'
+        default: '["ubuntu-latest"]'
       full:
         description: Force the full suite (a caller's workflow_dispatch input full=true)
         type: boolean

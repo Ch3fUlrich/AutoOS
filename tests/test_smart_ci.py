@@ -307,6 +307,13 @@ class WorkflowShellTests(unittest.TestCase):
         reported = re.findall(r"needs\.([A-Za-z0-9_-]+)\.result", re.search(r"RESULTS: .*", gate).group(0))
         self.assertEqual(sorted(needs), sorted(reported))
 
+    def test_runs_on_defaults_to_hosted_so_self_hosted_is_opt_in(self):
+        text = (ROOT / ".github" / "workflows" / "smart-ci.yml").read_text(encoding="utf-8")
+        block = text[text.index("      runs_on:"):]
+        default = re.search(r"default: (.*)", block).group(1)
+        self.assertNotIn("self-hosted", default)
+        self.assertIn("ubuntu-latest", default)
+
     def test_the_token_is_not_put_on_the_command_line(self):
         gate = run_block("ci.yml", "merge-gate:")
         self.assertIn("-H @-", gate)
