@@ -43,6 +43,9 @@ $script:HandoffDefaults = @{
     # lane for the operator instead of resuming into it again.
     stallMinutes   = 60
     stallWindow    = @{ maxStalls = 5; hours = 3 }
+    # How long a `blocked` session showing Claude Code's own auto-deny countdown
+    # is waited out before it counts as blocked (the countdown starts near 2:00).
+    autoDenyGraceMinutes = 5
     stopAfterMerge = $true
     removeWorktreeAfterMerge = $false
     traps          = @()
@@ -357,6 +360,20 @@ function Test-HandoffPermissionPrompt {
     # The MCP-approval and folder-trust dialogs are drawn as full-screen
     # menus, not questions: match their wording, not only a question mark.
     return [bool]($Text -match "(?i)do you want to proceed|do you trust|allow this|\[y/n\]|permission required|new mcp server found|use this mcp server|use this and all future mcp servers|enter to confirm|esc to cancel|trust the files in this folder")
+}
+
+function Test-HandoffAutoDenyPrompt {
+    <#  The one prompt a background session DOES get past: Claude Code denies an
+        approval on an unattended session itself after a countdown ("will
+        automatically deny this request in 1:54"), and the agent carries on.
+        The agents view still says `blocked` meanwhile, so the runner must wait
+        that prompt out rather than stop the lane (measured 2026-10-16, gen E3).
+        The text is a terminal render: colour codes and line wraps are removed
+        before matching.  #>
+    param([string]$Text)
+    if (-not $Text) { return $false }
+    $plain = ($Text -replace "\x1b\[[0-9;?]*[A-Za-z]", "") -replace "\s+", " "
+    return [bool]($plain -match "(?i)will automatically deny this request in \d+:\d\d")
 }
 
 function Read-HandoffState {
@@ -1556,7 +1573,7 @@ function Read-HandoffConfig {
 }
 
 Export-ModuleMember -Function ConvertTo-HandoffHash, Expand-HandoffTemplate, Classify-HandoffFailure,
-Test-HandoffPermissionPrompt, Read-HandoffState, Write-HandoffState, Resolve-HandoffBrief,
+Test-HandoffPermissionPrompt, Test-HandoffAutoDenyPrompt, Read-HandoffState, Write-HandoffState, Resolve-HandoffBrief,
 Build-HandoffGuardCommand, Read-HandoffConfig, Build-HandoffSubagentPolicy, Build-HandoffMcpPolicy,
 Get-HandoffSessionVars, Build-HandoffBrief, Export-HandoffBriefs,
 Get-HandoffLinkType, Resolve-HandoffRepoRoot, Build-HandoffLaunchArgs, Resolve-HandoffSessionLauncher,

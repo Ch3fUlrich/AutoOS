@@ -589,6 +589,7 @@ function Wait-Bg([string]$id, [datetime]$deadline, [string]$wt = "", [string]$do
     # a DONE note is HUNG, and returns "stalled" - the case quietMinutes cannot
     # see, because it only ever closes a session that already finished.
     $missing = 0
+    $autoDenySince = $null
     $isRunnerManaged = ($cfg.launcher.ContainsKey("backgroundMode") -and $cfg.launcher.backgroundMode -eq "runner-managed")
     # CPU is a RATE, so it is tracked as "when did this tree last do any work":
     # the epoch moves every time the tree's total processor time goes up, and a
@@ -618,6 +619,24 @@ function Wait-Bg([string]$id, [datetime]$deadline, [string]$wt = "", [string]$do
         }
         else {
             $missing = 0
+            if ($e.state -eq "blocked") {
+                # An approval prompt that Claude Code denies by itself on an
+                # unattended session (countdown on screen) resolves without us:
+                # wait it out, capped, instead of stopping the lane on it.
+                $screen = try { [string](Invoke-Launcher "logs" @{ id = $id }) } catch { "" }
+                if (Test-HandoffAutoDenyPrompt $screen.Substring([math]::Max(0, $screen.Length - 4000))) {
+                    if (-not $autoDenySince) {
+                        $autoDenySince = Get-Date
+                        Log "session $id is at a prompt Claude Code auto-denies on unattended sessions; waiting up to $($cfg.autoDenyGraceMinutes) min for it to resolve"
+                    }
+                    if (((Get-Date) - $autoDenySince).TotalMinutes -lt $cfg.autoDenyGraceMinutes) {
+                        Start-Sleep -Seconds $cfg.pollSeconds
+                        continue
+                    }
+                    Log "session $id still blocked $($cfg.autoDenyGraceMinutes) min after the auto-deny countdown; treating it as blocked"
+                }
+            }
+            elseif ($e.state -eq $cfg.launcher.workingState) { $autoDenySince = $null }
             if ($e.state -and $e.state -ne $cfg.launcher.workingState) { return [string]$e.state }
         }
         Start-Sleep -Seconds $cfg.pollSeconds

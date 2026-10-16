@@ -132,6 +132,31 @@ It "recognises the MCP-approval dialog and the folder-trust dialog as prompts" {
     Assert-True (-not (Test-HandoffPermissionPrompt "ran 12 tests, all green"))
 }
 
+Write-Host "`nTest-HandoffAutoDenyPrompt"
+# Measured 2026-10-16 (gen lane1, session E3): a background session hit a
+# "Dangerous rm operation" approval, the agents view reported it `blocked`, and
+# the runner stopped the lane - but Claude Code itself denies such a prompt in
+# an unattended session after a countdown, and E3 carried on working. The
+# countdown line is what tells the two cases apart.
+$autoDenyScreen = "Dangerous rm operation on possibly-empty variable path`n" +
+    "  Claude Code will automatically deny this request in 1:54, to avoid blocking progress on an unattended`n" +
+    "  session`n Do you want to proceed?`n 1. Yes`n 2. No`n Esc to cancel"
+It "recognises the auto-deny countdown on an unattended session's prompt" {
+    Assert-True (Test-HandoffAutoDenyPrompt $autoDenyScreen)
+    # still a prompt for the detector above: the countdown only changes what the runner does about it
+    Assert-True (Test-HandoffPermissionPrompt $autoDenyScreen)
+}
+It "survives the terminal rendering: ANSI colour codes and a wrapped line" {
+    $ansi = "`e[38;2;255;193;7mClaude Code will automatically deny this`e[m`n`e[2m  request in 0:07, to avoid blocking`e[22m"
+    Assert-True (Test-HandoffAutoDenyPrompt $ansi)
+}
+It "does not fire on a prompt without the countdown, or on prose about auto-deny" {
+    Assert-True (-not (Test-HandoffAutoDenyPrompt "Do you want to proceed?`n 1. Yes`n 2. No"))
+    Assert-True (-not (Test-HandoffAutoDenyPrompt "Do you trust the files in this folder?"))
+    Assert-True (-not (Test-HandoffAutoDenyPrompt "the docs say prompts are denied automatically after a while"))
+    Assert-True (-not (Test-HandoffAutoDenyPrompt ""))
+}
+
 Write-Host "`nExpand-HandoffTemplate"
 It "substitutes {{placeholders}} from a hashtable" {
     Assert-Equal "run in C:\wt on b1" (Expand-HandoffTemplate "run in {{worktree}} on {{branch}}" @{ worktree = "C:\wt"; branch = "b1" })
