@@ -247,6 +247,8 @@ class WorkflowShellTests(unittest.TestCase):
     """The two shell blocks that guard correctness run for real, with a stub `gh`."""
 
     def setUp(self):
+        if os.name == "nt":
+            self.skipTest("POSIX-only: stub executables and bash")
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.bin = os.path.join(self.tmp.name, "bin")
