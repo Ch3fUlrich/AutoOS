@@ -1,7 +1,7 @@
 ﻿#requires -Version 7
 # Ephemeral self-hosted GitHub Actions runner on Docker Desktop (autoos:CI-WORKST-RUNNER).
 # One job per container: register (--ephemeral) -> run one job -> container exits -> loop re-registers.
-# Operator decisions: Docker Desktop, 32 GB RAM cap, no CPU cap, workstation-only CI.
+# Operator decisions: Docker Desktop, 32 GB RAM cap, per-slot CPU cap (D-1425), workstation-only CI.
 # The registration token is fetched per iteration with the operator's gh login, passed by ENV NAME
 # only (never argv, never logged). Stop: create the file  <dir>\stop-<Name>.
 param(
@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory)][string]$Name,          # slot name, e.g. workst-plangraph-1
     [string]$Labels = "workst,workstation,fleet-ci", # added to the defaults self-hosted,Linux,X64
     [string]$Memory = "32g",
-    [string]$Image = "workst-runner:2.338.0-3",
+    [string]$Image = "workst-runner:2.338.0-4",
+    [int]$Cpus = 0,                                # per-slot CPU cap (D-1425); 0 = no cap
     [switch]$NoDockerSocket,                       # jobs cannot reach the host Docker
     [switch]$NetNs,                                # caps for `sudo unshare --net` (AutoOS loopback-only suite)
     [switch]$CacheVolumes                          # mount the shared cargo/sccache cache volumes
@@ -26,7 +27,7 @@ while (-not (Test-Path $stop)) {
         $env:RUNNER_TOKEN = (gh api -X POST "repos/$Repo/actions/runners/registration-token" --jq .token)
         if (-not $env:RUNNER_TOKEN) { throw "no registration token" }
         $inst = "$Name-$(Get-Date -Format yyyyMMddHHmmss)"
-        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs -CacheVolumes:$CacheVolumes
+        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs -CacheVolumes:$CacheVolumes -Cpus $Cpus
         Log "launch $inst"
         $env:MSYS_NO_PATHCONV = "1"
         & docker @dargs 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -notmatch 'token' } | Add-Content $log

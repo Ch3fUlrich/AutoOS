@@ -12182,6 +12182,128 @@ Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0
     Assert-True ($cdf -match '/home/runner/\.cache/sccache') 'sccache cache dir missing'
 }
 
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before --entrypoint' {
+    $c1on = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 8
+    $c1cpu = -1
+    $c1shares = -1
+    $c1ep = -1
+    for ($c1k = 0; $c1k -lt $c1on.Count; $c1k++) {
+        if ($c1on[$c1k] -eq '--cpus') { $c1cpu = $c1k }
+        if ($c1on[$c1k] -eq '--cpu-shares') { $c1shares = $c1k }
+        if ($c1on[$c1k] -eq '--entrypoint') { $c1ep = $c1k }
+    }
+    Assert-True ($c1cpu -ge 0) '--cpus missing with -Cpus 8'
+    Assert-True ($c1shares -ge 0) '--cpu-shares missing with -Cpus 8'
+    Assert-True ($c1ep -ge 0) '--entrypoint missing'
+    $c1cpuNext = $c1cpu + 1
+    $c1sharesNext = $c1shares + 1
+    Assert-Equal $c1on[$c1cpuNext] '8'
+    Assert-Equal $c1on[$c1sharesNext] '1024'
+    Assert-True ($c1cpu -lt $c1ep) '--cpus must come before --entrypoint'
+    Assert-True ($c1shares -lt $c1ep) '--cpu-shares must come before --entrypoint'
+    # no -Cpus (default 0) and an explicit -Cpus 0 must add neither flag
+    $c1off = Get-CiRunnerDockerArgs -Name 'i2' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
+    Assert-True (-not ($c1off -contains '--cpus')) '--cpus must be absent without -Cpus'
+    Assert-True (-not ($c1off -contains '--cpu-shares')) '--cpu-shares must be absent without -Cpus'
+    $c1zero = Get-CiRunnerDockerArgs -Name 'i3' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 0
+    Assert-True (-not ($c1zero -contains '--cpus')) '--cpus must be absent with -Cpus 0'
+    Assert-True (-not ($c1zero -contains '--cpu-shares')) '--cpu-shares must be absent with -Cpus 0'
+}
+
+Test-Case 'ci-runner: Get-CiSlotCpus prefers repo cpus, then cpus_default, then 8, zero = no cap' {
+    $c2cfg = [pscustomobject]@{ cpus_default = 6 }
+    $c2cfgNone = [pscustomobject]@{ labels = 'x' }
+    $c2cfgZero = [pscustomobject]@{ cpus_default = 0 }
+    $c2repo = [pscustomobject]@{ prefix = 'ga'; slots = 2; cpus = 4 }
+    $c2repoZero = [pscustomobject]@{ prefix = 'z'; slots = 1; cpus = 0 }
+    $c2repoBare = [pscustomobject]@{ prefix = 'pl'; slots = 1 }
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repo -Config $c2cfg) 4
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfg) 6
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgNone) 8
+    # a resolved 0 means "no cap" and must survive instead of falling back to 8
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoZero -Config $c2cfg) 0
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgZero) 0
+}
+
+Test-Case 'ci-runner: Test-CiDiskFloor prunes below the floor and stays off when floor <= 0' {
+    Assert-True (Test-CiDiskFloor -FreeGB 4 -FloorGB 50) 'free below the floor must prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 60 -FloorGB 50)) 'free above the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 50 -FloorGB 50)) 'free equal to the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB 0)) 'a floor of 0 disables the check'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB (-1))) 'a negative floor disables the check'
+}
+
+Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and build-cache prunes' {
+    $c4 = @(Get-CiPruneCommands)
+    Assert-Equal $c4.Count 2
+    $c4img = $c4[0]
+    $c4bld = $c4[1]
+    Assert-Equal $c4img.Count 3
+    Assert-Equal $c4img[0] 'image'
+    Assert-Equal $c4img[1] 'prune'
+    Assert-Equal $c4img[2] '-f'
+    Assert-Equal $c4bld.Count 5
+    Assert-Equal $c4bld[0] 'builder'
+    Assert-Equal $c4bld[1] 'prune'
+    Assert-Equal $c4bld[2] '-f'
+    Assert-Equal $c4bld[3] '--keep-storage'
+    Assert-Equal $c4bld[4] '20gb'
+    # the ci-cargo-registry / ci-cargo-git / ci-sccache caches are named volumes and the
+    # runner/job images are tagged: neither may ever appear in a prune
+    foreach ($c4outer in $c4) {
+        foreach ($c4inner in $c4outer) {
+            Assert-True ($c4inner -ne 'volume') "prune must never touch volumes: $c4inner"
+            Assert-True ($c4inner -ne '-a') "prune must never be all-inclusive: $c4inner"
+            Assert-True ($c4inner -ne '--all') "prune must never be all-inclusive: $c4inner"
+        }
+    }
+}
+
+Test-Case 'ci-runner: slots.example.json sets cpus_default 8 and disk_floor_gb 50' {
+    $c5roots = @()
+    if ($PSScriptRoot) { $c5roots += (Join-Path $PSScriptRoot '..') }
+    $c5cwd = (Get-Location).Path
+    $c5roots += $c5cwd
+    $c5roots += (Join-Path $c5cwd '..')
+    $c5file = $null
+    foreach ($c5root in $c5roots) {
+        $c5try = Join-Path $c5root 'tools/ci-runner/slots.example.json'
+        if (Test-Path -LiteralPath $c5try) { $c5file = $c5try; break }
+    }
+    if ($null -eq $c5file) {
+        Assert-True $false 'tools/ci-runner/slots.example.json not found'
+        return
+    }
+    $c5cfg = Get-Content -LiteralPath $c5file -Raw | ConvertFrom-Json
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['cpus_default']) 'cpus_default missing from slots.example.json'
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['disk_floor_gb']) 'disk_floor_gb missing from slots.example.json'
+    Assert-Equal ([int]($c5cfg.cpus_default)) 8
+    Assert-Equal ([int]($c5cfg.disk_floor_gb)) 50
+}
+
+Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Python build toolchain' {
+    $c6roots = @()
+    if ($PSScriptRoot) { $c6roots += (Join-Path $PSScriptRoot '..') }
+    $c6cwd = (Get-Location).Path
+    $c6roots += $c6cwd
+    $c6roots += (Join-Path $c6cwd '..')
+    $c6file = $null
+    foreach ($c6root in $c6roots) {
+        $c6try = Join-Path $c6root 'tools/ci-runner/Dockerfile'
+        if (Test-Path -LiteralPath $c6try) { $c6file = $c6try; break }
+    }
+    if ($null -eq $c6file) {
+        Assert-True $false 'tools/ci-runner/Dockerfile not found'
+        return
+    }
+    $c6raw = Get-Content -LiteralPath $c6file -Raw
+    Assert-True ($c6raw -match 'fonts-dejavu-core') 'fonts-dejavu-core missing from the Dockerfile'
+    Assert-True ($c6raw -match 'fonts-liberation') 'fonts-liberation missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-venv') 'python3-venv missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
+    Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

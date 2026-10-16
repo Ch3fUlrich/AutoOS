@@ -14,7 +14,8 @@ function Get-CiRunnerDockerArgs {
         [Parameter(Mandatory)][string]$Image,  # runner image
         [switch]$DockerSocket,                 # mount the host Docker socket into the job
         [switch]$NetNs,                        # caps for `sudo unshare --net`
-        [switch]$CacheVolumes                  # mount the shared cargo/sccache cache volumes
+        [switch]$CacheVolumes,                 # mount the shared cargo/sccache cache volumes
+        [int]$Cpus = 0                         # per-slot CPU cap (D-1425); 0 = no cap
     )
     # NOTE: there is deliberately no token parameter. The registration token travels in the
     # RUNNER_TOKEN environment name only - never on argv, never in a log line.
@@ -36,6 +37,12 @@ function Get-CiRunnerDockerArgs {
                 '-e', 'SCCACHE_DIR=/home/runner/.cache/sccache',
                 '-e', 'SCCACHE_CACHE_SIZE=30G')
     }
+    # CI-SPEED-WORKST (D-1425, operator decision 2026-10-16): a per-slot CPU cap, because
+    # 16 containers for 9 repos on one box let one repo's pytest starve the others
+    # (measured: gen-analysis pytest 32 min under load vs ~9 min hosted). Equal
+    # --cpu-shares keeps the scheduling weight proportional to the cap. Like every other
+    # docker run option this must stay ABOVE the --entrypoint/image line below. 0 = no cap.
+    if ($Cpus -gt 0) { $d += @('--cpus', "$Cpus", '--cpu-shares', '1024') }
     $d += @('--entrypoint', 'bash', $Image, '-c',
         './config.sh --url "$REPO_URL" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" --ephemeral --unattended --disableupdate --replace >/dev/null && unset RUNNER_TOKEN && ./run.sh')
     return ,$d
@@ -94,4 +101,58 @@ function Get-CiPrepullImages {
     return @(@($Config.prepull) | Where-Object { $_ })
 }
 
-Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages
+function Get-CiSlotCpus {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Repo,    # one slots.json repo entry
+        [Parameter(Mandatory)]$Config   # the whole slots.json config
+    )
+    # CI-SPEED-WORKST (D-1425, operator decision 2026-10-16): the per-slot CPU cap, so one
+    # repository's pytest cannot starve the other repositories' jobs on the same box.
+    # Precedence: the repo entry's "cpus", else the config's top-level "cpus_default",
+    # else 8. A resolved value of 0 means "no cap" and is returned unchanged (the
+    # supervisor then omits -Cpus and the container may use every core).
+    $v = $null
+    if ($Repo -is [System.Collections.IDictionary]) {
+        if ($Repo.Contains('cpus')) { $v = $Repo['cpus'] }
+    } elseif ($Repo.PSObject.Properties['cpus']) {
+        $v = $Repo.PSObject.Properties['cpus'].Value
+    }
+    if ($null -ne $v) { return [int]$v }
+    $v = $null
+    if ($Config -is [System.Collections.IDictionary]) {
+        if ($Config.Contains('cpus_default')) { $v = $Config['cpus_default'] }
+    } elseif ($Config.PSObject.Properties['cpus_default']) {
+        $v = $Config.PSObject.Properties['cpus_default'].Value
+    }
+    if ($null -ne $v) { return [int]$v }
+    return 8
+}
+
+function Test-CiDiskFloor {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][double]$FreeGB,  # free space on the Docker disk
+        [Parameter(Mandatory)][double]$FloorGB  # config "disk_floor_gb"; <= 0 disables
+    )
+    # CI-SPEED-WORKST (D-1425): $true when the supervisor must prune - free space below the
+    # floor. A floor of 0 (or less) turns the check off entirely: never prune.
+    if ($FloorGB -le 0) { return $false }
+    return ($FreeGB -lt $FloorGB)
+}
+
+function Get-CiPruneCommands {
+    [CmdletBinding()]
+    param()
+    # CI-SPEED-WORKST (D-1425): what the supervisor runs when the Docker disk drops below
+    # the floor, in order. Deliberately narrow - dangling images and the build cache only.
+    # It NEVER touches volumes (the ci-cargo-registry / ci-cargo-git / ci-sccache caches
+    # are named volumes) and NEVER removes tagged images (workst-runner:* and the
+    # pre-pulled job images), so a prune can neither destroy a cache nor force a re-pull.
+    $prunes = [System.Collections.Generic.List[object]]::new()
+    [void]$prunes.Add([object[]]@('image', 'prune', '-f'))
+    [void]$prunes.Add([object[]]@('builder', 'prune', '-f', '--keep-storage', '20gb'))
+    return $prunes
+}
+
+Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands

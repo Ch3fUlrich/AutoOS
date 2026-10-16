@@ -31,9 +31,40 @@ try {
 
 $unhealthySince = @{}
 $offlineSince = @{}
+$nextDiskCheck = Get-Date
 while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
     try {
         $cfg = Get-Content (Join-Path $dir "slots.json") -Raw | ConvertFrom-Json
+        # Disk floor (D-1425): the main loop only ticks every 60 s, so the disk check keeps
+        # its own timestamp and runs at most every 10 minutes. Free space is read with a
+        # throwaway `df` container on the default image (second output line = avail in 1G
+        # blocks); on any error it is logged and skipped, and a failed prune never fails
+        # the supervisor.
+        if (((Get-Date) - $nextDiskCheck).TotalMinutes -ge 10) {
+            $nextDiskCheck = Get-Date
+            $floorGB = 0.0
+            $floorProp = $cfg.PSObject.Properties['disk_floor_gb']
+            if ($floorProp -and $null -ne $floorProp.Value) { $floorGB = [double]$floorProp.Value }
+            $freeGB = $null
+            try {
+                $dfImage = 'workst-runner:2.338.0-4'
+                $imageProp = $cfg.PSObject.Properties['image']
+                if ($imageProp -and $imageProp.Value) { $dfImage = [string]$imageProp.Value }
+                $dfLines = @(docker run --rm --entrypoint df $dfImage -B1G --output=avail / 2>$null)
+                if ($LASTEXITCODE -ne 0 -or $dfLines.Count -lt 2) { throw "df rc=$LASTEXITCODE" }
+                $freeGB = [double]::Parse((($dfLines[1].Trim()) -split '\s+')[-1], [Globalization.CultureInfo]::InvariantCulture)
+            } catch {
+                Log "disk floor check failed: $($_.Exception.Message)"
+                $freeGB = $null
+            }
+            if ($null -ne $freeGB -and (Test-CiDiskFloor -FreeGB $freeGB -FloorGB $floorGB)) {
+                Log "disk floor: $freeGB GB < $floorGB GB, pruning"
+                foreach ($pruneArgs in @(Get-CiPruneCommands)) {
+                    docker @pruneArgs *> $null
+                    Log "prune: docker $($pruneArgs -join ' ') rc=$LASTEXITCODE"
+                }
+            }
+        }
         $procs = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" | Where-Object { $_.CommandLine -match 'runner-loop\.ps1' })
         $containers = @(docker ps --format '{{.Names}}' 2>$null)
         $runnersByRepo = @{}
@@ -82,6 +113,9 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 if ($r.image) { $a += @('-Image', $r.image) }
                 if ($r.netns) { $a += '-NetNs' }
                 if ($r.cache) { $a += '-CacheVolumes' }
+                # D-1425: per-slot CPU cap (repo "cpus" > config "cpus_default" > 8); 0 = no cap.
+                $slotCpus = Get-CiSlotCpus -Repo $r -Config $cfg
+                if ($slotCpus -gt 0) { $a += @('-Cpus', $slotCpus) }
                 Remove-Item (Join-Path $dir "stop-$name") -ErrorAction SilentlyContinue
                 $p = Start-Process pwsh -ArgumentList $a -WindowStyle Hidden -PassThru
                 $unhealthySince.Remove($name)

@@ -1,6 +1,8 @@
 {
   "labels": "workst,workstation,fleet-ci",
   "prepull": ["postgres:16"],
+  "cpus_default": 8,
+  "disk_floor_gb": 50,
   "repos": [
     {
       "repo": "example-owner/example",

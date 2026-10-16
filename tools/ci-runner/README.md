@@ -62,7 +62,31 @@ Clear a cache by stopping the slots and running
 rebuilds it from scratch. The supervisor additionally runs `docker pull` for
 every image in the config's `"prepull"` array (for example `postgres:16`)
 once at startup, so the first job of the day does not pay for a cold pull
-either. Current runner image tag: `workst-runner:2.338.0-3`.
+either. Current runner image tag: `workst-runner:2.338.0-4`.
+
+## CPU and disk
+
+One box runs up to 16 ephemeral containers for 9 repositories, so without a
+cap one repository's pytest starved the others (measured: gen-analysis pytest
+32 min under load vs ~9 min hosted, plangraph 127 s -> 360-380 s). Operator
+decision 2026-10-16, D-1425:
+
+- **Per-slot CPU cap.** The supervisor passes `-Cpus <n>` to each loop, which
+  becomes `docker run --cpus <n> --cpu-shares 1024` - the shares always match
+  the cap, so a capped slot cannot outweigh its peers.
+- **Cap precedence.** The repository entry's `"cpus"`, else the config's
+  top-level `"cpus_default"` (8 in `slots.example.json`), else 8.
+  `"cpus": 0` means *no cap*: the container may use every core, exactly as
+  before D-1425 (the supervisor then omits `-Cpus`).
+- **Disk floor.** Every 10 minutes the supervisor reads the Docker disk's free
+  space (`docker run --rm --entrypoint df <image> -B1G --output=avail /`) and,
+  below the config's `"disk_floor_gb"` (50 in the example), logs
+  `disk floor: <free> GB < <floor> GB, pruning` and prunes.
+- **What the prune removes - and never removes.** Only dangling images
+  (`docker image prune -f`) and the build cache
+  (`docker builder prune -f --keep-storage 20gb`). It never touches volumes
+  (the `ci-cargo-*` and `ci-sccache` caches live there) and never removes
+  tagged images such as `workst-runner:*` or the pre-pulled job images.
 
 ## Fork pull requests must never reach the workstation
 
