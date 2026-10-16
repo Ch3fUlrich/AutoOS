@@ -233,6 +233,9 @@ CLEAN = [
     "Runs on `coding.example.internal` from the single-source",
     "http://host.docker.internal:8080", "/home/you/project",
     "C:\\Users\\you\\project",
+    # The GitHub Actions runner image's own account (tools/ci-runner mounts caches
+    # under it): a fixed image user, never a person's login.
+    "/home/runner/.cargo/registry",
 ]
 
 

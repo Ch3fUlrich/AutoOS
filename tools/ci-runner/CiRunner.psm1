@@ -13,7 +13,8 @@ function Get-CiRunnerDockerArgs {
         [Parameter(Mandatory)][string]$Memory, # docker --memory value
         [Parameter(Mandatory)][string]$Image,  # runner image
         [switch]$DockerSocket,                 # mount the host Docker socket into the job
-        [switch]$NetNs                         # caps for `sudo unshare --net`
+        [switch]$NetNs,                        # caps for `sudo unshare --net`
+        [switch]$CacheVolumes                  # mount the shared cargo/sccache cache volumes
     )
     # NOTE: there is deliberately no token parameter. The registration token travels in the
     # RUNNER_TOKEN environment name only - never on argv, never in a log line.
@@ -24,6 +25,17 @@ function Get-CiRunnerDockerArgs {
            '-e', "RUNNER_LABELS=$Labels")
     if ($DockerSocket) { $d += @('--group-add', '0', '-v', '/var/run/docker.sock:/var/run/docker.sock') }
     if ($NetNs) { $d += @('--cap-add', 'SYS_ADMIN', '--cap-add', 'NET_ADMIN', '--security-opt', 'seccomp=unconfined') }
+    # CI-SPEED-WORKST (D-1393): shared named volumes for the cargo registry/git and the
+    # sccache build cache. `docker run` requires every option BEFORE the image, so this
+    # block must stay above the --entrypoint/image line below.
+    if ($CacheVolumes) {
+        $vols = Get-CiCacheVolumes
+        $dirs = @('/home/runner/.cargo/registry', '/home/runner/.cargo/git', '/home/runner/.cache/sccache')
+        for ($k = 0; $k -lt $vols.Count; $k++) { $d += @('-v', "$($vols[$k]):$($dirs[$k])") }
+        $d += @('-e', 'RUSTC_WRAPPER=/usr/local/bin/sccache',
+                '-e', 'SCCACHE_DIR=/home/runner/.cache/sccache',
+                '-e', 'SCCACHE_CACHE_SIZE=30G')
+    }
     $d += @('--entrypoint', 'bash', $Image, '-c',
         './config.sh --url "$REPO_URL" --token "$RUNNER_TOKEN" --name "$RUNNER_NAME" --labels "$RUNNER_LABELS" --ephemeral --unattended --disableupdate --replace >/dev/null && unset RUNNER_TOKEN && ./run.sh')
     return ,$d
@@ -65,4 +77,21 @@ function Get-CiSlotNames {
     return $names
 }
 
-Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames
+function Get-CiCacheVolumes {
+    [CmdletBinding()]
+    param()
+    # Single source of truth for the shared CI cache volumes (CI-SPEED-WORKST, D-1393):
+    # Get-CiRunnerDockerArgs -CacheVolumes mounts exactly these, and anything that has to
+    # create or prune them asks here.
+    return @('ci-cargo-registry', 'ci-cargo-git', 'ci-sccache')
+}
+
+function Get-CiPrepullImages {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Config)
+    # Config 'prepull' array: images the supervisor pulls before the first slot starts.
+    # Absent key -> empty array (no pre-pull work).
+    return @(@($Config.prepull) | Where-Object { $_ })
+}
+
+Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages

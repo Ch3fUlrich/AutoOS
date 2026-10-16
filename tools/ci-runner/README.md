@@ -43,6 +43,27 @@ in `slots.json` alive on a 60 s tick. Design: D-1380.
 Default labels are `workst,workstation,fleet-ci` (added to the runner's own
 defaults `self-hosted`, `Linux`, `X64`).
 
+## Caches
+
+Three named Docker volumes are mounted into every slot whose repository entry
+has `"cache": true` (the `-CacheVolumes` switch on the docker run argv). They
+are shared by all slots and survive container restarts (and Docker Desktop
+restarts), so a cold cargo download or a Rust rebuild is paid once instead of
+on every job:
+
+- `ci-cargo-registry` -> `/home/runner/.cargo/registry` - the crates.io index
+  and the downloaded crate tarballs.
+- `ci-cargo-git` -> `/home/runner/.cargo/git` - git dependencies.
+- `ci-sccache` -> `/home/runner/.cache/sccache` - the sccache compile cache
+  (sccache v0.18.0 is baked into the image and exported as `RUSTC_WRAPPER`).
+
+Clear a cache by stopping the slots and running
+`docker volume rm ci-cargo-registry ci-cargo-git ci-sccache`; the next job
+rebuilds it from scratch. The supervisor additionally runs `docker pull` for
+every image in the config's `"prepull"` array (for example `postgres:16`)
+once at startup, so the first job of the day does not pay for a cold pull
+either. Current runner image tag: `workst-runner:2.338.0-3`.
+
 ## Fork pull requests must never reach the workstation
 
 Two guards, both required:
