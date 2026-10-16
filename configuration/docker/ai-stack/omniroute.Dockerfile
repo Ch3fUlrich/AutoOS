@@ -1,68 +1,10 @@
 # OmniRoute gateway for the AutoOS docker AI stack (compose.yml, service omniroute).
 #
-# Why a local layer: the Qoder PAT login (dashboard -> Providers -> Qoder) is
-# driven through the `qodercli` binary inside the gateway container, and the
-# upstream image ships none - the login fails with `spawn qodercli ENOENT`.
-# This adds exactly that binary and nothing else. No vendor binary is kept in
-# git: npm fetches the package at build time (AGENTS.md rule 2). npm 12 in the
-# base blocks install scripts by default, so nothing from the package runs at
-# build either.
-#
-# The FROM digest and the qodercli version are bumped together, and with them
-# the local tag in compose.yml (autoos/omniroute:<upstream>-autoos<n>; see
-# docs/web-services.md, "Bumping an image"). The qodercli version is the one
-# the host runs (`qodercli --version`).
-#
-# A second layer adds bcryptjs for the reset-password CLI (`docker exec -i
-# autoos-omniroute node bin/reset-password.mjs --password-stdin`): the base's
-# standalone build prunes it from /app/node_modules, so the CLI dies with
-# ERR_MODULE_NOT_FOUND. The version is the one /app/package-lock.json pins -
-# bump it with the FROM digest.
-FROM diegosouzapw/omniroute:3.8.50@sha256:085c57adf499a8aaa9f35ccde95c0df9c11bd9ecd18d6c9edbf3b68b8079ba9d AS base
-USER root
-RUN npm install -g @qoder-ai/qodercli@1.1.63 && npm cache clean --force
-# Into a throw-away prefix, then moved: npm in /app would reconcile the whole
-# package.json. bcryptjs has no dependencies, so the one package is the tree.
-RUN npm install --prefix /tmp/autoos-cli-deps --ignore-scripts --no-audit --no-fund bcryptjs@3.0.3 && rm -rf /app/node_modules/bcryptjs && mv /tmp/autoos-cli-deps/node_modules/bcryptjs /app/node_modules/bcryptjs && rm -rf /tmp/autoos-cli-deps && npm cache clean --force
-# The base's own user; compose.yml overrides it with the host uid:gid anyway.
-USER node
-
-# U2 (autoos3, D-626): Vertex "Requests ending with a model turn are not supported" (400).
-# tools/apply-vertex-patch.py (reviewed, lane F1-vertex) strips the trailing role:"model"
-# contents at every mergeConsecutiveSameRoleContents call site in the compiled chunks.
-# The runtime image has a read-only rootfs and no python, so the patch runs at BUILD time
-# in a python stage over a copy of the chunks, which are copied back.
-# v2 (lane VERTEX-GUARD, D-859): the v1 guard tested `contents.length>1`, so a request
-# whose contents is ONE lone model turn was never stripped - the shape that reproduces the
-# 400. v2 pops every trailing model turn and refills an emptied contents with one synthetic
-# user turn (configuration/omniroute/vertex-trailing-turn-README.md).
-# v3 (lane VERTEX-LIVE, D-908): v2 still never looked INSIDE a turn, so a signed tool call
-# ending on a user turn that MIXES a functionResponse part with a text part 400'd with the
-# same "ends with a model turn" message although the body ends on user. v3 first splits
-# every mixed user turn into user[functionResponse parts], model["Noted."], user[other
-# parts], then runs the v2 pop/refill (the split's final turn is user, so the body ends on
-# user). The three guard generations are the SKIP/PATCH anchors of tools/apply-vertex-patch.py.
-# gate (lane VERTEX-GUARD, gate 06c19a): the counts this stage checked were the counts of the
-# 6 chunk names the patcher's table carries, which FAILS OPEN - a bump that adds a 13th
-# call site in a new chunk, or renames one of the 6, ships an unpatched gateway and every
-# number still matches, because the check never looked at that file. The counting now
-# lives in tools/vertex-patch-gate.py, which judges EVERY *.js chunk in the directory it is
-# given and stops the build unless: v3 guards == call sites == refill sites == split sites,
-# call sites >= 12, no v1 guard text survives, and both patcher runs add up to that same
-# count. No chunk name appears below - the text of the tree is the truth, not a list of files.
-FROM python:3.12-slim-bookworm@sha256:7753c33391fc9f01d1984375bf375eb6686d52ba10db6043a86634a5ccf90dcf AS vertex-patch
-COPY --from=base /app/.build/next/server/chunks /chunks
-COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py
-COPY --from=tools vertex-patch-gate.py /vertex-patch-gate.py
-# set -e and no pipes (/bin/sh has no pipefail): every step must succeed, the patcher's
-# and the gate's exit code included, or the build stops. The gate runs after both patcher
-# runs - they wrote the tree it judges - and before the cleanup removes the backups it
-# skips.
-RUN set -e; \
-    python3 /apply-vertex-patch.py /chunks > /run1.txt || { cat /run1.txt; exit 1; }; cat /run1.txt; \
-    python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }; cat /run2.txt; \
-    python3 /vertex-patch-gate.py /chunks --min-sites 12 --run1 /run1.txt --run2 /run2.txt; \
-    rm -f /chunks/*.autoos-backup-*
-
-FROM base
-COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/
+# The image comes from our fork (Ch3fUlrich/OmniRoute, branch autoos/*): its
+# Dockerfile.autoos already carries qodercli@1.1.63 for the Qoder PAT login,
+# bcryptjs@3.0.3 for the reset-password CLI, and the Vertex turn-shape guard v3
+# as source patches, built by the fork's own workflow. This file is only a
+# digest-pinned pointer, so image_source_hash still tracks the base.
+# TODO(digest): the zero digest is a placeholder until the fork image is
+# published - L1 replaces it with the real value before merge.
+FROM ghcr.io/ch3fulrich/omniroute:3.8.50-autoos.1@sha256:0000000000000000000000000000000000000000000000000000000000000000

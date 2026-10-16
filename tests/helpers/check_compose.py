@@ -88,11 +88,11 @@ def main(path):
             bad.append(name + ": needs no capability back")
     if not re.search(r'REQUIRE_API_KEY: "true"', om):
         bad.append("omniroute: REQUIRE_API_KEY must be pinned to true")
-    # The gateway runs qodercli for the Qoder PAT login: a derived image (the
-    # upstream one has none) and a writable HOME - qodercli crashes at start
+    # The gateway runs qodercli for the Qoder PAT login, shipped inside the
+    # fork image, and needs a writable HOME - qodercli crashes at start
     # without one, and the rootfs is read-only.
     if not re.search(r"^    build:\n      context: \.\n      dockerfile: omniroute\.Dockerfile$", om, re.M):
-        bad.append("omniroute: must build omniroute.Dockerfile (the qodercli layer)")
+        bad.append("omniroute: must build omniroute.Dockerfile (the pinned fork image)")
     if not re.search(r"^    image: autoos/omniroute:\d+\.\d+\.\d+-autoos\d+$", om, re.M):
         bad.append("omniroute: the local image must be autoos/omniroute:<upstream version>-autoos<n>")
     if not re.search(r"^      CLI_QODER_BIN: /usr/local/bin/qodercli$", om, re.M):

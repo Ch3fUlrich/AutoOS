@@ -52,8 +52,8 @@ So the fix belongs at the translation boundary, at every
 6 compiled chunks — 2 per chunk, an expression site (`...,f.contents=merge(f.contents),f}`)
 and a statement site (`o.contents=merge(o.contents??[]);let _=t.tools`) — and one site in
 the `open-sse/translator/request/openai-to-gemini.ts` source. That sentence is a measurement
-of one release, not a contract on the next: `tools/vertex-patch-gate.py` counts the sites on
-disk instead of trusting it, which is what the count in it is a floor for.
+of one release, not a contract on the next: the fork's own workflow judges the tree on disk
+instead of trusting it.
 
 ## The three guards, and why v1 and v2 were each incomplete
 
@@ -147,9 +147,12 @@ parts:[{text:"Continue."}]}` — is appended instead of refusing the request.
 
 | tool | what it patches |
 |---|---|
-| `tools/apply-vertex-patch.py <chunks-dir>` | the 12 compiled-chunk sites only |
+| `tools/apply-vertex-patch.py <chunks-dir>` | the 12 compiled-chunk sites only (npm workstation installs) |
 | `tools/vertex-trailing-turn-reapply.ps1` | those 12 **plus** the `.ts` source site (13) |
-| `tools/vertex-patch-gate.py <chunks-dir>` | nothing — it counts the sites, v3 guards, refills and splits in **every** chunk on disk and fails a build whose tree is not fully guarded |
+
+(The container gateway no longer patches at build time: the fork image carries
+the v3 guard as source. The deleted `tools/vertex-patch-gate.py` used to count
+every chunk at build time; that counting now lives in the fork's workflow.)
 
 Both patchers decide every site in exactly three states and refuse anything else:
 
@@ -173,37 +176,31 @@ remember instead of two. A site whose anchor matches more than once is reported 
 rather than half-patched, because a chunk whose text moved is a chunk this table no longer
 describes.
 
-`npm update omniroute` (or a `FROM` bump of the gateway base image) reverts every patch;
-re-run the script, or rebuild the image, afterwards. Each modified file is copied to
+`npm update omniroute` reverts every patch on a workstation install: re-run the
+script afterwards. A fork-image bump ships the guard as built. Each modified file is copied to
 `<file>.autoos-backup-<timestamp>` first (AGENTS.md rule 5).
 
 ## Where the patch actually ships
 
-The runtime image has a read-only rootfs and no python, so the patch runs at **build**
-time: `configuration/docker/ai-stack/omniroute.Dockerfile` copies the chunks into a
-`python:3.12-slim` stage, runs `apply-vertex-patch.py` twice, and hands the tree to
-`tools/vertex-patch-gate.py`, which stops the build unless the v3 guard count equals the
-call-site count, the refill count and the split count each equal it too, at least 12 call
-sites exist, no v1 guard text survives anywhere in the tree, and both run summaries account
-for exactly that many sites (run 2 patching anything at all is a failed build: the guard
-must be idempotent).
+The container gateway ships the patch as **source in our fork**: the v3 guard
+lives in `Ch3fUlrich/OmniRoute` branch `autoos/*`, and the fork's own workflow
+builds `ghcr.io/ch3fulrich/omniroute:<upstream>-autoos.<n>` from it (with
+qodercli and bcryptjs). `configuration/docker/ai-stack/omniroute.Dockerfile`
+is only a digest-pinned pointer at that image — no build stage, no patch step —
+so `ai-stack.sh up` serves the guarded gateway as built.
 
-The gate counts **every** `*.js` chunk on disk, never the 6 names the patcher's table
-carries. That was the gate's own defect (lane VERTEX-GUARD, gate 06c19a): the stage used to
-grep `Done: 12 patched` and count refills over a hard-coded chunk list, so a `FROM` bump that
-added a 13th `mergeConsecutiveSameRoleContents` call site in a new chunk — or renamed one of
-the 6 — shipped a gateway unpatched at that site while every number still matched, because
-the check had only ever counted the files it named. A gate that reads the tree has nothing to
-know in advance: chunk names, chunk count and site count come from the text, and a mismatch
-fails the build with the counts and the offending file printed, which is what a human then
-adds to `tools/apply-vertex-patch.py`.
+On an npm workstation install (no container) the same guard is applied to the
+compiled chunks on disk instead: run `tools/apply-vertex-patch.py` (or
+`tools/vertex-trailing-turn-reapply.ps1` on Windows, which also covers the
+`.ts` source site) after every `npm update omniroute`, and re-run it after any
+upgrade that reverts the chunks. Each modified file is copied to
+`<file>.autoos-backup-<timestamp>` first (AGENTS.md rule 5).
 
 The counts stayed **12** for v3 because the anchors did not move — only the guard inserted
-at them changed. That is also why the patcher's report alone is never enough: the v1 and v2
-patchers report `12 patched` too, and so does the v3 patcher on a tree with a 13th site it
-cannot see. The gate therefore judges the guard's own bytes (the split marker and the refill
-marker) as well as the arithmetic, so a tree left on the v2 guard fails as `split=0` rather
-than passing on matching numbers.
+at them changed. A tree left on an older guard is detected by the guard's own bytes
+(the split marker and the refill marker), never by arithmetic alone: the v1 and v2
+patchers also report `12 patched`, so a report of matching numbers proves nothing
+without the v3 text.
 
 ## Impact
 
@@ -229,7 +226,7 @@ providers' requests never reach it.
 
 On Windows the `.ps1` patches the global OmniRoute package at
 `%APPDATA%\npm\node_modules\omniroute`; pass `-Path` for any other install.
-The build stage patches the chunks inside the image and the gate judges the same tree.
+The container gateway carries the same guard as fork source (see above).
 None of the three reads a credential, opens a network connection, or invokes the container
-runtime — `tests/test_vertex_trailing_turn_patch.py` and `tests/test_vertex_patch_gate.py`
-run on fixture copies of the chunk and source text only (D-852).
+runtime — `tests/test_vertex_trailing_turn_patch.py`
+runs on fixture copies of the chunk and source text only (D-852).

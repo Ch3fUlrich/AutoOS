@@ -4760,92 +4760,29 @@ if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is di
     if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
 fi
 
-# ─── The gateway image: OmniRoute + qodercli (omniroute.Dockerfile) ─────────
-# The Qoder PAT login runs `qodercli` inside the gateway container. The
-# upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
-# it - built like the opencode one, from a digest-pinned base.
+# ─── The gateway image: our fork GHCR image (omniroute.Dockerfile) ───────
+# The fork (Ch3fUlrich/OmniRoute, branch autoos/*) carries qodercli, bcryptjs
+# and the Vertex turn-shape guard v3 as source, built by its own workflow.
+# This file is a single digest-pinned FROM so image_source_hash still tracks
+# the base.
 
-if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+if it "aistack: omniroute.Dockerfile is a single FROM on ghcr.io/ch3fulrich/omniroute pinned by digest"; then
+    # The fork image already ships qodercli (the Qoder PAT login), bcryptjs
+    # (the reset-password CLI) and the Vertex turn-shape guard v3: nothing is
+    # built here, so no RUN/COPY/ADD and no tools build context.
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
-    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}\( AS [a-z][a-z0-9-]*\)\{0,1\}$/\1/p' "$f" 2>/dev/null)"
-    [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
-    # The local tag names the upstream version it is built on: bumped together.
-    grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
-        || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
-    grep -qxE 'RUN npm install -g @qoder-ai/qodercli@[0-9]+\.[0-9]+\.[0-9]+ && npm cache clean --force' "$f" 2>/dev/null \
-        || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
-    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
-    [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
-    # No file from the build context: the only COPYs allowed are between build stages
-    # (`--from=<stage declared earlier>`) and the reviewed patcher script from the `tools`
-    # named context (a .py from this repo, never a binary). ADD stays forbidden.
-    bad_copy="$(awk 'BEGIN{IGNORECASE=1}
-        /^[[:space:]]*FROM[[:space:]].*[[:space:]]AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1 }
-        /^[[:space:]]*ADD[[:space:]]/ { print; next }
-        /^[[:space:]]*COPY[[:space:]]/ {
-            if (match($0, /--from=[^[:space:]]+/)) {
-                src=tolower(substr($0, RSTART+7, RLENGTH-7))
-                if (src in st) next
-                if (src == "tools" && $(NF-1) ~ /^[A-Za-z0-9_.-]+\.py$/) next
-            }
-            print }' "$f" 2>/dev/null)"
-    [[ -z "$bad_copy" ]] || { ok=0; echo "COPY/ADD from the build context (vendor binary risk): $bad_copy" >&2; }
-    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
-fi
-
-if it "aistack: vertex the omniroute U2 stage patches at build time and hands the tree to vertex-patch-gate.py, which counts every chunk"; then
-    # autoos3 (D-626): the runtime rootfs is read-only and has no python, so the reviewed
-    # tools/apply-vertex-patch.py runs in a python build stage over a copy of the chunks. The
-    # stage must stop the build on a patcher error, must not pipe (no pipefail in /bin/sh), and
-    # must drop the backups. D-859 (lane VERTEX-GUARD): the counts alone cannot tell the guard
-    # from the v1 one it replaces - both install at the same anchors and both report the same
-    # numbers, so the stage also judges the guard's own bytes. D-908 (lane VERTEX-LIVE): the
-    # guard is v3, which splits a mixed tool/text user turn before the v2 pop/refill.
-    # gate 06c19a (lane VERTEX-GUARD): what it used to judge them over was the 6 chunk names
-    # the patcher's table carries, and that fails OPEN - a FROM bump adding a 13th call site in
-    # a new chunk, or renaming one of the 6, ships an unpatched gateway with every number
-    # still matching. The counting therefore moved into tools/vertex-patch-gate.py, which reads
-    # every *.js chunk it is given; this test asserts the recipe delegates to it and no longer
-    # knows any chunk name or any fixed site count.
-    ok=1
-    f="$AISTACK/omniroute.Dockerfile"
-    grep -qE '^FROM python:[0-9.]+-slim[a-z-]*@sha256:[0-9a-f]{64} AS vertex-patch$' "$f" || { ok=0; echo "no digest-pinned python stage named vertex-patch" >&2; }
-    grep -qx 'COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py' "$f" || { ok=0; echo "the patcher is not taken from the tools context" >&2; }
-    grep -qx 'COPY --from=tools vertex-patch-gate.py /vertex-patch-gate.py' "$f" || { ok=0; echo "the gate is not taken from the tools context" >&2; }
-    grep -qx 'RUN set -e; \\' "$f" || { ok=0; echo "the patch RUN does not start with set -e" >&2; }
-    grep -qF "python3 /apply-vertex-patch.py /chunks > /run1.txt || { cat /run1.txt; exit 1; }" "$f" || { ok=0; echo "run 1 is not captured with its exit code" >&2; }
-    grep -qF "python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }" "$f" || { ok=0; echo "run 2 is not captured with its exit code" >&2; }
-    grep -qF "python3 /vertex-patch-gate.py /chunks --min-sites 12 --run1 /run1.txt --run2 /run2.txt" "$f" || { ok=0; echo "the gate is not run over the whole chunk tree with the 12-site floor and both run summaries" >&2; }
-    # the fail-open this lane closed: names and fixed counts must not come back
-    names_check="$(grep -oE "_08_y1bx|_18ct13i|_1j_edf1|_1luyz1c|_15ose6x|_1xkpq2s" "$f" | sort -u | wc -l)"
-    [[ "$names_check" == "0" ]] || { ok=0; echo "the recipe names $names_check patched chunks; only the gate may know them" >&2; }
-    grep -qF "Done: 12 patched" "$f" && { ok=0; echo "a fixed patched-count is asserted in the recipe again" >&2; }
-    grep -qF "got==12" "$f" && { ok=0; echo "an inline byte count is back in the recipe instead of the gate" >&2; }
-    grep -qF 'rm -f /chunks/*.autoos-backup-*' "$f" || { ok=0; echo "patch backups are not removed" >&2; }
-    stage="$(sed -n '/^FROM python:.* AS vertex-patch$/,/^FROM /p' "$f")"
-    # a single `|` after the patcher call is a pipe; `||` (the error branch) is not
-    grep -qE 'apply-vertex-patch\.py[^|]*\|([^|]|$)' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
-    # the gate must sit between the second run and the cleanup: before the runs it would judge
-    # unpatched text, after the cleanup the backups it skips are gone
-    gate_line="$(grep -nF 'vertex-patch-gate.py /chunks' "$f" | cut -d: -f1)"
-    run2_line="$(grep -nF '/run2.txt || { cat /run2.txt; exit 1; }' "$f" | cut -d: -f1)"
-    rm_line="$(grep -nF 'rm -f /chunks/*.autoos-backup-*' "$f" | cut -d: -f1)"
-    (( ${gate_line:-0} > ${run2_line:-0} && ${gate_line:-0} < ${rm_line:-0} )) \
-        || { ok=0; echo "the gate does not run after run 2 and before the cleanup" >&2; }
-    [[ "$(grep -E '^FROM ' "$f" | tail -n1)" == "FROM base" ]] || { ok=0; echo "the final stage is not FROM base" >&2; }
-    grep -qx 'COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/' "$f" || { ok=0; echo "the patched chunks are not copied back" >&2; }
-    grep -qE '^      additional_contexts:$' "$AISTACK/compose.yml" && grep -qE '^        tools: \.\./\.\./\.\./tools$' "$AISTACK/compose.yml" \
-        || { ok=0; echo "compose.yml does not pass the tools build context" >&2; }
-    if (( ok )); then pass; else fail "the omniroute U2 build stage contract is broken"; fi
-fi
-
-if it "vertex gate: counts every mergeConsecutiveSameRoleContents call site in the tree, so a 13th unpatched site or a renamed chunk fails the build (unit tests)"; then
-    # tests/test_vertex_patch_gate.py is hermetic (D-852): fixture chunk text in a temporary
-    # directory, the patcher and the gate as subprocesses. It proves the gate accepts a fully
-    # patched 12-site tree and refuses 12-of-13, a renamed chunk and a tree below the floor.
-    out="$(python3 tests/test_vertex_patch_gate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    base="$(sed -n 's/^FROM ghcr\.io\/ch3fulrich\/omniroute:\([0-9][0-9.]*-autoos\.[0-9][0-9]*\)@sha256:[0-9a-f]\{64\}$/\1/p' "$f" 2>/dev/null)"
+    [[ -n "$base" ]] || { ok=0; echo "FROM is not ghcr.io/ch3fulrich/omniroute:<version>-autoos.<n>@sha256:<digest>" >&2; }
+    [[ "$(grep -cE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null)" == 1 ]] || { ok=0; echo "not exactly one FROM line" >&2; }
+    # The local tag names the upstream version the fork image is built on: bumped together.
+    ver="${base%-autoos.*}"
+    grep -qxE "    image: autoos/omniroute:${ver//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$ver]" >&2; }
+    grep -qE '^[[:space:]]*(RUN|COPY|ADD)[[:space:]]' "$f" 2>/dev/null \
+        && { ok=0; echo "the Dockerfile builds layers; the fork image ships them" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile is not a single pinned fork FROM"; fi
 fi
 
 if it "vertex guard: splits mixed tool/text user turns, pops the model tail, refills emptied contents, upgrades v1/v2 in place, fails loudly on anything else (unit tests)"; then
@@ -4855,26 +4792,6 @@ if it "vertex guard: splits mixed tool/text user turns, pops the model tail, ref
     # D-908 (lane VERTEX-LIVE): v3 splits a user turn that mixes a functionResponse with text
     # before the v2 pop/refill, covering the body that ends on user yet still 400s.
     out="$(python3 tests/test_vertex_trailing_turn_patch.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
-fi
-
-if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then
-    # The base's standalone build prunes bcryptjs from /app/node_modules although
-    # package-lock pins it, so `node bin/reset-password.mjs` dies with
-    # ERR_MODULE_NOT_FOUND. Running npm with cwd /app would reconcile the whole
-    # package.json, so the package is fetched into a throw-away prefix and moved.
-    ok=1
-    f="$AISTACK/omniroute.Dockerfile"
-    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
-    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && (rm -rf .* && )?mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
-        || { ok=0; echo "bcryptjs is not pinned and added, moved into /app/node_modules and cleaned up in one layer" >&2; }
-    layer="$(grep -nE '^RUN npm install --prefix /tmp/[a-z-]+ .*bcryptjs@' "$f" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
-    last="$(grep -nE '^USER node' "$f" 2>/dev/null | tail -n1 | cut -d: -f1 || true)"
-    [[ -n "$layer" && -n "$last" ]] || { ok=0; echo "no bcryptjs layer or no trailing USER node line" >&2; }
-    (( ${layer:-0} < ${last:-0} )) \
-        || { ok=0; echo "the bcryptjs layer (line ${layer:-0}) comes after the last USER node (line ${last:-0})" >&2; }
-    grep -qE 'cd /app' "$f" 2>/dev/null \
-        && { ok=0; echo "npm runs with cwd /app: it would reconcile the whole package.json" >&2; }
-    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned bcryptjs outside /app's npm tree"; fi
 fi
 
 if it "aistack: keys_add_opencode_password backs up a 644 keys file at mode 600"; then
@@ -4964,8 +4881,11 @@ if it "aistack: the omniroute image is rebuilt when its label, base digest or Do
     first="$(cat "$d/omniroute-label")"
     _omni_up
     [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt an up-to-date image" >&2; }
-    # A bumped base digest, the Dockerfile text unchanged otherwise.
-    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]{64}/\1$(printf '%064d' 0)/" "$t/docker/ai-stack/omniroute.Dockerfile"
+    # A bumped base digest, the Dockerfile text unchanged otherwise. The bump
+    # flips the first hex digit, so it differs from whatever is pinned: the
+    # zero placeholder until the fork image is published, the real digest after.
+    if grep -qE '^FROM [^ ]+@sha256:0' "$t/docker/ai-stack/omniroute.Dockerfile"; then bump=1; else bump=0; fi
+    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]([0-9a-f]{63})/\1${bump}\2/" "$t/docker/ai-stack/omniroute.Dockerfile"
     _omni_up
     [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a bumped base digest was not rebuilt" >&2; }
     second="$(cat "$d/omniroute-label")"

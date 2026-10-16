@@ -80,8 +80,8 @@ Other secrets not in the table: `STORAGE_ENCRYPTION_KEY` in OmniRoute's own data
   CLI writes the database; the running gateway reads it at start) and log in
   with the new password. The CLI imports
   `bcryptjs`, which the upstream image's standalone build prunes from
-  `/app/node_modules`, so the derived layer adds it: needs
-  `autoos/omniroute:…-autoos2` or later (rebuilt by `ai-stack.sh up`).
+  `/app/node_modules`, so the fork image ships it: needs
+  `autoos/omniroute:…-autoos6` or later (rebuilt by `ai-stack.sh up`).
 
 #### OAuth logins and the public URL
 
@@ -271,7 +271,7 @@ pre-ticked in `server`, requires `docker`.
 
 | Service | Image | Container | Runs as | Published | State |
 |---|---|---|---|---|---|
-| `omniroute` | local `autoos/omniroute:3.8.50-autoos5` (FROM `diegosouzapw/omniroute:3.8.50@sha256:085c…`; autoos5 = + U2 Vertex turn-shape patch, applied at build time and counted by `tools/vertex-patch-gate.py`; autoos4 shipped the v2 guard, autoos3 the v1 guard; the v3 guard splits a mixed tool/text user turn into user/model/user and then pops the trailing model run — see `configuration/omniroute/vertex-trailing-turn-README.md`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> the service user's home (`/home/<service-user>`, `HOME`) |
+| `omniroute` | local `autoos/omniroute:3.8.50-autoos6` (FROM `ghcr.io/ch3fulrich/omniroute:3.8.50-autoos.1@sha256:0000…`; the fork carries qodercli, bcryptjs and the U2 Vertex turn-shape patch v3 as source — see `configuration/omniroute/vertex-trailing-turn-README.md`) | `autoos-omniroute` | host uid:gid | `${AUTOOS_STACK_BIND}:20128` | `~/.local/share/autoos/ai-stack/omniroute` -> `/app/data`; `…/ai-stack/qoder-home` -> the service user's home (`/home/<service-user>`, `HOME`) |
 | `opencode` | local `autoos/opencode:2.0.16-autoos1` (FROM `ghcr.io/anomalyco/opencode:2.0.16@sha256:1644…`) | `autoos-opencode` | host uid:gid | `${AUTOOS_STACK_BIND}:4096` | `…/ai-stack/opencode-home` -> `/home/<service-user>`; the code tree at the same path |
 | `openhands` | `docker.openhands.dev/openhands/openhands@sha256:17d0…` | `openhands-app` | root entrypoint -> `enduser` (host uid) | `${AUTOOS_STACK_BIND}:3000` | `~/.openhands` -> `/.openhands` |
 
@@ -451,10 +451,12 @@ exactly those plus `curl` for the healthcheck (image 225 MB -> 382 MB).
 The gateway's Qoder provider signs in with a personal access token (PAT), and
 OmniRoute drives that through the `qodercli` binary inside its own container.
 The upstream image has none, so the login failed with `spawn qodercli ENOENT`.
-`omniroute.Dockerfile` adds exactly that binary on the digest-pinned upstream
-image (`npm install -g @qoder-ai/qodercli@<version>`, the version the host
-runs; npm fetches it at build, no binary is kept in git; image 4.14 GB ->
-4.24 GB) and compose builds it as `autoos/omniroute:<upstream>-autoos<n>`.
+Our fork image (`ghcr.io/ch3fulrich/omniroute`, built by the fork's own
+workflow from `Ch3fUlrich/OmniRoute` branch `autoos/*`) ships that binary as
+source (`@qoder-ai/qodercli@1.1.63`, the version the host runs, alongside
+`bcryptjs@3.0.3` and the Vertex turn-shape guard v3); `omniroute.Dockerfile`
+is only a digest-pinned pointer at it, and compose builds it as
+`autoos/omniroute:<upstream>-autoos<n>`.
 
 Two measurements decide the rest of the service:
 
@@ -664,7 +666,7 @@ that `ps` shows, and no line of the output contains it.
 Resolve the new digest (`docker buildx imagetools inspect <image>:<tag>`),
 change the `image:` line (for opencode and OmniRoute the `FROM` line of their
 Dockerfile and the local tag in `compose.yml`, which names the upstream version;
-for OmniRoute the pinned qodercli version moves with them), run
+for OmniRoute the fork tag moves with them), run
 `ai-stack.sh up`. For OmniRoute keep a backup of the data dir first; for
 OpenHands check the settings schema note in `start-stack.sh`. `up` recreates a
 running gateway whose image changed (a short gap on `:20128`).

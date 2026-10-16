@@ -334,7 +334,7 @@ class TreeStates(unittest.TestCase):
             self.assertEqual(0, run_patcher(Path(tmp)).returncode)
             for chunk in ALL_CHUNKS:
                 text = (Path(tmp) / chunk).read_text(encoding="utf-8")
-                # The same string the omniroute.Dockerfile build gate asserts absent.
+                # The same string the former omniroute.Dockerfile build gate asserted absent.
                 self.assertNotIn('contents.length>1&&"model"===', text, chunk)
                 self.assertIn('text:"Continue."', text, chunk)
 
@@ -772,13 +772,10 @@ class Hermetic(unittest.TestCase):
     """D-852: this lane never reaches the container runtime or the network."""
 
     FILES = [PATCH_TOOL, REAPPLY_PS1, Path(__file__),
-             ROOT / "configuration" / "omniroute" / "vertex-trailing-turn-README.md",
-             ROOT / "configuration" / "docker" / "ai-stack" / "omniroute.Dockerfile"]
+             ROOT / "configuration" / "omniroute" / "vertex-trailing-turn-README.md"]
 
-    def test_only_the_dockerfile_build_stage_mentions_the_runtime(self):
+    def test_no_tracked_tool_runs_a_container_command(self):
         for path in self.FILES:
-            if path.name == "omniroute.Dockerfile":
-                continue
             text = path.read_text(encoding="utf-8")
             self.assertIsNone(re.search(r"^\s*(?:.*\s)?docker\s+\w", text, re.MULTILINE),
                               f"{path.name} runs a container command")
