@@ -1,14 +1,16 @@
 # Workstation CI runner image (autoos:CI-WORKST-RUNNER): the official runner plus the tools
 # the AutoOS/plangraph Linux jobs expect from ubuntu-latest but the runner image lacks.
 # Versions are pinned and at least two weeks old when chosen (2026-10-16).
-# Image tag: workst-runner:2.338.0-3
+# Image tag: workst-runner:2.338.0-4
 FROM ghcr.io/actions/actions-runner:2.338.0
 USER root
 ARG PWSH_VERSION=7.6.6
 ARG NODE_VERSION=v24.21.0
+# fonts-dejavu-core/fonts-liberation are the Cyrillic-capable TTFs the lab PDF tests need;
+# python3-venv/python3-dev/build-essential the python and C toolchain of the jobs.
 RUN apt-get update -y \
  && apt-get install -y --no-install-recommends iproute2 shellcheck yamllint jq unzip xz-utils make ca-certificates curl \
-    libicu74 libssl3 \
+    libicu74 libssl3 fonts-dejavu-core fonts-liberation python3-venv python3-dev build-essential \
  && rm -rf /var/lib/apt/lists/*
 # PowerShell (official release tarball)
 RUN curl -fsSL -o /tmp/pwsh.tgz "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" \
