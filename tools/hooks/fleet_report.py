@@ -49,7 +49,8 @@ TAIL_BYTES = 256 * 1024
 MAX_LINE = 300
 
 # First matching line of the assistant text; \b keeps STOPPED/ DONEX out.
-STATUS_RE = re.compile(r"^(DONE|MERGE-READY|BLOCKED|FAILED|RECYCLE-READY|STOP)\b")
+STATUS_KEYWORDS = ("DONE", "MERGE-READY", "BLOCKED", "FAILED", "RECYCLE-READY", "STOP")
+STATUS_RE = re.compile(r"^(%s)\b" % "|".join(STATUS_KEYWORDS))
 
 # A name (session id, session name, parent) becomes a file name under the state
 # dir: a letter/digit first, then letters, digits, dot, dash, underscore.
@@ -164,9 +165,11 @@ def atomic_write(path, data: bytes) -> None:
     path = Path(path)
     tmp = path.with_name("%s.%d.tmp" % (path.name, os.getpid()))
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(tmp), flags, 0o600)
         with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
+            if fh.write(data) != len(data):
+                raise OSError("short write")
         os.replace(str(tmp), str(path))
     finally:
         try:
@@ -252,10 +255,11 @@ def append_inbox(parent: str, record: dict) -> None:
     """
     inbox = ensure_dir(state_dir() / "inbox")
     payload = (json.dumps(record) + "\n").encode("utf-8")
-    fd = os.open(str(inbox / ("%s.jsonl" % parent)),
-                 os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+    flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(str(inbox / ("%s.jsonl" % parent)), flags, 0o600)
     try:
-        os.write(fd, payload)
+        if os.write(fd, payload) != len(payload):
+            raise OSError("short write")
     finally:
         os.close(fd)
 

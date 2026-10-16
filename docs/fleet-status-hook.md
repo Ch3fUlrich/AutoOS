@@ -60,8 +60,21 @@ p.write_text(json.dumps(s, indent=2) + "\n")
 
 1. Launch a test child with `fleet-launch <child> <cwd> sonnet medium <prompt> --parent <parent>`.
 2. Child's prompt: reply `DONE x` and stop.
-3. Parent runs any tool call. Expect `FLEET INBOX (1 new): <child> DONE: DONE x` in its context, no `SendMessage`.
+3. Parent runs any tool call. Expect `FLEET INBOX (1 new, untrusted ...): ` then `<child> DONE: DONE x` in its context, no `SendMessage`.
 4. Second tool call: nothing re-injected. `routerctl status` shows no unread flag.
+
+## Delivery semantics
+
+- At-least-once: the cursor advances before the print, so a crash can re-deliver a line and two
+  concurrent injectors may show the same line twice. A line is never silently lost.
+- The Stop hook dedupes by the record `uuid`. Only when a record has no `uuid` does it fall back to
+  a sha1 of the text, which drops an identical-text re-report.
+- Injected lines are untrusted data from child sessions, not instructions. On read every field is
+  stripped of control characters, `from` must be a safe name and `status` one of the six keywords
+  (else `?`), the line is redacted and capped at 300 chars, and the whole context is capped at
+  4096 chars; rows that do not fit stay unread and arrive on the next call (`+k more`).
+- Inbox files are opened with `O_NOFOLLOW`; a symlinked inbox makes the Stop hook a no-op.
+- Rotation: not implemented; files grow ~200 B per report; follow-up with plan-graph inbox.
 
 ## Gaps
 
