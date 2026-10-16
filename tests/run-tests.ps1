@@ -11943,6 +11943,165 @@ Test-Case 'go-gate front: the gate script is imported, not restated' {
     Assert-True ($text -notmatch 'def verify_go_ref|verify_go_ref\(') 'the front restates the verdict logic'
 }
 
+# ─── ci-runner (D-1380) ─────────────────────────────────────────────────────
+Import-Module (Join-Path $Root 'tools\ci-runner\CiRunner.psm1') -Force -DisableNameChecking
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token in argv' {
+    $a = Get-CiRunnerDockerArgs -Name 'workst-a-1-20261016120000' -Repo 'example-owner/example' -Labels 'workst,workstation,fleet-ci' -Memory '8g' -Image 'workst-runner:2.338.0-2'
+    # T1: the function has no token parameter at all...
+    Assert-True (-not (@((Get-Command Get-CiRunnerDockerArgs).Parameters.Keys) -match 'Token')) 'Get-CiRunnerDockerArgs takes a token parameter'
+    # ...so argv carries only the ENV NAME, as the exact pair '-e','RUNNER_TOKEN'.
+    $pairs = 0
+    for ($k = 0; $k -lt $a.Count - 1; $k++) { if ($a[$k] -eq '-e' -and $a[$k + 1] -eq 'RUNNER_TOKEN') { $pairs++ } }
+    Assert-Equal $pairs 1
+    $tokenLike = 'ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
+    $tokenPat = [regex]::Escape($tokenLike)
+    Assert-True (-not (@($a) -match $tokenPat)) 'a token value leaked into the docker args'
+    $m = [array]::IndexOf([string[]]$a, '--memory')
+    Assert-True ($m -ge 0) '--memory missing'
+    Assert-Equal $a[$m + 1] '8g'
+    Assert-Contains $a '--rm'
+    Assert-Contains $a 'workst-runner:2.338.0-2'
+    Assert-Contains $a 'REPO_URL=https://github.com/example-owner/example'
+    Assert-Contains $a 'RUNNER_LABELS=workst,workstation,fleet-ci'
+    $e = [array]::IndexOf([string[]]$a, '--entrypoint')
+    Assert-True ($e -ge 0) '--entrypoint missing'
+    Assert-Equal $a[$e + 1] 'bash'
+    Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socket' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $with = Get-CiRunnerDockerArgs @base -DockerSocket
+    $g = [array]::IndexOf([string[]]$with, '--group-add')
+    Assert-True ($g -ge 0) '--group-add missing with -DockerSocket'
+    Assert-Equal $with[$g + 1] '0'
+    $v = [array]::IndexOf([string[]]$with, '-v')
+    Assert-True ($v -ge 0) '-v missing with -DockerSocket'
+    Assert-Equal $with[$v + 1] '/var/run/docker.sock:/var/run/docker.sock'
+    $without = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($without -contains '--group-add')) '--group-add without -DockerSocket'
+    Assert-True (-not ($without -contains '0')) 'group 0 without -DockerSocket'
+    Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'
+    Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $net = Get-CiRunnerDockerArgs @base -NetNs
+    Assert-Contains $net '--cap-add'
+    Assert-Contains $net 'SYS_ADMIN'
+    Assert-Contains $net 'NET_ADMIN'
+    Assert-Contains $net '--security-opt'
+    Assert-Contains $net 'seccomp=unconfined'
+    $plain = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($plain -contains '--cap-add')) '--cap-add without -NetNs'
+    Assert-True (-not ($plain -contains 'SYS_ADMIN')) 'SYS_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone' {
+    # T4: loop dead => start, whatever the other signals say.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction leaves a live healthy slot alone' {
+    # T5: loop alive and online, or busy, or its container running => ok.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction waits, then restarts, never a busy runner' {
+    # T6: live + not online + not busy + no container: wait up to 5 min, then restart.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
+    # T6: a running job must not be killed.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 60) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'start'
+}
+
+Test-Case 'ci-runner: Test-CiOfflineExpired waits 3 minutes for a fresh runner' {
+    # T7: a fresh ephemeral runner shows offline until its session connects.
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 0)) '0 min must not expire'
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 2.9)) '2.9 min must not expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 3) '3 min must expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 42) '42 min must expire'
+}
+
+Test-Case 'ci-runner: Get-CiSlotNames expands every prefix into its slots' {
+    # T8
+    $cfg = [pscustomobject]@{ repos = @(
+        [pscustomobject]@{ prefix = 'workst-a'; slots = 2 },
+        [pscustomobject]@{ prefix = 'workst-b'; slots = 1 }) }
+    $names = @(Get-CiSlotNames -Config $cfg)
+    Assert-Equal $names.Count 3
+    Assert-Equal $names[0] 'workst-a-1'
+    Assert-Equal $names[1] 'workst-a-2'
+    Assert-Equal $names[2] 'workst-b-1'
+}
+
+Test-Case 'ci-runner: slots.example.json matches the live config shape' {
+    # T9
+    $ex = Get-Content -LiteralPath (Join-Path $Root 'tools\ci-runner\slots.example.json') -Raw | ConvertFrom-Json
+    $repos = @($ex.repos)
+    Assert-True ($repos.Count -ge 2) 'the example needs at least two repos'
+    $labels = @("$($ex.labels)" -split ',')
+    Assert-Contains $labels 'fleet-ci'
+    Assert-Contains $labels 'workstation'
+    foreach ($r in $repos) {
+        foreach ($prop in 'repo', 'prefix', 'slots', 'memory') {
+            Assert-True (@($r.PSObject.Properties.Name) -contains $prop) "repo entry lacks '$prop'"
+        }
+        Assert-True ($r.repo -like 'example-owner/*') "repo owner must be example-owner: $($r.repo)"
+        Assert-True ([int]$r.slots -ge 1) "slots must be >= 1 on $($r.prefix)"
+    }
+}
+
+Test-Case 'ci-runner: ci.yml keeps fork PRs off the self-hosted runners' {
+    # T10
+    $lines = @(Get-Content -LiteralPath (Join-Path $Root '.github\workflows\ci.yml'))
+    $runsOn = @($lines | Where-Object { $_ -match '^\s*runs-on:' })
+    Assert-True ($runsOn.Count -gt 0) 'no runs-on: lines in ci.yml'
+    $checked = 0
+    foreach ($line in $runsOn) {
+        if ($line -match 'windows-latest') { continue }   # the Windows job is not self-hosted
+        $checked++
+        Assert-True ($line -like '*github.event.pull_request.head.repo.full_name == github.repository*') "fork guard missing: $($line.Trim())"
+        Assert-True ($line -like "*'ubuntu-latest'*") "no ubuntu-latest fallback: $($line.Trim())"
+    }
+    Assert-True ($checked -gt 0) 'only the Windows runs-on line was seen'
+}
+
+Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
+    # T11: the install dir is $PSScriptRoot, so nothing names a drive or the install dir.
+    $ciDir = Join-Path $Root 'tools\ci-runner'
+    $files = @()
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $files = @(git -C $Root ls-files -- 'tools/ci-runner/' 2>$null | Where-Object { $_ })
+    }
+    if (-not $files) {
+        $files = @(Get-ChildItem -LiteralPath $ciDir -Recurse -File | ForEach-Object { $_.FullName })
+    }
+    Assert-True ($files.Count -gt 0) 'no files found under tools/ci-runner'
+    $drive = '(?<![A-Za-z])[A-Za-z]:[\\/]'
+    $install = 'fleet[\\/]ci-runner'
+    foreach ($f in $files) {
+        $path = if ([System.IO.Path]::IsPathRooted($f)) { $f } else { Join-Path $Root $f }
+        $name = Split-Path $path -Leaf
+        $text = Get-Content -LiteralPath $path -Raw
+        Assert-True ($text -notmatch $drive) "drive path in tools/ci-runner/$name"
+        Assert-True ($text -notmatch $install) "install dir in tools/ci-runner/$name"
+    }
+}
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')
