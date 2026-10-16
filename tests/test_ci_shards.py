@@ -32,6 +32,11 @@ class ShardMapTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cs.matrix_for(shards, "tools/x.py")
 
+    def test_only_naming_an_unknown_part_runs_everything(self):
+        shards = [("a", ["13"]), ("b", ["33"])]
+        self.assertEqual(cs.matrix_for(shards, "tests/linux/99-gone.sh"), cs.matrix_for(shards))
+        self.assertEqual(len(cs.matrix_for(shards, "13 99")["include"]), 2)
+
     def test_a_missing_part_is_named(self):
         found = cs.problems([("a", ["01"])], {"01", "02"})
         self.assertEqual(found, ["part 02 (tests/linux/02-*.sh) is in no shard"])

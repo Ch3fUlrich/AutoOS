@@ -71,6 +71,10 @@ def matrix_for(shards, only=None) -> dict:
         if not m:
             raise ValueError("--only: %r is neither NN nor tests/linux/NN-*.sh" % item)
         want.add(m.group(1))
+    # A selected part that is on no shard (a deleted or renamed part) cannot be
+    # trimmed to safely: run the whole matrix instead of an empty one.
+    if not want <= {p for _, parts in shards for p in parts}:
+        return matrix_for(shards)
     rows = []
     for n, parts in shards:
         keep = [p for p in parts if p in want]

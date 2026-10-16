@@ -219,6 +219,91 @@ class CliTests(unittest.TestCase):
         self.assertEqual(json.loads(jobs)["pytest"], True)
 
 
+def run_block(workflow, header):
+    """The shell text of the `run: |` that follows `header` in a workflow file (no YAML parser: stdlib only)."""
+    lines = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8").splitlines()
+    start = next(i for i, l in enumerate(lines) if header in l)
+    run = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+    indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+    out = []
+    for l in lines[run + 1:]:
+        if l.strip() and len(l) - len(l.lstrip()) < indent:
+            break
+        out.append(l[indent:])
+    return chr(10).join(out) + chr(10)
+
+
+@unittest.skipUnless(os.name == "posix", "workflow shell blocks are bash")
+class WorkflowShellTests(unittest.TestCase):
+    """The two shell blocks that guard correctness run for real, with a stub `gh`."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.bin = os.path.join(self.tmp.name, "bin")
+        os.makedirs(self.bin)
+        self.calls = os.path.join(self.tmp.name, "gh-calls")
+        gh = os.path.join(self.bin, "gh")
+        Path(gh).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls, ""]))
+        os.chmod(gh, 0o755)
+
+    def gate(self, event, full, results):
+        script = run_block("ci.yml", "merge-gate:")
+        env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], GH_TOKEN="x", REPO="o/r", SHA="abc",
+                   EVENT=event, FULL=full, REASON="r", RESULTS=results)
+        p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env)
+        calls = Path(self.calls).read_text() if os.path.exists(self.calls) else ""
+        state = [w.split("=", 1)[1] for w in calls.split() if w.startswith("state=")]
+        return p.returncode, (state[-1] if state else None)
+
+    def test_selected_only_pr_run_is_green_with_a_pending_status(self):
+        self.assertEqual(self.gate("pull_request", "false", "success success skipped success"), (0, "pending"))
+
+    def test_full_pr_run_sets_success(self):
+        self.assertEqual(self.gate("pull_request", "true", "success success success"), (0, "success"))
+
+    def test_push_run_sets_success(self):
+        self.assertEqual(self.gate("push", "true", "success success"), (0, "success"))
+
+    def test_a_failed_or_cancelled_job_is_red_with_a_failure_status(self):
+        self.assertEqual(self.gate("pull_request", "false", "success failure"), (1, "failure"))
+        self.assertEqual(self.gate("pull_request", "true", "success cancelled"), (1, "failure"))
+
+    def test_a_skipped_job_in_a_full_run_is_red(self):
+        self.assertEqual(self.gate("pull_request", "true", "success skipped success"), (1, "failure"))
+
+    def test_selector_that_cannot_run_falls_back_to_full(self):
+        script = run_block("smart-ci.yml", "name: Select")
+        out = os.path.join(self.tmp.name, "gh_out")
+        env = dict(os.environ, EVENT="pull_request", LABELS="[]", MERGE_LABEL="merge-ready", FORCE_FULL="false",
+                   BASE_SHA="a", HEAD_SHA="b", MAP="m.json", TOOL_REPO="", GITHUB_OUTPUT=out,
+                   GITHUB_STEP_SUMMARY=os.path.join(self.tmp.name, "sum"), RUNNER_TEMP=self.tmp.name)
+        # cwd has no tools/smart-ci/selector.py, so python3 itself fails
+        p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env,
+                           cwd=self.tmp.name)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = Path(out).read_text().splitlines()
+        self.assertIn("mode=full", lines)
+        self.assertIn("full=true", lines)
+
+    def test_merge_ready_label_forces_full(self):
+        script = run_block("smart-ci.yml", "name: Select")
+        out = os.path.join(self.tmp.name, "gh_out")
+        tool = os.path.join(self.tmp.name, "tools", "smart-ci")
+        os.makedirs(tool)
+        Path(tool, "selector.py").write_text(SCRIPT.read_text(encoding="utf-8"), encoding="utf-8")
+        Path(self.tmp.name, "m.json").write_text(json.dumps(MAP))
+        env = dict(os.environ, EVENT="pull_request", LABELS='["x","merge-ready"]', MERGE_LABEL="merge-ready",
+                   FORCE_FULL="false", BASE_SHA="a", HEAD_SHA="b", MAP="m.json", TOOL_REPO="", GITHUB_OUTPUT=out,
+                   GITHUB_STEP_SUMMARY=os.path.join(self.tmp.name, "sum"), RUNNER_TEMP=self.tmp.name)
+        p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env,
+                           cwd=self.tmp.name)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = Path(out).read_text().splitlines()
+        self.assertIn("mode=full", lines)
+        self.assertTrue(any("merge-ready" in l for l in lines if l.startswith("reason=")))
+
+
 class RepoMapTests(unittest.TestCase):
     """The map this repository ships must itself be valid and place real paths."""
 

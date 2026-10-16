@@ -86,7 +86,13 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
           post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="Full suite (merge-ready)" -f description="$2" >/dev/null || true; }
-          for r in $RESULTS; do case "$r" in success|skipped) ;; *) post failure "a CI job ended $r"; exit 1 ;; esac; done
+          for r in $RESULTS; do
+            case "$r" in
+              success) ;;
+              skipped) if [ "$FULL" = true ]; then post failure "full run but a job was skipped"; exit 1; fi ;;
+              *) post failure "a CI job ended $r"; exit 1 ;;
+            esac
+          done
           if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label"
           else post success "full suite passed"; fi
 ```

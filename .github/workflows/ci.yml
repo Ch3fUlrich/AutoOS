@@ -335,7 +335,8 @@ jobs:
           post() { gh api "repos/$REPO/statuses/$SHA" -f state="$1" -f context="$ctx" -f description="$2" >/dev/null || echo "::warning::could not set the $ctx status"; }
           for r in $RESULTS; do
             case "$r" in
-              success|skipped) ;;
+              success) ;;
+              skipped) if [ "$FULL" = true ]; then post failure "full run but a job was skipped"; echo "::error::full run but a job was skipped"; exit 1; fi ;;
               *) post failure "a CI job ended $r"; echo "::error::a CI job ended $r"; exit 1 ;;
             esac
           done
