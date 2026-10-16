@@ -17,6 +17,8 @@ cheaper than asking an L2.
 
 ## 1a. The heartbeat (every level, from the first minute)
 
+**Superseded for the fleet: no recurring cron (D-1364/D-1377); see SKILL.md 'Fleet rules in force'.**
+
 One recurring `CronCreate` job (cron `7-59/10 * * * *`) from launch until you stop, recreated after
 every relaunch or context clear. Its prompt names the round trip — read your inbox, the status and
 DONE files you wait for and your CI runs; act; continue your plan. It is your primary wake-up — a
@@ -37,9 +39,11 @@ R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
    skill). Open only the files they route you to.
 2. Read the plan. Read the DONE notes of earlier sessions (`layers.md`, "successor brief").
    Read `<stateDir>/state.json` if a run exists.
+   Read the plan-graph item (keeper `show <key> brief=true`) before the plan; claim it before work.
 3. Check the machine (§5) before launching anything.
 4. Create the heartbeat cron (§1a) before your first spawn — a session that cannot be watched
    cannot be recovered.
+   - Superseded by D-1364/D-1377: no recurring cron (§1a); see SKILL.md 'Fleet rules in force'.
 
 ## 3. Spawning and briefing L2
 
