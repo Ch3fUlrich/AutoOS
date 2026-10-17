@@ -247,6 +247,8 @@ _is_readonly_run() {
     return 1
 }
 
+export AUTOOS_DRIFT_SNAPSHOT=/nonexistent
+
 # _go_flags <root> — the --go/--go-sha flags that clear apply.sh's D-825 gate for a
 # mutating run against this checkout, as an array (empty for a read-only run). <ref>
 # is OS-0, a valid OS-<n> item; the sha is the real HEAD so apply.sh's own
@@ -1866,24 +1868,18 @@ PY
 }
 # _drift_apply <dir> - apply.sh --drift against the two stand-ins.
 _drift_apply() {
-    local d="$1" pid port
+    local d="$1" pid port; shift
     read -r pid port < <(_start_test_http_server "$d/gw")
-    if [[ -z "$port" ]]; then
-        kill "$pid" 2>/dev/null
-        echo "no stand-in gateway"
-        return 1
-    fi
+    [[ -z "$port" ]] && { kill "$pid" 2>/dev/null; echo "no stand-in gateway"; return 1; }
     PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
-        bash "$ROOT/configuration/omniroute/apply.sh" --drift 2>&1
-    local rc=$?
-    kill "$pid" 2>/dev/null
-    return "$rc"
+        bash "$ROOT/configuration/omniroute/apply.sh" --drift "$@" 2>&1
+    local rc=$?; kill "$pid" 2>/dev/null; return "$rc"
 }
 
 if it "apply drift: live combos equal combos.json -> exit 0, no difference lines"; then
     d="$(_drift_sandbox)"
     _drift_json "$d"
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     ok=1
     [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *drift:* || "$out" == *"missing "* || "$out" == *"extra "* ]] \
@@ -1897,7 +1893,7 @@ fi
 if it "apply drift: the upstream split step shape (model without provider) is in sync too"; then
     d="$(_drift_sandbox)"
     _drift_json "$d" "" split
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     rm -rf "$d"
     if [[ $rc -eq 0 && "$out" == *"in sync"* ]]; then pass; else fail "rc=$rc: $out"; fi
 fi
@@ -1905,7 +1901,7 @@ fi
 if it "apply drift: one combo's leg order differs -> exit 1 and names it"; then
     d="$(_drift_sandbox)"
     _drift_json "$d" swap
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     # The first multi-leg combo in combos.json is the one _drift_json swapped.
     want="$(python3 -c 'import json
 for c in json.load(open("configuration/omniroute/combos.json"))["combos"]:
@@ -1923,7 +1919,7 @@ if it "apply drift: an unreadable live store -> exit 3 with a one-line reason"; 
     d="$(_drift_sandbox)"
     _drift_json "$d"
     : >"$d/drift.fail"
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     ok=1
     [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$(grep -c . <<<"$out")" -le 3 ]] || { ok=0; echo "not one line: $out" >&2; }
@@ -1954,7 +1950,7 @@ live["combos"].append({"name": sys.argv[4], "strategy": "priority",
 print(json.dumps(live))
 PY
     mv "$d/drift.json.new" "$d/drift.json"
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     ok=1
     [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"missing $missing"* ]] || { ok=0; echo "no missing line: $out" >&2; }
@@ -1981,7 +1977,7 @@ live["combos"].append({"name": sys.argv[3], "strategy": "priority",
 print(json.dumps(live))
 PY
     mv "$d/drift.json.new" "$d/drift.json"
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     ok=1
     [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
     [[ "$out" == *"extra $omitted (omitted: no servable leg)"* ]] || { ok=0; echo "no labeled extra line: $out" >&2; }
@@ -1996,7 +1992,7 @@ fi
 if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
     d="$(_drift_sandbox)"
     printf '[]' >"$d/drift.json"
-    out="$(_drift_apply "$d")"; rc=$?
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
     ok=1
     [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
     grep -qi 'traceback' <<<"$out" && { ok=0; echo "crashed: $out" >&2; }
@@ -2004,6 +2000,111 @@ if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
     [[ "$out" == *unreadable* ]] || { ok=0; echo "no reason line: $out" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "--drift crashed on a JSON list instead of exiting 3"; fi
+fi
+
+if it "apply drift: snapshot == live -> exit 0, in sync"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1", "p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m2"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 0 && "$out" == *"in sync: live combos match "* && "$out" == *"(1 combos)"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "snapshot == live failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: one changed leg -> exit 1, output names that combo"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1", "p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m3"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 1 && "$out" == *"drift t1: live=[p/m1, p/m3] file=[p/m1, p/m2]"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "changed leg failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: mutating run on drifted combo without --allow-drift refuses and does not mutate"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 && "$out" == *"  ! l1-orchestrator: live differs from the server snapshot - refused (needs --go <ref> and --allow-drift l1-orchestrator)"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "drifted combo without --allow-drift was not refused"; fi
+fi
+
+if it "apply drift: mutating run on drifted combo with --allow-drift proceeds"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline --allow-drift l1-orchestrator)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" != *"live differs from the server snapshot - refused"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "drifted combo with --allow-drift did not proceed"; fi
+fi
+
+if it "apply drift: an unreadable snapshot -> exit 3 with a drift: line"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m2"}]}]}\n' >"$d/drift.json"
+    printf 'not json\n' >"$d/snap.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 3 && "$out" == *"drift: snapshot unreadable"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: --dry-run on a drifted combo prints would refuse and an in-sync combo is not flagged"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --dry-run)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" == *"l1-orchestrator: live differs from the server snapshot - would refuse"* ]] || ok=0
+    grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "dry-run on drifted combo failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: mutating run with an unreadable snapshot refuses (fail closed)"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"; printf 'not json
+' >"$d/snap.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$(git -C "$ROOT" rev-parse HEAD)" --go-offline)"; rc=$?
+    ok=1; [[ $rc -eq 3 && "$out" == *"server snapshot unreadable"* ]] || ok=0; grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot did not refuse: rc=$rc $out"; fi
+fi
+
+if it "apply drift: --drift-against without --drift, or with another value -> exit 2"; then
+    out1="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift-against registry 2>&1)"; rc1=$?
+    out2="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift --drift-against bogus 2>&1)"; rc2=$?
+    ok=1; [[ $rc1 -eq 2 && $rc2 -eq 2 ]] || ok=0
+    if (( ok )); then pass; else fail "rc1=$rc1 rc2=$rc2"; fi
+fi
+
+if it "apply drift: snapshot mode reports missing and extra"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1"], "t2": ["p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t2", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m2"}]}, {"name": "t3", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m3"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 && "$out" == *"missing t1"* && "$out" == *"extra t3"* && "$out" != *"omitted"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "rc=$rc $out"; fi
+fi
+
+if it "apply drift: --allow-drift is repeatable"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"], "l2-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}, {"name": "l2-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline --allow-drift l1-orchestrator --allow-drift l2-orchestrator)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" != *"live differs from the server snapshot - refused"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" || ok=0
+    grep -qE 'combo (create|delete) l2-orchestrator ' "$d/calls.log" || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "repeatable --allow-drift failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: no /dev/fd remains in apply.sh"; then
+    hits="$(grep -n '/dev/fd' "$ROOT/configuration/omniroute/apply.sh" || true)"
+    [[ -z "$hits" ]] && pass || fail "apply.sh still uses /dev/fd: $hits"
 fi
 
 # ─── APPLYIDEM S1: apply.sh leaves an unchanged combo alone ─────────────────

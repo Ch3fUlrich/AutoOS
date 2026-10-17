@@ -35,15 +35,16 @@
 # whole, reported lost rather than restored short — never reported as untouched
 # (see the Combos loop).
 #
-#   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift] \
-#                                      [--go <ref> --go-sha <sha>] [--go-offline]
+#   ./configuration/omniroute/apply.sh [--dry-run] [--probe] [--drift [--drift-against registry]] \
+#                                      [--allow-drift <name>] [--go <ref> --go-sha <sha>] [--go-offline]
 #
 # --probe sends one tiny request per combo and reports what answered
 # (spends a few hundred tokens; skipped under --dry-run).
-# --drift is read-only: it compares the live combos with combos.json (name +
-# ordered models; retired ids ignored), prints one line per difference and
-# exits 0 in sync, 1 on drift, 3 when the live store is unreadable. It skips
-# the provider, resilience and combo steps below.
+# --drift is read-only: it compares the live combos with the server snapshot
+# ($HERE/live/server-combos.json or AUTOOS_DRIFT_SNAPSHOT), prints differences
+# and exits 0 in sync, 1 on drift, 3 when unreadable. Pass --drift-against
+# registry to compare with combos.json (including retired/omitted).
+# --allow-drift <name> permits mutating or pruning a drifted combo.
 # --go <ref> + --go-sha <sha> — fleet rule D-825. A run that MUTATES the live
 # gateway (any run that is neither --dry-run nor --drift, --probe included)
 # refuses with exit 2 unless it carries an explicit judge GO: <ref> names the
@@ -77,6 +78,8 @@ OVERRIDES_FILE="$HERE/context-overrides.json"
 DRY=0
 PROBE=0
 DRIFT=0
+DRIFT_AGAINST=""
+declare -A ALLOW_DRIFT_MAP=()
 GO_REF=""
 GO_SHA=""
 GO_OFFLINE=0
@@ -85,6 +88,10 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY=1 ;;
         --probe)   PROBE=1 ;;
         --drift)   DRIFT=1 ;;
+        --drift-against) [[ $# -ge 2 ]] || { echo "apply.sh: --drift-against needs a target ('registry')." >&2; exit 2; }; DRIFT_AGAINST="$2"; shift ;;
+        --drift-against=*) DRIFT_AGAINST="${1#--drift-against=}" ;;
+        --allow-drift) [[ $# -ge 2 ]] || { echo "apply.sh: --allow-drift needs a combo name." >&2; exit 2; }; ALLOW_DRIFT_MAP["$2"]=1; shift ;;
+        --allow-drift=*) ALLOW_DRIFT_MAP["${1#--allow-drift=}"]=1 ;;
         --go)
             [[ $# -ge 2 ]] || { echo "apply.sh: --go needs a reference (a judge run id YYYYMMDD-HHMMSS-…, a decision id D-<n> or an OS-<n> item)." >&2; exit 2; }
             GO_REF="$2"; shift ;;
@@ -98,11 +105,14 @@ while [[ $# -gt 0 ]]; do
         # `apply.sh --bogus` fell through to a live run, and a typo'd --go-sha or a
         # stale --apply was swallowed exactly that way. apply-cluster.sh has always
         # refused unknown arguments; apply.sh now does the same.
-        *) echo "apply.sh: unknown argument '$1' (--dry-run --probe --drift --go <ref> --go-sha <sha> --go-offline are the flags)." >&2
+        *) echo "apply.sh: unknown argument '$1' (--dry-run --probe --drift [--drift-against registry] [--allow-drift <name>] --go <ref> --go-sha <sha> --go-offline are the flags)." >&2
            exit 2 ;;
     esac
     shift
 done
+if [[ -n "$DRIFT_AGAINST" ]] && { [[ $DRIFT -ne 1 || "$DRIFT_AGAINST" != "registry" ]]; }; then
+    echo "apply.sh: --drift-against registry is only valid with --drift." >&2; exit 2
+fi
 PROBE_COMBOS=()
 
 # ─── Fleet rule D-825: a live/infra step runs only on an explicit GO ──────────
@@ -418,12 +428,11 @@ omni_json() {
 # zero combos), 3 with a one-line reason on stdout when the store is unreadable —
 # the caller adds its own prefix and chooses its own fallback.
 live_combo_norm() {
-    python3 - "${2:-0}" 3<<<"$1" <<'PY'
-import json, sys
+    LIVE_DOC="$1" python3 - "${2:-0}" <<'PY'
+import json, os, sys
 
 try:
-    with open("/dev/fd/3", encoding="utf-8") as fh:
-        live_doc = json.load(fh)
+    live_doc = json.loads(os.environ.get("LIVE_DOC", ""))
 except (OSError, ValueError):
     if sys.argv[1] == "1":
         print("live store unreadable - the omniroute CLI could not reach the gateway")
@@ -504,28 +513,36 @@ if [[ $DRIFT -eq 1 ]]; then
         echo "drift: $drift_live"
         exit 3
     fi
+    drift_target="${AUTOOS_DRIFT_SNAPSHOT:-$HERE/live/server-combos.json}" drift_mode="snapshot"
+    [[ "$DRIFT_AGAINST" == "registry" ]] && { drift_target="$COMBOS_FILE"; drift_mode="registry"; }
     drift_rc=0
-    python3 - "$COMBOS_FILE" 3<<<"$drift_live" <<'PY' || drift_rc=$?
-import json, sys
+    LIVE_ROWS="$drift_live" python3 - "$drift_target" "$drift_mode" <<'PY' || drift_rc=$?
+import json, os, sys
 
-data = json.load(open(sys.argv[1], encoding="utf-8"))
-retired = set(data.get("retired", []))
-omitted = set(data.get("omitted", []))
-file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", [])}
+target_path, is_registry = sys.argv[1], (sys.argv[2] == "registry")
+try:
+    data = json.load(open(target_path, encoding="utf-8"))
+    if not isinstance(data, dict): raise ValueError
+except Exception as e:
+    print("drift: snapshot unreadable - %s" % e); sys.exit(3)
 
-# The normalised live store, one "<name>\x1f<strategy>\x1f<refs>\x1f<dropped>"
-# line per combo (unit-separated - see live_combo_norm). Neither the strategy nor
-# the dropped-step count is compared here: --drift reports the leg order, which
-# is what a re-run of apply can silently change, and a combo with an unreadable
-# step has refs that already differ from the file's, so it is reported. Extra
-# columns are tolerated - the shape the normaliser prints is its own business.
+if is_registry:
+    retired, omitted = set(data.get("retired", [])), set(data.get("omitted", []))
+    file_combos = {c["name"]: list(c["models"]) for c in data.get("combos", []) if isinstance(c, dict)}
+else:
+    retired, omitted = set(), set()
+    raw = data.get("combos")
+    if not isinstance(raw, dict):
+        print("drift: snapshot unreadable - combos field is not a dict"); sys.exit(3)
+    file_combos = {k: list(v) for k, v in raw.items() if isinstance(v, list)}
+
 live_combos = {}
-for line in open("/dev/fd/3", encoding="utf-8").read().splitlines():
+for line in os.environ.get("LIVE_ROWS", "").splitlines():
     cols = line.split("\x1f")
     if len(cols) < 3:
         continue
     name, _strategy, refs = cols[0], cols[1], cols[2]
-    if not name or name in retired:
+    if not name or (is_registry and name in retired):
         continue
     live_combos[name] = [ref for ref in refs.split(",") if ref]
 
@@ -540,15 +557,13 @@ for name, file_refs in file_combos.items():
         rc = 1
 for name in live_combos:
     if name not in file_combos:
-        if name in omitted:
+        if is_registry and name in omitted:
             print("extra %s (omitted: no servable leg)" % name)
         else:
             print("extra %s" % name)
         rc = 1
 if rc == 0:
-    # No "drift:" here: that prefix marks a difference line, and an in-sync
-    # store must print none.
-    print("in sync: live combos match %s (%d combos)" % (sys.argv[1], len(file_combos)))
+    print("in sync: live combos match %s (%d combos)" % (target_path, len(file_combos)))
 sys.exit(rc)
 PY
     exit "$drift_rc"
@@ -1318,6 +1333,39 @@ if command -v omniroute >/dev/null; then
     fi
 fi
 
+SNAPSHOT_FILE="${AUTOOS_DRIFT_SNAPSHOT:-$HERE/live/server-combos.json}"
+declare -A SNAPSHOT_COMBOS=() SNAPSHOT_HELD=()
+snapshot_readable=0 snapshot_warned=0 drift_refused=0
+if [[ -f "$SNAPSHOT_FILE" ]] && snapshot_rows="$(python3 -c 'import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    for k, v in d["combos"].items():
+        if isinstance(v, list): print("%s\t%s" % (k, ",".join(str(x) for x in v)))
+except Exception: sys.exit(1)' "$SNAPSHOT_FILE" 2>/dev/null)"; then
+    snapshot_readable=1
+    while IFS=$'\t' read -r snap_name snap_refs; do
+        [[ -n "$snap_name" ]] && { SNAPSHOT_COMBOS["$snap_name"]="$snap_refs"; SNAPSHOT_HELD["$snap_name"]=1; }
+    done <<<"$snapshot_rows"
+elif [[ -f "$SNAPSHOT_FILE" ]]; then
+    echo "  ! server snapshot unreadable: $SNAPSHOT_FILE - refusing; fix or re-export it"
+    [[ $DRY -eq 1 ]] || exit 3
+fi
+
+combo_is_drifted() {
+    local name="$1"
+    [[ $snapshot_readable -eq 1 ]] || return 1
+    local live_held="${LIVE_COMBO_HELD[$name]-0}" snap_held="${SNAPSHOT_HELD[$name]-0}"
+    [[ $live_held -eq 0 && $snap_held -eq 0 ]] && return 1
+    [[ $live_held -ne $snap_held || "${LIVE_COMBO_REFS[$name]-}" != "${SNAPSHOT_COMBOS[$name]-}" ]]
+}
+combo_drift_allowed() { [[ -n "$GO_REF" && "${ALLOW_DRIFT_MAP[$1]-}" == 1 ]]; }
+warn_drift_guard_off() {
+    if [[ $snapshot_readable -eq 0 && $snapshot_warned -eq 0 ]]; then
+        echo "  - drift guard off: no server snapshot at $SNAPSHOT_FILE"
+        snapshot_warned=1
+    fi
+}
+
 # A live combo is current when its legs are the same refs in the same order as
 # the ones about to be written (so after the catalog filter below — a dropped
 # leg is a change) and, when the store reports one, its strategy is the strategy
@@ -1334,6 +1382,7 @@ combo_is_current() {
 }
 
 echo "Combos:"
+warn_drift_guard_off
 if [[ $live_combo_readable -eq 0 ]] && command -v omniroute >/dev/null; then
     if [[ $DRY -eq 1 ]]; then
         echo "  ! live combo list unreadable - would replace every combo (${live_combo_reason:-unknown})"
@@ -1369,6 +1418,8 @@ while IFS=$'\t' read -r name strategy models; do
         if [[ $live_combo_readable -eq 1 ]] && combo_is_current "$name" "$strategy" "$keep"; then
             echo "  - $name: would keep unchanged [$strategy]"
             combo_unchanged=$((combo_unchanged + 1))
+        elif combo_is_drifted "$name" && ! combo_drift_allowed "$name"; then
+            echo "  ! $name: live differs from the server snapshot - would refuse (needs --go <ref> and --allow-drift $name)"
         elif [[ $live_combo_readable -eq 1 ]] && [[ "${LIVE_COMBO_HELD[$name]-}" == 1 ]]; then
             echo "  - $name: would replace [$strategy] with $keep"
             combo_replaced=$((combo_replaced + 1))
@@ -1385,6 +1436,10 @@ while IFS=$'\t' read -r name strategy models; do
         # unchanged combo is managed.
         PROBE_COMBOS+=("$name")
         continue
+    fi
+    if combo_is_drifted "$name" && ! combo_drift_allowed "$name"; then
+        echo "  ! $name: live differs from the server snapshot - refused (needs --go <ref> and --allow-drift $name)"
+        drift_refused=$((drift_refused + 1)); continue
     fi
     # Create first, delete only what it replaces: if the create fails the old
     # tier survives instead of leaving a hole. Delete-then-create can only run
@@ -1482,6 +1537,7 @@ fi
 # A down gateway is not listed at all: the CLI would fall back to reading the
 # store file directly, and a dry run must not depend on that.
 echo "Prune:"
+warn_drift_guard_off
 list_out=""
 if ! command -v omniroute >/dev/null; then
     echo "  - omniroute CLI missing - the store is not read, nothing pruned"
@@ -1518,7 +1574,12 @@ else
     while IFS=$'\t' read -r prune_kind prune_name; do
         [[ -z "$prune_name" ]] && continue
         if [[ $DRY -eq 1 ]]; then
-            echo "  - $prune_name: $prune_kind, would delete"
+            combo_is_drifted "$prune_name" && ! combo_drift_allowed "$prune_name" && \
+                echo "  ! $prune_name: live differs from the server snapshot - would refuse (needs --go <ref> and --allow-drift $prune_name)" || \
+                echo "  - $prune_name: $prune_kind, would delete"
+        elif combo_is_drifted "$prune_name" && ! combo_drift_allowed "$prune_name"; then
+            echo "  ! $prune_name: live differs from the server snapshot - refused (needs --go <ref> and --allow-drift $prune_name)"
+            drift_refused=$((drift_refused + 1))
         elif omni combo delete "$prune_name" --yes </dev/null >/dev/null 2>&1; then
             echo "  - $prune_name: $prune_kind, deleted"
         else
@@ -1667,3 +1728,4 @@ PY
 fi
 
 echo "Done. Apps pick this up on next start (configuration/start-stack.sh)."
+if (( ${drift_refused:-0} > 0 )); then exit 1; fi
